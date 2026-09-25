@@ -270,6 +270,99 @@ pub fn clear_mfa_pending_cookie(secure: bool) -> String {
     format!("{MFA_PENDING_COOKIE}=; HttpOnly; Path=/ui; SameSite=Lax; Max-Age=0{secure_attr}")
 }
 
+/// Name of the cookie binding a login OTP challenge to its MFA pending cookie.
+///
+/// Set by `GET /ui/mfa-otp-challenge` when it issues an SMS or email OTP.
+/// The value is `{factor}.{otp_nonce}.{mac}` where MAC =
+/// HMAC-SHA256(secret, `hearth-mfa-otp|user_id|realm_id|pending_nonce|factor|otp_nonce`).
+/// The factor the user is challenged on and the pending OTP record the typed
+/// code is checked against therefore come from server-signed state tied to
+/// one specific password step — never from the form, where the client could
+/// pick an easier factor or a record it obtained some other way.
+pub const MFA_OTP_COOKIE: &str = "hearth_ui_mfa_otp";
+
+/// Server-bound state of an issued login OTP challenge, read back from
+/// [`MFA_OTP_COOKIE`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MfaOtpChallenge {
+    /// Factor wire name (`"sms"` or `"email_otp"`).
+    pub factor: String,
+    /// Handle of the pending OTP record returned at issuance.
+    pub otp_nonce: String,
+}
+
+/// Builds the `Set-Cookie` value binding `factor` + `otp_nonce` to `pending`.
+///
+/// Lives exactly as long as the pending cookie it is bound to; `secure`
+/// follows [`WebState::is_secure_request`] like every other `/ui` cookie.
+#[must_use]
+pub(super) fn issue_mfa_otp_cookie(
+    secret: &CookieSecret,
+    pending: &MfaPending,
+    factor: &str,
+    otp_nonce: &str,
+    secure: bool,
+) -> String {
+    let mac = compute_mfa_otp_mac(secret, pending, factor, otp_nonce);
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!(
+        "{MFA_OTP_COOKIE}={factor}.{otp_nonce}.{mac}; HttpOnly; Path=/ui; SameSite=Lax; \
+         Max-Age={MFA_PENDING_TTL_SECS}{secure_attr}"
+    )
+}
+
+/// Parses an [`MFA_OTP_COOKIE`] value and checks it is bound to `pending`.
+///
+/// Returns `None` on any malformation or MAC mismatch — including a cookie
+/// minted for a different user, realm or password step.
+#[must_use]
+pub(super) fn parse_mfa_otp_cookie(
+    secret: &CookieSecret,
+    pending: &MfaPending,
+    value: &str,
+) -> Option<MfaOtpChallenge> {
+    let (body, mac_str) = value.rsplit_once('.')?;
+    let (factor, otp_nonce) = body.split_once('.')?;
+    if factor.is_empty() || otp_nonce.is_empty() {
+        return None;
+    }
+    let expected = compute_mfa_otp_mac(secret, pending, factor, otp_nonce);
+    let ok: bool = expected.as_bytes().ct_eq(mac_str.as_bytes()).into();
+    ok.then(|| MfaOtpChallenge {
+        factor: factor.to_string(),
+        otp_nonce: otp_nonce.to_string(),
+    })
+}
+
+/// Returns the `Set-Cookie` value that clears [`MFA_OTP_COOKIE`].
+#[must_use]
+pub(super) fn clear_mfa_otp_cookie(secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!("{MFA_OTP_COOKIE}=; HttpOnly; Path=/ui; SameSite=Lax; Max-Age=0{secure_attr}")
+}
+
+/// Computes the HMAC tag for an [`MFA_OTP_COOKIE`].
+fn compute_mfa_otp_mac(
+    secret: &CookieSecret,
+    pending: &MfaPending,
+    factor: &str,
+    otp_nonce: &str,
+) -> String {
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes())
+        .expect("HMAC-SHA256 accepts any 32-byte key");
+    mac.update(b"hearth-mfa-otp|");
+    mac.update(pending.user_id.as_uuid().as_bytes());
+    mac.update(b"|");
+    mac.update(pending.realm_id.as_uuid().as_bytes());
+    mac.update(b"|");
+    mac.update(pending.nonce.as_bytes());
+    mac.update(b"|");
+    mac.update(factor.as_bytes());
+    mac.update(b"|");
+    mac.update(otp_nonce.as_bytes());
+    BASE64URL_NOPAD.encode(&mac.finalize().into_bytes())
+}
+
 /// Computes the HMAC tag for an MFA pending cookie.
 fn compute_mfa_pending_mac(
     secret: &CookieSecret,
@@ -1223,6 +1316,95 @@ fn url_encode(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── MFA OTP challenge cookie ─────────────────────────────────────────────
+
+    fn pending_for_otp(nonce: &str) -> MfaPending {
+        MfaPending {
+            user_id: UserId::new(Uuid::from_u128(1)),
+            realm_id: RealmId::new(Uuid::from_u128(2)),
+            return_to: None,
+            nonce: nonce.to_string(),
+        }
+    }
+
+    fn otp_cookie_value(set_cookie: &str) -> &str {
+        set_cookie
+            .strip_prefix(&format!("{MFA_OTP_COOKIE}="))
+            .and_then(|rest| rest.split(';').next())
+            .expect("cookie value")
+    }
+
+    #[test]
+    fn mfa_otp_cookie_round_trips_for_its_own_pending_login() {
+        let secret = CookieSecret::from_bytes([5u8; 32]);
+        let pending = pending_for_otp("pending-a");
+        let set = issue_mfa_otp_cookie(&secret, &pending, "sms", "00ff", true);
+        assert!(set.contains("HttpOnly") && set.contains("; Secure"));
+        let parsed = parse_mfa_otp_cookie(&secret, &pending, otp_cookie_value(&set));
+        assert_eq!(
+            parsed,
+            Some(MfaOtpChallenge {
+                factor: "sms".to_string(),
+                otp_nonce: "00ff".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn mfa_otp_cookie_is_bound_to_one_password_step() {
+        let secret = CookieSecret::from_bytes([5u8; 32]);
+        let set =
+            issue_mfa_otp_cookie(&secret, &pending_for_otp("pending-a"), "sms", "00ff", false);
+        let value = otp_cookie_value(&set);
+        // Another login of the same user (fresh pending nonce).
+        assert_eq!(
+            parse_mfa_otp_cookie(&secret, &pending_for_otp("pending-b"), value),
+            None
+        );
+        // Another user.
+        let mut other_user = pending_for_otp("pending-a");
+        other_user.user_id = UserId::new(Uuid::from_u128(3));
+        assert_eq!(parse_mfa_otp_cookie(&secret, &other_user, value), None);
+        // Another secret.
+        assert_eq!(
+            parse_mfa_otp_cookie(
+                &CookieSecret::from_bytes([6u8; 32]),
+                &pending_for_otp("pending-a"),
+                value
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn mfa_otp_cookie_rejects_a_swapped_factor_or_nonce() {
+        let secret = CookieSecret::from_bytes([5u8; 32]);
+        let pending = pending_for_otp("pending-a");
+        let set = issue_mfa_otp_cookie(&secret, &pending, "sms", "00ff", false);
+        let mac = otp_cookie_value(&set).rsplit_once('.').expect("mac").1;
+        for forged in [
+            format!("email_otp.00ff.{mac}"),
+            format!("sms.11ee.{mac}"),
+            format!("sms..{mac}"),
+            format!(".00ff.{mac}"),
+            "sms.00ff".to_string(),
+            String::new(),
+        ] {
+            assert_eq!(
+                parse_mfa_otp_cookie(&secret, &pending, &forged),
+                None,
+                "{forged:?} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn mfa_otp_cookie_clear_expires_it() {
+        let c = clear_mfa_otp_cookie(true);
+        assert!(c.starts_with(&format!("{MFA_OTP_COOKIE}=;")));
+        assert!(c.contains("Max-Age=0") && c.contains("; Secure"));
+    }
 
     #[test]
     fn mac_tag_matches_round_trip() {

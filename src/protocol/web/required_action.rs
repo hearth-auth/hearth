@@ -464,6 +464,40 @@ pub fn resume_oidc_flow(
     let user_id = UserId::new(user_uuid);
     let client_id = ClientId::new(client_uuid);
 
+    // The SMS MFA intercept. On every authorize branch it runs only AFTER the
+    // required-action intercept, and that one returns first — so an authorize
+    // that detoured through required actions arrives here without the SMS
+    // factor ever having been challenged. This used to issue the code
+    // straight away: a session made without the SMS factor (passkey, magic
+    // link, federation) got a code on a realm that requires it just by having
+    // a required action pending. Run the same gate, with the same parameters,
+    // before anything is issued; it fails closed exactly as it does there.
+    let resumed_q = AuthorizeQuery {
+        client_id: oidc_params.client_id.clone(),
+        redirect_uri: oidc_params.redirect_uri.clone(),
+        response_type: oidc_params.response_type.clone(),
+        scope: oidc_params.scope.clone(),
+        state: oidc_params.state.clone().unwrap_or_default(),
+        code_challenge: oidc_params.code_challenge.clone(),
+        code_challenge_method: oidc_params.code_challenge_method.clone(),
+        nonce: oidc_params.nonce.clone().unwrap_or_default(),
+        prompt: String::new(),
+        response_mode: oidc_params.response_mode.clone(),
+        request: None,
+        request_uri: None,
+    };
+    if let Some(mut sms_response) = super::sms_challenge::sms_mfa_challenge_gate(
+        state,
+        realm,
+        &user_id,
+        &resumed_q,
+        secure,
+        oidc_params.via_par,
+    ) {
+        append_cookie(&mut sms_response, &clear_cookie);
+        return sms_response;
+    }
+
     let code_challenge_method = match oidc_params.code_challenge_method.as_str() {
         "S256" => Some(CodeChallengeMethod::S256),
         _ => None,
@@ -1691,7 +1725,9 @@ pub async fn enroll_phone_otp_verify_submit(
 
     match state
         .identity
-        .verify_sms_otp(&realm, &form.nonce, &form.code, &hmac_key, now_ts)
+        // Bound to the submitted number: a code sent to one phone must not
+        // mark a different one verified.
+        .verify_sms_otp(&realm, &form.nonce, &phone, &form.code, &hmac_key, now_ts)
     {
         Ok(()) => {}
         Err(_) => {
@@ -2109,10 +2145,14 @@ pub async fn enroll_email_otp_verify_submit(
     let hmac_key = email_otp_hmac_key_bytes(&state);
     let now_ts = now_unix_ts();
 
-    match state
-        .identity
-        .verify_email_otp(&realm, &form.nonce, &form.code, &hmac_key, now_ts)
-    {
+    match state.identity.verify_email_otp(
+        &realm,
+        &form.nonce,
+        &email,
+        &form.code,
+        &hmac_key,
+        now_ts,
+    ) {
         Ok(()) => {}
         Err(_) => {
             return render_enroll_email_otp_verify(
@@ -2245,13 +2285,36 @@ fn mask_email(email: &str) -> String {
 
 /// Returns the HMAC key bytes to use for email OTP operations.
 ///
-/// Reuses the SMS OTP HMAC key if configured; falls back to a deterministic
-/// dev key when neither is set (dev mode only — not for production).
+/// Always a secret key — see [`derive_email_otp_hmac_key`]. This used to fall
+/// back to the public constant `hearth-dev-email-otp-key-not-for-production`
+/// whenever no SMS OTP key was loaded, which is every production deployment
+/// on the `log` SMS transport: each stored email OTP digest was then keyed
+/// with a value anyone could read in the source, and so brute-forceable
+/// offline in about 10^6 HMACs.
 pub(super) fn email_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
-    state
-        .sms_otp_hmac_key
-        .clone()
-        .unwrap_or_else(|| b"hearth-dev-email-otp-key-not-for-production".to_vec())
+    derive_email_otp_hmac_key(
+        state.sms_otp_hmac_key.as_deref(),
+        super::auth::cookie_secret_bytes(&state.cookie_secret),
+    )
+}
+
+/// Domain-separation label for [`derive_email_otp_hmac_key`].
+const EMAIL_OTP_KEY_LABEL: &[u8] = b"hearth/email-otp-hmac-key/v1";
+
+/// Derives the email OTP HMAC key: `HMAC-SHA256(base, label)`.
+///
+/// `base` is the operator's `HEARTH_SMS_OTP_HMAC_KEY` when one is loaded (it is
+/// stable across restarts and shared by every node), otherwise the process's
+/// random cookie secret. The cookie secret already bounds the email OTP login
+/// flow — the MFA pending cookie is MAC'd with it — so a code issued under it
+/// lives exactly as long, and on exactly the node, as the login it belongs to.
+/// The label keeps the derived key distinct from the key it came from.
+fn derive_email_otp_hmac_key(sms_key: Option<&[u8]>, cookie_secret: &[u8]) -> Vec<u8> {
+    let base = sms_key.unwrap_or(cookie_secret);
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, base);
+    ring::hmac::sign(&key, EMAIL_OTP_KEY_LABEL)
+        .as_ref()
+        .to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -2654,5 +2717,47 @@ mod mask_phone_tests {
             assert!(!is_e164(input), "is_e164 accepted {input:?}");
         }
         assert!(is_e164("+15555550100"));
+    }
+}
+
+#[cfg(test)]
+mod email_otp_key_tests {
+    use super::derive_email_otp_hmac_key;
+
+    /// The constant this used to fall back to whenever no SMS OTP key was
+    /// loaded — i.e. every production deployment on the `log` SMS transport.
+    /// It is in the public source, so every digest keyed with it could be
+    /// brute-forced offline (10^6 HMACs) by anyone who could read storage.
+    const OLD_PUBLIC_KEY: &[u8] = b"hearth-dev-email-otp-key-not-for-production";
+
+    #[test]
+    fn no_sms_key_derives_from_the_process_secret_not_a_public_constant() {
+        let a = derive_email_otp_hmac_key(None, &[1u8; 32]);
+        let b = derive_email_otp_hmac_key(None, &[2u8; 32]);
+        assert_ne!(a.as_slice(), OLD_PUBLIC_KEY);
+        assert_eq!(a.len(), 32, "a full HMAC-SHA256 key");
+        assert_ne!(a, b, "the key must depend on the secret, not be a constant");
+        assert_eq!(
+            a,
+            derive_email_otp_hmac_key(None, &[1u8; 32]),
+            "deterministic for one secret, so issue and verify agree"
+        );
+    }
+
+    #[test]
+    fn an_sms_key_is_preferred_but_never_reused_verbatim() {
+        let sms = b"0123456789abcdef0123456789abcdef";
+        let k = derive_email_otp_hmac_key(Some(sms), &[1u8; 32]);
+        assert_ne!(
+            k.as_slice(),
+            sms.as_slice(),
+            "domain-separated from the SMS key"
+        );
+        assert_eq!(
+            k,
+            derive_email_otp_hmac_key(Some(sms), &[9u8; 32]),
+            "the operator's cluster-shared key wins over the per-process secret"
+        );
+        assert_ne!(k.as_slice(), OLD_PUBLIC_KEY);
     }
 }

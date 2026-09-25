@@ -25,7 +25,7 @@ use hearth::identity::{
     EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, RealmConfig, UpdateUserRequest,
     UserStatus,
 };
-use hearth::protocol::web::auth::{MFA_PENDING_COOKIE, SESSION_COOKIE};
+use hearth::protocol::web::auth::{MFA_OTP_COOKIE, MFA_PENDING_COOKIE, SESSION_COOKIE};
 use hearth::protocol::web::{self, CookieSecret, WebState};
 use hearth::rbac::EmbeddedRbacEngine;
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
@@ -361,6 +361,14 @@ async fn otp_challenge_page_renders_a_verifiable_form() {
         .expect("challenge page");
 
     assert_eq!(resp.status(), StatusCode::OK, "challenge page must render");
+    assert!(
+        resp.headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .any(|v| v.starts_with(&format!("{MFA_OTP_COOKIE}=")) && v.contains("HttpOnly")),
+        "the page must bind the OTP it issued to the server-signed challenge cookie"
+    );
     let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
         .await
         .expect("body");
@@ -370,7 +378,11 @@ async fn otp_challenge_page_renders_a_verifiable_form() {
         "the OTP form must carry a CSRF token"
     );
     assert!(
-        html.contains(r#"name="otp_nonce""#) && html.contains(r#"value="email_otp""#),
-        "the OTP form must carry the pending-OTP handle and the factor it verifies"
+        html.contains(r#"name="code""#),
+        "the OTP form must ask for the code"
+    );
+    assert!(
+        !html.contains(r#"name="otp_nonce""#) && !html.contains(r#"name="factor""#),
+        "the pending-OTP handle and the factor are server state, not form fields"
     );
 }

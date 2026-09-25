@@ -15963,6 +15963,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         nonce: &str,
+        phone: &str,
         candidate_code: &str,
         otp_hmac_key_bytes: &[u8],
         now_unix_ts: u64,
@@ -16016,8 +16017,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &otp_key, &updated_bytes)
             .map_err(Self::storage_err)?;
 
-        // 5. Constant-time HMAC verification.
-        let result = stored.verify(candidate_code, otp_hmac_key_bytes);
+        // 5. Constant-time HMAC verification, bound to the expected phone.
+        let result = stored.verify(candidate_code, phone, otp_hmac_key_bytes);
 
         match result {
             Ok(()) => {
@@ -16067,8 +16068,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let rng = ring::rand::SystemRandom::new();
         let nonce = otp_mod::generate_otp_nonce(&rng)?;
         let expiry_unix_ts = now_unix_ts.saturating_add(expiry_secs);
-        let (digits, stored) =
-            StoredOtp::create(&rng, otp_hmac_key_bytes, expiry_unix_ts, max_attempts)?;
+        let (digits, stored) = StoredOtp::create(
+            &rng,
+            otp_hmac_key_bytes,
+            email,
+            expiry_unix_ts,
+            max_attempts,
+        )?;
 
         let otp_key = keys::encode_email_pending_otp(&nonce);
         let otp_bytes = serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
@@ -16091,6 +16097,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         nonce: &str,
+        email: &str,
         candidate_code: &str,
         otp_hmac_key_bytes: &[u8],
         now_unix_ts: u64,
@@ -16139,7 +16146,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &otp_key, &updated_bytes)
             .map_err(Self::storage_err)?;
 
-        let result = stored.verify(candidate_code, otp_hmac_key_bytes);
+        let result = stored.verify(candidate_code, email, otp_hmac_key_bytes);
 
         match result {
             Ok(()) => {
@@ -17191,8 +17198,13 @@ impl EmbeddedIdentityEngine {
         let rng = ring::rand::SystemRandom::new();
         let nonce = otp_mod::generate_otp_nonce(&rng)?;
         let expiry_unix_ts = now_unix_ts.saturating_add(expiry_secs);
-        let (digits, stored) =
-            StoredOtp::create(&rng, otp_hmac_key_bytes, expiry_unix_ts, max_attempts)?;
+        let (digits, stored) = StoredOtp::create(
+            &rng,
+            otp_hmac_key_bytes,
+            phone,
+            expiry_unix_ts,
+            max_attempts,
+        )?;
 
         let otp_key = keys::encode_sms_pending_otp(&nonce);
         let otp_bytes = serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {

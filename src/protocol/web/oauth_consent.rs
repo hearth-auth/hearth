@@ -332,7 +332,7 @@ async fn authorize_get_impl(
     //     extracts authoritative values from its claims. Skip response_type /
     //     state / redirect_uri checks here; the engine enforces them after
     //     JAR extraction. Never redirect for JAR errors (open-redirect risk).
-    if q.request.is_some() {
+    if let Some(ref request_jwt) = q.request {
         // Load client to confirm it exists; redirect_uri check is deferred.
         match state.identity.get_client(realm, &client_id) {
             Ok(Some(_)) => {}
@@ -342,23 +342,15 @@ async fn authorize_get_impl(
                 return handlers_common::server_error();
             }
         }
-        return issue_code_and_redirect(
+        return authorize_jar(
             state,
+            session,
             realm,
-            &session.user_id,
             &client_id,
-            &q.redirect_uri,
-            &q.scope,
-            &q.state,
-            optional(&q.code_challenge),
-            None,
-            optional(&q.nonce),
-            Vec::new(),
-            q.response_mode
-                .as_deref()
-                .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok()),
-            q.request.clone(),
-            false, // JAR path: not via PAR (JAR != PAR)
+            q,
+            request_jwt,
+            headers,
+            now,
         );
     }
 
@@ -1068,6 +1060,115 @@ pub(super) fn issue_code_and_redirect(
             handlers_common::server_error()
         }
     }
+}
+
+/// The JAR (RFC 9101) branch of `authorize_get_impl`.
+///
+/// Verifies the signed request object here — consuming its `jti` — and runs
+/// the required-action and SMS MFA intercepts on its authoritative
+/// parameters before any code is issued, exactly as the PAR branch does with
+/// its stored ones. This branch used to hand the raw JWT straight to
+/// `issue_code_and_redirect`, returning before either intercept: a session
+/// created without the SMS factor (passkey, magic link, federation) got an
+/// authorization code on a realm that requires it, and pending required
+/// actions were skipped.
+///
+/// The parameter merge mirrors the engine's own JAR handling (the claim
+/// wins, the outer value is the fallback), so the code issued below — or by
+/// an intercept's resume path — carries the same values the engine would
+/// have extracted. The JWT is not passed on: its `jti` is spent.
+#[allow(clippy::too_many_arguments)]
+fn authorize_jar(
+    state: &Arc<WebState>,
+    session: &UiSession,
+    realm: &RealmId,
+    client_id: &ClientId,
+    q: &AuthorizeQuery,
+    request_jwt: &str,
+    headers: &axum::http::HeaderMap,
+    now: Timestamp,
+) -> Response {
+    // Never redirect for JAR errors (open-redirect risk).
+    let jar = match state.identity.verify_jar(realm, client_id, request_jwt) {
+        Ok(jar) => jar,
+        Err(e) => {
+            tracing::warn!(error = %e, "authorize_get(JAR): request object rejected");
+            return handlers_common::bad_request("invalid request object");
+        }
+    };
+    // RFC 9101 §4: the claim, when present, must name the same client.
+    if jar
+        .client_id
+        .as_deref()
+        .is_some_and(|cid| cid != client_id.to_string())
+    {
+        return handlers_common::bad_request("client_id mismatch with request object");
+    }
+
+    let jar_q = AuthorizeQuery {
+        client_id: q.client_id.clone(),
+        redirect_uri: jar.redirect_uri.unwrap_or_else(|| q.redirect_uri.clone()),
+        response_type: jar.response_type.unwrap_or_else(|| q.response_type.clone()),
+        scope: jar.scope.unwrap_or_else(|| q.scope.clone()),
+        state: jar.state.unwrap_or_else(|| q.state.clone()),
+        code_challenge: jar
+            .code_challenge
+            .unwrap_or_else(|| q.code_challenge.clone()),
+        // The engine took the method from the JAR only (the outer value was
+        // never passed on this branch); keep that.
+        code_challenge_method: jar.code_challenge_method.unwrap_or_default(),
+        nonce: jar.nonce.unwrap_or_else(|| q.nonce.clone()),
+        prompt: q.prompt.clone(),
+        response_mode: q.response_mode.clone(),
+        request: None,
+        request_uri: None,
+    };
+
+    if let Some(ra_response) = super::required_action::required_action_check(
+        state,
+        realm,
+        &session.user_id,
+        &jar_q,
+        headers,
+        now,
+        false, // JAR != PAR
+    ) {
+        return ra_response;
+    }
+    if let Some(sms_response) = super::sms_challenge::sms_mfa_challenge_check(
+        state,
+        realm,
+        &session.user_id,
+        &jar_q,
+        headers,
+        now,
+        false, // JAR != PAR
+    ) {
+        return sms_response;
+    }
+
+    issue_code_and_redirect(
+        state,
+        realm,
+        &session.user_id,
+        client_id,
+        &jar_q.redirect_uri,
+        &jar_q.scope,
+        &jar_q.state,
+        optional(&jar_q.code_challenge),
+        match jar_q.code_challenge_method.as_str() {
+            "S256" => Some(CodeChallengeMethod::S256),
+            _ => None,
+        },
+        optional(&jar_q.nonce),
+        Vec::new(),
+        jar_q
+            .response_mode
+            .as_deref()
+            .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok()),
+        None,  // the request object was verified (and its jti spent) above
+        false, // JAR path: not via PAR (JAR != PAR)
+    )
 }
 
 /// Builds the redirect location string from an `AuthorizationResponse`.

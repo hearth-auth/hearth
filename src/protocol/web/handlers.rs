@@ -527,13 +527,11 @@ impl MfaChallengeTemplate {
 struct MfaOtpChallengeTemplate {
     error: Option<String>,
     /// One line telling the user where the code went, e.g. the masked phone.
+    ///
+    /// The factor and the pending OTP record are deliberately NOT rendered
+    /// into the form: they travel in the server-signed
+    /// [`super::auth::MFA_OTP_COOKIE`], so the POST cannot choose them.
     prompt: String,
-    /// `"sms"` or `"email_otp"` — echoed so the POST verifies the right factor.
-    factor: &'static str,
-    /// Opaque nonce returned by `issue_sms_otp` / `issue_email_otp`. The
-    /// pending record is keyed by it, so it is a server-side handle, not a
-    /// secret — the same shape the required-action OTP pages already use.
-    otp_nonce: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -548,19 +546,10 @@ struct MfaOtpChallengeTemplate {
 }
 
 impl MfaOtpChallengeTemplate {
-    fn new(
-        error: Option<String>,
-        prompt: String,
-        factor: &'static str,
-        otp_nonce: String,
-        product_name: String,
-        logo_url: String,
-    ) -> Self {
+    fn new(error: Option<String>, prompt: String, product_name: String, logo_url: String) -> Self {
         Self {
             error,
             prompt,
-            factor,
-            otp_nonce,
             chrome: false,
             active: "",
             user_email: None,
@@ -738,20 +727,20 @@ pub async fn mfa_otp_challenge_form(
             let tmpl = MfaOtpChallengeTemplate::new(
                 Some("We could not send a code right now. Please try again.".to_string()),
                 String::new(),
-                factor.as_str(),
-                String::new(),
                 state.product_name.clone(),
                 state.logo_url.clone(),
             );
-            return render_status(&tmpl, StatusCode::INTERNAL_SERVER_ERROR);
+            // Drop any challenge a previous render bound: it named an OTP
+            // this attempt did not replace.
+            let mut resp = render_status(&tmpl, StatusCode::INTERNAL_SERVER_ERROR);
+            append_cookie(&mut resp, &super::auth::clear_mfa_otp_cookie(secure));
+            return resp;
         }
     };
 
     let mut tmpl = MfaOtpChallengeTemplate::new(
         None,
         prompt,
-        factor.as_str(),
-        nonce,
         state.product_name.clone(),
         state.logo_url.clone(),
     );
@@ -760,6 +749,18 @@ pub async fn mfa_otp_challenge_form(
     if let Some(cookie) = fresh_cookie {
         append_cookie(&mut resp, &cookie);
     }
+    // Bind the issued OTP record and its factor to THIS password step. The
+    // POST reads both from here, never from the form.
+    append_cookie(
+        &mut resp,
+        &super::auth::issue_mfa_otp_cookie(
+            &state.cookie_secret,
+            &pending,
+            factor.as_str(),
+            &nonce,
+            secure,
+        ),
+    );
     resp
 }
 
@@ -767,14 +768,12 @@ pub async fn mfa_otp_challenge_form(
 #[derive(Debug, Deserialize)]
 pub struct MfaOtpChallengeForm {
     /// The 6-digit code the user typed.
+    ///
+    /// This is the ONLY client-chosen input: the factor and the pending OTP
+    /// record come from the server-signed [`super::auth::MFA_OTP_COOKIE`].
+    /// Any `factor` / `otp_nonce` fields a client still sends are ignored.
     #[serde(default)]
     pub code: String,
-    /// `"sms"` or `"email_otp"`, echoed from the rendered form.
-    #[serde(default)]
-    pub factor: String,
-    /// Opaque handle for the pending OTP record.
-    #[serde(default)]
-    pub otp_nonce: String,
     /// CSRF token echoed from the hidden `_csrf` field.
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
@@ -799,15 +798,37 @@ pub async fn mfa_otp_challenge_submit(
         return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
     };
 
-    let Some(factor) = OtpFactor::parse(&form.factor) else {
+    // The factor and the pending OTP record come from the challenge cookie the
+    // GET bound to THIS pending login — never from the form. With them in the
+    // form, the client chose which record its typed code was checked against
+    // (any code obtained for the same phone or inbox by another route passed)
+    // and which factor it was challenged on. No valid challenge cookie means
+    // no OTP was issued for this login: send the user to get one.
+    let Some(challenge) = cookie_value_from_headers(&headers, super::auth::MFA_OTP_COOKIE)
+        .and_then(|raw| super::auth::parse_mfa_otp_cookie(&state.cookie_secret, &pending, raw))
+    else {
         return Redirect::to("/ui/mfa-otp-challenge").into_response();
     };
+    let Some(factor) = OtpFactor::parse(&challenge.factor) else {
+        return Redirect::to("/ui/mfa-otp-challenge").into_response();
+    };
+
+    // The code must prove the PENDING user's own, current factor: refuse a
+    // challenge for a factor they are no longer challenged on (the realm or
+    // the user changed since the code was sent).
+    let (Ok(Some(realm)), Ok(Some(user))) = (
+        state.identity.get_realm(&pending.realm_id),
+        state.identity.get_user(&pending.realm_id, &pending.user_id),
+    ) else {
+        return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+    };
+    if otp_factor_for(&state, &realm, &user) != Some(factor) {
+        return Redirect::to("/ui/mfa-otp-challenge").into_response();
+    }
 
     let otp_err = |msg: &str, status: StatusCode| {
         let tmpl = MfaOtpChallengeTemplate::new(
             Some(msg.to_string()),
-            String::new(),
-            factor.as_str(),
             String::new(),
             state.product_name.clone(),
             state.logo_url.clone(),
@@ -830,27 +851,15 @@ pub async fn mfa_otp_challenge_submit(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let code = form.code.trim();
-    let verified = match factor {
-        OtpFactor::Sms => match super::required_action::sms_otp_hmac_key_bytes(&state) {
-            Some(key) => state.identity.verify_sms_otp(
-                &pending.realm_id,
-                &form.otp_nonce,
-                code,
-                &key,
-                now_ts,
-            ),
-            // No key: nothing can verify, so the factor is not proved.
-            None => Err(IdentityError::MfaNotEnabled),
-        },
-        OtpFactor::Email => state.identity.verify_email_otp(
-            &pending.realm_id,
-            &form.otp_nonce,
-            code,
-            &super::required_action::email_otp_hmac_key_bytes(&state),
-            now_ts,
-        ),
-    };
+    let verified = verify_login_otp(
+        &state,
+        &pending.realm_id,
+        &user,
+        factor,
+        &challenge.otp_nonce,
+        form.code.trim(),
+        now_ts,
+    );
     if let Err(e) = verified {
         tracing::debug!(error = %e, "mfa-otp-challenge: verification failed");
         return otp_err("Invalid code. Please try again.", StatusCode::UNAUTHORIZED);
@@ -884,10 +893,54 @@ pub async fn mfa_otp_challenge_submit(
         now_ra,
     ) {
         state.set_current_realm(pending.realm_id.clone());
+        let mut ra_response = ra_response;
+        append_cookie(
+            &mut ra_response,
+            &super::auth::clear_mfa_otp_cookie(state.is_secure_request(&headers)),
+        );
         return ra_response;
     }
 
     finish_otp_login(&state, &headers, &pending, session_ctx)
+}
+
+/// Checks `code` against the pending OTP record `otp_nonce` for `factor`.
+///
+/// `otp_nonce` and `factor` MUST come from the server-signed challenge cookie,
+/// never from the request body. Each verify also names the recipient the
+/// user's code must have been sent to: the OTP record itself names nobody, so
+/// without that a genuine nonce + code someone obtained for THEIR OWN phone or
+/// inbox passed this user's challenge.
+fn verify_login_otp(
+    state: &Arc<WebState>,
+    realm_id: &RealmId,
+    user: &crate::identity::User,
+    factor: OtpFactor,
+    otp_nonce: &str,
+    code: &str,
+    now_ts: u64,
+) -> Result<(), IdentityError> {
+    match factor {
+        OtpFactor::Sms => match (
+            user.phone_number(),
+            super::required_action::sms_otp_hmac_key_bytes(state),
+        ) {
+            (Some(phone), Some(key)) => state
+                .identity
+                .verify_sms_otp(realm_id, otp_nonce, phone, code, &key, now_ts),
+            // No number or no key: nothing can verify, so the factor is not
+            // proved.
+            _ => Err(IdentityError::MfaNotEnabled),
+        },
+        OtpFactor::Email => state.identity.verify_email_otp(
+            realm_id,
+            otp_nonce,
+            user.email(),
+            code,
+            &super::required_action::email_otp_hmac_key_bytes(state),
+            now_ts,
+        ),
+    }
 }
 
 /// Issues the session once an OTP second factor has been proved.
@@ -930,6 +983,7 @@ fn finish_otp_login(
             append_cookie(&mut response, &session_cookie);
             append_cookie(&mut response, &csrf_cookie);
             append_cookie(&mut response, &clear_mfa_pending_cookie(secure));
+            append_cookie(&mut response, &super::auth::clear_mfa_otp_cookie(secure));
             append_cookie(
                 &mut response,
                 &super::auth::last_realm_cookie(

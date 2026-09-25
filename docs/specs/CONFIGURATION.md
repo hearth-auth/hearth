@@ -473,7 +473,14 @@ code could ever be delivered. The same rule rejects unknown method names on ever
 > process environment only — never in `hearth.yaml`. Under `--dev` with no key, Hearth
 > generates a random per-process key. Outside `--dev` with no key, SMS OTP fails closed: no
 > code is issued, and a user whose second factor is SMS cannot complete login until SMS is
-> configured.
+> configured. There is no fallback or dev key in production.
+>
+> **Email OTP key.** Email OTP codes are HMAC'd under a key derived from
+> `HEARTH_SMS_OTP_HMAC_KEY` when it is set (domain-separated, never the SMS key itself), and
+> otherwise from the process's random cookie secret. Either way the key is secret — never a
+> constant — so no dedicated email OTP variable is needed. Without `HEARTH_SMS_OTP_HMAC_KEY`
+> an email OTP verifies only on the process that issued it, the same scope as the login
+> cookies it completes; set the variable if your deployment routes one sign-in across nodes.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

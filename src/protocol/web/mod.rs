@@ -526,9 +526,10 @@ impl WebState {
 
     /// Configures the SMS transport and HMAC key for OTP delivery.
     ///
-    /// `hmac_key` is the raw bytes derived from `HEARTH_SMS_OTP_HMAC_KEY`.
-    /// When `hmac_key` is `None` (the Log transport, in dev or production), the
-    /// handlers substitute a deterministic dev key.
+    /// `hmac_key` is the raw bytes derived from `HEARTH_SMS_OTP_HMAC_KEY` (or,
+    /// in dev mode only, a random per-process key). There is no substitute
+    /// when it is `None`: every SMS OTP surface then fails closed — no code is
+    /// issued, nothing verifies, and a user whose factor is SMS cannot pass it.
     #[must_use]
     pub fn with_sms(
         mut self,

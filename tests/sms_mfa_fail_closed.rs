@@ -32,7 +32,7 @@ use hearth::identity::{
     SmsMessage, SmsSender, UpdateUserRequest, UserStatus,
 };
 use hearth::protocol::http::{router, AppState};
-use hearth::protocol::web::auth::{MFA_PENDING_COOKIE, SESSION_COOKIE};
+use hearth::protocol::web::auth::{MFA_OTP_COOKIE, MFA_PENDING_COOKIE, SESSION_COOKIE};
 use hearth::protocol::web::oauth_consent::AuthorizeQuery;
 use hearth::protocol::web::sms_challenge::sms_mfa_challenge_check;
 use hearth::protocol::web::{self, CookieSecret, WebState};
@@ -67,6 +67,15 @@ impl CapturingSms {
     fn sent(&self) -> usize {
         #[allow(clippy::unwrap_used)]
         self.messages.lock().unwrap().len()
+    }
+
+    /// The 6-digit code in the most recent message.
+    fn last_code(&self) -> String {
+        #[allow(clippy::unwrap_used)]
+        let guard = self.messages.lock().unwrap();
+        let body = guard.last().expect("an SMS was sent").body.clone();
+        let (_, code) = body.rsplit_once(": ").expect("code in body");
+        code.trim().to_string()
     }
 }
 
@@ -527,6 +536,10 @@ fn cookie_pair(resp: &Response<Body>, name: &str) -> Option<String> {
 }
 
 async fn post_login(rig: &LoginRig) -> Response<Body> {
+    post_login_as(rig, USER_EMAIL).await
+}
+
+async fn post_login_as(rig: &LoginRig, email: &str) -> Response<Body> {
     let page = rig
         .app
         .clone()
@@ -559,7 +572,7 @@ async fn post_login(rig: &LoginRig) -> Response<Body> {
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, csrf_cookie)
                 .body(Body::from(format!(
-                    "email={USER_EMAIL}&password={}&_csrf={csrf_field}",
+                    "email={email}&password={}&_csrf={csrf_field}",
                     password()
                 )))
                 .expect("build login POST"),
@@ -730,4 +743,1174 @@ async fn authorize_intercept_with_key_and_transport_starts_the_challenge() {
         Some("/ui/sms-challenge")
     );
     assert_eq!(rig.sms.sent(), 1);
+}
+
+// ===========================================================================
+// JSON admin API — shape errors in `mfa_methods`
+// ===========================================================================
+
+/// A non-string entry used to be dropped silently, so the stored list was not
+/// the list the operator sent. It is refused — even on a real transport, so
+/// the refusal is about the shape and nothing else.
+#[tokio::test]
+async fn json_admin_api_refuses_a_non_string_mfa_method_entry() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let state = AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+        .with_sms_transport(SmsTransport::Twilio);
+    let (status, realm) = json_patch_mfa(state, &h, r#"{"mfa_methods":["totp",5]}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(stored_mfa_methods(&h, &realm), None);
+}
+
+/// A scalar where a list belongs used to be ignored (the PATCH answered 200
+/// and changed nothing). It is refused.
+#[tokio::test]
+async fn json_admin_api_refuses_a_non_array_mfa_methods() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let state = AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+        .with_sms_transport(SmsTransport::Twilio);
+    let (status, realm) = json_patch_mfa(state, &h, r#"{"mfa_methods":"sms"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(stored_mfa_methods(&h, &realm), None);
+}
+
+// ===========================================================================
+// Shared helpers for the OTP surfaces below
+// ===========================================================================
+
+const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
+/// The key the handlers used to substitute when none was loaded.
+const OLD_ZERO_KEY: [u8; 32] = [0u8; 32];
+const OTHER_EMAIL: &str = "other-user@fail-closed.test";
+const OTHER_PHONE: &str = "+15555550199";
+const REDIRECT: &str = "https://app.example.com/cb";
+
+/// S256 challenge for a fixed verifier — the test clients are public, and a
+/// public client must use PKCE.
+fn pkce_challenge() -> String {
+    data_encoding::BASE64URL_NOPAD.encode(
+        ring::digest::digest(
+            &ring::digest::SHA256,
+            b"verifier-verifier-verifier-verifier-4",
+        )
+        .as_ref(),
+    )
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Adds a second active user with its own verified phone to the rig's realm.
+fn add_sms_user(rig: &LoginRig, email: &str, phone: &str) -> UserId {
+    let user = rig
+        .state
+        .identity
+        .create_user(
+            &rig.realm_id,
+            &CreateUserRequest {
+                email: email.to_string(),
+                display_name: "Other".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("user");
+    rig.state
+        .identity
+        .set_password(
+            &rig.realm_id,
+            user.id(),
+            &CleartextPassword::from_string(password()),
+        )
+        .expect("password");
+    rig.state
+        .identity
+        .update_user(
+            &rig.realm_id,
+            user.id(),
+            &UpdateUserRequest {
+                status: Some(UserStatus::Active),
+                phone_number: Some(Some(phone.to_string())),
+                phone_verified: Some(true),
+                ..Default::default()
+            },
+        )
+        .expect("verify phone");
+    user.id().clone()
+}
+
+fn html_field(html: &str, name: &str) -> String {
+    let marker = format!(r#"name="{name}" value=""#);
+    let start = html.find(&marker).unwrap_or_else(|| panic!("{name} field")) + marker.len();
+    let end = start + html[start..].find('"').expect("unterminated value");
+    html[start..end].to_string()
+}
+
+async fn body_string(resp: Response<Body>) -> String {
+    String::from_utf8_lossy(
+        &axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .expect("body"),
+    )
+    .into_owned()
+}
+
+/// Password step for `email`, then the challenge page; returns the pending
+/// cookie pair and the challenge cookie pair the page set.
+async fn start_otp_login(rig: &LoginRig, email: &str) -> (String, String) {
+    let resp = post_login_as(rig, email).await;
+    let pending = cookie_pair(&resp, MFA_PENDING_COOKIE).expect("pending cookie");
+    let page = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ui/mfa-otp-challenge")
+                .header(header::COOKIE, pending.clone())
+                .body(Body::empty())
+                .expect("build challenge GET"),
+        )
+        .await
+        .expect("challenge");
+    assert_eq!(page.status(), StatusCode::OK, "challenge page renders");
+    let otp = cookie_pair(&page, MFA_OTP_COOKIE)
+        .expect("the challenge page must bind the OTP it issued to a server-signed cookie");
+    let html = body_string(page).await;
+    assert!(
+        !html.contains(r#"name="otp_nonce""#) && !html.contains(r#"name="factor""#),
+        "the OTP handle and factor must not round-trip through the form"
+    );
+    (pending, otp)
+}
+
+/// POSTs the OTP challenge form. `cookies` is the cookie header minus the
+/// CSRF cookie; `extra` is appended to the form body verbatim — client-chosen
+/// fields the server must ignore.
+async fn submit_login_otp(
+    rig: &LoginRig,
+    cookies: &str,
+    code: &str,
+    extra: &str,
+) -> Response<Body> {
+    rig.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/mfa-otp-challenge")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("{cookies}; hearth_ui_csrf={CSRF}"))
+                .body(Body::from(format!("code={code}&_csrf={CSRF}{extra}")))
+                .expect("build challenge POST"),
+        )
+        .await
+        .expect("challenge submit")
+}
+
+/// The login OTP challenge cookie, MAC'd exactly as the challenge page does.
+/// Only for a test that needs an OTP the page itself would refuse to issue.
+fn forge_mfa_otp_cookie(pending_pair: &str, factor: &str, otp_nonce: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let (_, value) = pending_pair.split_once('=').expect("cookie pair");
+    let parts: Vec<&str> = value.split('.').collect();
+    let user = uuid::Uuid::parse_str(parts[0]).expect("user uuid");
+    let realm = uuid::Uuid::parse_str(parts[1]).expect("realm uuid");
+    let pending_nonce = parts[4];
+    let mut mac = <Hmac<Sha256>>::new_from_slice(&COOKIE_SECRET).expect("key");
+    mac.update(b"hearth-mfa-otp|");
+    mac.update(user.as_bytes());
+    mac.update(b"|");
+    mac.update(realm.as_bytes());
+    mac.update(b"|");
+    mac.update(pending_nonce.as_bytes());
+    mac.update(b"|");
+    mac.update(factor.as_bytes());
+    mac.update(b"|");
+    mac.update(otp_nonce.as_bytes());
+    let tag = data_encoding::BASE64URL_NOPAD.encode(&mac.finalize().into_bytes());
+    format!("{MFA_OTP_COOKIE}={factor}.{otp_nonce}.{tag}")
+}
+
+fn clears_cookie(resp: &Response<Body>, name: &str) -> bool {
+    resp.headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| v.starts_with(&format!("{name}=;")) && v.contains("Max-Age=0"))
+}
+
+// ===========================================================================
+// Login OTP — the code proves the PENDING user's factor, via server state
+// ===========================================================================
+
+/// Someone who knows the victim's password and holds their own account in the
+/// same realm obtains a genuine code for THEMSELVES, then presents it — with
+/// their own challenge cookie — on the victim's pending login. Neither the OTP
+/// record nor the form named the victim, so it verified as the victim.
+#[tokio::test]
+async fn login_otp_issued_to_another_user_does_not_pass_the_victims_challenge() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    add_sms_user(&rig, OTHER_EMAIL, OTHER_PHONE);
+
+    // Attacker: their own login, their own genuine code.
+    let (_own_pending, own_otp) = start_otp_login(&rig, OTHER_EMAIL).await;
+    let own_code = rig.sms.last_code();
+
+    // Victim: password step only (the attacker knows the password).
+    let victim = post_login_as(&rig, USER_EMAIL).await;
+    let victim_pending = cookie_pair(&victim, MFA_PENDING_COOKIE).expect("pending cookie");
+
+    let resp = submit_login_otp(
+        &rig,
+        &format!("{victim_pending}; {own_otp}"),
+        &own_code,
+        "&factor=sms",
+    )
+    .await;
+    assert!(
+        !has_cookie(&resp, SESSION_COOKIE),
+        "an OTP sent to another user's phone must not prove the victim's factor"
+    );
+}
+
+/// Control: the user's own code completes the login with nothing but the code
+/// in the form, and the challenge cookie is cleared with the pending one.
+#[tokio::test]
+async fn login_otp_issued_to_the_user_completes_the_login() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    let (pending, otp) = start_otp_login(&rig, USER_EMAIL).await;
+    let code = rig.sms.last_code();
+    let resp = submit_login_otp(&rig, &format!("{pending}; {otp}"), &code, "").await;
+    assert!(has_cookie(&resp, SESSION_COOKIE), "own code must log in");
+    assert!(
+        clears_cookie(&resp, MFA_OTP_COOKIE),
+        "the spent challenge cookie must be cleared"
+    );
+}
+
+/// The form used to name the pending OTP record (`otp_nonce`), so the client
+/// chose which record the typed code was checked against. A code obtained for
+/// the same phone by any other route then passed the login challenge. The
+/// record must come from the server-signed challenge cookie only.
+#[tokio::test]
+async fn login_otp_submit_ignores_a_form_supplied_nonce() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    let (pending, otp) = start_otp_login(&rig, USER_EMAIL).await;
+    let challenge_code = rig.sms.last_code();
+
+    // A second, genuine OTP for the same phone that the challenge never issued.
+    let other_nonce = rig
+        .state
+        .identity
+        .issue_sms_otp(&rig.realm_id, PHONE, KEY, rig.sms.as_ref(), now_secs())
+        .expect("issue a second OTP");
+    let other_code = rig.sms.last_code();
+    let cookies = format!("{pending}; {otp}");
+
+    let resp = submit_login_otp(
+        &rig,
+        &cookies,
+        &other_code,
+        &format!("&factor=sms&otp_nonce={other_nonce}"),
+    )
+    .await;
+    assert!(
+        !has_cookie(&resp, SESSION_COOKIE),
+        "a client-chosen OTP record must not complete the challenge"
+    );
+
+    // The record the challenge bound still verifies its own code.
+    let resp = submit_login_otp(
+        &rig,
+        &cookies,
+        &challenge_code,
+        &format!("&otp_nonce={other_nonce}"),
+    )
+    .await;
+    assert!(
+        has_cookie(&resp, SESSION_COOKIE),
+        "the server-bound OTP record must be the one checked"
+    );
+}
+
+/// The form used to name the factor too. The server-side factor wins: the
+/// user is challenged on SMS, so SMS is verified whatever the form claims.
+#[tokio::test]
+async fn login_otp_submit_ignores_a_form_supplied_factor() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    let (pending, otp) = start_otp_login(&rig, USER_EMAIL).await;
+    let code = rig.sms.last_code();
+    let resp = submit_login_otp(
+        &rig,
+        &format!("{pending}; {otp}"),
+        &code,
+        "&factor=email_otp",
+    )
+    .await;
+    assert!(
+        has_cookie(&resp, SESSION_COOKIE),
+        "the factor is the one the server challenged, not the form's"
+    );
+}
+
+/// Without the challenge cookie there is no server-issued OTP to check, so a
+/// genuine code for the user's phone — issued outside this challenge — is
+/// refused.
+#[tokio::test]
+async fn login_otp_submit_without_the_challenge_cookie_is_refused() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    let victim = post_login_as(&rig, USER_EMAIL).await;
+    let pending = cookie_pair(&victim, MFA_PENDING_COOKIE).expect("pending cookie");
+    let nonce = rig
+        .state
+        .identity
+        .issue_sms_otp(&rig.realm_id, PHONE, KEY, rig.sms.as_ref(), now_secs())
+        .expect("issue");
+    let code = rig.sms.last_code();
+
+    let resp = submit_login_otp(
+        &rig,
+        &pending,
+        &code,
+        &format!("&factor=sms&otp_nonce={nonce}"),
+    )
+    .await;
+    assert!(!has_cookie(&resp, SESSION_COOKIE));
+}
+
+/// With no key loaded, a code HMAC'd under the old all-zero key must not
+/// verify, even with a correctly signed challenge cookie naming it: the
+/// submit path used the zero key too, so reinstating that fallback would make
+/// this pass.
+#[tokio::test]
+async fn login_otp_submit_without_an_hmac_key_refuses_a_zero_key_code() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, None));
+    let nonce = rig
+        .state
+        .identity
+        .issue_sms_otp(
+            &rig.realm_id,
+            PHONE,
+            &OLD_ZERO_KEY,
+            rig.sms.as_ref(),
+            now_secs(),
+        )
+        .expect("issue under the old zero key");
+    let code = rig.sms.last_code();
+    let victim = post_login_as(&rig, USER_EMAIL).await;
+    let pending = cookie_pair(&victim, MFA_PENDING_COOKIE).expect("pending cookie");
+    let otp = forge_mfa_otp_cookie(&pending, "sms", &nonce);
+
+    let resp = submit_login_otp(&rig, &format!("{pending}; {otp}"), &code, "").await;
+    assert!(!has_cookie(&resp, SESSION_COOKIE));
+}
+
+/// Control for the forged cookie above: the same forgery under a loaded key
+/// does complete the login, so the refusal is the missing key and not a
+/// cookie the handler would never accept.
+#[tokio::test]
+async fn login_otp_forged_challenge_cookie_matches_the_server_format() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    let nonce = rig
+        .state
+        .identity
+        .issue_sms_otp(&rig.realm_id, PHONE, KEY, rig.sms.as_ref(), now_secs())
+        .expect("issue");
+    let code = rig.sms.last_code();
+    let victim = post_login_as(&rig, USER_EMAIL).await;
+    let pending = cookie_pair(&victim, MFA_PENDING_COOKIE).expect("pending cookie");
+    let otp = forge_mfa_otp_cookie(&pending, "sms", &nonce);
+
+    let resp = submit_login_otp(&rig, &format!("{pending}; {otp}"), &code, "").await;
+    assert!(has_cookie(&resp, SESSION_COOKIE));
+}
+
+// ===========================================================================
+// /ui/sms-challenge (authorize intercept) — no key refuses
+// ===========================================================================
+
+fn register_client(rig: &LoginRig) -> hearth::identity::OAuthClient {
+    rig.state
+        .identity
+        .register_client(
+            &rig.realm_id,
+            &hearth::identity::RegisterClientRequest {
+                client_name: "SMS fail-closed app".to_string(),
+                redirect_uris: vec![REDIRECT.to_string()],
+                require_consent: false,
+                grant_types: vec!["authorization_code".to_string()],
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
+                ..Default::default()
+            },
+        )
+        .expect("register client")
+}
+
+/// A signed UI session cookie (plus the CSRF cookie) for `user_id`.
+fn ui_session_cookie(rig: &LoginRig, user_id: &UserId) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let session = rig
+        .state
+        .identity
+        .create_session(&rig.realm_id, user_id, &SessionContext::default())
+        .expect("session");
+    let mut mac = <Hmac<Sha256>>::new_from_slice(&COOKIE_SECRET).expect("key");
+    mac.update(session.id().as_uuid().as_bytes());
+    mac.update(b"|");
+    mac.update(rig.realm_id.as_uuid().as_bytes());
+    let tag = data_encoding::BASE64URL_NOPAD.encode(&mac.finalize().into_bytes());
+    format!(
+        "hearth_ui_session={}.{}.{}; hearth_ui_csrf={CSRF}",
+        session.id().as_uuid(),
+        rig.realm_id.as_uuid(),
+        tag,
+    )
+}
+
+/// The `/ui/sms-challenge` pending cookie, MAC'd the way the intercept does.
+fn sms_mfa_cookie(rig: &LoginRig, client_id: &str, otp_nonce: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let payload = serde_json::json!({
+        "realm_id": rig.realm_id.as_uuid().to_string(),
+        "user_id": rig.user_id.as_uuid().to_string(),
+        "otp_nonce": otp_nonce,
+        "masked_phone": "+1•••0142",
+        "client_id": client_id,
+        "redirect_uri": REDIRECT,
+        "scope": "openid",
+        "oauth_state": "st",
+        "code_challenge": pkce_challenge(),
+        "code_challenge_method": "S256",
+        "response_type": "code",
+        "via_par": false,
+    });
+    let b64 = data_encoding::BASE64URL_NOPAD
+        .encode(serde_json::to_string(&payload).expect("json").as_bytes());
+    let mut mac = <Hmac<Sha256>>::new_from_slice(&COOKIE_SECRET).expect("key");
+    mac.update(rig.user_id.as_uuid().as_bytes());
+    mac.update(b"|");
+    mac.update(b64.as_bytes());
+    let tag = data_encoding::BASE64URL_NOPAD.encode(&mac.finalize().into_bytes());
+    format!("hearth_ui_sms_mfa={b64}.{tag}")
+}
+
+async fn post_sms_challenge(rig: &LoginRig, issue_key: &[u8]) -> Response<Body> {
+    let client = register_client(rig);
+    let nonce = rig
+        .state
+        .identity
+        .issue_sms_otp(
+            &rig.realm_id,
+            PHONE,
+            issue_key,
+            rig.sms.as_ref(),
+            now_secs(),
+        )
+        .expect("issue");
+    let code = rig.sms.last_code();
+    let cookies = format!(
+        "{}; {}",
+        ui_session_cookie(rig, &rig.user_id),
+        sms_mfa_cookie(rig, &client.client_id().as_uuid().to_string(), &nonce)
+    );
+    rig.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/sms-challenge")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, cookies)
+                .body(Body::from(format!("code={code}&_csrf={CSRF}")))
+                .expect("build sms-challenge POST"),
+        )
+        .await
+        .expect("sms-challenge")
+}
+
+fn location(resp: &Response<Body>) -> String {
+    resp.headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[tokio::test]
+async fn sms_challenge_post_without_an_hmac_key_refuses_a_zero_key_code() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, None));
+    let resp = post_sms_challenge(&rig, &OLD_ZERO_KEY).await;
+    assert!(
+        !location(&resp).starts_with(REDIRECT),
+        "no authorization code may be issued without a loaded OTP key; got {}",
+        location(&resp)
+    );
+}
+
+/// Control: with the key the same POST issues the code.
+#[tokio::test]
+async fn sms_challenge_post_with_the_hmac_key_issues_the_code() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    let resp = post_sms_challenge(&rig, KEY).await;
+    assert!(
+        location(&resp).starts_with(REDIRECT),
+        "rig sanity: the right code under the right key completes; got {} ({})",
+        location(&resp),
+        resp.status()
+    );
+}
+
+// ===========================================================================
+// Phone enrolment (ENROLL_PHONE_OTP required action)
+// ===========================================================================
+
+const ENROLL_EMAIL: &str = "enrol@fail-closed.test";
+const ENROLL_PHONE: &str = "+15555550177";
+
+/// Creates a user who must enrol a phone, drives the authorize intercept, and
+/// returns `(user_id, ra_cookie)`.
+async fn enrolment_ra_cookie(rig: &LoginRig) -> (UserId, String) {
+    let client = register_client(rig);
+    let user = rig
+        .state
+        .identity
+        .create_user(
+            &rig.realm_id,
+            &CreateUserRequest {
+                email: ENROLL_EMAIL.to_string(),
+                display_name: "Enrol".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("user");
+    rig.state
+        .identity
+        .update_user(
+            &rig.realm_id,
+            user.id(),
+            &UpdateUserRequest {
+                status: Some(UserStatus::Active),
+                required_actions: Some(vec![hearth::identity::RequiredAction::EnrollPhoneOtp]),
+                ..Default::default()
+            },
+        )
+        .expect("require phone enrolment");
+    let challenge = pkce_challenge();
+    let uri = format!(
+        "/ui/oauth/authorize?client_id={}&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb\
+         &response_type=code&scope=openid&state=st&code_challenge={challenge}\
+         &code_challenge_method=S256",
+        client.client_id().as_uuid()
+    );
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, ui_session_cookie(rig, user.id()))
+                .body(Body::empty())
+                .expect("build authorize"),
+        )
+        .await
+        .expect("authorize");
+    let ra = resp
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find_map(|v| v.strip_prefix("hearth_ra_session="))
+        .and_then(|rest| rest.split(';').next())
+        .map(|t| format!("hearth_ra_session={t}"))
+        .expect("RA cookie from the intercept");
+    (user.id().clone(), ra)
+}
+
+async fn enroll_post(rig: &LoginRig, ra: &str, path: &str, body: String) -> Response<Body> {
+    rig.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, ra)
+                .body(Body::from(body))
+                .expect("build enrol POST"),
+        )
+        .await
+        .expect("enrol")
+}
+
+fn phone_verified(rig: &LoginRig, user: &UserId) -> (Option<String>, bool) {
+    let u = rig
+        .state
+        .identity
+        .get_user(&rig.realm_id, user)
+        .expect("get_user")
+        .expect("user exists");
+    (u.phone_number().map(str::to_string), u.phone_verified())
+}
+
+#[tokio::test]
+async fn enroll_phone_send_without_an_hmac_key_sends_nothing() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, None));
+    let (_, ra) = enrolment_ra_cookie(&rig).await;
+    let resp = enroll_post(
+        &rig,
+        &ra,
+        "/required-action/ENROLL_PHONE_OTP/send",
+        "phone=%2B15555550177".to_string(),
+    )
+    .await;
+    let html = body_string(resp).await;
+    assert!(
+        html.contains("SMS delivery is not configured"),
+        "the page must say why no code was sent"
+    );
+    assert_eq!(rig.sms.sent(), 0, "no code may be issued without a key");
+}
+
+#[tokio::test]
+async fn enroll_phone_verify_without_an_hmac_key_refuses_a_zero_key_code() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, None));
+    let (user, ra) = enrolment_ra_cookie(&rig).await;
+    let nonce = rig
+        .state
+        .identity
+        .issue_sms_otp(
+            &rig.realm_id,
+            ENROLL_PHONE,
+            &OLD_ZERO_KEY,
+            rig.sms.as_ref(),
+            now_secs(),
+        )
+        .expect("issue under the old zero key");
+    let code = rig.sms.last_code();
+    let _ = enroll_post(
+        &rig,
+        &ra,
+        "/required-action/ENROLL_PHONE_OTP/verify",
+        format!("nonce={nonce}&phone=%2B15555550177&code={code}"),
+    )
+    .await;
+    assert_eq!(
+        phone_verified(&rig, &user),
+        (None, false),
+        "no phone may be verified without a loaded OTP key"
+    );
+}
+
+/// A code sent to the enrolling user's OWN phone must not verify a different
+/// number: the form carries the phone, and the OTP named no recipient, so any
+/// number could be marked verified with a code received elsewhere.
+#[tokio::test]
+async fn enroll_phone_verify_refuses_a_code_sent_to_a_different_number() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    let (user, ra) = enrolment_ra_cookie(&rig).await;
+    let resp = enroll_post(
+        &rig,
+        &ra,
+        "/required-action/ENROLL_PHONE_OTP/send",
+        "phone=%2B15555550177".to_string(),
+    )
+    .await;
+    let nonce = html_field(&body_string(resp).await, "nonce");
+    let code = rig.sms.last_code();
+    let _ = enroll_post(
+        &rig,
+        &ra,
+        "/required-action/ENROLL_PHONE_OTP/verify",
+        format!("nonce={nonce}&phone=%2B15555550100&code={code}"),
+    )
+    .await;
+    assert_eq!(
+        phone_verified(&rig, &user),
+        (None, false),
+        "+15555550100 never received a code and must not become verified"
+    );
+}
+
+/// Control: the number the code went to does verify.
+#[tokio::test]
+async fn enroll_phone_verify_accepts_the_number_the_code_was_sent_to() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    let (user, ra) = enrolment_ra_cookie(&rig).await;
+    let resp = enroll_post(
+        &rig,
+        &ra,
+        "/required-action/ENROLL_PHONE_OTP/send",
+        "phone=%2B15555550177".to_string(),
+    )
+    .await;
+    let nonce = html_field(&body_string(resp).await, "nonce");
+    let code = rig.sms.last_code();
+    let resp = enroll_post(
+        &rig,
+        &ra,
+        "/required-action/ENROLL_PHONE_OTP/verify",
+        format!("nonce={nonce}&phone=%2B15555550177&code={code}"),
+    )
+    .await;
+    assert_eq!(
+        phone_verified(&rig, &user),
+        (Some(ENROLL_PHONE.to_string()), true)
+    );
+    // The resumed authorize still runs the SMS challenge (documented in the
+    // SMS MFA deployment guide): a second code, no authorization code yet.
+    assert_eq!(location(&resp), "/ui/sms-challenge");
+    assert_eq!(
+        rig.sms.sent(),
+        2,
+        "enrolment code, then the sign-in challenge code"
+    );
+}
+
+// ===========================================================================
+// Authorize with a signed request object (JAR) — intercepts still run
+// ===========================================================================
+
+const JAR_KID: &str = "sms-fc-jar-key";
+
+/// Registers a JWKS client and signs a JAR for it; returns the authorize URI.
+fn jar_authorize_uri(rig: &LoginRig) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
+    let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("pair");
+    let x = URL_SAFE_NO_PAD.encode(pair.public_key().as_ref());
+    let jwks = format!(
+        r#"{{"keys":[{{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","kid":"{JAR_KID}","x":"{x}"}}]}}"#
+    );
+    let client = rig
+        .state
+        .identity
+        .register_client(
+            &rig.realm_id,
+            &hearth::identity::RegisterClientRequest {
+                client_name: "JAR app".to_string(),
+                redirect_uris: vec![REDIRECT.to_string()],
+                require_consent: false,
+                grant_types: vec!["authorization_code".to_string()],
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
+                jwks: Some(jwks),
+                ..Default::default()
+            },
+        )
+        .expect("register JAR client");
+    let cid = client.client_id().to_string();
+    let realm_name = rig
+        .state
+        .identity
+        .get_realm(&rig.realm_id)
+        .expect("get_realm")
+        .expect("realm")
+        .name()
+        .to_string();
+    let now = i64::try_from(now_secs()).expect("now");
+    let challenge = pkce_challenge();
+    let header = serde_json::json!({ "alg": "EdDSA", "kid": JAR_KID });
+    let claims = serde_json::json!({
+        "iss": cid,
+        "aud": format!("https://hearth.local/realms/{realm_name}"),
+        "exp": now + 600,
+        "iat": now,
+        "jti": uuid::Uuid::new_v4().to_string(),
+        "client_id": cid,
+        "response_type": "code",
+        "redirect_uri": REDIRECT,
+        "scope": "openid",
+        "state": "jar-state",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    });
+    let h = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header"));
+    let c = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims"));
+    let input = format!("{h}.{c}");
+    let sig = URL_SAFE_NO_PAD.encode(pair.sign(input.as_bytes()).as_ref());
+    format!(
+        "/ui/oauth/authorize?client_id={}&request={input}.{sig}",
+        client.client_id().as_uuid()
+    )
+}
+
+async fn jar_authorize(rig: &LoginRig) -> Response<Body> {
+    let uri = jar_authorize_uri(rig);
+    rig.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, ui_session_cookie(rig, &rig.user_id))
+                .body(Body::empty())
+                .expect("build JAR authorize"),
+        )
+        .await
+        .expect("JAR authorize")
+}
+
+/// The JAR branch returned a code before the SMS intercept ever ran, so a
+/// session made without the SMS factor got a code on an `sms` realm.
+#[tokio::test]
+async fn jar_authorize_runs_the_sms_challenge() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    let resp = jar_authorize(&rig).await;
+    assert_eq!(
+        location(&resp),
+        "/ui/sms-challenge",
+        "a JAR authorize on an sms realm must be challenged, not issued a code"
+    );
+    assert_eq!(rig.sms.sent(), 1);
+}
+
+/// And with no transport the JAR branch fails closed like the others.
+#[tokio::test]
+async fn jar_authorize_without_an_sms_transport_issues_no_code() {
+    let rig = login_rig(|s, _| s);
+    let resp = jar_authorize(&rig).await;
+    assert!(
+        !location(&resp).starts_with(REDIRECT),
+        "no code without the SMS factor; got {}",
+        location(&resp)
+    );
+}
+
+/// The JAR's pending required actions are enforced too.
+#[tokio::test]
+async fn jar_authorize_runs_the_required_action_intercept() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    rig.state
+        .identity
+        .update_user(
+            &rig.realm_id,
+            &rig.user_id,
+            &UpdateUserRequest {
+                required_actions: Some(vec![hearth::identity::RequiredAction::UpdatePassword]),
+                ..Default::default()
+            },
+        )
+        .expect("require an action");
+    let resp = jar_authorize(&rig).await;
+    assert!(
+        !location(&resp).starts_with(REDIRECT),
+        "pending required actions must be completed first; got {}",
+        location(&resp)
+    );
+    assert!(
+        resp.headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .any(|v| v.starts_with("hearth_ra_session=")),
+        "the RA intercept must have started"
+    );
+}
+
+// ===========================================================================
+// Required-action resume — the SMS intercept still runs
+// ===========================================================================
+
+/// A plain (non-PAR, non-JAR) authorize for `user`, with a UI session made
+/// without any second factor.
+async fn plain_authorize(rig: &LoginRig, user: &UserId) -> Response<Body> {
+    let client = register_client(rig);
+    let uri = format!(
+        "/ui/oauth/authorize?client_id={}&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb\
+         &response_type=code&scope=openid&state=st&code_challenge={}\
+         &code_challenge_method=S256",
+        client.client_id().as_uuid(),
+        pkce_challenge()
+    );
+    rig.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, ui_session_cookie(rig, user))
+                .body(Body::empty())
+                .expect("build authorize"),
+        )
+        .await
+        .expect("authorize")
+}
+
+/// The RA intercept runs before the SMS intercept and returns first, so a
+/// user with any pending required action reached `resume_oidc_flow` — which
+/// issued the authorization code directly. The SMS intercept never ran: a
+/// session made without the SMS factor got a code on an `sms` realm just by
+/// having (or being given) a required action.
+#[tokio::test]
+async fn completing_a_required_action_does_not_skip_the_sms_challenge() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    rig.state
+        .identity
+        .update_user(
+            &rig.realm_id,
+            &rig.user_id,
+            &UpdateUserRequest {
+                required_actions: Some(vec![hearth::identity::RequiredAction::UpdatePassword]),
+                ..Default::default()
+            },
+        )
+        .expect("require a password update");
+
+    let resp = plain_authorize(&rig, &rig.user_id).await;
+    let ra = cookie_pair(&resp, "hearth_ra_session").expect("RA cookie from the intercept");
+    assert_eq!(rig.sms.sent(), 0, "the RA intercept runs first");
+
+    let new_password = ["a", "brand", "new", "sms", "passphrase", "9"].join("-");
+    let resp = enroll_post(
+        &rig,
+        &format!("{ra}; hearth_ui_csrf={CSRF}"),
+        "/required-action/UPDATE_PASSWORD",
+        format!(
+            "current_password={}&new_password={new_password}&confirm_password={new_password}\
+             &_csrf={CSRF}",
+            password()
+        ),
+    )
+    .await;
+    assert!(
+        !location(&resp).starts_with(REDIRECT),
+        "no authorization code before the SMS factor is proved; got {}",
+        location(&resp)
+    );
+    assert_eq!(
+        location(&resp),
+        "/ui/sms-challenge",
+        "completing the last required action must lead to the SMS challenge"
+    );
+    assert_eq!(rig.sms.sent(), 1, "the SMS challenge sends its code");
+}
+
+/// And without an SMS transport the resume fails closed instead of issuing.
+#[tokio::test]
+async fn completing_a_required_action_without_an_sms_transport_issues_no_code() {
+    let rig = login_rig(|s, _| s);
+    rig.state
+        .identity
+        .update_user(
+            &rig.realm_id,
+            &rig.user_id,
+            &UpdateUserRequest {
+                required_actions: Some(vec![hearth::identity::RequiredAction::UpdatePassword]),
+                ..Default::default()
+            },
+        )
+        .expect("require a password update");
+    let resp = plain_authorize(&rig, &rig.user_id).await;
+    let ra = cookie_pair(&resp, "hearth_ra_session").expect("RA cookie from the intercept");
+
+    let new_password = ["a", "brand", "new", "sms", "passphrase", "9"].join("-");
+    let resp = enroll_post(
+        &rig,
+        &format!("{ra}; hearth_ui_csrf={CSRF}"),
+        "/required-action/UPDATE_PASSWORD",
+        format!(
+            "current_password={}&new_password={new_password}&confirm_password={new_password}\
+             &_csrf={CSRF}",
+            password()
+        ),
+    )
+    .await;
+    assert!(
+        !location(&resp).starts_with(REDIRECT),
+        "no authorization code without the SMS factor; got {} ({})",
+        location(&resp),
+        resp.status()
+    );
+    assert_ne!(
+        resp.status(),
+        StatusCode::OK,
+        "the password page must not simply re-render"
+    );
+}
+
+// ===========================================================================
+// Email OTP — the HMAC key is never a public constant
+// ===========================================================================
+
+/// The key email OTP codes used to be HMAC'd under whenever no SMS OTP key was
+/// loaded — every production deployment on the `log` SMS transport. It is in
+/// the public source, so every stored digest was brute-forceable offline.
+const OLD_PUBLIC_EMAIL_KEY: &[u8] = b"hearth-dev-email-otp-key-not-for-production";
+
+struct CapturingEmail {
+    messages: Mutex<Vec<hearth::identity::EmailMessage>>,
+}
+
+impl CapturingEmail {
+    fn last_code(&self) -> String {
+        #[allow(clippy::unwrap_used)]
+        let guard = self.messages.lock().unwrap();
+        let body = guard.last().expect("an email was sent").text_body.clone();
+        let (_, rest) = body.rsplit_once(": ").expect("code in body");
+        rest.trim().chars().take(6).collect()
+    }
+}
+
+impl hearth::identity::EmailSender for CapturingEmail {
+    fn send(
+        &self,
+        message: &hearth::identity::EmailMessage,
+    ) -> Result<(), hearth::identity::EmailError> {
+        #[allow(clippy::unwrap_used)]
+        self.messages.lock().unwrap().push(message.clone());
+        Ok(())
+    }
+}
+
+struct EmailRig {
+    login: LoginRig,
+    mail: Arc<CapturingEmail>,
+    service: Arc<EmailService>,
+}
+
+/// A realm offering only `email_otp`, a user enrolled in it, a capturing mail
+/// transport and NO SMS OTP key — the production shape that used to fall
+/// back to the public constant.
+fn email_rig() -> EmailRig {
+    let e = engines();
+    let realm = e
+        .identity
+        .create_realm(&CreateRealmRequest {
+            name: format!("email-fc-{}", uuid::Uuid::new_v4()),
+            config: Some(RealmConfig {
+                mfa_methods: Some(vec!["email_otp".to_string()]),
+                ..RealmConfig::default()
+            }),
+        })
+        .expect("realm");
+    let user = e
+        .identity
+        .create_user(
+            realm.id(),
+            &CreateUserRequest {
+                email: USER_EMAIL.to_string(),
+                display_name: "Em".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("user");
+    e.identity
+        .set_password(
+            realm.id(),
+            user.id(),
+            &CleartextPassword::from_string(password()),
+        )
+        .expect("password");
+    e.identity
+        .update_user(
+            realm.id(),
+            user.id(),
+            &UpdateUserRequest {
+                status: Some(UserStatus::Active),
+                email_otp_enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .expect("enrol email otp");
+
+    let mail = Arc::new(CapturingEmail {
+        messages: Mutex::new(Vec::new()),
+    });
+    let service = Arc::new(
+        EmailService::new(
+            Arc::clone(&mail) as _,
+            "Hearth".to_string(),
+            None,
+            EmailBranding::default(),
+            String::new(),
+            None,
+        )
+        .expect("email service"),
+    );
+    let onboarding = Arc::new(OnboardingService::new(
+        Arc::clone(&e.identity),
+        Arc::clone(&e.rbac),
+        null_email(),
+        e.data_dir.clone(),
+    ));
+    let state = WebState::new(
+        Arc::clone(&e.identity),
+        Arc::clone(&e.rbac),
+        Arc::clone(&e.audit),
+        onboarding,
+        CookieSecret::from_bytes(COOKIE_SECRET),
+        Some(Arc::clone(&service)),
+    )
+    .with_default_realm(Some(realm.name().to_string()));
+    let app = web::router(state.clone());
+    EmailRig {
+        login: LoginRig {
+            app,
+            state: Arc::new(state),
+            realm_id: realm.id().clone(),
+            user_id: user.id().clone(),
+            sms: CapturingSms::new(),
+        },
+        mail,
+        service,
+    }
+}
+
+/// A code HMAC'd under the old public constant must not complete an email OTP
+/// login: that would mean the handler still keys email OTPs with it.
+#[tokio::test]
+async fn email_otp_login_refuses_a_code_keyed_with_the_old_public_constant() {
+    let rig = email_rig();
+    let nonce = rig
+        .login
+        .state
+        .identity
+        .issue_email_otp(
+            &rig.login.realm_id,
+            USER_EMAIL,
+            OLD_PUBLIC_EMAIL_KEY,
+            &rig.service,
+            None,
+            now_secs(),
+        )
+        .expect("issue under the old public key");
+    let code = rig.mail.last_code();
+    let login = post_login(&rig.login).await;
+    let pending = cookie_pair(&login, MFA_PENDING_COOKIE).expect("pending cookie");
+    let otp = forge_mfa_otp_cookie(&pending, "email_otp", &nonce);
+
+    let resp = submit_login_otp(&rig.login, &format!("{pending}; {otp}"), &code, "").await;
+    assert!(
+        !has_cookie(&resp, SESSION_COOKIE),
+        "an email OTP keyed with the public constant must not verify"
+    );
+}
+
+/// Control: with no SMS key loaded, email OTP still works end to end — the
+/// key is a secret derived per process, not missing — so the refusal above is
+/// the key and not a broken email flow.
+#[tokio::test]
+async fn email_otp_login_works_without_an_sms_key() {
+    let rig = email_rig();
+    let (pending, otp) = start_otp_login(&rig.login, USER_EMAIL).await;
+    assert!(otp.contains("email_otp."), "the email factor is challenged");
+    let code = rig.mail.last_code();
+    let resp = submit_login_otp(&rig.login, &format!("{pending}; {otp}"), &code, "").await;
+    assert!(
+        has_cookie(&resp, SESSION_COOKIE),
+        "own email code must log in"
+    );
 }

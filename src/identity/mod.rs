@@ -2610,15 +2610,23 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Verifies an SMS OTP previously issued by `issue_sms_otp`.
     ///
+    /// `phone` is the number the caller expects the code to have been sent
+    /// to — the challenged user's own verified number, or the number being
+    /// enrolled. The code verifies only if it was issued to that same number,
+    /// so a genuine nonce + code obtained for one phone cannot prove
+    /// possession of another. Never pass a number taken from the request
+    /// when a stored one exists.
+    ///
     /// Loads the pending record, checks expiry and attempt count, increments
     /// attempts, verifies HMAC in constant time via `ring::hmac::verify`.
     /// On success deletes the record (replay prevention). Returns
     /// `InvalidSmsOtp` for any failure (not-found, expired, wrong code,
-    /// exhausted).
+    /// wrong recipient, exhausted).
     fn verify_sms_otp(
         &self,
         realm_id: &RealmId,
         nonce: &str,
+        phone: &str,
         candidate_code: &str,
         otp_hmac_key_bytes: &[u8],
         now_unix_ts: u64,
@@ -2645,15 +2653,20 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Verifies an Email OTP previously issued by `issue_email_otp`.
     ///
+    /// `email` is the address the caller expects the code to have been sent
+    /// to (the challenged user's own address). The code verifies only if it
+    /// was issued to that same address — see [`Self::verify_sms_otp`].
+    ///
     /// Loads the pending record, checks expiry and attempt count, increments
     /// attempts, verifies HMAC in constant time via `ring::hmac::verify`.
     /// On success deletes the record (replay prevention). Returns
     /// `InvalidEmailOtp` for any failure (not-found, expired, wrong code,
-    /// exhausted).
+    /// wrong recipient, exhausted).
     fn verify_email_otp(
         &self,
         realm_id: &RealmId,
         nonce: &str,
+        email: &str,
         candidate_code: &str,
         otp_hmac_key_bytes: &[u8],
         now_unix_ts: u64,

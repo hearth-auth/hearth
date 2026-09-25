@@ -181,7 +181,6 @@ fn clear_sms_mfa_cookie(secure: bool) -> String {
 /// When both hold but the factor cannot be challenged — no SMS sender or no
 /// OTP HMAC key on `WebState`, or a realm/user lookup fails — the returned
 /// response is an error: the authorization is refused, never waved through.
-#[allow(clippy::too_many_lines)]
 pub fn sms_mfa_challenge_check(
     state: &Arc<WebState>,
     realm: &RealmId,
@@ -194,7 +193,21 @@ pub fn sms_mfa_challenge_check(
     // Task 21.6: the pending-MFA cookie must carry `Secure` on a TLS request,
     // like every other `/ui` cookie. `headers` was previously unused.
     let secure = state.is_secure_request(headers);
+    sms_mfa_challenge_gate(state, realm, user_id, q, secure, via_par)
+}
 
+/// [`sms_mfa_challenge_check`] for a caller that has already resolved whether
+/// the request is secure — the required-action resume path, which carries
+/// `secure` rather than the request headers.
+#[allow(clippy::too_many_lines)]
+pub(super) fn sms_mfa_challenge_gate(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    q: &AuthorizeQuery,
+    secure: bool,
+    via_par: bool,
+) -> Option<Response> {
     // 1. Is SMS MFA required for this realm?
     // A lookup failure must not read as "SMS not required": that would skip
     // the factor on a storage error. Refuse instead.
@@ -494,15 +507,29 @@ pub async fn sms_challenge_post(
         return handlers_common::server_error();
     };
 
+    // The code must have been sent to THIS user's verified number; the OTP
+    // record names no one, so the expected recipient comes from the user.
+    let phone = match state.identity.get_user(&realm, &user_id) {
+        Ok(Some(u)) if u.phone_verified() => match u.phone_number() {
+            Some(p) => p.to_string(),
+            None => return handlers_common::server_error(),
+        },
+        _ => return handlers_common::server_error(),
+    };
+
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    match state
-        .identity
-        .verify_sms_otp(&realm, &sms_state.otp_nonce, &code, &hmac_key, now_ts)
-    {
+    match state.identity.verify_sms_otp(
+        &realm,
+        &sms_state.otp_nonce,
+        &phone,
+        &code,
+        &hmac_key,
+        now_ts,
+    ) {
         Ok(()) => {
             // Emit success audit event.
             emit_audit(
