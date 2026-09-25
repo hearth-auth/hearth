@@ -43,7 +43,7 @@ cd examples/scim-provisioning
 
 The script will:
 
-1. `cargo build --release --bin hearth` (slow on first run, instant after).
+1. `cargo build --release --features dev-endpoints --bin hearth` (slow on first run, instant after).
 2. Wipe any previous demo data under `./data/scim-provisioning/`.
 3. Start `hearth serve --dev --config ./hearth.yaml` on `http://127.0.0.1:8422` in the background; logs go to `.hearth.log`.
 4. Wait for `/health` to respond.

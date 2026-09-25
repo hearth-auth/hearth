@@ -1307,6 +1307,59 @@ jobs:
             echo "| AC-7: write contention, 2 leadership changes | cluster_chaos.rs |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # ── Production feature set: tests compiled only WITHOUT `dev-endpoints` ─────
+  #
+  # `dev-endpoints` (POST /admin/bootstrap, /dev/seed-*, the hard-coded dev
+  # admin password) is opt-in, not a default feature. `make check` runs the
+  # suite WITH it, because most black-box tests drive bootstrap — so a test
+  # gated `#[cfg(not(feature = "dev-endpoints"))]` is never even compiled
+  # there. Those tests are the ones that pin the production build: `serve
+  # --dev` on a featureless binary says bootstrap is unavailable, and a
+  # dev-mode router built without the feature has no /admin/bootstrap route.
+  # Without this job no CI run executed either of them.
+  #
+  # `make test-no-dev-endpoints` discovers the test binaries (every tests/*.rs
+  # holding such a test, plus the default-feature-set manifest guard) and runs
+  # them with no features, so `target/debug/hearth` — the binary the cli tests
+  # spawn — is a featureless build too. `--no-tests=fail` keeps a rename from
+  # turning this into a green no-op. A separate job, not a step in `quality`,
+  # so it runs in parallel instead of adding a second hearth compile to that
+  # job's 30-minute budget.
+
+  no-dev-endpoints:
+    name: no-dev-endpoints (tests of the default, production feature set)
+    needs: filter
+    # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
+    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # Same disk budget reasoning as `quality`: line tables are all a failure
+      # report needs, and they drop ~90% of each test binary's size.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        with:
+          tool: cargo-nextest
+
+      - name: make test-no-dev-endpoints (featureless build — cli, dev_only_routes, default_feature_set)
+        env:
+          NEXTEST_PROFILE: ci
+        run: PROTOC=protoc make test-no-dev-endpoints
+
   # ── Dependency advisory gate (HEA-1652, audit 2026-08-28 §4.8#7, §4.12#3) ───
   #
   # Dedicated job so advisory/license/ban violations appear as their own named
@@ -1380,8 +1433,11 @@ jobs:
           toolchain: "1.88.0"
           components: ""
 
+      # `--features hearth/dev-endpoints`: the feature is opt-in now, and it only
+      # ADDS code (the bootstrap / seed routes). Checking with it keeps the
+      # superset under the MSRV floor, as this job did while it was a default.
       - name: cargo check (MSRV)
-        run: cargo check --workspace --locked
+        run: cargo check --workspace --locked --features hearth/dev-endpoints
 
   # ── Required-summary gate (HEA-693) ──────────────────────────────────────────
   #
@@ -1476,7 +1532,7 @@ jobs:
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, proto-freshness, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-kotlin, sdk-go, sdk-typescript, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, cargo-deny, msrv, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
+    needs: [filter, quality, proto-freshness, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-kotlin, sdk-go, sdk-typescript, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, no-dev-endpoints, cargo-deny, msrv, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -1498,6 +1554,7 @@ jobs:
           ABUSE_COVERAGE: ${{ needs.abuse-coverage.result }}
           LDAP_INTEGRATION: ${{ needs.ldap-integration.result }}
           CLUSTER_CHAOS: ${{ needs.cluster-chaos.result }}
+          NO_DEV_ENDPOINTS: ${{ needs.no-dev-endpoints.result }}
           CARGO_DENY: ${{ needs.cargo-deny.result }}
           MSRV: ${{ needs.msrv.result }}
           COMMIT_LINT: ${{ needs.commit-lint.result }}
@@ -1506,14 +1563,14 @@ jobs:
           SECURITY: ${{ needs.security.result }}
           LOADTEST_SMOKE: ${{ needs.loadtest-smoke.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-kotlin=$SDK_KOTLIN sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS cargo-deny=$CARGO_DENY msrv=$MSRV commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
+          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-kotlin=$SDK_KOTLIN sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS no-dev-endpoints=$NO_DEV_ENDPOINTS cargo-deny=$CARGO_DENY msrv=$MSRV commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
           # ALLOWLIST, not a denylist (production-readiness task 24.4). This
           # loop used to fail only on "failure" or "cancelled". That is
           # fail-open by construction: any result GitHub adds, and any empty
           # string from an expression that did not evaluate, would have been
           # read as "fine". `success` and `skipped` are the only two results
           # that may pass; everything else — including "" — blocks the merge.
-          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_KOTLIN" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$CARGO_DENY" "$MSRV" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
+          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_KOTLIN" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$NO_DEV_ENDPOINTS" "$CARGO_DENY" "$MSRV" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
             case "$result" in
               success|skipped) ;;
               *)

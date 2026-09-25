@@ -13,7 +13,7 @@ BUF := buf
 ## with `--workspace`.
 DEV_FEATURES ?= --features hearth/dev-endpoints
 
-.PHONY: setup build test clippy fmt loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
+.PHONY: setup build test test-no-dev-endpoints clippy fmt loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -75,6 +75,20 @@ build: css
 ## Runnable documentation examples live under `examples/`.
 test:
 	PROTOC=$(PROTOC) cargo nextest run --workspace $(DEV_FEATURES) $(CARGO_FLAGS)
+
+## Run the tests that only exist in a build WITHOUT `dev-endpoints` — the
+## production feature set a plain `cargo build` / `cargo install` ships.
+## `make test` compiles with the feature, so a `#[cfg(not(feature =
+## "dev-endpoints"))]` test (e.g. "`serve --dev` says bootstrap is unavailable",
+## "a dev-mode router has no /admin/bootstrap") is never even compiled there.
+## CI runs this in the `no-dev-endpoints` job. The test binaries are
+## discovered, not listed: every tests/*.rs holding such a test, plus the
+## manifest guard. The cli tests spawn `target/debug/hearth`, which this same
+## featureless invocation builds.
+NO_DEV_TEST_FILES := $(sort tests/default_feature_set.rs $(shell grep -l 'cfg(not(feature = "dev-endpoints"))' tests/*.rs))
+test-no-dev-endpoints:
+	PROTOC=$(PROTOC) cargo nextest run --package hearth --no-fail-fast --no-tests=fail \
+		$(foreach f,$(NO_DEV_TEST_FILES),--test $(basename $(notdir $(f)))) $(CARGO_FLAGS)
 
 ## Lint both feature sets: the production one (no `dev-endpoints`, what a plain
 ## `cargo build` ships) and the dev one the test suite compiles under. Each
@@ -488,6 +502,7 @@ ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
 	@echo "==> auth-discard-check (HEA-1657)" && $(MAKE) auth-discard-check
 	@echo "==> rbac-storage-check (HEA-1781)" && $(MAKE) rbac-storage-check
 	@echo "==> check (clippy + fmt + nextest)" && $(MAKE) check
+	@echo "==> test-no-dev-endpoints"     && $(MAKE) test-no-dev-endpoints
 	@echo "==> css-check"                && $(MAKE) css-check
 	@echo "==> proto-check"              && $(MAKE) proto-check
 	@echo "==> notice-check"             && $(MAKE) notice-check

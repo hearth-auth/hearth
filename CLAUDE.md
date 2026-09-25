@@ -29,6 +29,7 @@ make tailwind-install  # downloads Tailwind standalone CLI to ui/tailwindcss
 |---------|-------------|
 | `make check` | clippy + fmt + nextest — run before every PR |
 | `make test` | `cargo nextest run --workspace --features hearth/dev-endpoints` (PROTOC env var required) |
+| `make test-no-dev-endpoints` | Runs the tests that only compile WITHOUT `dev-endpoints` (the production feature set) — CI job `no-dev-endpoints` |
 | `make clippy` | `cargo clippy --all-targets -- -D warnings`, once without and once with `dev-endpoints` |
 | `make fmt` | `cargo fmt --check` |
 | `make build` | Tailwind CSS + `cargo build --features hearth/dev-endpoints` |
