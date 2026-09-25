@@ -7,8 +7,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use arc_swap::ArcSwap;
-
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ring::rand::SecureRandom;
@@ -17,8 +15,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::audit::{Actor, AuditAction, AuditContext, AuditEngine, CreateAuditEvent};
 use crate::core::{
-    AgentCredentialId, AgentId, ClientId, Clock, ImportOutcome, InvitationId, OrganizationId,
-    RealmId, SessionId, Timestamp, UserId, WebhookId,
+    AgentCredentialId, AgentId, ClientId, Clock, EpochCell, ImportOutcome, InvitationId,
+    OrganizationId, RealmId, SessionId, Timestamp, UserId, WebhookId,
 };
 use crate::identity::claims_config::{
     resolve_claims_for_target, ClaimEvaluationContext, ClaimTarget,
@@ -337,7 +335,7 @@ pub(super) mod cross_realm;
 pub(super) mod spiffe;
 pub(super) mod txn;
 
-use sharded_cache::ShardedArcSwapMap;
+use sharded_cache::ShardedEpochMap;
 
 /// Context supplied to [`IdentityEngine::issue_tokens_with_context`] to
 /// influence which claims are embedded in the issued token pair.
@@ -576,11 +574,11 @@ pub struct EmbeddedIdentityEngine {
     /// Each realm gets its own key pair so tokens from one realm cannot
     /// validate in another.
     ///
-    /// Hot-path readers call `load()` — one atomic fence, no locking.
+    /// Hot-path readers call `load()` — one epoch-pinned load, no lock.
     /// Writers `rcu()` only the affected shard; realm key ops are rare.
     /// Wrapped in `Arc` so background delete tasks can hold a reference.
     /// Sharded (HEA-1772) so an insert clones ~`1/N` of the map, not all of it.
-    realm_signing_keys: Arc<ShardedArcSwapMap<RealmId, Arc<SigningKey>>>,
+    realm_signing_keys: Arc<ShardedEpochMap<RealmId, Arc<SigningKey>>>,
     /// Per-realm retiring signing keys within their rotation grace period.
     ///
     /// After [`rotate_realm_signing_key`](Self::rotate_realm_signing_key) the
@@ -596,7 +594,7 @@ pub struct EmbeddedIdentityEngine {
     /// their deadline and filtered by the current clock at read time, so an
     /// expired retiring key is never accepted even before the cache entry is
     /// invalidated. Invalidated on rotation and realm delete.
-    realm_retiring_keys: Arc<ShardedArcSwapMap<RealmId, Arc<Vec<RetiringSigningKey>>>>,
+    realm_retiring_keys: Arc<ShardedEpochMap<RealmId, Arc<Vec<RetiringSigningKey>>>>,
     /// Per-realm rotation epoch guarding the `realm_signing_keys` cache-miss
     /// fill against a racing rotation (HEA-2096).
     ///
@@ -610,7 +608,7 @@ pub struct EmbeddedIdentityEngine {
     /// time the load completes, discards its own insert so the next reader
     /// reloads the freshly-rotated key. No lock and no cost on the cache-hit
     /// hot path — only cache misses read the epoch.
-    realm_key_epoch: Arc<ShardedArcSwapMap<RealmId, u64>>,
+    realm_key_epoch: Arc<ShardedEpochMap<RealmId, u64>>,
     /// Highest cluster control epoch this process has observed.
     ///
     /// Three caches decide a control question authoritatively on the
@@ -631,13 +629,13 @@ pub struct EmbeddedIdentityEngine {
     /// path may perform none. This bounds how often it pays for them. See
     /// [`Self::sync_epochs_debounced`] and [`EPOCH_SYNC_INTERVAL_MICROS`].
     epoch_sync_after: AtomicI64,
-    /// Wait-free realm status cache for the `validate_token` hot path.
+    /// Lock-free realm status cache for the `validate_token` hot path.
     ///
     /// Populated at startup and updated on every realm CRUD operation.
     /// `validate_token` reads with `load()` — no lock, no storage call.
     /// Writers (`create_realm`, `update_realm`, `delete_realm`) use `rcu()`.
     /// Wrapped in `Arc` so background delete tasks can hold a reference.
-    realm_status_cache: Arc<ArcSwap<HashMap<RealmId, RealmStatus>>>,
+    realm_status_cache: Arc<EpochCell<HashMap<RealmId, RealmStatus>>>,
     /// Per-realm RSA signing keys used for SAML metadata + response signing.
     ///
     /// Lazily loaded. Regeneration happens only on first SAML operation in
@@ -805,9 +803,9 @@ pub struct EmbeddedIdentityEngine {
     /// In-process session cache for the `validate_token` hot path (S12-F1).
     ///
     /// Key: `(RealmId, SessionId)`. Value: `Arc<Session>`.
-    /// Hot-path readers call `load()` — one atomic fence, no lock, no I/O.
+    /// Hot-path readers call `load()` — one epoch-pinned load, no lock, no I/O.
     /// Writers use `rcu()` on `persist_session`. Bounded to [`SESSION_CACHE_MAX`].
-    session_cache: ArcSwap<HashMap<(RealmId, SessionId), Arc<Session>>>,
+    session_cache: EpochCell<HashMap<(RealmId, SessionId), Arc<Session>>>,
     /// In-process token claims cache for the `validate_token` hot path (S12-F2).
     ///
     /// Key: SHA-256(`token_bytes`) as `[u8; 32]`. Value: `Arc<TokenClaims>`.
@@ -815,7 +813,7 @@ pub struct EmbeddedIdentityEngine {
     /// access token. Hot-path readers call `load()`. Bounded to
     /// `config.token.claims_cache_max`; a full cache evicts expired then
     /// soonest-to-expire entries rather than refusing inserts (HEA-1990).
-    token_claims_cache: ArcSwap<HashMap<[u8; 32], Arc<TokenClaims>>>,
+    token_claims_cache: EpochCell<HashMap<[u8; 32], Arc<TokenClaims>>>,
     /// Monotonic generation counter guarding [`Self::token_claims_cache`]
     /// against a flush-vs-in-flight-verify TOCTOU (HEA-2097).
     ///
@@ -846,8 +844,8 @@ pub struct EmbeddedIdentityEngine {
     /// Populated at startup by scanning `agt:dpop:block:jkt:*` across all realms.
     /// Updated by `block_dpop_jkt` / `unblock_dpop_jkt`; each write `rcu()`s a
     /// single shard. Modelled as a set via `V = ()`.
-    /// Hot-path readers call `contains_key()` — one atomic fence, no lock, no syscall.
-    blocked_dpop_jkt_cache: ShardedArcSwapMap<String, ()>,
+    /// Hot-path readers call `contains_key()` — one epoch-pinned load, no lock, no syscall.
+    blocked_dpop_jkt_cache: ShardedEpochMap<String, ()>,
     /// Hot-path JTI revocation projection (§10.5).
     ///
     /// Key: `"{realm_uuid}:{jti}"`. Value: expiry (Unix seconds); `i64::MAX`
@@ -856,12 +854,12 @@ pub struct EmbeddedIdentityEngine {
     /// Populated at startup by scanning `oauth:revjti:*` across all realms.
     /// Updated whenever a sessionless token is revoked; each write `rcu()`s a
     /// single shard (HEA-1772) rather than cloning the whole projection.
-    /// Hot-path readers call `contains_key()` — one atomic fence, no lock, no syscall.
+    /// Hot-path readers call `contains_key()` — one epoch-pinned load, no lock, no syscall.
     ///
     /// Expired entries remain until the next per-shard eviction sweep; an
     /// expired token is rejected by the `exp` claim check before we reach this
     /// cache, so stale entries are harmless.
-    revoked_jti_cache: ShardedArcSwapMap<String, i64>,
+    revoked_jti_cache: ShardedEpochMap<String, i64>,
     // INVARIANT: guard released before method returns; no .await in scope.
     agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor,
     /// Per-code-hash advisory lock for single-use enforcement of authorization codes.
@@ -1263,12 +1261,12 @@ impl EmbeddedIdentityEngine {
             dummy_hash,
             dummy_hashes: Mutex::new(std::collections::HashMap::new()),
             signing_key,
-            realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
-            realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
-            realm_key_epoch: Arc::new(ShardedArcSwapMap::new()),
+            realm_signing_keys: Arc::new(ShardedEpochMap::new()),
+            realm_retiring_keys: Arc::new(ShardedEpochMap::new()),
+            realm_key_epoch: Arc::new(ShardedEpochMap::new()),
             control_epoch: AtomicU64::new(0),
             epoch_sync_after: AtomicI64::new(0),
-            realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            realm_status_cache: Arc::new(EpochCell::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
@@ -1316,12 +1314,12 @@ impl EmbeddedIdentityEngine {
             ),
             device_fp,
             sv_store,
-            session_cache: ArcSwap::from_pointee(HashMap::new()),
-            token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
+            session_cache: EpochCell::from_pointee(HashMap::new()),
+            token_claims_cache: EpochCell::from_pointee(HashMap::new()),
             token_claims_cache_gen: AtomicU64::new(0),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
-            blocked_dpop_jkt_cache: ShardedArcSwapMap::new(),
-            revoked_jti_cache: ShardedArcSwapMap::new(),
+            blocked_dpop_jkt_cache: ShardedEpochMap::new(),
+            revoked_jti_cache: ShardedEpochMap::new(),
             // INVARIANT: guard released before method returns; no .await in scope.
             agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
                 crate::abuse::agent_monitor::AgentRateConfig::default(),
@@ -1603,7 +1601,7 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Scans storage for all non-system realms and populates the wait-free
+    /// Scans storage for all non-system realms and populates the lock-free
     /// `realm_status_cache` used by the `validate_token` hot path.
     ///
     /// Called once at startup after seeding. Realms created or updated after
@@ -1835,12 +1833,12 @@ impl EmbeddedIdentityEngine {
             dummy_hash,
             dummy_hashes: Mutex::new(std::collections::HashMap::new()),
             signing_key,
-            realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
-            realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
-            realm_key_epoch: Arc::new(ShardedArcSwapMap::new()),
+            realm_signing_keys: Arc::new(ShardedEpochMap::new()),
+            realm_retiring_keys: Arc::new(ShardedEpochMap::new()),
+            realm_key_epoch: Arc::new(ShardedEpochMap::new()),
             control_epoch: AtomicU64::new(0),
             epoch_sync_after: AtomicI64::new(0),
-            realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            realm_status_cache: Arc::new(EpochCell::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
@@ -1888,12 +1886,12 @@ impl EmbeddedIdentityEngine {
             ),
             device_fp,
             sv_store,
-            session_cache: ArcSwap::from_pointee(HashMap::new()),
-            token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
+            session_cache: EpochCell::from_pointee(HashMap::new()),
+            token_claims_cache: EpochCell::from_pointee(HashMap::new()),
             token_claims_cache_gen: AtomicU64::new(0),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
-            blocked_dpop_jkt_cache: ShardedArcSwapMap::new(),
-            revoked_jti_cache: ShardedArcSwapMap::new(),
+            blocked_dpop_jkt_cache: ShardedEpochMap::new(),
+            revoked_jti_cache: ShardedEpochMap::new(),
             // INVARIANT: guard released before method returns; no .await in scope.
             agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
                 crate::abuse::agent_monitor::AgentRateConfig::default(),
@@ -4121,7 +4119,13 @@ impl EmbeddedIdentityEngine {
     /// `flush_token_claims_cache`.
     fn purge_realm_caches(&self, realm_id: &RealmId) {
         // Session cache: keyed by (realm, session). Rebuild without this realm.
-        let has_sessions = self.session_cache.load().keys().any(|(r, _)| r == realm_id);
+        // An owned snapshot for the scan: it walks every cached session, and an
+        // epoch pin held that long would stall reclamation process-wide.
+        let has_sessions = self
+            .session_cache
+            .load_full()
+            .keys()
+            .any(|(r, _)| r == realm_id);
         if has_sessions {
             self.session_cache.rcu(|map| {
                 let mut m = HashMap::clone(map);
@@ -4246,7 +4250,7 @@ impl EmbeddedIdentityEngine {
     /// This runs only on a cache **miss**, which already performed the Ed25519
     /// verify + `serde_json` parse — it is off the zero-allocation hot path, so
     /// the O(n) rebuild and eviction scan here are acceptable. The hot-path
-    /// read (`validate_token`) is unchanged: one wait-free `ArcSwap::load` plus
+    /// read (`validate_token`) is unchanged: one lock-free `EpochCell::load` plus
     /// an `Arc` refcount bump.
     ///
     /// Eviction policy when the cache is full:
@@ -4778,7 +4782,7 @@ impl EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
     ) -> Result<Arc<SigningKey>, IdentityError> {
-        // Wait-free read: one atomic load, no locking.
+        // Lock-free read: one epoch-pinned load, no locking.
         if let Some(key) = self.realm_signing_keys.get(realm_id) {
             return Ok(key);
         }
@@ -5066,7 +5070,7 @@ impl EmbeddedIdentityEngine {
     /// Verifies a client_credentials (sessionless) token by checking the JTI
     /// revocation projection. Returns `Ok(())` if the token is not revoked.
     ///
-    /// Hot-path safe: reads `revoked_jti_cache` via a single atomic `load()` —
+    /// Hot-path safe: reads `revoked_jti_cache` via a single epoch-pinned `load()` —
     /// no lock, no syscall (§10.5).
     fn verify_client_credentials_token(
         &self,
@@ -5085,7 +5089,7 @@ impl EmbeddedIdentityEngine {
     /// revoked delegation grant is honored immediately rather than at natural
     /// expiry (G1).
     ///
-    /// Hot-path safe: a single atomic `load()` — no lock, no syscall (§10.5).
+    /// Hot-path safe: a single epoch-pinned `load()` — no lock, no syscall (§10.5).
     fn is_token_jti_revoked(&self, realm_id: &RealmId, claims: &TokenClaims) -> bool {
         let Some(ref jti) = claims.jti else {
             return false;
@@ -6262,15 +6266,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             )
             .map_err(Self::storage_err)?;
 
-        // Cache signing key (wait-free reads on hot path).
+        // Cache signing key (lock-free reads on hot path).
         self.realm_signing_keys
             .insert(realm_id.clone(), Arc::new(realm_signing_key));
 
-        // Cache realm status for wait-free validate_token reads.
+        // Cache realm status for lock-free validate_token reads.
         {
             let id = realm_id.clone();
             self.realm_status_cache.rcu(|current| {
-                let mut new_map = (**current).clone();
+                let mut new_map = HashMap::clone(current);
                 new_map.insert(id.clone(), RealmStatus::Active);
                 new_map
             });
@@ -6428,7 +6432,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             let _ = self.storage.delete(&sys_realm, &old_name_key);
         }
 
-        // Propagate status change to the wait-free cache so validate_token
+        // Propagate status change to the lock-free cache so validate_token
         // immediately reflects the new lifecycle state. Ordered before
         // record_audit so the cache is consistent before any further writes,
         // matching the ordering used in create_realm.
@@ -6436,7 +6440,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             let id = realm_id.clone();
             let status = realm.status();
             self.realm_status_cache.rcu(|current| {
-                let mut new_map = (**current).clone();
+                let mut new_map = HashMap::clone(current);
                 new_map.insert(id.clone(), status);
                 new_map
             });
@@ -6534,7 +6538,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 // Reflect the status change in the in-memory cache immediately.
                 let id = realm_id.clone();
                 self.realm_status_cache.rcu(|current| {
-                    let mut new_map = (**current).clone();
+                    let mut new_map = HashMap::clone(current);
                     new_map.insert(id.clone(), RealmStatus::DeletingInProgress);
                     new_map
                 });
@@ -6634,7 +6638,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     signing_keys.remove(&realm_id_bg);
                     retiring_keys.remove(&realm_id_bg);
                     status_cache.rcu(|current| {
-                        let mut new_map = (**current).clone();
+                        let mut new_map = HashMap::clone(current);
                         new_map.remove(&realm_id_bg);
                         new_map
                     });
@@ -6669,7 +6673,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             self.realm_signing_keys.remove(&id);
             self.realm_retiring_keys.remove(&id);
             self.realm_status_cache.rcu(|current| {
-                let mut new_map = (**current).clone();
+                let mut new_map = HashMap::clone(current);
                 new_map.remove(&id);
                 new_map
             });
@@ -8606,7 +8610,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // accept tokens. Checked after signature verification so forged tokens
         // never reach this path.
         //
-        // Wait-free read from the ArcSwap cache — no lock, no storage call.
+        // Lock-free read from the epoch-reclaimed cache — no lock, no storage call.
         // Absence from cache means realm is unknown (new or system realm);
         // fail-open matches the original get_realm(None) behavior.
         {
@@ -8642,7 +8646,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         // §10.4 — DPoP JKT blocklist: reject tokens whose `cnf.jkt` thumbprint
-        // is server-blocked. Hot-path safe: single atomic `load()`, no syscall.
+        // is server-blocked. Hot-path safe: single epoch-pinned `load()`, no syscall.
         if let Some(ref cnf) = claims.cnf {
             if self.blocked_dpop_jkt_cache.contains_key(cnf.jkt.as_str()) {
                 return Err(IdentityError::DPopJktBlocked);
@@ -11368,7 +11372,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             self.realm_signing_keys
                 .insert(id.clone(), Arc::new(realm_signing_key));
             self.realm_status_cache.rcu(|current| {
-                let mut new_map = (**current).clone();
+                let mut new_map = HashMap::clone(current);
                 new_map.insert(id.clone(), RealmStatus::Active);
                 new_map
             });
