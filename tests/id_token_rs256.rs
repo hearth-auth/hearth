@@ -1053,7 +1053,16 @@ fn revoking_rotation_drops_the_old_rsa_key_immediately() {
     let realm = plain_realm(&engine);
     let client = admin_register(&engine, &realm, Some("RS256")).unwrap();
     let before = code_flow(&engine, &realm, &client);
+    assert_eq!(
+        header_alg(before.id_token()),
+        "RS256",
+        "precondition: the token under test is an RS256 ID token, so `old_kid` is an RSA kid"
+    );
     let old_kid = header_kid(before.id_token());
+    assert_eq!(
+        rsa_kids(&engine.realm_jwks(&realm).unwrap()),
+        vec![old_kid.clone()]
+    );
 
     // A graceful rotation first leaves a retiring key; the revoking one must
     // purge it along with the key it retires.
@@ -1164,6 +1173,15 @@ async fn concurrent_rs256_registrations_converge_on_one_rsa_key() {
     );
     let jwks = serde_json::to_value(jwks).unwrap();
     for token in &id_tokens {
-        verify_against_jwks(token, &jwks);
+        assert_eq!(
+            header_alg(token),
+            "RS256",
+            "every client here registered RS256, so every ID token must be RS256"
+        );
+        let jwk = verify_against_jwks(token, &jwks);
+        assert_eq!(
+            jwk["kty"], "RSA",
+            "each ID token must verify against the single published RSA key"
+        );
     }
 }
