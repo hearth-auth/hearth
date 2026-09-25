@@ -165,7 +165,8 @@ their memory when dropped.  They do **not** implement `Debug`, `Display`, or
 
 All admin endpoints require a valid `Authorization: Bearer <token>` with
 `admin` role in the realm (or a system-level admin token from
-`POST /admin/bootstrap` in dev mode).
+`POST /admin/bootstrap` in dev mode, on a binary built with the opt-in
+`dev-endpoints` cargo feature).
 
 ### 3.1 User PII Endpoints
 

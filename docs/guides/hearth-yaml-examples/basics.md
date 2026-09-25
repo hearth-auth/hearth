@@ -20,11 +20,21 @@ hearth serve --dev
 ```
 
 `--dev` enables in-memory storage (nothing is persisted), disables `fsync`, and binds to
-`127.0.0.1:8420`. The bootstrap endpoint is available immediately:
+`127.0.0.1:8420`.
+
+The bootstrap endpoint is **not** part of a default build. `POST /admin/bootstrap` (and the
+`/dev/seed-*` routes) are compiled in only with the opt-in `dev-endpoints` cargo feature —
+the release binaries, the container image, `cargo install` and a plain `cargo build` leave it
+out, and `serve --dev` on such a binary logs a warning saying bootstrap is unavailable. To use
+it, run from source with the feature (or `make dev`, which enables it):
 
 ```bash
-curl -X POST http://127.0.0.1:8420/admin/bootstrap
+cargo run --features dev-endpoints -- serve --dev
+curl -X POST http://127.0.0.1:8420/admin/bootstrap   # from a second terminal
 ```
+
+On a binary without the feature, create the first admin through the one-time onboarding page at
+`/ui/setup` instead (see [First-run setup flow](../local-dev.md#first-run-setup-flow)).
 
 - An empty YAML file and a missing file are treated identically — every field defaults.
 - Never use `--dev` in production: data is lost on restart and fsync is off.

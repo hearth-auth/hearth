@@ -148,7 +148,8 @@ Work through this list before directing production traffic to Hearth.
 ### Verify users imported correctly
 
 ```bash
-# Requires an admin token — see /admin/bootstrap for dev or your hearth.yaml admin config
+# Requires an admin token — /admin/bootstrap in dev (needs a `--features dev-endpoints`
+# build) or your hearth.yaml admin config
 curl -H "Authorization: Bearer <admin-token>" \
   http://127.0.0.1:8420/admin/realms/<realm-id>/users | jq length
 ```

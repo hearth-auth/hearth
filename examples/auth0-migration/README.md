@@ -90,6 +90,11 @@ HEARTH_DEV_DATA_DIR=/var/lib/hearth/data \
   hearth serve --dev --bind 127.0.0.1 --port 8431
 ```
 
+`verify.mjs` (step 4) mints its admin token through `POST /admin/bootstrap`, which exists only
+in a binary built with the opt-in `dev-endpoints` cargo feature
+(`cargo build --release --features dev-endpoints --bin hearth`, as `run.sh` does). A release
+binary, the container image or a plain `cargo build` answers `404` there.
+
 For production, copy `hearth.yaml` from this directory, fill in the
 placeholders, and run:
 
