@@ -10,7 +10,7 @@
 //!
 //! Cold-tier reads are **not** the hot path, but the cache still must not
 //! serialize every read through a single lock (CLAUDE.md). Lookups are
-//! therefore lock-free: each shard's map is an [`ArcSwap`], so a cache **hit**
+//! therefore lock-free: each shard's map is an [`EpochCell`], so a cache **hit**
 //! only loads the map pointer, clones an `Arc`, and sets a relaxed atomic
 //! reference bit — no mutex. A per-shard `Mutex` is taken only on a **miss**
 //! insert / eviction, which already pays for a decrypt and is off the hot path.
@@ -23,8 +23,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use arc_swap::ArcSwap;
-
+use crate::core::EpochCell;
 use crate::storage::memtable::{CompositeKey, MemtableValue};
 
 /// Number of independent shards. A power of two so the index mask is a cheap
@@ -79,7 +78,7 @@ impl CachedBlock {
 /// One shard of the block cache.
 struct Shard {
     /// Lock-free read map. Rebuilt-and-swapped on every insert/eviction.
-    map: ArcSwap<HashMap<BlockId, Arc<CachedBlock>>>,
+    map: EpochCell<HashMap<BlockId, Arc<CachedBlock>>>,
     /// Eviction bookkeeping — touched only on miss-insert, never on a hit.
     inner: Mutex<ShardInner>,
 }
@@ -108,7 +107,7 @@ impl BlockCache {
         let shard_cap_bytes = (total_budget_bytes / SHARD_COUNT).max(1);
         let shards = (0..SHARD_COUNT)
             .map(|_| Shard {
-                map: ArcSwap::from_pointee(HashMap::new()),
+                map: EpochCell::from_pointee(HashMap::new()),
                 inner: Mutex::new(ShardInner {
                     clock: VecDeque::new(),
                     bytes: 0,
@@ -251,6 +250,95 @@ mod tests {
             cache.resident_bytes(),
             budget,
             slack
+        );
+    }
+
+    /// A hit loads its shard's map with no lock while inserts rebuild and
+    /// replace it (an `ArcSwap` until task 26.5, an `EpochCell` now). Readers
+    /// racing evicting inserts on one shard must only ever get back the block
+    /// cached under the id they asked for. Run several copies at once with
+    /// glibc's heap checking on (`MALLOC_CHECK_=3` with `libc_malloc_debug.so`
+    /// preloaded, plus `MALLOC_PERTURB_=165`) and a use-after-free in the cell
+    /// aborts (task 26.1).
+    #[test]
+    fn concurrent_hits_only_return_the_block_cached_under_their_id() {
+        const IDS: usize = 24;
+        const ROUNDS: usize = 150;
+        const WEIGHT: usize = 64;
+
+        // Room for four blocks per shard, and every id below lands in the same
+        // shard, so nearly every insert evicts another id's block.
+        let cache = Arc::new(BlockCache::new(SHARD_COUNT * WEIGHT * 4));
+        let target = cache.shard_idx(BlockId {
+            reader_id: 9,
+            block_index: 0,
+        });
+        let ids: Arc<Vec<BlockId>> = Arc::new(
+            (0_u32..)
+                .map(|block_index| BlockId {
+                    reader_id: 9,
+                    block_index,
+                })
+                .filter(|id| cache.shard_idx(*id) == target)
+                .take(IDS)
+                .collect(),
+        );
+        let key_of = |id: BlockId| format!("{}:{}", id.reader_id, id.block_index).into_bytes();
+        let realm = RealmId::generate();
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let (cache, ids, stop) = (Arc::clone(&cache), Arc::clone(&ids), Arc::clone(&stop));
+                std::thread::spawn(move || {
+                    let mut hits = 0_u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        for id in ids.iter() {
+                            if let Some(block) = cache.get(*id) {
+                                hits += 1;
+                                assert_eq!(
+                                    block.entries[0].0.key(),
+                                    key_of(*id).as_slice(),
+                                    "a hit returned another id's block"
+                                );
+                            }
+                        }
+                    }
+                    hits
+                })
+            })
+            .collect();
+
+        let writers: Vec<_> = (0..2)
+            .map(|w| {
+                let (cache, ids, realm) = (Arc::clone(&cache), Arc::clone(&ids), realm.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..ROUNDS {
+                        for id in ids.iter().skip(w).step_by(2) {
+                            cache.insert(*id, block(&realm, &key_of(*id), WEIGHT));
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for w in writers {
+            w.join().expect("writer thread");
+        }
+        stop.store(true, Ordering::Relaxed);
+        let hits: u64 = readers
+            .into_iter()
+            .map(|r| r.join().expect("reader thread"))
+            .sum();
+        assert!(hits > 0, "the readers never hit: nothing was checked");
+
+        // Settled: an insert of an evicted id publishes again.
+        let last = ids[IDS - 1];
+        cache.insert(last, block(&realm, &key_of(last), WEIGHT));
+        assert_eq!(
+            cache.get(last).map(|b| b.entries[0].0.key().to_vec()),
+            Some(key_of(last)),
+            "an insert after the storm did not publish"
         );
     }
 

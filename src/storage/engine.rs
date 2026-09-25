@@ -35,9 +35,7 @@ use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use fs2::FileExt as _;
 
-use arc_swap::ArcSwap;
-
-use crate::core::RealmId;
+use crate::core::{EpochCell, RealmId};
 use crate::storage::encryption;
 use crate::storage::error::StorageError;
 use crate::storage::fs::{Fs, RealFs};
@@ -335,8 +333,8 @@ pub struct EmbeddedStorageEngine {
     active_memtable: Arc<Memtable>,
     /// On-disk SST files, newest first.
     ///
-    /// Wrapped in `Arc<ArcSwap<...>>` for the same reason as `active_memtable`.
-    sst_readers: Arc<ArcSwap<Vec<SstReader>>>,
+    /// Wrapped in `Arc<EpochCell<...>>` for the same reason as `active_memtable`.
+    sst_readers: Arc<EpochCell<Vec<SstReader>>>,
     /// In-memory hot tier for frequently accessed data.
     hot_tier: HotTier,
     /// Base data directory.
@@ -653,7 +651,7 @@ impl EmbeddedStorageEngine {
         // pre-rotate flush callback.
         let active_memtable = Arc::new(memtable);
         record_sst_file_count(sst_readers.len());
-        let sst_readers = Arc::new(ArcSwap::from_pointee(sst_readers));
+        let sst_readers = Arc::new(EpochCell::from_pointee(sst_readers));
         let flush_lock = Arc::new(Mutex::new(()));
         let sst_counter = Arc::new(std::sync::atomic::AtomicU64::new(max_sst_num + 1));
 
@@ -751,6 +749,10 @@ impl EmbeddedStorageEngine {
                     cb_sst_readers.store(Arc::new(rebuilt));
                     Ok(())
                 })?;
+                // As in `trigger_flush`: release a replaced reader list the
+                // store above could not, rather than hold its mappings until the
+                // next flush.
+                cb_sst_readers.reclaim();
                 Ok(())
             });
         }
@@ -908,6 +910,12 @@ impl EmbeddedStorageEngine {
 
             Ok(())
         })?;
+
+        // The reader list is written only by flushes and compactions. If a
+        // thread was pinned when the list was replaced above, the old list — a
+        // memory map per SST — would otherwise wait for the next flush to be
+        // released; the memtable hand-off since then has driven the epoch on.
+        self.sst_readers.reclaim();
 
         Ok(())
     }
@@ -1303,7 +1311,7 @@ impl EmbeddedStorageEngine {
         // `other_nums`, and `drop_tombstones` (the run still being the oldest)
         // stay valid through the merge; `compaction_lock` keeps any other
         // compaction out.
-        let sst_readers = self.sst_readers.load();
+        let sst_readers = self.sst_readers.load_full();
         let Some((start, end)) = select_partial_run(&sst_readers, merge_min) else {
             return Ok(0);
         };
@@ -1368,7 +1376,7 @@ impl EmbeddedStorageEngine {
             drop_tombstones,
         )?;
 
-        // Drop the load guard before the commit phase (reload re-reads from
+        // Drop the snapshot before the commit phase (reload re-reads from
         // disk). Everything needed for the splice is already captured.
         drop(sst_readers);
 
@@ -1550,8 +1558,11 @@ impl StorageEngine for EmbeddedStorageEngine {
             None => {}
         }
 
-        // 3. SST files newest-to-oldest (binary search)
-        let sst_readers = self.sst_readers.load();
+        // 3. SST files newest-to-oldest (binary search). An owned snapshot, not
+        // a pinned `load()`: the probes below read mmapped blocks and can fault
+        // to disk, and an epoch pin held across that would stall reclamation
+        // for every `EpochCell` in the process.
+        let sst_readers = self.sst_readers.load_full();
         let mut ssts_probed: u64 = 0;
         for reader in sst_readers.iter() {
             ssts_probed += 1;
@@ -1957,7 +1968,7 @@ impl StorageEngine for EmbeddedStorageEngine {
             std::collections::BTreeMap::new();
 
         // SST files oldest-to-newest (reverse of storage order) so newer overwrites older
-        let sst_readers = self.sst_readers.load();
+        let sst_readers = self.sst_readers.load_full();
         for reader in sst_readers.iter().rev() {
             let entries = reader.range_scan(realm_id, start, end)?;
             for (key, value) in entries {
@@ -2013,7 +2024,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         let mut merged: std::collections::BTreeMap<Vec<u8>, bool> =
             std::collections::BTreeMap::new();
 
-        let sst_readers = self.sst_readers.load();
+        let sst_readers = self.sst_readers.load_full();
         for reader in sst_readers.iter().rev() {
             for (key, alive) in reader.range_scan_keys(realm_id, start, end)? {
                 merged.insert(key, alive);
@@ -2053,7 +2064,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         }
 
         // Enumerate from every live SST file.
-        let sst_readers = self.sst_readers.load();
+        let sst_readers = self.sst_readers.load_full();
         for reader in sst_readers.iter() {
             for (key, _) in reader.iter_all()? {
                 realms.insert(key.realm_id().clone());

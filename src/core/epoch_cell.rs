@@ -329,6 +329,17 @@ impl<T> EpochCell<T> {
         self.release_elapsed();
     }
 
+    /// How many replaced values the cell is still holding, released or not.
+    /// Lets a consumer's tests prove a write path does not keep a large value
+    /// alive after it returns.
+    #[cfg(test)]
+    pub(crate) fn retired_len(&self) -> usize {
+        self.retired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
     /// Drops every retired value whose grace period has ended.
     ///
     /// The destructors run on this (writing) thread, after the lock is
@@ -429,6 +440,12 @@ impl<T> EpochCellOption<T> {
     /// [`EpochCell::reclaim`].
     pub fn reclaim(&self) {
         self.inner.reclaim();
+    }
+
+    /// See [`EpochCell::retired_len`].
+    #[cfg(test)]
+    pub(crate) fn retired_len(&self) -> usize {
+        self.inner.retired_len()
     }
 }
 
@@ -830,9 +847,11 @@ mod tests {
     }
 
     /// The shape of the `arc-swap` fault (task 26.1): readers walking heap-owned
-    /// data inside a snapshot while writers replace it. Run it under
-    /// `MALLOC_CHECK_=3`, several copies at once, to make a use-after-free
-    /// abort rather than read recycled memory; see
+    /// data inside a snapshot while writers replace it. Run several copies at
+    /// once with glibc's heap checking on — `MALLOC_CHECK_=3` with
+    /// `libc_malloc_debug.so` preloaded (glibc 2.34+ ignores the variable
+    /// without it) and `MALLOC_PERTURB_=165` — so a use-after-free aborts or
+    /// reads garbage rather than intact stale memory; see
     /// `reports/arc-swap-use-after-free-2026-09-21.md`.
     #[test]
     fn concurrent_readers_never_observe_a_torn_or_freed_value() {
