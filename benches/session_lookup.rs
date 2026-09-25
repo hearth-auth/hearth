@@ -31,8 +31,8 @@
 //!
 //! ## Allocation ceiling rationale
 //!
-//! On a **warm** cache hit `get_session` performs a single ArcSwap `load()`
-//! (thread-local debt slots, no allocation single-thread) and clones the cached
+//! On a **warm** cache hit `get_session` performs a single `EpochCell::load()`
+//! (an epoch pin: no allocation once the thread is registered) and clones the cached
 //! `Session` body. The gate fixture uses [`SessionContext::default()`] — a
 //! browserless session whose `ip_address`, `user_agent_raw`, and `device_label`
 //! fields are all `None` and whose remaining fields are `Copy` — so the clone

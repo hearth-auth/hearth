@@ -10,7 +10,7 @@ Every other identity provider is an application sitting on top of a generic data
 
 **Sub-millisecond p99 (engine plane) · One binary · Zero external dependencies**
 
-Token validation, session lookup, and permission checks run in-process against lock-free in-memory structures (`ArcSwap<HashMap>`) — no network hop, no cache round-trip, no database query on the hot path. Deploy as a single binary with one config file and a data directory. No Postgres to provision, no Redis to invalidate, no policy service to operate.
+Token validation, session lookup, and permission checks run in-process against lock-free in-memory structures (epoch-reclaimed `HashMap` snapshots) — no network hop, no cache round-trip, no database query on the hot path. Deploy as a single binary with one config file and a data directory. No Postgres to provision, no Redis to invalidate, no policy service to operate.
 
 > **Stable 1.6.10:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
 

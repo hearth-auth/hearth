@@ -220,7 +220,7 @@ PROTOC=protoc cargo bench --bench storage_gate
 Criterion reports **mean**, **median** (≈ p50), and standard deviation.
 The gate binaries independently compute p50 and p99 from raw samples
 taken after warm-up iterations, matching the hot-tier steady state (data
-already in the `ArcSwap`-backed lock-free tier). See each bench file's
+already in the lock-free, epoch-reclaimed hot tier). See each bench file's
 module doc for sample count and warm-up details.
 
 If a gate fails on your machine but passes elsewhere, check for

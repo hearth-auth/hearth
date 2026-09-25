@@ -14,6 +14,11 @@ lock is forbidden there, and the epoch-based reclamation they need is a new
 dependency with its own justification. `arc-swap` is therefore still a
 dependency of this crate.
 
+**Status at 2026-09-25 — closed.** The eight hot sites moved to `EpochCell`, an
+epoch-reclaimed cell on `crossbeam-epoch`, and `arc-swap` is no longer a
+dependency: it is out of `Cargo.toml` and both lockfiles, and `deny.toml` bans
+it. See [The hot-path half](#the-hot-path-half-2026-09-25) at the end.
+
 ## What was measured
 
 The instrument is `rbac::resolution_cache::tests::concurrent_readers_never_observe_stale_after_bump`:
@@ -204,6 +209,7 @@ a concurrent reader/writer test, `MALLOC_CHECK_=3`, several copies at once.
 
 **`arc-swap` stays in `Cargo.toml`** until these eight are converted. Removing
 the dependency is the closing act of that work, not of 26.5.
+(Done on 2026-09-25; see the last section.)
 
 ## Regression guard
 
@@ -212,3 +218,101 @@ writer iterations. It found the bug and it is now the guard for the fix. Its
 doc comment records the reproduction recipe, so a future failure there is
 self-diagnosing rather than looking like a flake — which is what it looked like
 twice before.
+
+## The hot-path half (2026-09-25)
+
+All eight sites in the table above are off the crate, and `arc-swap` is gone
+from `Cargo.toml`, `Cargo.lock` and `fuzz/Cargo.lock`. Two guards keep it out:
+a `deny.toml` ban (`cargo deny check bans` fails on the pre-removal graph) and
+`tests/arc_swap_removed.rs` (manifest and both lockfiles).
+
+### The primitive
+
+`src/core/epoch_cell.rs` — `EpochCell<T>`, plus `EpochCellOption<T>` for the
+one `ArcSwapOption` site — keeps the current value as the raw pointer of an
+`Arc<T>` in an `AtomicPtr`:
+
+* **Read.** `load()` pins the thread's `crossbeam-epoch` participant and returns
+  a guard that dereferences to the value: no lock, no syscall, no write to the
+  shared refcount, and no allocation once the thread has pinned before.
+  `load_full()` adds one refcount increment for a caller that keeps the value.
+* **Write.** `store` swaps the pointer; `rcu` is a compare-and-swap retry loop
+  with `ArcSwap::rcu`'s semantics, so a check inside the closure — the claims
+  cache's HEA-2097 generation guard — is re-read on every attempt.
+* **Reclamation.** A replaced value is retired, not freed. An epoch callback
+  raises a flag once every thread that was pinned at the swap has unpinned, and
+  the *writer* drops flagged values. The destructor of a replaced map therefore
+  never runs on a reader thread — which is exactly where the 26.1 abort ran it.
+* Four `unsafe` blocks (the `Arc` raw-pointer round trip and the pinned
+  dereference), each with its `// SAFETY:` argument; `ARCHITECTURE.md` §9.2 now
+  lists the file as a permitted `unsafe` location.
+
+| Site | Now |
+|---|---|
+| `identity/engine/mod.rs` — `realm_status_cache`, `session_cache`, `token_claims_cache` | `EpochCell<HashMap<..>>` |
+| `identity/engine/sharded_cache.rs` — `ShardedArcSwapMap` | `ShardedEpochMap`: 64 `EpochCell` shards, same surface |
+| `storage/memtable.rs` — active map, flushing slot | `EpochCell` / `EpochCellOption` |
+| `storage/engine.rs` — `sst_readers` | `EpochCell<Vec<SstReader>>`, read with `load_full` |
+| `storage/tiered.rs`, `storage/block_cache.rs` — shard maps | `EpochCell<HashMap<..>>` |
+
+Pinned `load()` is used only for short in-memory reads. A scan of a whole map,
+an SST probe that may fault on an mmap, or a writer's clone takes an owned
+`load_full()` snapshot instead, because a thread held pinned stalls reclamation
+for every cell in the process.
+
+**What reclamation promises.** A write releases what it replaced before it
+returns unless some thread stayed pinned through its bounded attempts to end the
+grace period; the value is then released by the next write to that cell, by
+`reclaim()`, or when the cell drops. Retention is bounded, not zero. The two
+cells written once per flush and holding large values — the memtable (a whole
+flushed map) and the SST list (a memory map per SST) — call `reclaim()` at the
+end of every flush.
+
+**Found on the way.** `flush_streaming` installed the empty active map before
+parking the full one, so for one store a concurrent read found a written,
+acknowledged key in neither (6,447 misses in 3,000 flushes, measured). Parking
+first closed it; that fix is independent of the primitive.
+
+### Measured
+
+The instrument is the one above, strengthened. On glibc 2.34 and later —
+this host runs 2.42 — `MALLOC_CHECK_` has no effect unless
+`libc_malloc_debug.so` is preloaded, so the 26.1 runs had only glibc's
+always-on `free()` checks. The runs below preload it and add
+`MALLOC_PERTURB_=165`, which overwrites freed chunks so a stale read sees
+garbage rather than intact memory:
+
+```bash
+LD_PRELOAD=<glibc>/lib/libc_malloc_debug.so.0 MALLOC_CHECK_=3 MALLOC_PERTURB_=165 \
+  <lib test binary> --exact <test>     # three copies at a time
+```
+
+| Test | Runs | Failures |
+|---|---|---|
+| `core::epoch_cell::tests::concurrent_readers_never_observe_a_torn_or_freed_value` | 1,650 | 0 |
+| `storage::tiered::tests::concurrent_reads_see_only_values_written_for_their_key` | 1,650 | 0 |
+| `identity::engine::sharded_cache::tests::concurrent_writers_on_one_shard_never_lose_an_update` | 1,650 | 0 |
+| `storage::block_cache::tests::concurrent_hits_only_return_the_block_cached_under_their_id` | 1,650 | 0 |
+| `storage::memtable::tests::a_key_is_never_missing_while_a_flush_moves_it` | 1,650 | 0 |
+| `rbac::resolution_cache::tests::concurrent_readers_never_observe_stale_after_bump` (the 26.1 instrument) | 150 | 0 |
+| `core::epoch_cell::tests::concurrent_rcu_never_loses_an_update` | 150 | 0 |
+| `core::epoch_cell::tests::replaced_values_are_never_dropped_on_a_reader_thread` | 150 | 0 |
+| `storage::memtable::tests::concurrent_reads_during_writes_see_consistent_snapshots` | 150 | 0 |
+| `storage::engine::tests::concurrent_writes_during_flush_are_not_lost` | 150 | 0 |
+| `identity::engine::tests::signing_key_cache_miss_racing_rotation_discards_stale_key` | 150 | 0 |
+
+The 26.1 recipe as written (`MALLOC_CHECK_=3` alone) also gave 0 in 150 for the
+resolution-cache instrument and for the `EpochCell` torn-value test.
+
+The instrument is not blind. With the cell's grace period removed (a mutant
+that frees the replaced value at once) and `MALLOC_CHECK_=3` alone, the
+sharded-map test failed 10 runs in 10 (`free(): invalid pointer`), the
+torn-value test 10 in 10 and the block-cache test 9 in 10 (`SIGSEGV`) — but the
+hot-tier test 0 in 10: its stale reads found freed memory still intact. With the
+preload and `MALLOC_PERTURB_` the hot-tier, block-cache and memtable
+(`a_key_is_never_missing_while_a_flush_moves_it`) tests each failed 10 in 10,
+which is why the runs above use both.
+
+The zero-allocation bench gates (`session_lookup` and `validate_token`, both
+0 allocations per warm call) and the latency gates (`storage_gate`,
+`demotion_latency`, `rbac_check`) pass on this branch.

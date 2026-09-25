@@ -115,7 +115,8 @@ const VALIDATE_TOKEN_P99: Duration = Duration::from_millis(1);
 ///   (refcount bump, no `Session` clone),
 /// - the JTI-revocation check formats its `{realm}:{jti}` key into a stack
 ///   buffer (`StackKeyBuf`) instead of `format!()`,
-/// - ArcSwap `load()` uses thread-local debt slots (no allocation single-thread).
+/// - `EpochCell::load()` pins the thread's epoch participant, which allocates
+///   only on that thread's first pin (registration, done during warm-up).
 ///
 /// The ceiling is therefore **0**: any allocation on the warm path — a
 /// re-introduced deep `clone()`, a stray `format!()`, or new boxing — trips the
@@ -127,7 +128,7 @@ const GATE_SAMPLES: usize = 10_000;
 
 /// Warm-up iterations discarded before gate measurement begins.
 ///
-/// Primes the ArcSwap realm-status cache, session cache, and token claims
+/// Primes the `EpochCell` realm-status cache, session cache, and token claims
 /// cache so we measure steady-state latency, not cold-start penalty.
 const GATE_WARMUP: usize = 500;
 
@@ -199,7 +200,7 @@ fn make_bench_state() -> BenchState {
 
     let access_token = pair.access_token().to_string();
 
-    // Prime ArcSwap caches and the session hot tier.
+    // Prime the `EpochCell` caches and the session hot tier.
     for _ in 0..GATE_WARMUP {
         black_box(
             engine

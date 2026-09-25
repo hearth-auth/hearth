@@ -4,7 +4,7 @@
 profiles are fully wired, not skeletal** — `apply_claim_profile` is called on every token-issue
 path (`src/identity/engine/mod.rs`, `src/identity/engine/oauth.rs`) and `RealmConfig.claim_profile`
 is populated from YAML in `main.rs`; Phase 3 OAuth fields wired. The `PermissionRegistry`
-`ArcSwap` hot-swap is wired in `main.rs` (`RegistrySwap`, rebuilt on SIGHUP reconcile), and
+`SwapCell` hot-swap is wired in `main.rs` (`RegistrySwap`, rebuilt on SIGHUP reconcile), and
 `User.attributes` runtime validation runs at `create_user`, `update_user` and `import_user`.
 See per-phase checkboxes in §Delivery Phasing and §Critical Files — the "not yet" annotations in
 §Critical Files predated those landings and have been corrected below.
@@ -663,7 +663,7 @@ YAML-authored entities do **not** get storage keys — they live in the in-memor
 
 ## Registry and Reload
 
-The `PermissionRegistry` is loaded from YAML at startup into `Arc<PermissionRegistry>` and hot-swapped via `ArcSwap` on SIGHUP. It holds permissions, roles, scope bundles, and per-realm claim profiles.
+The `PermissionRegistry` is loaded from YAML at startup into `Arc<PermissionRegistry>` and hot-swapped via `core::SwapCell` on SIGHUP. It holds permissions, roles, scope bundles, and per-realm claim profiles.
 
 ### Dangling references
 
@@ -861,7 +861,7 @@ These call `DELETE /v1/me/applications/{clientId}` for self-service revocation.
 ## Engine Changes
 
 - **File: `src/identity/engine.rs:2267-2309`** — `issue_tokens` becomes a thin wrapper around a new `issue_tokens_with_context` that takes a `TokenIssuanceContext { oid, client_id, requested_scopes, grant_type, resource: Option<Uri> }`. The `resource` field carries the RFC 8707 resource indicator from `/authorize` and `/token` (or `None` when the token is bound to Hearth itself as audience). The wrapper supplies an empty context so every existing caller is unchanged.
-- **File: `src/rbac/registry.rs`** (new) — loads and validates the YAML registry; exposes `Arc<PermissionRegistry>` for hot-swap on SIGHUP via `ArcSwap`; provides `classify_scope_string(s: &str) -> ScopeKind` (the syntactic classifier); enforces Tier 1/2/3 claim-name rules; validates role permission references, scope bundle permission references, and claim profile tier enforcement.
+- **File: `src/rbac/registry.rs`** (new) — loads and validates the YAML registry; exposes `Arc<PermissionRegistry>` for hot-swap on SIGHUP via `core::SwapCell`; provides `classify_scope_string(s: &str) -> ScopeKind` (the syntactic classifier); enforces Tier 1/2/3 claim-name rules; validates role permission references, scope bundle permission references, and claim profile tier enforcement.
 - **File: `src/rbac/mod.rs`** — extend the `Rbac` trait:
   - `grant_user_permission` / `revoke_user_permission` / `list_user_permissions`
   - `resolve_effective(user_id, realm_id, oid, requested_scopes, client_id, resource: Option<Uri>) -> ResolvedPermissions` — the one function that implements the resolution rule above. `resource` selects which scope registry the `:`-bundles are looked up in (realm-level when `None`, `protected_resources[resource]` when `Some`) and gates whether `.`-permission scopes are legal at all.
@@ -881,13 +881,13 @@ Mapping to Hearth's eight layers (per `docs/specs/TESTING.md`):
 3. **Property** — `resolve_effective` idempotence, scope-match determinism, mapper output determinism, digest stability under permutation, layered-fallback determinism under mapping reordering.
 4. **Fuzz** — YAML deserialization, permission/scope name parser, claim profile JSON, HTTPS-namespaced claim name parser.
 5. **Adversarial** — privilege escalation attempts (requesting undeclared scope, consenting to permission user lacks, Tier 1 claim override via mapper), scope-deletion-with-active-refresh-tokens, reserved-claim-name collision, name collision across namespaces, **raw-request scope leak** (gate a sensitive claim on `required_scopes: [admin:bundle]`, have the client request it but lack permissions — verify the claim does NOT emit), **cross-org consent reuse** (consent in org A must not authorize in org B without `consent_spans_orgs`), third-party client receiving `roles`/`groups` via default profile (must NOT emit).
-6. **Simulation** — admin rewrites YAML while tokens are being issued (ArcSwap invalidation), scope definition deleted while refresh in flight, dangling-reference orphan skip, claim profile toggled to tighten gates mid-flight (in-flight tokens unaffected, next issuance honors tightening).
+6. **Simulation** — admin rewrites YAML while tokens are being issued (registry hot-swap invalidation), scope definition deleted while refresh in flight, dangling-reference orphan skip, claim profile toggled to tighten gates mid-flight (in-flight tokens unaffected, next issuance honors tightening).
 7. **Conformance** — OAuth 2.0 RFC 6749 scope semantics (scope narrower on grant than request, refresh scope ⊆ original), OIDC Core scope claim shape, standard OIDC scope handling, UserInfo endpoint claim shape matches ID token shape under mapper overrides.
 8. **Benchmarks** — `issue_tokens` with 40-permission user (target: same as baseline), `validate_token` (must be byte-identical perf since hot path is unchanged), registry lookup cached via `ArcSwap`, layered-fallback evaluation cost (target: <1µs per claim for realistic mapping counts).
 
 ## Critical Files
 
-- [x] `src/rbac/registry.rs` — `RealmPermissionRegistry`, `PermissionRegistry`, `RegistryError`, grammar validator, `TIER1_CLAIMS`. ArcSwap hot-swap **is** wired (`main.rs`: `RegistrySwap`, rebuilt after each SIGHUP reconcile) — the "not yet wired" note here contradicted the ticked box in §Delivery Phasing and was stale.
+- [x] `src/rbac/registry.rs` — `RealmPermissionRegistry`, `PermissionRegistry`, `RegistryError`, grammar validator, `TIER1_CLAIMS`. `SwapCell` hot-swap **is** wired (`main.rs`: `RegistrySwap`, rebuilt after each SIGHUP reconcile) — the "not yet wired" note here contradicted the ticked box in §Delivery Phasing and was stale.
 - [x] `src/rbac/types.rs` — `RoleScopeKind`, `UserPermissionGrant`, `PermissionDefinition`, `ScopeBundle`.
 - [x] `src/rbac/keys.rs` — `rba:user_perm:*` storage keys added.
 - [x] `src/rbac/mod.rs` — user-extras trait methods + `add/remove/list_additional_role` added.
@@ -1031,14 +1031,14 @@ This specification commits to three phases. SDK DX improvements (codegen CLI, `g
 Scope:
 - [x] New types: `RoleScopeKind`, `UserPermissionGrant`, `PermissionDefinition`, `ScopeBundle` (all in `src/rbac/types.rs` or `src/rbac/registry.rs`)
 - [x] `User.attributes` field (`BTreeMap<String, String>`) on `User` struct — runtime validation **is** done, at `create_user`, `update_user` and `import_user` (key grammar, value ≤1 KiB, map total ≤16 KiB)
-- [x] `src/rbac/registry.rs`: `RealmPermissionRegistry`, `PermissionRegistry`, `RegistryError`, grammar validator, `TIER1_CLAIMS` — `ArcSwap` hot-swap **is** wired in `main.rs`
+- [x] `src/rbac/registry.rs`: `RealmPermissionRegistry`, `PermissionRegistry`, `RegistryError`, grammar validator, `TIER1_CLAIMS` — `SwapCell` hot-swap **is** wired in `main.rs`
 - [x] Storage keys: `rba:user_perm:*`, `rba:user_perm:by_perm:*`
 - [x] Trait methods: `grant_user_permission`, `revoke_user_permission`, `list_user_permissions`
 - [x] `resolve_permissions` updated to union user extras and honor `scope_kind` / scope-match rule
 - [x] `OrganizationMembership.additional_roles: Vec<String>` field + getter/setter — `add_additional_role` / `remove_additional_role` / `list_additional_roles` done.
 - [x] `User.attributes` runtime validation at `create_user`, `update_user` and `import_user` (key grammar, value ≤1 KiB, total ≤16 KiB). `CreateUserRequest.attributes` exists (`src/identity/types/user.rs`); the earlier note saying it did not was stale.
 - [x] `add_additional_role` / `remove_additional_role` / `list_additional_roles` on `RbacEngine` trait + `EmbeddedRbacEngine` + RBAC-owned storage key + `resolve_permissions` integration
-- [x] `PermissionRegistry` hot-swap via `ArcSwap` on SIGHUP wired in `main.rs`
+- [x] `PermissionRegistry` hot-swap via `core::SwapCell` on SIGHUP wired in `main.rs` (an `ArcSwap` until task 26.5)
 - [x] Admin UI: `/ui/admin/rbac/permissions` (read-only list), `/ui/admin/rbac/roles` (read-only). User detail Access card and org member typeahead pending.
 - [x] Nav: new "RBAC" section in sidebar (Permissions, Roles, Permission Check)
 - [x] CLI: `hearth config validate`, `hearth rbac orphans list` / `purge`

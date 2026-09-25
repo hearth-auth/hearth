@@ -327,7 +327,7 @@ Hearth is written in Rust. This is a deliberate choice, not a trend-following on
 The hot path — the code that executes on every authenticated request — is the most performance-critical part of the system. It's designed with the following constraints:
 
 1. **Zero allocations**: all data structures used on the hot path are pre-allocated or arena-allocated. No heap allocation per request.
-2. **No syscalls for hot reads**: hot-tier data (active sessions, frequently-accessed user records) lives in lock-free in-process hash structures (`ArcSwap<HashMap>`, `src/storage/tiered.rs`). Hot-tier reads are in-memory hash lookups, not I/O operations. Cold-tier reads (SST files) use `memmap2` and incur a disk I/O on first access; see Section 7.3.1.
+2. **No syscalls for hot reads**: hot-tier data (active sessions, frequently-accessed user records) lives in lock-free in-process hash structures (`EpochCell<HashMap>`, `src/storage/tiered.rs`), reclaimed by epoch rather than by lock. Hot-tier reads are in-memory hash lookups, not I/O operations. Cold-tier reads (SST files) use `memmap2` and incur a disk I/O on first access; see Section 7.3.1.
 3. **Lock-free reads**: read operations use epoch-based reclamation or read-copy-update patterns. Readers never block on writers.
 4. **Batched writes**: mutations are batched and committed to the WAL in groups, amortizing the cost of fsync across multiple operations.
 5. **CPU-cache-friendly layouts**: data structures are designed for sequential memory access patterns where possible, minimizing cache misses on the hot path.
@@ -404,7 +404,7 @@ Identity workloads follow a heavy power-law distribution. A system managing 100M
 
 Hearth addresses this with a two-tier storage model:
 
-**Hot tier.** Recently accessed records live in lock-free in-process hash structures (`ArcSwap<HashMap>`) designed for sub-microsecond reads. This is the tier described in Section 6.4: zero allocations on the read path, no syscalls, lock-free reads. The hot tier holds the *working set* — the subset of data actively being accessed — not the entire dataset. For a system with 1M daily active users, the hot tier may hold ~1–2M user records plus all active sessions; role and group records (far fewer and smaller than user records) comfortably fit alongside.
+**Hot tier.** Recently accessed records live in lock-free in-process hash structures (epoch-reclaimed `EpochCell<HashMap>` snapshots) designed for sub-microsecond reads. This is the tier described in Section 6.4: zero allocations on the read path, no syscalls, lock-free reads. The hot tier holds the *working set* — the subset of data actively being accessed — not the entire dataset. For a system with 1M daily active users, the hot tier may hold ~1–2M user records plus all active sessions; role and group records (far fewer and smaller than user records) comfortably fit alongside.
 
 **Cold tier.** Records that have not been accessed within the eviction window are stored in on-disk sorted string tables (SSTs), fully durable and queryable. Cold-tier reads are not failures — they are normal, expected operations for low-frequency data. Target latencies: < 5 ms on NVMe storage, < 20 ms on spinning disk. The cold tier uses the same data format as the hot tier, so no deserialization or format conversion is needed on promotion — just a memory copy.
 
