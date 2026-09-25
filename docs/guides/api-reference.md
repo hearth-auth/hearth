@@ -278,6 +278,17 @@ open, token-gated, or disabled is controlled by `realms.<name>.auth.dcr.mode` in
 `hearth.yaml` (see [CONFIGURATION.md — `realms.<name>.auth.dcr`](../specs/CONFIGURATION.md#realmsnameathdcr))
 or at runtime via `PATCH /admin/realms/{realm_id}/config` with the `dcr_policy` field.
 
+### ID-token signing algorithm (`id_token_signed_response_alg`)
+
+Every registration surface above — and `PATCH /admin/applications/{id}` — accepts
+`id_token_signed_response_alg`: `"EdDSA"` or `"RS256"` (case-sensitive). Any other value
+(`none`, `HS256`, `ES256`, …) is refused: `400 invalid_client_metadata` on `POST /register`,
+`400` on the admin routes. When the field is omitted, **dynamic registration defaults to
+`RS256`** (OpenID Connect Registration §2) and the admin routes default to `EdDSA`; the
+registration response and the client record always report the resolved value. The setting
+affects ID tokens only — access and refresh tokens are EdDSA for every client. See
+[OIDC.md §1.2](../specs/OIDC.md#12-signing).
+
 ---
 
 ## POST /token — Confidential-client authentication

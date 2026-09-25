@@ -308,7 +308,7 @@ Hearth's internal hot path validates tokens via **session lookup**, not signatur
 
 **Signing:**
 
-- Token signing MUST use asymmetric algorithms only. **Ed25519 (EdDSA)** is the primary signing algorithm. RS256 and ES256 MAY be supported for ecosystem compatibility.
+- Token signing MUST use asymmetric algorithms only. **Ed25519 (EdDSA)** signs everything Hearth issues and validates. The one exception is RS256 for the **ID tokens** of a client that registered `id_token_signed_response_alg: RS256` (OIDC Core §15.1 interop; see [OIDC.md §1.2](OIDC.md#12-signing)). RS256 MUST NOT be accepted by any path that validates an access, refresh, logout or required-action token.
 - Symmetric signing algorithms (HS256, HS384, HS512) MUST NOT be supported. This eliminates the class of vulnerabilities where a verification key can forge tokens.
 - `alg: none` MUST be rejected unconditionally.
 - Hearth MUST manage its own signing key lifecycle: generation, rotation, and JWKS endpoint for external consumers. Operators MUST NOT need to manually generate or distribute keys in the default configuration.
@@ -671,7 +671,7 @@ Key architectural decisions codified in this document, with rationale:
 | Storage | Custom embedded engine | Purpose-built for identity access patterns, no external dependencies |
 | Authorization model | Claims-based RBAC (roles, groups, permissions embedded in JWT) | Matches industry convention (Auth0/Clerk/Keycloak/Okta). Synchronous client checks with zero network cost. Resource-specific authz lives in the application layer; teams needing graph-shaped ACLs pair Hearth with a dedicated authz service (SpiceDB, OpenFGA). |
 | Token validation (hot path) | Session lookup, not signature re-verification | Sub-microsecond vs 5-50μs, instant revocation, smaller key exposure surface |
-| Signing algorithm | Ed25519 (asymmetric only) | No HS256 eliminates token forgery from compromised verification keys |
+| Signing algorithm | Ed25519 (asymmetric only); RS256 for ID tokens a client opts into | No HS256 eliminates token forgery from compromised verification keys; RS256 ID tokens are mandatory for OpenID certification and are never accepted as access tokens |
 | Password hashing | Argon2id, OWASP parameters | Security over latency — hashing is off the hot path |
 | Multi-tenancy | Logical isolation, type-enforced | Cross-realm users are inherent to identity systems; physical isolation makes this painful |
 | Cluster consensus | `openraft` | Proven library, not custom — Raft is subtle and `openraft` is battle-tested |

@@ -213,7 +213,7 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 
 **Multi-tenancy**
 - Realm-isolated keyspace (every key prefixed with `RealmId`)
-- Per-realm Ed25519 signing keys with JWKS rotation
+- Per-realm Ed25519 signing keys with JWKS rotation (plus an RSA key for RS256 ID tokens, created only for clients that request `id_token_signed_response_alg: RS256`)
 - Cascading deletion across users, sessions, credentials, OAuth clients, role assignments, device codes, signing keys
 
 **Protocols**

@@ -204,6 +204,8 @@ Keycloak's client admin URL is no longer relevant. For each OAuth application, c
 
 Keycloak and Hearth use different signing algorithms (Keycloak defaults to RS256; Hearth uses Ed25519). Because the algorithms differ, tokens issued by Keycloak are not valid in Hearth and vice versa. No key material is imported from Keycloak — Hearth generates a fresh Ed25519 key per realm on first startup.
 
+Migrated clients receive EdDSA ID tokens. A relying party whose OIDC library only verifies RS256 ID tokens — common with applications built against Keycloak's default — needs its client switched with `id_token_signed_response_alg: RS256` (admin API, console or `hearth.yaml`); Hearth then provisions a per-realm RSA key and publishes it in the realm JWKS. Access tokens remain EdDSA.
+
 Inform your application teams of the new JWKS endpoint:
 ```
 GET /.well-known/jwks.json

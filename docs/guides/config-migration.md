@@ -238,7 +238,7 @@ On the next boot the diff engine compares the new config against the snapshot an
 | Realm slug removed | Archive realm (soft-delete) |
 | `migrate_from` declared | Run cross-realm user migration |
 | `copy_from` declared | Run cross-realm copy |
-| `rotate_signing_key: true` | Generate new Ed25519 key, enter grace period, write an audit event |
+| `rotate_signing_key: true` | Generate new Ed25519 key (and a new RS256 ID-token key, if the realm has one), enter grace period, write an audit event |
 | `password_memory_cost` changed | Mark realm for lazy rehash |
 | `archive_drop: true` set | Hard-delete instead of archive on slug removal |
 

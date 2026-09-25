@@ -126,6 +126,7 @@ For transparency, Hearth's core cryptographic primitive selections:
 |---|---|---|
 | At-rest encryption | AES-256-GCM (3-tier envelope, active in 1.0) | `ring` 0.17 |
 | JWT signing | Ed25519 (EdDSA) | `ring` 0.17 |
+| ID-token signing, opt-in per client (`id_token_signed_response_alg: RS256`) | RSA-3072, RSASSA-PKCS1-v1_5 SHA-256 (RS256); never accepted as an access token | `ring` 0.17 (sign/verify), `rcgen` 0.13 + `aws-lc-rs` (key generation) |
 | Password hashing | Argon2id (OWASP params: 19 MiB, 2 iterations, p=1) | `argon2` 0.5 |
 | TLS | TLS 1.2 / 1.3 | `rustls` 0.23 |
 | Webhook signing | HMAC-SHA256 | `ring` 0.17 |

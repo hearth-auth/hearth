@@ -72,6 +72,7 @@
 | Pushed Authorization Requests (PAR, RFC 9126) | ✅ Shipped | `POST /as/par`, `POST /realms/{realm}/as/par` (`src/protocol/http/oauth.rs`) |
 | JWT Authorization Requests (JAR, RFC 9101) | ✅ Shipped | `verify_jar` consumed on `/authorize` and PAR (`src/identity/engine/oauth.rs`) |
 | JWT Authorization Response Mode (JARM) | ✅ Shipped | `authorization_signed_response_alg` per client; `sign_jarm_error_jwt` (`src/identity/mod.rs`) |
+| RS256 ID tokens | ✅ Shipped | `id_token_signed_response_alg` per client (`RS256`/`EdDSA`; DCR defaults to RS256); per-realm RSA-3072 key, rotated with the realm key, published in the realm JWKS (`src/identity/engine/id_token_keys.rs`). Access tokens stay EdDSA-only |
 | FAPI 2.0 Security Profile (per-client + per-realm) | ✅ Shipped | `ClientProfile::Fapi2`, `RealmConfig::fapi_profile` (`src/identity/oidc.rs`); normative spec [docs/specs/OIDC.md](specs/OIDC.md) |
 | RFC 8693 token exchange / RFC 8707 resource indicators | ✅ Shipped | `src/identity/engine/oauth.rs`; see [docs/specs/AGENT_AUTH.md](specs/AGENT_AUTH.md) |
 | SAML 2.0 — SP (inbound federation) | ✅ Shipped | `src/identity/federation/saml/sp.rs`; spec [docs/specs/SAML.md](specs/SAML.md) |

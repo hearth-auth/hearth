@@ -152,7 +152,10 @@ The primary goals are credential theft, token forgery, and denial of service.
   in-memory) and per-account lockout after 5 consecutive failures (5-minute lockout,
   WAL-persisted so it survives server restarts). Account lockout counters are wiped only by
   successful authentication.
-- *Token forgery*: Ed25519 (EdDSA) only — no HS256, no `alg:none`. Because token validation
+- *Token forgery*: Ed25519 (EdDSA) for everything Hearth issues and validates — no HS256, no
+  `alg:none`. RS256 exists only for the ID tokens of clients that request it via
+  `id_token_signed_response_alg` (OpenID Connect interop); the RSA key signs nothing else, and no
+  access-token validation path accepts RS256. Because token validation
   is performed via session lookup rather than signature re-verification on the hot path, a
   valid signature on a revoked session is not accepted.
 - *Replay attacks*: JTI (JWT ID) is included in all tokens; revoked JTIs are recorded in a
@@ -211,7 +214,7 @@ client configurations, and read the audit log for that realm.
 | Vector | Defense |
 |--------|---------|
 | Credential stuffing | Argon2id slow-hash; per-IP rate limit; per-account WAL-persisted lockout |
-| Token forgery | Ed25519 only; no HS256; no `alg:none`; per-realm keys |
+| Token forgery | Ed25519 for all issued/validated tokens (RS256 only for opted-in ID tokens, never accepted as access tokens); no HS256; no `alg:none`; per-realm keys |
 | Cross-realm data leakage | Compile-time `RealmId` enforcement; key prefix isolation; bounded scans |
 | Replay attacks | JTI blocklist; single-use refresh tokens with theft detection |
 | Enumeration timing attacks | Constant-time comparisons via `subtle`; uniform error responses |
