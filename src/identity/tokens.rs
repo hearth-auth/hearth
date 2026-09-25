@@ -1,6 +1,9 @@
 //! JWT token issuance, validation, and JWKS endpoint.
 //!
-//! Tokens are signed with Ed25519 (`EdDSA`) using the `ring` crate.
+//! Tokens are signed with Ed25519 (`EdDSA`) using the `ring` crate. The single
+//! exception is an OIDC ID token for a client that registered
+//! `id_token_signed_response_alg: RS256`, which is signed RSASSA-PKCS1-v1_5
+//! SHA-256 by [`RsaIdTokenSigningKey`] — see that type for the scoping rules.
 //! Only asymmetric signing is supported — no HMAC, no `alg: none`.
 //!
 //! Internal hot-path validation uses session lookup (not signature
@@ -21,8 +24,36 @@ use crate::core::Uri;
 use crate::identity::error::IdentityError;
 use crate::identity::types::RequiredAction;
 
-/// The only supported JWT algorithm.
+/// The algorithm of every token Hearth issues **and** validates.
+///
+/// Access, refresh, required-action, logout and JARM tokens are Ed25519 and
+/// nothing else. The one exception is an ID token for a client that registered
+/// `id_token_signed_response_alg: RS256` — see [`RS256_ALGORITHM`] — and no
+/// Hearth validation path that consults this constant ever accepts RS256.
 const JWT_ALGORITHM: &str = "EdDSA";
+
+/// JWS `alg` of an RS256-signed ID token (OIDC Core §15.1 interop).
+///
+/// Only [`RsaIdTokenSigningKey::issue_id_token`] emits it and only
+/// [`verify_rs256_id_token_signature`] accepts it, and both refuse any payload
+/// whose `token_type` is not [`ID_TOKEN_TYPE`].
+const RS256_ALGORITHM: &str = "RS256";
+
+/// `token_type` claim of an OIDC ID token — the only token type an RSA key
+/// may sign.
+pub(crate) const ID_TOKEN_TYPE: &str = "id_token";
+
+/// Smallest RSA modulus, in bits, accepted for an ID-token signing key.
+///
+/// Enforced on every load, so a key restored from a backup or written into
+/// storage out of band cannot weaken the realm below it.
+pub const RSA_ID_TOKEN_MIN_MODULUS_BITS: usize = 2048;
+
+/// Modulus size, in bits, of every newly generated ID-token signing key.
+///
+/// RSA-3072 is the ~128-bit security level (NIST SP 800-57 Pt. 1 Table 2),
+/// matching the Ed25519 keys used for everything else.
+pub const RSA_ID_TOKEN_MODULUS_BITS: usize = 3072;
 
 /// Maximum clock skew tolerated when validating `nbf` (not-before) and `exp`.
 ///
@@ -437,13 +468,14 @@ pub struct Jwk {
     pub alg: String,
     /// Non-standard informational role hint.
     ///
-    /// `"access-token-signing"` is the only value any JWKS Hearth publishes
-    /// has carried since the RSA and EC entries were withdrawn (audit
-    /// 2026-08-28 §4.2#4). The `"saml-signing"` and `"ecdsa-compat"` values
-    /// are still set by [`RsaSigningKey::to_jwk`] and
-    /// [`EcdsaSigningKey::to_jwk`], but neither is assembled into a published
-    /// document — SAML signing uses X.509 in the SAML metadata, not a JWK, so
-    /// a client MUST NOT branch on seeing those roles (§4.2#6, §4.19#10).
+    /// A published JWKS carries two values: `"access-token-signing"` on the
+    /// Ed25519 keys, and `"id-token-signing"` on the RSA key a realm publishes
+    /// once a client selected RS256 ID tokens ([`RsaIdTokenSigningKey::to_jwk`],
+    /// task 26.55). The `"saml-signing"` and `"ecdsa-compat"` values are still
+    /// set by [`RsaSigningKey::to_jwk`] and [`EcdsaSigningKey::to_jwk`], but
+    /// neither is assembled into a published document — SAML signing uses
+    /// X.509 in the SAML metadata, not a JWK (§4.2#6, §4.19#10). A client MUST
+    /// NOT branch on the role; the `alg` decides what a key may verify.
     ///
     /// Omitted by keys that predate this field.
     #[serde(
@@ -1308,6 +1340,245 @@ impl EcdsaSigningKey {
             x_key_role: Some("ecdsa-compat".to_string()),
         }
     }
+}
+
+/// A per-realm RSA key that signs OIDC ID tokens with `RS256` — and nothing
+/// else (task 26.55).
+///
+/// OpenID Connect Core §15.1 and Discovery §3 make RS256 mandatory for ID
+/// tokens, and a client that registers without `id_token_signed_response_alg`
+/// is owed RS256 (OIDC Registration §2). Hearth therefore signs an ID token
+/// with this key when — and only when — the client asked for RS256. The
+/// scoping is structural rather than conventional:
+///
+/// - [`Self::issue_id_token`] refuses any claims whose `token_type` is not
+///   [`ID_TOKEN_TYPE`], so this key cannot mint an access, refresh,
+///   required-action or logout token even if a caller hands it one.
+/// - Every Hearth validation path for those tokens verifies Ed25519 only
+///   ([`verify_token_signature`], [`verify_jwt_typed`]); an RS256 header is
+///   rejected before any key is consulted.
+/// - The one RS256 verifier, [`verify_rs256_id_token_signature`], in turn
+///   refuses any payload that is not an ID token.
+///
+/// Keys are generated as RSA-3072 via `rcgen`'s `aws_lc_rs` backend (`ring`
+/// cannot generate RSA keys, and the `rsa` crate carries the unpatched
+/// RUSTSEC-2023-0071 timing side channel); signing and verification use
+/// `ring`. The `kid` is derived from the public key, like the Ed25519 `kid`.
+/// The PKCS#8 document is zeroized on drop and never appears in `Debug`.
+pub struct RsaIdTokenSigningKey {
+    /// `ring` key pair used for RSASSA-PKCS1-v1_5 SHA-256 signing.
+    key_pair: ring::signature::RsaKeyPair,
+    /// Stable key identifier derived from the public key.
+    key_id: String,
+    /// The raw PKCS#8 document, zeroized on drop.
+    pkcs8_doc: ZeroizingBytes,
+}
+
+impl std::fmt::Debug for RsaIdTokenSigningKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RsaIdTokenSigningKey")
+            .field("key_id", &self.key_id)
+            .field("modulus_bits", &self.modulus_bits())
+            .finish_non_exhaustive()
+    }
+}
+
+impl RsaIdTokenSigningKey {
+    /// Generates a fresh RSA-3072 ID-token signing key.
+    ///
+    /// Slow (key generation is a prime search, typically 100 ms–1 s) and off
+    /// every hot path: it runs once per realm, the first time a client in the
+    /// realm selects RS256, and again on each key rotation.
+    ///
+    /// # Errors
+    /// Returns [`IdentityError::SigningError`] if key generation fails.
+    pub fn generate() -> Result<Self, IdentityError> {
+        use zeroize::Zeroize as _;
+        let mut key_pair =
+            rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_3072)
+                .map_err(|e| IdentityError::SigningError {
+                    reason: format!("RSA ID-token key generation failed: {e}"),
+                })?;
+        let pkcs8 = zeroize::Zeroizing::new(key_pair.serialize_der());
+        // rcgen keeps its own copy of the PKCS#8 document; scrub it rather than
+        // leave a private key in freed memory.
+        key_pair.zeroize();
+        Self::from_pkcs8(&pkcs8)
+    }
+
+    /// Loads a key from a PKCS#8 DER document.
+    ///
+    /// # Errors
+    /// Returns [`IdentityError::SigningError`] when the document is not an RSA
+    /// private key `ring` accepts, or its modulus is shorter than
+    /// [`RSA_ID_TOKEN_MIN_MODULUS_BITS`].
+    pub fn from_pkcs8(pkcs8_der: &[u8]) -> Result<Self, IdentityError> {
+        let key_pair = ring::signature::RsaKeyPair::from_pkcs8(pkcs8_der).map_err(|e| {
+            IdentityError::SigningError {
+                reason: format!("RSA ID-token key PKCS#8 parse failed: {e}"),
+            }
+        })?;
+        let bits = key_pair.public().modulus_len() * 8;
+        if bits < RSA_ID_TOKEN_MIN_MODULUS_BITS {
+            return Err(IdentityError::SigningError {
+                reason: format!(
+                    "RSA ID-token key is {bits} bits; at least \
+                     {RSA_ID_TOKEN_MIN_MODULUS_BITS} are required"
+                ),
+            });
+        }
+        let key_id = compute_key_id(key_pair.public().as_ref());
+        Ok(Self {
+            key_pair,
+            key_id,
+            pkcs8_doc: ZeroizingBytes(pkcs8_der.to_vec()),
+        })
+    }
+
+    /// Returns the PKCS#8 DER bytes for persistence.
+    ///
+    /// Callers MUST NOT log, display, or serialize these bytes.
+    pub fn pkcs8_bytes(&self) -> &[u8] {
+        &self.pkcs8_doc.0
+    }
+
+    /// Returns the key identifier (`kid`), derived from the public key.
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    /// Returns the DER `RSAPublicKey` (PKCS#1) — the form
+    /// [`verify_rs256_id_token_signature`] takes.
+    pub fn public_key_der(&self) -> &[u8] {
+        self.key_pair.public().as_ref()
+    }
+
+    /// Returns the modulus size in bits.
+    pub fn modulus_bits(&self) -> usize {
+        self.key_pair.public().modulus_len() * 8
+    }
+
+    /// Builds the RFC 7517 JWK published in the realm JWKS: `kty: RSA`,
+    /// `alg: RS256`, `use: sig`, `n`, `e`, and the `kid` every ID token it
+    /// signs carries.
+    ///
+    /// # Errors
+    /// Returns [`IdentityError::SigningError`] if the public key DER cannot be
+    /// parsed (it always can for a key `ring` loaded).
+    pub fn to_jwk(&self) -> Result<Jwk, IdentityError> {
+        let (n_bytes, e_bytes) = parse_pkcs1_rsa_public_key(self.public_key_der())?;
+        Ok(Jwk {
+            kty: "RSA".to_string(),
+            crv: None,
+            x: None,
+            y: None,
+            n: Some(URL_SAFE_NO_PAD.encode(&n_bytes)),
+            e: Some(URL_SAFE_NO_PAD.encode(&e_bytes)),
+            kid: self.key_id.clone(),
+            use_: "sig".to_string(),
+            alg: RS256_ALGORITHM.to_string(),
+            x_key_role: Some("id-token-signing".to_string()),
+        })
+    }
+
+    /// Signs an OIDC ID token with RS256.
+    ///
+    /// # Errors
+    /// Returns [`IdentityError::SigningError`] when `claims.token_type` is not
+    /// [`ID_TOKEN_TYPE`] — this key signs ID tokens and nothing else — or when
+    /// serialization or signing fails.
+    pub fn issue_id_token(&self, claims: &TokenClaims) -> Result<String, IdentityError> {
+        if claims.token_type != ID_TOKEN_TYPE {
+            return Err(IdentityError::SigningError {
+                reason: "the RSA ID-token key signs ID tokens only".to_string(),
+            });
+        }
+        let header = JwtHeader {
+            alg: RS256_ALGORITHM.to_string(),
+            typ: JWT_TYPE.to_string(),
+            kid: self.key_id.clone(),
+        };
+        let header_json =
+            serde_json::to_vec(&header).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        let claims_json = serde_json::to_vec(claims).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        let signing_input = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(&header_json),
+            URL_SAFE_NO_PAD.encode(&claims_json)
+        );
+        let mut sig = vec![0u8; self.key_pair.public().modulus_len()];
+        self.key_pair
+            .sign(
+                &signature::RSA_PKCS1_SHA256,
+                &SystemRandom::new(),
+                signing_input.as_bytes(),
+                &mut sig,
+            )
+            .map_err(|e| IdentityError::SigningError {
+                reason: format!("RS256 ID-token signing failed: {e}"),
+            })?;
+        Ok(format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(&sig)))
+    }
+}
+
+/// Verifies an RS256-signed **ID token** against a DER `RSAPublicKey` and
+/// returns its claims.
+///
+/// The only RS256 verifier in Hearth, and deliberately narrow. It exists for
+/// the paths that legitimately receive back an ID token Hearth issued — an
+/// `id_token_hint` at RP-initiated logout, or an ID token presented for
+/// revocation — and it refuses:
+///
+/// - any header `alg` other than `RS256`, or `typ` other than `JWT`;
+/// - a signature that does not verify with RSASSA-PKCS1-v1_5 SHA-256 over a
+///   2048-to-8192-bit key;
+/// - any payload whose `token_type` is not [`ID_TOKEN_TYPE`], so a validly
+///   signed RS256 token can never be accepted as an access, refresh or
+///   required-action token.
+///
+/// Does NOT check `exp`; callers decide (an `id_token_hint` may be expired).
+///
+/// # Errors
+/// Returns [`IdentityError::InvalidToken`] on any of the refusals above or a
+/// malformed token.
+pub fn verify_rs256_id_token_signature(
+    token: &str,
+    public_key_der: &[u8],
+) -> Result<TokenClaims, IdentityError> {
+    let mut parts = token.split('.');
+    let (Some(header_b64), Some(claims_b64), Some(sig_b64), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(IdentityError::InvalidToken);
+    };
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(header_b64)
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let header: JwtHeader =
+        serde_json::from_slice(&header_bytes).map_err(|_| IdentityError::InvalidToken)?;
+    if header.alg != RS256_ALGORITHM || header.typ != JWT_TYPE {
+        return Err(IdentityError::InvalidToken);
+    }
+    let sig = URL_SAFE_NO_PAD
+        .decode(sig_b64)
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let signing_input = &token[..header_b64.len() + 1 + claims_b64.len()];
+    signature::UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA256, public_key_der)
+        .verify(signing_input.as_bytes(), &sig)
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let claims_bytes = URL_SAFE_NO_PAD
+        .decode(claims_b64)
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let claims: TokenClaims =
+        serde_json::from_slice(&claims_bytes).map_err(|_| IdentityError::InvalidToken)?;
+    if claims.token_type != ID_TOKEN_TYPE {
+        return Err(IdentityError::InvalidToken);
+    }
+    Ok(claims)
 }
 
 /// Generates a fresh RSA-2048 keypair and its self-signed X.509 wrapper
@@ -2225,5 +2496,216 @@ mod tests {
         assert_eq!(n_raw.len(), 256, "RSA-2048 modulus is 256 bytes");
         // 65537 (0x010001) is the universal RSA public exponent rcgen emits.
         assert_eq!(e_b64, "AQAB");
+    }
+
+    // ===== RS256 ID-token signing (task 26.55) =====
+    //
+    // RS256 exists for one purpose only: OIDC Core interop for ID tokens a
+    // client asked to receive RS256-signed. These tests pin the three halves of
+    // that scoping — the key type, the signer that refuses anything but an ID
+    // token, and the verifiers on each side of the Ed25519/RS256 line.
+
+    /// Claims for an ID token, the only token type an RSA key may sign.
+    fn id_token_claims(now_secs: i64) -> TokenClaims {
+        let mut claims = test_claims(now_secs);
+        claims.token_type = ID_TOKEN_TYPE.to_string();
+        claims.nonce = Some("n-0S6_WzA2Mj".to_string());
+        claims.azp = Some("client-a".to_string());
+        claims
+    }
+
+    /// Splits a compact JWS and decodes its header as JSON.
+    fn jws_header(token: &str) -> serde_json::Value {
+        let header_b64 = token.split('.').next().expect("header segment");
+        let bytes = URL_SAFE_NO_PAD.decode(header_b64).expect("header b64");
+        serde_json::from_slice(&bytes).expect("header json")
+    }
+
+    /// Signs `claims` with RS256 by hand, bypassing the ID-token-only guard in
+    /// [`RsaIdTokenSigningKey::issue_id_token`]. Models an attacker (or a future
+    /// bug) that gets an RS256 signature over a non-ID-token payload.
+    fn raw_rs256_jwt(key: &RsaIdTokenSigningKey, claims: &TokenClaims) -> String {
+        let header = serde_json::json!({"alg": "RS256", "typ": "JWT", "kid": key.key_id()});
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header"));
+        let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("claims"));
+        let signing_input = format!("{header_b64}.{claims_b64}");
+        let pair = ring::signature::RsaKeyPair::from_pkcs8(key.pkcs8_bytes()).expect("pkcs8");
+        let mut sig = vec![0u8; pair.public().modulus_len()];
+        pair.sign(
+            &ring::signature::RSA_PKCS1_SHA256,
+            &SystemRandom::new(),
+            signing_input.as_bytes(),
+            &mut sig,
+        )
+        .expect("sign");
+        format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig))
+    }
+
+    #[test]
+    fn rsa_id_token_key_is_3072_bit_and_publishes_an_rs256_jwk() {
+        let key = RsaIdTokenSigningKey::generate().expect("generate");
+        assert_eq!(key.modulus_bits(), 3072, "new ID-token keys are RSA-3072");
+
+        let jwk = key.to_jwk().expect("jwk");
+        assert_eq!(jwk.kty, "RSA");
+        assert_eq!(jwk.alg, "RS256");
+        assert_eq!(jwk.use_, "sig");
+        assert_eq!(jwk.kid, key.key_id());
+        assert_eq!(jwk.x_key_role.as_deref(), Some("id-token-signing"));
+        assert!(jwk.crv.is_none() && jwk.x.is_none() && jwk.y.is_none());
+        let n = URL_SAFE_NO_PAD
+            .decode(jwk.n.as_deref().expect("n"))
+            .expect("decode n");
+        assert_eq!(n.len(), 384, "an RSA-3072 modulus is 384 bytes");
+        assert_eq!(jwk.e.as_deref(), Some("AQAB"));
+    }
+
+    #[test]
+    fn rsa_id_token_key_round_trips_through_pkcs8_with_a_stable_kid() {
+        let key = RsaIdTokenSigningKey::generate().expect("generate");
+        let reloaded = RsaIdTokenSigningKey::from_pkcs8(key.pkcs8_bytes()).expect("reload");
+        assert_eq!(reloaded.key_id(), key.key_id(), "kid must survive a reload");
+        assert_eq!(reloaded.to_jwk().expect("jwk"), key.to_jwk().expect("jwk"));
+
+        let other = RsaIdTokenSigningKey::generate().expect("generate");
+        assert_ne!(other.key_id(), key.key_id(), "distinct keys, distinct kids");
+    }
+
+    #[test]
+    fn rsa_id_token_key_refuses_non_rsa_material() {
+        let ed25519 = test_signing_key();
+        assert!(
+            matches!(
+                RsaIdTokenSigningKey::from_pkcs8(ed25519.pkcs8_bytes()),
+                Err(IdentityError::SigningError { .. })
+            ),
+            "an Ed25519 PKCS#8 document must not load as an RSA ID-token key"
+        );
+        assert!(matches!(
+            RsaIdTokenSigningKey::from_pkcs8(b"not a key"),
+            Err(IdentityError::SigningError { .. })
+        ));
+    }
+
+    #[test]
+    fn rs256_id_token_carries_rs256_header_and_verifies_against_its_jwk() {
+        let key = RsaIdTokenSigningKey::generate().expect("generate");
+        let claims = id_token_claims(1_700_000_000);
+        let token = key.issue_id_token(&claims).expect("issue");
+
+        let header = jws_header(&token);
+        assert_eq!(header["alg"], "RS256");
+        assert_eq!(header["typ"], "JWT");
+        assert_eq!(header["kid"].as_str(), Some(key.key_id()));
+
+        // Hearth's own verifier.
+        let verified =
+            verify_rs256_id_token_signature(&token, key.public_key_der()).expect("verify");
+        assert_eq!(verified, claims);
+
+        // An independent verifier built only from the published JWK (n, e) —
+        // what a relying party does with the JWKS.
+        let jwk = key.to_jwk().expect("jwk");
+        let n = URL_SAFE_NO_PAD.decode(jwk.n.expect("n")).expect("n");
+        let e = URL_SAFE_NO_PAD.decode(jwk.e.expect("e")).expect("e");
+        let (signing_input, sig_b64) = token.rsplit_once('.').expect("jws");
+        let sig = URL_SAFE_NO_PAD.decode(sig_b64).expect("sig");
+        ring::signature::RsaPublicKeyComponents { n: &n, e: &e }
+            .verify(
+                &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+                signing_input.as_bytes(),
+                &sig,
+            )
+            .expect("the JWK alone must verify the ID token");
+    }
+
+    #[test]
+    fn rsa_id_token_key_refuses_to_sign_anything_but_an_id_token() {
+        let key = RsaIdTokenSigningKey::generate().expect("generate");
+        for token_type in ["access", "refresh", REQUIRED_ACTION_TOKEN_TYPE, ""] {
+            let mut claims = id_token_claims(1_700_000_000);
+            claims.token_type = token_type.to_string();
+            assert!(
+                matches!(
+                    key.issue_id_token(&claims),
+                    Err(IdentityError::SigningError { .. })
+                ),
+                "an RSA key must never sign a {token_type:?} token"
+            );
+        }
+    }
+
+    /// The Ed25519 verifier behind `validate_token`, introspection and
+    /// userinfo must refuse an RS256 token outright — even a genuine ID token
+    /// signed by this realm's own RSA key.
+    #[test]
+    fn eddsa_verifiers_reject_an_rs256_id_token() {
+        let rsa = RsaIdTokenSigningKey::generate().expect("generate");
+        let ed = test_signing_key();
+        let token = rsa
+            .issue_id_token(&id_token_claims(1_700_000_000))
+            .expect("issue");
+        assert!(matches!(
+            verify_token_signature(&token, ed.public_key_bytes()),
+            Err(IdentityError::InvalidToken)
+        ));
+        assert!(matches!(
+            validate_token_with_time(
+                &token,
+                ed.public_key_bytes(),
+                Timestamp::from_micros(1_700_000_000 * MICROS_PER_SEC)
+            ),
+            Err(IdentityError::InvalidToken)
+        ));
+        assert!(matches!(
+            verify_jwt_typed::<TokenClaims>(&token, ed.public_key_bytes(), Some("JWT")),
+            Err(IdentityError::InvalidToken)
+        ));
+    }
+
+    #[test]
+    fn rs256_verifier_rejects_eddsa_tampered_and_foreign_tokens() {
+        let rsa = RsaIdTokenSigningKey::generate().expect("generate");
+        let claims = id_token_claims(1_700_000_000);
+
+        // EdDSA header: never accepted by the RS256 path.
+        let ed_token = test_signing_key().issue_token(&claims).expect("issue");
+        assert!(matches!(
+            verify_rs256_id_token_signature(&ed_token, rsa.public_key_der()),
+            Err(IdentityError::InvalidToken)
+        ));
+
+        // Tampered payload.
+        let token = rsa.issue_id_token(&claims).expect("issue");
+        let mut parts: Vec<String> = token.split('.').map(str::to_string).collect();
+        let mut forged = claims.clone();
+        forged.sub = "user_attacker".to_string();
+        parts[1] = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&forged).expect("claims"));
+        assert!(matches!(
+            verify_rs256_id_token_signature(&parts.join("."), rsa.public_key_der()),
+            Err(IdentityError::InvalidToken)
+        ));
+
+        // Signed by a different RSA key.
+        let other = RsaIdTokenSigningKey::generate().expect("generate");
+        assert!(matches!(
+            verify_rs256_id_token_signature(&token, other.public_key_der()),
+            Err(IdentityError::InvalidToken)
+        ));
+    }
+
+    /// Defence in depth: a genuine RS256 signature over a payload that is not
+    /// an ID token is still refused, so the RS256 path can never be steered
+    /// into accepting an access, refresh or required-action token.
+    #[test]
+    fn rs256_verifier_rejects_a_validly_signed_non_id_token() {
+        let rsa = RsaIdTokenSigningKey::generate().expect("generate");
+        let mut claims = id_token_claims(1_700_000_000);
+        claims.token_type = "access".to_string();
+        let token = raw_rs256_jwt(&rsa, &claims);
+        assert!(matches!(
+            verify_rs256_id_token_signature(&token, rsa.public_key_der()),
+            Err(IdentityError::InvalidToken)
+        ));
     }
 }
