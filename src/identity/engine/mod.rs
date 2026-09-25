@@ -5049,6 +5049,7 @@ impl EmbeddedIdentityEngine {
                 "none".to_string(),
                 "client_secret_basic".to_string(),
                 "client_secret_post".to_string(),
+                "private_key_jwt".to_string(),
             ],
             // Task 26.43: confidential clients only — never `none`.
             introspection_endpoint_auth_methods_supported: vec![
@@ -16762,7 +16763,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             fid: subject_claims.fid.clone(),
             scope: Some(effective_scope.clone()),
             nonce: None,
-            azp: None,
+            // The exchanged token is issued to the authenticated client that
+            // exchanged it — not to the subject token's client, whose `fid`,
+            // `sid` and (for a machine subject) `sub` it inherits. `azp` is
+            // the party it was issued to (OIDC Core §2), and RFC 7009 §2.1
+            // ownership reads it first, so without it the subject's client
+            // could revoke this token and its own recipient could not.
+            azp: Some(request.client_id.to_string()),
             cnf: request
                 .dpop_jkt
                 .as_ref()

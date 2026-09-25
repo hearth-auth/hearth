@@ -785,9 +785,7 @@ impl EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?
             {
                 if let Ok(client) = serde_json::from_slice::<OAuthClient>(&client_bytes) {
-                    if client.assertion_public_key().is_some()
-                        && client.client_secret_hash().is_none()
-                    {
+                    if client.requires_client_assertion() {
                         return Err(IdentityError::InvalidClientAssertion {
                             reason: "client_assertion is required for private_key_jwt clients"
                                 .to_string(),
@@ -2358,7 +2356,22 @@ impl EmbeddedIdentityEngine {
                         ..Default::default()
                     },
                 )?;
-                let token_pair = self.issue_tokens(realm_id, user_id, session.id())?;
+                // The grant is issued TO the polling client: record it on the
+                // grant family, as the authorization-code grant does. Minting
+                // with the default (clientless) context left the family with
+                // no owner, so RFC 7009 ownership resolved to no client and
+                // the device client's own `/revoke` answered 200 while its
+                // refresh token and session stayed live. It also skipped the
+                // client's claim profile and the refresh-time client binding.
+                let token_pair = self.issue_tokens_with_context(
+                    realm_id,
+                    user_id,
+                    session.id(),
+                    &super::TokenIssuanceContext {
+                        client_id: Some(client_id.clone()),
+                        ..Default::default()
+                    },
+                )?;
 
                 // Issue ID token
                 // iss MUST match the discovery document's issuer (OIDC Core §2)
@@ -2725,8 +2738,14 @@ impl EmbeddedIdentityEngine {
         }
 
         match claims.token_type.as_str() {
+            // A delegated (RFC 8693 exchanged) token carries the subject
+            // token's `sid`, but it was issued to the exchanging client, not
+            // to the subject's. Ending that shared session would revoke the
+            // subject client's own tokens — the cross-client revocation the
+            // ownership check above exists to prevent — so it falls through
+            // to the JTI blocklist arm below and dies alone.
             "access" | "id_token" => {
-                if claims.sid != "none" {
+                if claims.sid != "none" && claims.act.is_none() {
                     // Session-bound token: revoke via session.
                     //
                     // The outcome is PROPAGATED, not discarded. RFC 7009 §2.2
@@ -2747,7 +2766,8 @@ impl EmbeddedIdentityEngine {
                         }
                     }
                 } else if let Some(ref jti) = claims.jti {
-                    // Sessionless token (e.g., client_credentials): revoke via JTI blocklist.
+                    // Sessionless token (e.g., client_credentials) or a
+                    // delegated token: revoke via JTI blocklist.
                     // Store the token's exp so the hot-path projection can self-evict expired entries.
                     // Propagated for the same reason as the session arm above:
                     // the cache insert below would otherwise mask a failed

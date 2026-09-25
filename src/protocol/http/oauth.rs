@@ -419,7 +419,8 @@ struct HttpTokenRequest {
 ///
 /// Extends the proto type with optional client credentials for HTTP endpoints.
 /// Clients may authenticate via HTTP Basic Auth or via these body fields
-/// per RFC 6749 §2.3.1.
+/// per RFC 6749 §2.3.1, or with a `private_key_jwt` assertion (RFC 7523
+/// §2.2) — the only method a secretless `private_key_jwt` client has.
 #[derive(Debug, Deserialize)]
 struct HttpRevocationBody {
     token: String,
@@ -429,6 +430,10 @@ struct HttpRevocationBody {
     client_id: Option<String>,
     #[serde(default)]
     client_secret: Option<String>,
+    #[serde(default)]
+    client_assertion_type: Option<String>,
+    #[serde(default)]
+    client_assertion: Option<String>,
 }
 
 /// HTTP request body for token introspection (RFC 7662).
@@ -580,9 +585,10 @@ fn resolve_client_credentials(
 ///
 /// Returns the authenticated `ClientId` on success, or a 401 response if
 /// client_id is missing, the client does not exist, or the secret is wrong.
-/// Confidential clients require a secret; public clients are accepted with
-/// client_id alone — right for `/revoke` (RFC 7009 §2.1), never for
-/// `/introspect`, which uses [`verify_introspection_client`] (task 26.43).
+/// Confidential clients require a secret; clients with no stored secret are
+/// accepted with client_id alone — including a `private_key_jwt` client, so
+/// `/revoke` layers [`verify_revocation_client`] on top, and `/introspect`
+/// uses [`verify_introspection_client`] instead (task 26.43).
 fn verify_endpoint_client(
     state: &AppState,
     realm_id: &RealmId,
@@ -636,7 +642,8 @@ fn verify_endpoint_client(
 const CLIENT_ASSERTION_TYPE_JWT_BEARER: &str =
     "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 
-/// The uniform RFC 6749 §5.2 `invalid_client` refusal for introspection.
+/// The uniform RFC 6749 §5.2 `invalid_client` refusal for introspection and
+/// revocation.
 fn invalid_client_response() -> Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -656,7 +663,7 @@ fn invalid_client_response() -> Response {
 /// `client_secret_basic`, `client_secret_post` and `private_key_jwt`, matching
 /// `introspection_endpoint_auth_methods_supported` in discovery.
 ///
-/// `/revoke` keeps [`verify_endpoint_client`], which accepts a public client:
+/// `/revoke` uses [`verify_revocation_client`], which accepts a public client:
 /// RFC 7009 §2.1 lets public clients revoke.
 fn verify_introspection_client(
     state: &AppState,
@@ -692,15 +699,85 @@ fn verify_introspection_client(
             .map(|()| client_id)
             .map_err(|_| invalid_client_response());
     }
+    verify_assertion_client(
+        state,
+        realm_id,
+        headers,
+        body.client_id.as_deref(),
+        body.client_secret.as_deref(),
+        assertion_type,
+        assertion,
+    )
+}
 
+/// Authenticates the revocation caller (RFC 7009 §2.1).
+///
+/// A public client is accepted on its `client_id` alone and a secret-bearing
+/// confidential client by its secret, exactly as [`verify_endpoint_client`]
+/// does. A `private_key_jwt` client authenticates with its assertion — and,
+/// because its `client_id` is as public as anyone's, is REFUSED when it
+/// presents no assertion: [`verify_endpoint_client`] treats any client with no
+/// stored secret as public, so a FAPI 2.0 client (which may not hold a secret)
+/// could otherwise be impersonated here by anyone who knew its identifier.
+fn verify_revocation_client(
+    state: &AppState,
+    realm_id: &RealmId,
+    headers: &HeaderMap,
+    body: &HttpRevocationBody,
+) -> Result<ClientId, Response> {
+    let assertion_type = body
+        .client_assertion_type
+        .as_deref()
+        .and_then(non_empty_credential);
+    let assertion = body
+        .client_assertion
+        .as_deref()
+        .and_then(non_empty_credential);
+    if assertion_type.is_some() || assertion.is_some() {
+        return verify_assertion_client(
+            state,
+            realm_id,
+            headers,
+            body.client_id.as_deref(),
+            body.client_secret.as_deref(),
+            assertion_type,
+            assertion,
+        );
+    }
+
+    let client_id = verify_endpoint_client(
+        state,
+        realm_id,
+        headers,
+        body.client_id.as_deref(),
+        body.client_secret.as_deref(),
+    )?;
+    match state.identity.get_client(realm_id, &client_id) {
+        Ok(Some(client)) if client.requires_client_assertion() => Err(invalid_client_response()),
+        Ok(_) => Ok(client_id),
+        Err(e) => Err(identity_error_to_response(&e).into_response()),
+    }
+}
+
+/// Authenticates a client by its `private_key_jwt` assertion (RFC 7523 §2.2)
+/// at an endpoint that also accepts secrets (`/introspect`, `/revoke`).
+///
+/// A request that also carries a secret — Basic or body — is `400
+/// invalid_request` (RFC 6749 §2.3: one authentication method per request).
+/// Any other failure is `401 invalid_client`.
+fn verify_assertion_client(
+    state: &AppState,
+    realm_id: &RealmId,
+    headers: &HeaderMap,
+    body_client_id: Option<&str>,
+    body_client_secret: Option<&str>,
+    assertion_type: Option<&str>,
+    assertion: Option<&str>,
+) -> Result<ClientId, Response> {
     // RFC 6749 §2.3 / §5.2: a client MUST NOT use more than one
     // authentication mechanism in a request.
     if parse_basic_auth(headers).is_some()
-        || body
-            .client_secret
-            .as_deref()
-            .and_then(non_empty_credential)
-            .is_some()
+        || body_client_secret.and_then(non_empty_credential).is_some()
     {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -716,9 +793,7 @@ fn verify_introspection_client(
         return Err(invalid_client_response());
     };
     // The assertion's `iss`/`sub` must equal this id — the engine checks it.
-    let client_id = body
-        .client_id
-        .as_deref()
+    let client_id = body_client_id
         .and_then(non_empty_credential)
         .and_then(|raw| raw.parse::<uuid::Uuid>().ok())
         .map(ClientId::new)
@@ -2195,9 +2270,11 @@ async fn token_exchange_impl(
 ///
 /// Per RFC 7009, returns 200 OK regardless of whether the token was
 /// actually revoked (to prevent information leakage). Requires client
-/// authentication via HTTP Basic Auth or body `client_id`/`client_secret`,
-/// and revokes only a token issued to the authenticated client (RFC 7009
-/// §2.1); any other token is a silent 200 no-op.
+/// authentication via HTTP Basic Auth, body `client_id`/`client_secret`, or
+/// a `private_key_jwt` assertion (mandatory for a secretless
+/// `private_key_jwt` client), and revokes only a token issued to the
+/// authenticated client (RFC 7009 §2.1); any other token is a silent 200
+/// no-op.
 async fn token_revocation(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2208,13 +2285,7 @@ async fn token_revocation(
         Err(e) => return e.into_response(),
     };
 
-    let client_id = match verify_endpoint_client(
-        &state,
-        &realm_id,
-        &headers,
-        body.client_id.as_deref(),
-        body.client_secret.as_deref(),
-    ) {
+    let client_id = match verify_revocation_client(&state, &realm_id, &headers, &body) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
@@ -3300,13 +3371,7 @@ async fn realm_token_revocation(
         Ok(id) => id,
         Err(e) => return e,
     };
-    let client_id = match verify_endpoint_client(
-        &state,
-        &realm_id,
-        &headers,
-        body.client_id.as_deref(),
-        body.client_secret.as_deref(),
-    ) {
+    let client_id = match verify_revocation_client(&state, &realm_id, &headers, &body) {
         Ok(id) => id,
         Err(resp) => return resp,
     };

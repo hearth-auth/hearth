@@ -26,17 +26,22 @@ mod common;
 
 use std::sync::Arc;
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use hearth::core::{ClientId, RealmId};
+use hearth::identity::tokens::{Audience, JwtAssertionClaims};
 use hearth::identity::{
-    ClientCredentialsRequest, ClientTrustLevel, CreateRealmRequest, CreateUserRequest,
-    RegisterClientRequest, SessionContext, TokenIntrospectionRequest, TokenIssuanceContext,
+    AccessTokenAuthorization, ClientCredentialsRequest, ClientTrustLevel, CreateRealmRequest,
+    CreateUserRequest, DeviceAuthorizationRequest, RegisterClientRequest, Rfc8693Request,
+    SessionContext, SigningKey, TokenIntrospectionRequest, TokenIssuanceContext,
+    UpdateClientRequest,
 };
 use hearth::protocol::admin_auth::AdminRateLimiter;
 use hearth::protocol::grpc::oauth::OAuthSvc;
 use hearth::protocol::grpc::server::GrpcState;
 use hearth::protocol::proto::identity::v1 as id_pb;
 use hearth::protocol::proto::identity::v1::o_auth_service_server::OAuthService;
-use tonic::Request as TonicRequest;
+use tonic::{Code, Request as TonicRequest};
 
 const SECRET: &str = "revoke-ownership-secret-1!";
 
@@ -404,4 +409,445 @@ async fn grpc_revoke_only_revokes_the_callers_own_tokens() {
         !is_active(&h, &realm, &access),
         "the owning client revokes its own token over gRPC"
     );
+}
+
+// ===== Tokens minted by real grant flows carry their issuing client =====
+//
+// The cases above mint through `issue_tokens_with_context` directly. The ones
+// below go through the grant that really issues the token, because a grant
+// that forgets to record its client leaves the owning client unable to revoke
+// — a silent `200` over a token that stays live.
+
+/// Runs a full RFC 8628 device flow for `client` and returns the access and
+/// refresh tokens the poll mints.
+fn device_pair(h: &common::TestHarness, realm: &RealmId, client: &ClientId) -> (String, String) {
+    let user = h
+        .identity()
+        .create_user(
+            realm,
+            &CreateUserRequest {
+                email: format!("tv-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "TV viewer".to_string(),
+                ..CreateUserRequest::default()
+            },
+        )
+        .expect("create user");
+    let auth = h
+        .identity()
+        .device_authorize(
+            realm,
+            &DeviceAuthorizationRequest {
+                client_id: client.clone(),
+                scope: None,
+            },
+        )
+        .expect("device authorize");
+    h.identity()
+        .approve_device(realm, &auth.user_code, user.id())
+        .expect("approve device");
+    let resp = h
+        .identity()
+        .poll_device_token(realm, &auth.device_code, client)
+        .expect("poll device token");
+    (
+        resp.access_token().to_string(),
+        resp.refresh_token().to_string(),
+    )
+}
+
+#[tokio::test]
+async fn a_device_client_revokes_its_own_device_grant_access_token() {
+    let env = server_env().await;
+    let tv = register(&env.h, &env.realm_id, None);
+    let (access, _) = device_pair(&env.h, &env.realm_id, &tv);
+    assert!(is_active(&env.h, &env.realm_id, &access), "precondition");
+
+    assert_eq!(revoke_realm(&env, &access, &tv, None).await, 200);
+    assert!(
+        !is_active(&env.h, &env.realm_id, &access),
+        "the device client the token was issued to must be able to revoke it"
+    );
+}
+
+#[tokio::test]
+async fn a_device_client_revokes_its_own_device_grant_refresh_token() {
+    let env = server_env().await;
+    let tv = register(&env.h, &env.realm_id, None);
+    let (access, refresh) = device_pair(&env.h, &env.realm_id, &tv);
+
+    assert_eq!(revoke_header_form(&env, &refresh, &tv).await, 200);
+    assert!(
+        !is_active(&env.h, &env.realm_id, &access),
+        "revoking the device grant's refresh token ends its session"
+    );
+    assert!(
+        env.h
+            .identity()
+            .refresh_tokens(&env.realm_id, &refresh, None, None)
+            .is_err(),
+        "a revoked device-grant refresh token must not rotate"
+    );
+}
+
+#[tokio::test]
+async fn another_client_cannot_revoke_a_device_grant_token() {
+    let env = server_env().await;
+    let tv = register(&env.h, &env.realm_id, None);
+    let attacker = register(&env.h, &env.realm_id, None);
+    let (access, refresh) = device_pair(&env.h, &env.realm_id, &tv);
+
+    assert_eq!(revoke_realm(&env, &access, &attacker, None).await, 200);
+    assert_eq!(revoke_header_form(&env, &refresh, &attacker).await, 200);
+    assert!(
+        is_active(&env.h, &env.realm_id, &access),
+        "a device-grant token issued to another client must survive"
+    );
+}
+
+// ===== RFC 8693 token exchange: the exchanged token belongs to the actor =====
+
+/// Registers a confidential client declaring `scope`, able to mint
+/// `client_credentials` tokens.
+fn register_scoped(h: &common::TestHarness, realm: &RealmId, scope: &str) -> ClientId {
+    h.identity()
+        .register_client(
+            realm,
+            &RegisterClientRequest {
+                client_name: format!("scoped-{}", uuid::Uuid::new_v4()),
+                redirect_uris: vec!["https://app.example.com/cb".to_string()],
+                client_secret: Some(SECRET.to_string()),
+                grant_types: vec!["client_credentials".to_string()],
+                trust_level: ClientTrustLevel::FirstParty,
+                declared_scopes: scope.split_whitespace().map(String::from).collect(),
+                access_token_authorization: AccessTokenAuthorization::Embedded,
+                ..RegisterClientRequest::default()
+            },
+        )
+        .expect("register scoped client")
+        .client_id()
+        .clone()
+}
+
+/// A user access token issued to `client` with a non-empty `scope`, so it can
+/// be exchanged (RFC 8693 §4.4 refuses an empty scope intersection).
+fn scoped_user_access(h: &common::TestHarness, realm: &RealmId, client: &ClientId) -> String {
+    let user = h
+        .identity()
+        .create_user(
+            realm,
+            &CreateUserRequest {
+                email: format!("subject-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "Subject".to_string(),
+                ..CreateUserRequest::default()
+            },
+        )
+        .expect("create user");
+    let session = h
+        .identity()
+        .create_session(realm, user.id(), &SessionContext::default())
+        .expect("create session");
+    h.identity()
+        .issue_tokens_with_context(
+            realm,
+            user.id(),
+            session.id(),
+            &TokenIssuanceContext {
+                client_id: Some(client.clone()),
+                granted_scopes: std::iter::once("read".to_string()).collect(),
+                ..TokenIssuanceContext::default()
+            },
+        )
+        .expect("issue subject tokens")
+        .access_token()
+        .to_string()
+}
+
+/// Exchanges `subject_token` at the token endpoint as `actor` (RFC 8693).
+fn exchange(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    actor: &ClientId,
+    subject_token: &str,
+) -> String {
+    h.identity()
+        .rfc8693_token_exchange(
+            realm,
+            &Rfc8693Request {
+                client_id: actor.clone(),
+                subject_token: subject_token.to_string(),
+                subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+                actor_token: None,
+                actor_token_type: None,
+                requested_token_type: None,
+                scope: None,
+                resource: None,
+                audience: None,
+                dpop_jkt: None,
+            },
+        )
+        .expect("token exchange")
+        .access_token
+}
+
+#[tokio::test]
+async fn an_exchanged_user_token_belongs_to_the_exchanging_client() {
+    let env = server_env().await;
+    let subject_client = register(&env.h, &env.realm_id, None);
+    let actor = register_scoped(&env.h, &env.realm_id, "read");
+    let subject = scoped_user_access(&env.h, &env.realm_id, &subject_client);
+    let exchanged = exchange(&env.h, &env.realm_id, &actor, &subject);
+    assert!(is_active(&env.h, &env.realm_id, &exchanged), "precondition");
+
+    assert_eq!(
+        revoke_realm(&env, &exchanged, &subject_client, None).await,
+        200
+    );
+    assert!(
+        is_active(&env.h, &env.realm_id, &exchanged),
+        "the subject token's client was not issued the exchanged token and must not revoke it"
+    );
+
+    assert_eq!(
+        revoke_realm(&env, &exchanged, &actor, Some(SECRET)).await,
+        200
+    );
+    assert!(
+        !is_active(&env.h, &env.realm_id, &exchanged),
+        "the client the exchanged token was issued to must be able to revoke it"
+    );
+    assert!(
+        is_active(&env.h, &env.realm_id, &subject),
+        "revoking the delegated token must not end the session behind the subject \
+         client's own token — that would revoke a token issued to another client"
+    );
+}
+
+#[tokio::test]
+async fn an_exchanged_machine_token_belongs_to_the_exchanging_client() {
+    let env = server_env().await;
+    let subject_client = register_scoped(&env.h, &env.realm_id, "read");
+    let actor = register_scoped(&env.h, &env.realm_id, "read");
+    let subject = env
+        .h
+        .identity()
+        .client_credentials_token(
+            &env.realm_id,
+            &ClientCredentialsRequest {
+                client_id: subject_client.clone(),
+                client_secret: Some(SECRET.to_string()),
+                scope: Some("read".to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("mint subject machine token")
+        .access_token()
+        .to_string();
+    let exchanged = exchange(&env.h, &env.realm_id, &actor, &subject);
+    assert!(is_active(&env.h, &env.realm_id, &exchanged), "precondition");
+
+    assert_eq!(
+        revoke_realm(&env, &exchanged, &subject_client, Some(SECRET)).await,
+        200
+    );
+    assert!(
+        is_active(&env.h, &env.realm_id, &exchanged),
+        "the subject machine token's client must not revoke a token issued to another client"
+    );
+
+    assert_eq!(
+        revoke_realm(&env, &exchanged, &actor, Some(SECRET)).await,
+        200
+    );
+    assert!(
+        !is_active(&env.h, &env.realm_id, &exchanged),
+        "the exchanging client revokes the machine token it was issued"
+    );
+}
+
+// ===== private_key_jwt clients authenticate with their assertion =====
+
+const CLIENT_ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+
+/// Registers a secretless client that authenticates with `private_key_jwt`
+/// (an assertion key and no `client_secret`, as a FAPI 2.0 client must be).
+fn register_pkjwt(h: &common::TestHarness, realm: &RealmId) -> (ClientId, SigningKey) {
+    let key = SigningKey::generate().expect("key");
+    let client_id = register(h, realm, None);
+    h.identity()
+        .update_client(
+            realm,
+            &client_id,
+            &UpdateClientRequest {
+                assertion_public_key: Some(Some(URL_SAFE_NO_PAD.encode(key.public_key_bytes()))),
+                ..Default::default()
+            },
+        )
+        .expect("install assertion key");
+    (client_id, key)
+}
+
+/// Signs a `private_key_jwt` assertion for the realm's issuer.
+fn assertion(env: &Env, key: &SigningKey, client_id: &ClientId) -> String {
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_secs(),
+    )
+    .expect("secs");
+    let issuer = env.h.identity().oidc_discovery().issuer;
+    key.issue_assertion_jwt(&JwtAssertionClaims {
+        iss: client_id.to_string(),
+        sub: client_id.to_string(),
+        aud: Audience::single(format!("{issuer}/realms/{}", env.realm_name)),
+        exp: now + 60,
+        jti: Some(uuid::Uuid::new_v4().to_string()),
+        iat: Some(now),
+    })
+    .expect("sign assertion")
+}
+
+async fn revoke_realm_json(env: &Env, body: serde_json::Value) -> u16 {
+    reqwest::Client::new()
+        .post(format!("{}/realms/{}/revoke", env.base, env.realm_name))
+        .json(&body)
+        .send()
+        .await
+        .expect("request")
+        .status()
+        .as_u16()
+}
+
+#[tokio::test]
+async fn a_private_key_jwt_client_cannot_revoke_by_client_id_alone() {
+    let env = server_env().await;
+    let (client, _key) = register_pkjwt(&env.h, &env.realm_id);
+    let (access, _) = user_pair(&env.h, &env.realm_id, Some(&client));
+
+    assert_eq!(
+        revoke_realm(&env, &access, &client, None).await,
+        401,
+        "a private_key_jwt client is confidential: its public client_id alone must not authenticate"
+    );
+    assert_eq!(
+        revoke_realm(&env, &access, &client, Some("a-made-up-secret-1!")).await,
+        401,
+        "a made-up secret must not stand in for the assertion"
+    );
+    assert!(
+        is_active(&env.h, &env.realm_id, &access),
+        "an unauthenticated revocation must not revoke anything"
+    );
+}
+
+#[tokio::test]
+async fn a_private_key_jwt_client_revokes_its_own_token_with_its_assertion() {
+    let env = server_env().await;
+    let (client, key) = register_pkjwt(&env.h, &env.realm_id);
+    let (access, _) = user_pair(&env.h, &env.realm_id, Some(&client));
+    let id = client.as_uuid().to_string();
+
+    let stranger = SigningKey::generate().expect("key");
+    let status = revoke_realm_json(
+        &env,
+        serde_json::json!({
+            "token": access,
+            "client_id": id,
+            "client_assertion_type": CLIENT_ASSERTION_TYPE,
+            "client_assertion": assertion(&env, &stranger, &client),
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 401,
+        "an assertion signed by the wrong key is refused"
+    );
+    assert!(is_active(&env.h, &env.realm_id, &access));
+
+    let status = revoke_realm_json(
+        &env,
+        serde_json::json!({
+            "token": access,
+            "client_id": id,
+            "client_assertion_type": CLIENT_ASSERTION_TYPE,
+            "client_assertion": assertion(&env, &key, &client),
+        }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        !is_active(&env.h, &env.realm_id, &access),
+        "a valid assertion authenticates the owning client, which revokes its token"
+    );
+}
+
+#[tokio::test]
+async fn revoke_refuses_an_assertion_combined_with_a_secret() {
+    let env = server_env().await;
+    let (client, key) = register_pkjwt(&env.h, &env.realm_id);
+    let (access, _) = user_pair(&env.h, &env.realm_id, Some(&client));
+
+    let status = revoke_realm_json(
+        &env,
+        serde_json::json!({
+            "token": access,
+            "client_id": client.as_uuid().to_string(),
+            "client_secret": "also-a-secret-1!",
+            "client_assertion_type": CLIENT_ASSERTION_TYPE,
+            "client_assertion": assertion(&env, &key, &client),
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "RFC 6749 §2.3: more than one client authentication method is invalid_request"
+    );
+    assert!(is_active(&env.h, &env.realm_id, &access));
+}
+
+#[tokio::test]
+async fn grpc_revoke_refuses_a_private_key_jwt_client_by_client_id_alone() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    let (client, _key) = register_pkjwt(&h, &realm);
+    let (access, _) = user_pair(&h, &realm, Some(&client));
+    let svc = OAuthSvc::new(grpc_state(&h));
+
+    let err = svc
+        .revoke(grpc_revoke_request(&realm, &access, &client))
+        .await
+        .expect_err("a private_key_jwt client_id alone must not authenticate over gRPC");
+    assert_eq!(err.code(), Code::Unauthenticated);
+    assert!(is_active(&h, &realm, &access));
+}
+
+#[tokio::test]
+async fn discovery_advertises_private_key_jwt_for_revocation() {
+    let env = server_env().await;
+    for url in [
+        format!("{}/.well-known/openid-configuration", env.base),
+        format!(
+            "{}/realms/{}/.well-known/openid-configuration",
+            env.base, env.realm_name
+        ),
+    ] {
+        let doc: serde_json::Value = reqwest::get(&url)
+            .await
+            .expect("request")
+            .json()
+            .await
+            .expect("json");
+        let methods: Vec<&str> = doc["revocation_endpoint_auth_methods_supported"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{url}: revocation auth methods must be advertised"))
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert!(
+            methods.contains(&"private_key_jwt"),
+            "{url}: got {methods:?}"
+        );
+    }
 }

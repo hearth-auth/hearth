@@ -134,6 +134,20 @@ impl OAuthService for OAuthSvc {
         let realm_id = extract_realm_id(req.metadata())?;
         let client_id =
             verify_grpc_client_auth(req.metadata(), &realm_id, self.state.identity.as_ref())?;
+        // `verify_grpc_client_auth` accepts any secretless client on its
+        // `client_id` alone. A `private_key_jwt` client is secretless but
+        // confidential, and this RPC carries no assertion, so it cannot
+        // authenticate here — refuse it rather than let anyone who knows its
+        // public identifier revoke as it (RFC 7009 §2.1). It revokes over
+        // HTTP with its assertion.
+        let client = self
+            .state
+            .identity
+            .get_client(&realm_id, &client_id)
+            .map_err(identity_to_status)?;
+        if client.is_some_and(|c| c.requires_client_assertion()) {
+            return Err(Status::unauthenticated("invalid client credentials"));
+        }
         // RFC 7009 §2.1: revoke only a token issued to the authenticated
         // client; any other token is a silent OK no-op, as on the HTTP routes.
         let mut body: domain::TokenRevocationRequest = req.into_inner().into();

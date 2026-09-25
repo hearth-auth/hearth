@@ -557,6 +557,19 @@ impl OAuthClient {
         self.assertion_public_key.as_deref()
     }
 
+    /// Returns whether this client authenticates ONLY with a `private_key_jwt`
+    /// assertion (RFC 7523 §2.2): it has an assertion key and no secret, as a
+    /// FAPI 2.0 client must.
+    ///
+    /// Such a client is confidential even though [`Self::is_confidential`]
+    /// (which reads the secret hash) says otherwise, so a surface that accepts
+    /// a secretless client on its `client_id` alone MUST refuse it unless it
+    /// presented a verified assertion — otherwise anyone who knows its public
+    /// identifier can act as it.
+    pub fn requires_client_assertion(&self) -> bool {
+        self.assertion_public_key.is_some() && self.client_secret_hash.is_none()
+    }
+
     /// Sets the assertion public key.  `None` clears it, disabling the
     /// `jwt-bearer` grant for this client.
     pub(crate) fn set_assertion_public_key(&mut self, key: Option<String>) {

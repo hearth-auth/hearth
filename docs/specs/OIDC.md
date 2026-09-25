@@ -426,7 +426,7 @@ The `/.well-known/openid-configuration` endpoint advertises FAPI-relevant capabi
   "request_uri_parameter_supported": true,
   "end_session_endpoint": "https://as.example.com/realms/{realm}/end_session",
   "introspection_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "private_key_jwt"],
-  "revocation_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post"]
+  "revocation_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post", "private_key_jwt"]
 }
 ```
 
@@ -562,8 +562,13 @@ Basic header is `400 invalid_request` (RFC 6749 §2.3, §5.2). After authenticat
 audience restriction applies to the authenticated client on every surface, gRPC included.
 
 **Revocation still accepts public clients** (RFC 7009 §2.1): `POST /revoke`, its realm twin and
-gRPC `Revoke` authenticate a public client by `client_id` alone and a confidential client by its
-secret.
+gRPC `Revoke` authenticate a public client by `client_id` alone and a secret-bearing confidential
+client by its secret (`client_secret_basic` / `client_secret_post`). A `private_key_jwt` client —
+one with an assertion key and no secret, as every FAPI 2.0 client is — is confidential too: the
+HTTP routes accept its `client_assertion` (same rules and `400 invalid_request` on a combined
+secret as introspection above) and refuse it with `401 invalid_client` when it presents only its
+`client_id` or a made-up secret. gRPC `Revoke` carries no assertion, so it refuses such a client
+with `UNAUTHENTICATED`; it revokes over HTTP.
 
 **Revocation is restricted to the caller's own tokens** (RFC 7009 §2.1: the server "verifies
 whether the token was issued to the client making the revocation request"). Every wire surface
@@ -573,16 +578,24 @@ resolved, in order, from:
 
 | Token shape | Issuing client |
 |-------------|----------------|
-| Carries `azp` (ID tokens, authorized-party-bound tokens) | `azp` |
-| Carries `fid` (every access and refresh token a grant mints) | the grant family's `client_id` |
+| Carries `azp` — ID tokens, and RFC 8693 exchanged tokens (the authenticated client that performed the exchange, not the subject token's client) | `azp` |
+| Carries `fid` and no `azp` — access and refresh tokens from the `authorization_code` and `device_code` grants, and every rotation of them | the grant family's `client_id` |
 | Sessionless (`sid = "none"`: `client_credentials`, `jwt-bearer`) | `sub` (the client itself) |
 | Anything else | none |
 
+The grants that authenticate no OAuth client record none on the grant family: the step-up-MFA and
+magic-link grants, required-action completion, and console / admin / bootstrap logins. Their tokens
+are Hearth first-party session tokens and fall in the last row.
+
 Audience membership does **not** confer ownership — a resource server named in `aud` received the
 token; it was not issued it, and it MUST NOT be able to end the user's session or grant family.
-A token issued to no client (a Hearth first-party session token, or a grant family with no recorded
-client) is not revocable through these endpoints by any client; the admin session API ends such a
-session. A token issued to another client is a silent no-op: the response is `200` (gRPC `OK`),
+A token issued to no client (a Hearth first-party session token) is not revocable through these
+endpoints by any client; the admin session API ends such a session.
+
+An exchanged token inherits the subject token's `sid`, so revoking it by ending that session would
+also kill the subject client's own tokens. A delegated token (one carrying `act`) is therefore
+revoked by its `jti` (the blocklist the sessionless tokens use), leaving the subject's session
+live. A token issued to another client is a silent no-op: the response is `200` (gRPC `OK`),
 identical to the response for an invalid token (RFC 7009 §2.2), and nothing is revoked or audited.
 `revoking_client_id: None` is reserved for trusted in-process callers that have authorized the
 revocation themselves. Covered by `tests/revoke_client_ownership.rs`.
@@ -592,7 +605,7 @@ Discovery advertises both sets (RFC 8414 §2):
 ```json
 {
   "introspection_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "private_key_jwt"],
-  "revocation_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post"]
+  "revocation_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post", "private_key_jwt"]
 }
 ```
 
@@ -611,7 +624,7 @@ Discovery advertises both sets (RFC 8414 §2):
 | `tests/oauth_form_encoding.rs` | Form + JSON content-type acceptance on token/revoke/introspect/PAR/device-authorization and their realm twins (HEA-2077) |
 | `tests/device_grant_client_auth.rs` | Confidential-client authentication on both device-grant endpoints and both realm twins (audit 2026-08-28 §4.19#4, §4.22#6) |
 | `tests/introspect_confidential_only.rs` | Introspection refuses public clients (HTTP, realm twin, gRPC); secret and `private_key_jwt` authentication; gRPC audience restriction; discovery auth-method metadata; public-client revocation still accepted (task 26.43) |
-| `tests/revoke_client_ownership.rs` | RFC 7009 §2.1 revocation ownership — a client revokes only tokens issued to it (`azp`, grant family, `client_credentials` subject) on `/revoke`, the realm twin and gRPC `Revoke`; foreign and first-party tokens are a silent `200` no-op |
+| `tests/revoke_client_ownership.rs` | RFC 7009 §2.1 revocation ownership — a client revokes only tokens issued to it (`azp`, grant family, `client_credentials` subject) on `/revoke`, the realm twin and gRPC `Revoke`; foreign and first-party tokens are a silent `200` no-op; device-grant tokens belong to the device client and exchanged tokens to the exchanging client, both minted through the real grant; `private_key_jwt` clients must present their assertion |
 | `tests/realm_token_exchange_client_auth.rs` | Token-exchange client auth enforcement + DPoP re-binding prevention on both endpoints (HEA-2024) |
 | `tests/fixtures/fapi2/conformance_vectors.json` | Test vectors for per-client FAPI 2.0 |
 
