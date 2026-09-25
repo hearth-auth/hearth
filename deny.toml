@@ -113,3 +113,12 @@ reason = "Not an approved HTTP client; use ureq."
 [[bans.deny]]
 name = "isahc"
 reason = "Not an approved HTTP client; use ureq."
+
+# Concurrency primitives. `arc-swap` 1.9.2 corrupts the heap under the
+# `load` + `rcu` pattern (tasks 26.1 and 26.5: 3 failures in 150 loaded runs
+# under MALLOC_CHECK_=3, and no release that fixes it). Every call site moved
+# to `core::EpochCell` (hot path) or `core::SwapCell` (off it);
+# tests/arc_swap_removed.rs guards the manifests, this guards the graph.
+[[bans.deny]]
+name = "arc-swap"
+reason = "Corrupts the heap under load + rcu (tasks 26.1/26.5); use core::EpochCell or core::SwapCell."

@@ -23,7 +23,6 @@ name = "hearth"
 path = "src/main.rs"
 
 [dependencies]
-arc-swap = "1"
 askama = "0.12"
 hashbrown = "0.17"
 pbjson = "0.9"
@@ -37,6 +36,11 @@ ciborium = "0.2"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 crc32fast = "1"
+# Epoch-based reclamation behind `core::EpochCell`, the hot-path atomic-Arc
+# cell (task 26.5). It replaced `arc-swap`, whose 1.9.2 release corrupts the
+# heap under load + rcu (task 26.1); deny.toml bans it and
+# tests/arc_swap_removed.rs keeps it out of both lockfiles.
+# Already in the tree through crossbeam-skiplist; MIT/Apache-2.0.
 crossbeam-epoch = "0.9"
 crossbeam-skiplist = "0.1"
 data-encoding = "2"
