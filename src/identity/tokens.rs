@@ -53,6 +53,8 @@ pub const RSA_ID_TOKEN_MIN_MODULUS_BITS: usize = 2048;
 ///
 /// RSA-3072 is the ~128-bit security level (NIST SP 800-57 Pt. 1 Table 2),
 /// matching the Ed25519 keys used for everything else.
+/// [`RsaIdTokenSigningKey::generate`] derives its key size from this value;
+/// it must be one `rcgen` can generate (2048, 3072 or 4096).
 pub const RSA_ID_TOKEN_MODULUS_BITS: usize = 3072;
 
 /// Maximum clock skew tolerated when validating `nbf` (not-before) and `exp`.
@@ -1394,11 +1396,22 @@ impl RsaIdTokenSigningKey {
     /// Returns [`IdentityError::SigningError`] if key generation fails.
     pub fn generate() -> Result<Self, IdentityError> {
         use zeroize::Zeroize as _;
-        let mut key_pair =
-            rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_3072)
-                .map_err(|e| IdentityError::SigningError {
-                    reason: format!("RSA ID-token key generation failed: {e}"),
-                })?;
+        // Derived from the constant, never hard-coded beside it, so
+        // `RSA_ID_TOKEN_MODULUS_BITS` is the size every new key actually has.
+        let size = match RSA_ID_TOKEN_MODULUS_BITS {
+            2048 => rcgen::RsaKeySize::_2048,
+            3072 => rcgen::RsaKeySize::_3072,
+            4096 => rcgen::RsaKeySize::_4096,
+            bits => {
+                return Err(IdentityError::SigningError {
+                    reason: format!("unsupported RSA ID-token key size: {bits} bits"),
+                })
+            }
+        };
+        let mut key_pair = rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, size)
+            .map_err(|e| IdentityError::SigningError {
+                reason: format!("RSA ID-token key generation failed: {e}"),
+            })?;
         let pkcs8 = zeroize::Zeroizing::new(key_pair.serialize_der());
         // rcgen keeps its own copy of the PKCS#8 document; scrub it rather than
         // leave a private key in freed memory.
@@ -2541,10 +2554,23 @@ mod tests {
         format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig))
     }
 
+    /// RSA-3072 is the ~128-bit level that matches Ed25519 (NIST SP 800-57
+    /// Pt. 1 Table 2); a change to the policy value must be deliberate.
     #[test]
-    fn rsa_id_token_key_is_3072_bit_and_publishes_an_rs256_jwk() {
+    fn rsa_id_token_key_size_is_rsa_3072() {
+        assert_eq!(RSA_ID_TOKEN_MODULUS_BITS, 3072);
+    }
+
+    /// The generator follows [`RSA_ID_TOKEN_MODULUS_BITS`] rather than a size
+    /// hard-coded beside it, so the constant cannot claim a size keys lack.
+    #[test]
+    fn rsa_id_token_key_follows_the_configured_size_and_publishes_an_rs256_jwk() {
         let key = RsaIdTokenSigningKey::generate().expect("generate");
-        assert_eq!(key.modulus_bits(), 3072, "new ID-token keys are RSA-3072");
+        assert_eq!(
+            key.modulus_bits(),
+            RSA_ID_TOKEN_MODULUS_BITS,
+            "new ID-token keys must have the configured modulus size"
+        );
 
         let jwk = key.to_jwk().expect("jwk");
         assert_eq!(jwk.kty, "RSA");
@@ -2556,7 +2582,11 @@ mod tests {
         let n = URL_SAFE_NO_PAD
             .decode(jwk.n.as_deref().expect("n"))
             .expect("decode n");
-        assert_eq!(n.len(), 384, "an RSA-3072 modulus is 384 bytes");
+        assert_eq!(
+            n.len(),
+            RSA_ID_TOKEN_MODULUS_BITS / 8,
+            "n is the minimal big-endian modulus: no ASN.1 sign byte"
+        );
         assert_eq!(jwk.e.as_deref(), Some("AQAB"));
     }
 
