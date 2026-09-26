@@ -4765,8 +4765,9 @@ fn register_submit_impl(
     // P-5 email reputation (task 20.13). The adapter was never constructed on
     // a production path, so `security.providers.email_reputation` did nothing
     // at all. It is opt-in and only the disposable-domain signal refuses:
-    // role addresses (`admin@`, `support@`) and a missing MX are legitimate in
-    // plenty of tenants and are recorded, not blocked (§6.1 fail-open).
+    // role addresses (`admin@`, `support@`) are legitimate in plenty of
+    // tenants and are recorded, not blocked (§6.1 fail-open). No DNS/MX
+    // lookup is performed.
     let reputation = state.abuse_guards.check_email_reputation(form.email.trim());
     if reputation.is_disposable {
         tracing::warn!("register_submit: refused a disposable email domain");
@@ -4775,10 +4776,9 @@ fn register_submit_impl(
             form.email,
         );
     }
-    if reputation.is_role_address || reputation.domain_has_no_mx {
+    if reputation.is_role_address {
         tracing::info!(
             role_address = reputation.is_role_address,
-            no_mx = reputation.domain_has_no_mx,
             "register_submit: email reputation signal recorded"
         );
     }

@@ -1457,31 +1457,28 @@ It is **not** on the `validate_token()` or `lookup_session()` hot path.
 
 `EmailReputation` is the P-5 extension point for email-address reputation checks.
 The built-in `BuiltinEmailReputation` reference adapter ships with Hearth.
-External adapters (Kickbox, ZeroBounce, NeverBounce) implement the trait and
-are wired at startup via `security.providers.email_reputation`.
+`security.providers.email_reputation.enabled` chooses between the built-in
+adapter and the no-op. External services (Kickbox, ZeroBounce, NeverBounce)
+can implement the trait, but there is no configuration key that loads one —
+wiring a third-party adapter is a code change.
 
 ### Verdict flags
 
 | Flag | Meaning |
 |------|---------|
 | `is_disposable` | Domain matched the bundled (~400-entry) disposable-domain list |
-| `domain_has_no_mx` | Domain could not be confirmed to have an MX record (see DNS note) |
 | `is_role_address` | Local part is a well-known role address (`noreply`, `admin`, etc.) |
 
 All flags are **advisory** — callers decide policy.  `is_clean()` is true only
-when all three flags are false.
+when both flags are false.
 
-### DNS MX validation (stub)
+### No DNS / MX lookup
 
-True MX validation requires an async DNS resolver (`hickory-resolver` or
-equivalent).  The built-in adapter sets `domain_has_no_mx = false` unconditionally
-(assume domain is valid).  To enable real MX checking:
-
-1. Add `hickory-resolver = "0.25"` to `Cargo.toml`.
-2. Implement `lookup_mx(domain)` in `BuiltinEmailReputation::check()` using the
-   `hickory_resolver::TokioAsyncResolver`.
-3. Change the trait signature to `async fn check` (requires `async-trait` or
-   native AFIT with a `Box<dyn Future>` return for dyn dispatch).
+Hearth performs no DNS lookup of the email domain — there is no resolver
+dependency and `check()` is synchronous by contract. A domain that does not
+exist or has no MX record is **not** flagged. (An earlier `no-MX` verdict flag
+was removed: nothing ever set it, so it implied a check that never ran.) Use
+email verification to establish that an address receives mail.
 
 ### Disposable-domain list
 

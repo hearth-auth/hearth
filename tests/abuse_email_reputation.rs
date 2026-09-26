@@ -2,7 +2,7 @@
 //!
 //! D-4 taxonomy:
 //! - **Unit**: verdict correctness for disposable domains, role addresses,
-//!   MX stub, and malformed inputs.
+//!   the absence of any DNS/MX signal, and malformed inputs.
 //! - **Adversarial**: case-variation attempts, lookalike domains, operator
 //!   extra-domain injection.
 //!
@@ -206,25 +206,55 @@ fn p5_unit_disposable_and_role_both_flagged() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Unit: DNS MX check stub
+// Unit: no DNS MX signal
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The stub MX check always returns false (assume domain is valid).
-/// This ensures no registrations are blocked due to the absent DNS resolver.
+/// The verdict carries exactly the two signals Hearth actually computes.
+///
+/// There used to be a `domain_has_no_mx` flag that no adapter ever set: the
+/// built-in "MX check" was a stub hard-wired to `false`, so the flag claimed
+/// a DNS check Hearth does not perform. This exhaustive literal (no
+/// `..Default::default()`) stops compiling if a flag nothing computes is
+/// reintroduced without a real implementation behind it.
 #[test]
-fn p5_unit_mx_stub_always_false_clean_domain() {
-    let v = p().check("user@example.com");
-    assert!(
-        !v.domain_has_no_mx,
-        "stub MX check must return false for any domain; got {v:?}"
-    );
+fn p5_verdict_has_only_computed_signals() {
+    let v = EmailReputationVerdict {
+        is_disposable: false,
+        is_role_address: false,
+    };
+    assert!(v.is_clean());
+    assert_eq!(v, EmailReputationVerdict::default());
 }
 
-/// Even a clearly fake TLD has domain_has_no_mx = false (stub is unconditional).
+/// A domain that cannot resolve is not flagged: the built-in adapter performs
+/// no DNS lookup, so reachability is never a signal (documented, not implied).
 #[test]
-fn p5_unit_mx_stub_always_false_fake_domain() {
+fn p5_unit_unresolvable_domain_is_clean() {
     let v = p().check("user@definitely-does-not-exist.invalid");
-    assert!(!v.domain_has_no_mx, "stub must always be false; got {v:?}");
+    assert!(v.is_clean(), "no DNS signal exists; got {v:?}");
+}
+
+/// The operator-facing specs must not claim an MX check Hearth does not do.
+#[test]
+fn p5_docs_make_no_mx_claim() {
+    let docs = [
+        (
+            "docs/specs/ABUSE.md",
+            include_str!("../docs/specs/ABUSE.md"),
+        ),
+        (
+            "docs/specs/CONFIGURATION.md",
+            include_str!("../docs/specs/CONFIGURATION.md"),
+        ),
+    ];
+    for (name, text) in docs {
+        for banned in ["domain_has_no_mx", "domain with no MX", "DNS MX validation"] {
+            assert!(
+                !text.contains(banned),
+                "{name} still claims an MX signal ({banned:?}); Hearth performs no MX lookup"
+            );
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
