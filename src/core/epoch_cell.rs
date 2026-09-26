@@ -258,7 +258,8 @@ impl<T> EpochCell<T> {
     /// Takes no lock and makes no syscall, and the read allocates nothing
     /// itself. Every 128th load on a thread also runs a slice of the cells'
     /// epoch collector, which allocates at most once per 1,024 loads on that
-    /// thread, and only while cells are being written — see the module docs.
+    /// thread, and only while cells are being written (or a thread that used
+    /// one exits) — see the module docs.
     /// The guard must be dropped promptly: hold it across a short read only,
     /// never across I/O, a lock or a long scan — use
     /// [`load_full`](Self::load_full) for those.

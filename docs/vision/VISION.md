@@ -326,7 +326,7 @@ Hearth is written in Rust. This is a deliberate choice, not a trend-following on
 
 The hot path — the code that executes on every authenticated request — is the most performance-critical part of the system. It's designed with the following constraints:
 
-1. **Zero allocations**: all data structures used on the hot path are pre-allocated or arena-allocated. No heap allocation per request — except the epoch collector's own bookkeeping behind lock-free reads (item 3), which is amortised to at most one allocation per 1,024 reads on a thread, and to none while nothing is being written ([ARCHITECTURE.md §3.2](../specs/ARCHITECTURE.md#32-hard-rules)).
+1. **Zero allocations**: all data structures used on the hot path are pre-allocated or arena-allocated. No heap allocation per request — except the epoch collector's own bookkeeping behind lock-free reads (item 3), which is amortised to at most one allocation per 1,024 reads on a thread, and to none while no cell is being written and no thread that used one exits ([ARCHITECTURE.md §3.2](../specs/ARCHITECTURE.md#32-hard-rules)).
 2. **No syscalls for hot reads**: hot-tier data (active sessions, frequently-accessed user records) lives in lock-free in-process hash structures (`EpochCell<HashMap>`, `src/storage/tiered.rs`), reclaimed by epoch rather than by lock. Hot-tier reads are in-memory hash lookups, not I/O operations. Cold-tier reads (SST files) use `memmap2` and incur a disk I/O on first access; see Section 7.3.1.
 3. **Lock-free reads**: read operations use epoch-based reclamation or read-copy-update patterns. Readers never block on writers.
 4. **Batched writes**: mutations are batched and committed to the WAL in groups, amortizing the cost of fsync across multiple operations.
