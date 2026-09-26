@@ -2660,10 +2660,18 @@ impl EmbeddedIdentityEngine {
     /// Whether `claims` belong to a token issued to `client` (RFC 7009 §2.1).
     ///
     /// The issuing client is, in order:
-    /// 1. `azp` — set on ID tokens and any token bound to an authorized party;
-    /// 2. the grant family's `client_id` — every user access and refresh token
+    /// 1. the outermost `act.sub` — an RFC 8693 exchanged (delegated) token is
+    ///    issued to the client that performed the exchange, which Hearth
+    ///    records as the current actor (RFC 8693 §4.1; the exchange enforces
+    ///    `act.sub` == the authenticated client). It inherits the subject
+    ///    token's `fid`, `sid` and `sub`, so reading those would hand it to
+    ///    the SUBJECT's client. `act.sub` is either `client_<uuid>` (from an
+    ///    `actor_token`) or the bare UUID; both parse as a `ClientId`, and
+    ///    anything else owns nothing;
+    /// 2. `azp` — set on ID tokens and any token bound to an authorized party;
+    /// 3. the grant family's `client_id` — every user access and refresh token
     ///    minted by a grant carries its family id in `fid`;
-    /// 3. `sub` — for a sessionless `client_credentials` token, whose subject
+    /// 4. `sub` — for a sessionless `client_credentials` token, whose subject
     ///    is the client itself.
     ///
     /// Audience membership deliberately does NOT count: a resource server
@@ -2678,6 +2686,9 @@ impl EmbeddedIdentityEngine {
         claims: &TokenClaims,
         client: &crate::core::ClientId,
     ) -> Result<bool, IdentityError> {
+        if let Some(act) = claims.act.as_ref() {
+            return Ok(act.sub.parse::<crate::core::ClientId>().ok().as_ref() == Some(client));
+        }
         let client_str = client.to_string();
         if let Some(azp) = claims.azp.as_deref() {
             return Ok(azp == client_str);

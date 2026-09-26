@@ -578,7 +578,8 @@ resolved, in order, from:
 
 | Token shape | Issuing client |
 |-------------|----------------|
-| Carries `azp` — ID tokens, and RFC 8693 exchanged tokens (the authenticated client that performed the exchange, not the subject token's client) | `azp` |
+| Carries `act` — RFC 8693 exchanged (delegated) tokens | the outermost `act.sub`: the authenticated client that performed the exchange, not the subject token's client |
+| Carries `azp` — ID tokens | `azp` |
 | Carries `fid` and no `azp` — access and refresh tokens from the `authorization_code` and `device_code` grants, and every rotation of them | the grant family's `client_id` |
 | Sessionless (`sid = "none"`: `client_credentials`, `jwt-bearer`) | `sub` (the client itself) |
 | Anything else | none |
@@ -591,6 +592,14 @@ Audience membership does **not** confer ownership — a resource server named in
 token; it was not issued it, and it MUST NOT be able to end the user's session or grant family.
 A token issued to no client (a Hearth first-party session token) is not revocable through these
 endpoints by any client; the admin session API ends such a session.
+
+Exchange records its client in `act.sub` (which the exchange already requires to equal the
+authenticated client) rather than in `azp`, so recording ownership leaves the RFC 7662 audience gate
+of the exchanged token unchanged: it has no `azp`, and a resource server that receives an agent's
+delegated token introspects it under the same rule as the subject token (any authenticated client
+for a user-session token; the machine subject's own client or an `aud` member for a machine token). Pinned by
+`a_resource_server_can_still_introspect_an_exchanged_user_token` and
+`an_exchanged_machine_token_keeps_its_introspection_audience`.
 
 An exchanged token inherits the subject token's `sid`, so revoking it by ending that session would
 also kill the subject client's own tokens. A delegated token (one carrying `act`) is therefore
@@ -624,7 +633,7 @@ Discovery advertises both sets (RFC 8414 §2):
 | `tests/oauth_form_encoding.rs` | Form + JSON content-type acceptance on token/revoke/introspect/PAR/device-authorization and their realm twins (HEA-2077) |
 | `tests/device_grant_client_auth.rs` | Confidential-client authentication on both device-grant endpoints and both realm twins (audit 2026-08-28 §4.19#4, §4.22#6) |
 | `tests/introspect_confidential_only.rs` | Introspection refuses public clients (HTTP, realm twin, gRPC); secret and `private_key_jwt` authentication; gRPC audience restriction; discovery auth-method metadata; public-client revocation still accepted (task 26.43) |
-| `tests/revoke_client_ownership.rs` | RFC 7009 §2.1 revocation ownership — a client revokes only tokens issued to it (`azp`, grant family, `client_credentials` subject) on `/revoke`, the realm twin and gRPC `Revoke`; foreign and first-party tokens are a silent `200` no-op; device-grant tokens belong to the device client and exchanged tokens to the exchanging client, both minted through the real grant; `private_key_jwt` clients must present their assertion |
+| `tests/revoke_client_ownership.rs` | RFC 7009 §2.1 revocation ownership — a client revokes only tokens issued to it (`act.sub`, `azp`, grant family, `client_credentials` subject) on `/revoke`, the realm twin and gRPC `Revoke`; foreign and first-party tokens are a silent `200` no-op; device-grant tokens belong to the device client and exchanged tokens to the exchanging client, both minted through the real grant; `private_key_jwt` clients must present their assertion |
 | `tests/realm_token_exchange_client_auth.rs` | Token-exchange client auth enforcement + DPoP re-binding prevention on both endpoints (HEA-2024) |
 | `tests/fixtures/fapi2/conformance_vectors.json` | Test vectors for per-client FAPI 2.0 |
 

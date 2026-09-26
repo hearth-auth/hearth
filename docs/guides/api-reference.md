@@ -361,9 +361,9 @@ public. Register a confidential client for each resource server that introspects
 confidential client authenticates with its secret, or — for a `private_key_jwt` client
 such as a FAPI 2.0 client — with `client_assertion_type` + `client_assertion`; such a
 client presenting only its `client_id` receives `401 invalid_client`. `/revoke` revokes
-only a token **issued to the calling client**: the client in the token's `azp` (for a
-token-exchange token, the client that performed the exchange), the client that owns its
-grant family (access and refresh tokens from the `authorization_code` and `device_code`
+only a token **issued to the calling client**: for a token-exchange token, the client that
+performed the exchange (its `act.sub`); otherwise the client in the token's `azp`, the client
+that owns its grant family (access and refresh tokens from the `authorization_code` and `device_code`
 grants), or — for a `client_credentials` or `jwt-bearer` token — the client itself. Any
 other token, including a Hearth first-party session token issued to no OAuth client
 (step-up-MFA and magic-link grants, console logins), is left untouched and the

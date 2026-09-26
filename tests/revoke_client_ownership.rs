@@ -15,12 +15,13 @@
 //! token's entire grant family, while presenting nothing but a public
 //! identifier.
 //!
-//! Ownership is the client the token was issued to: `azp` when the token
-//! carries one, the grant family's client for a family-bound access or
-//! refresh token, and `sub` for a `client_credentials` token. A token no
-//! client was issued (a Hearth first-party session token) is not revocable
-//! through this endpoint by any client. In every refused case the response is
-//! still `200` and the token stays live.
+//! Ownership is the client the token was issued to: `act.sub` for an RFC
+//! 8693 exchanged token, `azp` when the token carries one, the grant family's
+//! client for a family-bound access or refresh token, and `sub` for a
+//! `client_credentials` token. A token no client was issued (a Hearth
+//! first-party session token) is not revocable through this endpoint by any
+//! client. In every refused case the response is still `200` and the token
+//! stays live.
 
 mod common;
 
@@ -663,6 +664,158 @@ async fn an_exchanged_machine_token_belongs_to_the_exchanging_client() {
     assert!(
         !is_active(&env.h, &env.realm_id, &exchanged),
         "the exchanging client revokes the machine token it was issued"
+    );
+}
+
+/// Whether `client` sees the access token as active when it introspects it
+/// (RFC 7662), i.e. with the endpoint's audience gate applied.
+fn introspects_active_as(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    access_token: &str,
+    client: &ClientId,
+) -> bool {
+    h.identity()
+        .introspect_token(
+            realm,
+            &TokenIntrospectionRequest {
+                token: access_token.to_string(),
+                token_type_hint: None,
+                introspecting_client_id: Some(client.clone()),
+            },
+        )
+        .expect("introspect")
+        .active
+}
+
+/// Recording who an exchanged token was issued to (for RFC 7009 ownership)
+/// must not narrow who may introspect it. A resource server that receives an
+/// agent's delegated user token and validates it by introspection is neither
+/// the exchanging client nor (with `resource=`) named in `aud` by client_id;
+/// the RFC 7662 audience gate lets any authenticated client introspect a
+/// user-session token that is bound to no `azp`, and exchange must keep it so.
+#[tokio::test]
+async fn a_resource_server_can_still_introspect_an_exchanged_user_token() {
+    let env = server_env().await;
+    let subject_client = register(&env.h, &env.realm_id, None);
+    let actor = register_scoped(&env.h, &env.realm_id, "read");
+    let resource_server = register_scoped(&env.h, &env.realm_id, "read");
+    let subject = scoped_user_access(&env.h, &env.realm_id, &subject_client);
+    let exchanged = exchange(&env.h, &env.realm_id, &actor, &subject);
+
+    assert!(
+        introspects_active_as(&env.h, &env.realm_id, &exchanged, &resource_server),
+        "a third-party resource server must still be able to introspect a delegated user token"
+    );
+    assert!(introspects_active_as(
+        &env.h,
+        &env.realm_id,
+        &exchanged,
+        &actor
+    ));
+}
+
+/// The machine-subject case of the same rule: an exchanged `client_credentials`
+/// token keeps the subject's introspection audience (its own client, or an
+/// `aud` member), exactly as before ownership was recorded.
+#[tokio::test]
+async fn an_exchanged_machine_token_keeps_its_introspection_audience() {
+    let env = server_env().await;
+    let subject_client = register_scoped(&env.h, &env.realm_id, "read");
+    let actor = register_scoped(&env.h, &env.realm_id, "read");
+    let stranger = register_scoped(&env.h, &env.realm_id, "read");
+    let subject = env
+        .h
+        .identity()
+        .client_credentials_token(
+            &env.realm_id,
+            &ClientCredentialsRequest {
+                client_id: subject_client.clone(),
+                client_secret: Some(SECRET.to_string()),
+                scope: Some("read".to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("mint subject machine token")
+        .access_token()
+        .to_string();
+    let exchanged = exchange(&env.h, &env.realm_id, &actor, &subject);
+
+    assert!(
+        introspects_active_as(&env.h, &env.realm_id, &exchanged, &subject_client),
+        "the machine subject's own client keeps introspecting the exchanged token"
+    );
+    assert!(
+        !introspects_active_as(&env.h, &env.realm_id, &exchanged, &stranger),
+        "control: an unrelated client is still refused by the audience gate"
+    );
+}
+
+/// With an `actor_token` the exchanged token's `act.sub` is the actor token's
+/// `sub` — the prefixed `client_<uuid>` form, not the bare UUID the
+/// actor-less path records. Ownership must resolve both spellings.
+#[tokio::test]
+async fn an_exchanged_token_with_an_actor_token_belongs_to_the_actor() {
+    let env = server_env().await;
+    let subject_client = register(&env.h, &env.realm_id, None);
+    let actor = register_scoped(&env.h, &env.realm_id, "read");
+    let subject = scoped_user_access(&env.h, &env.realm_id, &subject_client);
+    let actor_token = env
+        .h
+        .identity()
+        .client_credentials_token(
+            &env.realm_id,
+            &ClientCredentialsRequest {
+                client_id: actor.clone(),
+                client_secret: Some(SECRET.to_string()),
+                scope: Some("read".to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("mint actor token")
+        .access_token()
+        .to_string();
+    let exchanged = env
+        .h
+        .identity()
+        .rfc8693_token_exchange(
+            &env.realm_id,
+            &Rfc8693Request {
+                client_id: actor.clone(),
+                subject_token: subject.clone(),
+                subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+                actor_token: Some(actor_token),
+                actor_token_type: Some("urn:ietf:params:oauth:token-type:access_token".to_string()),
+                requested_token_type: None,
+                scope: None,
+                resource: None,
+                audience: None,
+                dpop_jkt: None,
+            },
+        )
+        .expect("token exchange with actor_token")
+        .access_token;
+    assert!(is_active(&env.h, &env.realm_id, &exchanged), "precondition");
+
+    assert_eq!(
+        revoke_realm(&env, &exchanged, &subject_client, None).await,
+        200
+    );
+    assert!(
+        is_active(&env.h, &env.realm_id, &exchanged),
+        "the subject token's client must not revoke the delegated token"
+    );
+    assert_eq!(
+        revoke_realm(&env, &exchanged, &actor, Some(SECRET)).await,
+        200
+    );
+    assert!(
+        !is_active(&env.h, &env.realm_id, &exchanged),
+        "the actor the delegated token was issued to revokes it"
     );
 }
 
