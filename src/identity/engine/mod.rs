@@ -11817,11 +11817,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         client.set_declared_scopes(request.declared_scopes.clone());
         client.set_consent_spans_orgs(request.consent_spans_orgs);
         // ID-token signing algorithm (task 26.55), resolved as a registration
-        // resolves it. A backup restore installs the archived RSA key first,
-        // so an RS256 client finds that key rather than minting a new one.
+        // resolves it: RS256 is refused in a FAPI realm (an imported client
+        // carries no FAPI 2.0 profile of its own). A backup restore installs
+        // the archived RSA key first, so an RS256 client finds that key rather
+        // than minting a new one.
+        let fapi = self.realm_enforces_fapi(realm_id)?;
         client.set_id_token_signed_response_alg(self.resolve_client_id_token_alg(
             realm_id,
             request.id_token_signed_response_alg.as_deref(),
+            fapi,
         )?);
 
         let client_bytes =

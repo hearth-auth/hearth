@@ -18,9 +18,9 @@ use crate::identity::error::IdentityError;
 use crate::identity::keys;
 use crate::identity::oidc::{
     ApplicationStatus, AuthorizationRequest, AuthorizationResponse, BackchannelTarget,
-    CodeChallengeMethod, FrontchannelTarget, OAuthClient, OidcDiscoveryDocument, OidcTokenResponse,
-    RegisterClientRequest, ResponseMode, RpLogoutRequest, RpLogoutResult, StoredAuthorizationCode,
-    StoredDeviceCode, StoredGrantFamily, TokenExchangeRequest,
+    ClientProfile, CodeChallengeMethod, FrontchannelTarget, OAuthClient, OidcDiscoveryDocument,
+    OidcTokenResponse, RegisterClientRequest, ResponseMode, RpLogoutRequest, RpLogoutResult,
+    StoredAuthorizationCode, StoredDeviceCode, StoredGrantFamily, TokenExchangeRequest,
 };
 use crate::identity::tokens::{self, Audience, LogoutTokenClaims, TokenClaims};
 use crate::identity::types::{
@@ -254,12 +254,15 @@ impl EmbeddedIdentityEngine {
 
         // ID-token signing algorithm (task 26.55). `None` is the administrative
         // default, EdDSA; both Dynamic Client Registration handlers resolve an
-        // omitted value to RS256 (OIDC Registration §2) before reaching here.
-        // Resolved last among the validations and persisted explicitly; RS256
-        // provisions the realm's RSA key before the client exists.
+        // omitted value to RS256 (OIDC Registration §2) — EdDSA in a FAPI
+        // realm — before reaching here. Resolved last among the validations and
+        // persisted explicitly; RS256 is refused under FAPI 2.0 (§5.4.1) and
+        // otherwise provisions the realm's RSA key before the client exists.
+        let fapi = request.profile.is_fapi2() || self.realm_enforces_fapi(realm_id)?;
         client.set_id_token_signed_response_alg(self.resolve_client_id_token_alg(
             realm_id,
             request.id_token_signed_response_alg.as_deref(),
+            fapi,
         )?);
 
         // Serialize and persist
@@ -3503,11 +3506,19 @@ impl EmbeddedIdentityEngine {
             client.set_cors_origins(cors.clone());
         }
         // ID-token signing algorithm (task 26.55): validated, and the realm's
-        // RSA key provisioned, before the change is persisted.
+        // RSA key provisioned, before the change is persisted. `client` already
+        // carries any profile change above, so FAPI 2.0 (§5.4.1: no RS256) is
+        // judged on the client as it will be written — which also refuses
+        // moving an RS256 client to the FAPI 2.0 profile.
+        let fapi = client.profile().is_fapi2() || self.realm_enforces_fapi(realm_id)?;
         if let Some(alg) = request.id_token_signed_response_alg.as_deref() {
-            client.set_id_token_signed_response_alg(
-                self.resolve_client_id_token_alg(realm_id, Some(alg))?,
-            );
+            client.set_id_token_signed_response_alg(self.resolve_client_id_token_alg(
+                realm_id,
+                Some(alg),
+                fapi,
+            )?);
+        } else if request.profile.is_some_and(ClientProfile::is_fapi2) {
+            Self::refuse_rs256_under_fapi(client.id_token_signed_response_alg(), fapi)?;
         }
 
         let updated_bytes =

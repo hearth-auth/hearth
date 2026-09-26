@@ -34,6 +34,7 @@ use crate::identity::keys;
 use crate::identity::oidc::{IdTokenSigningAlg, OAuthClient};
 use crate::identity::tokens::{self, Jwk, RsaIdTokenSigningKey, SigningKey, TokenClaims};
 use crate::identity::types::RetiringSigningKeyExport;
+use crate::identity::IdentityEngine as _;
 use crate::storage::StorageEngine;
 
 use super::EmbeddedIdentityEngine;
@@ -79,6 +80,39 @@ impl EmbeddedIdentityEngine {
             .map(|k| k.as_bytes())
     }
 
+    /// Whether the realm has a FAPI 2.0 profile, which applies FAPI 2.0 to
+    /// every client in it. A realm that cannot be found enforces nothing here;
+    /// the caller's own realm lookup reports it.
+    pub(super) fn realm_enforces_fapi(&self, realm_id: &RealmId) -> Result<bool, IdentityError> {
+        Ok(self
+            .get_realm(realm_id)?
+            .is_some_and(|realm| realm.config().fapi_profile.is_some()))
+    }
+
+    /// Refuses RS256 wherever FAPI 2.0 applies.
+    ///
+    /// FAPI 2.0 Security Profile §5.4.1 lets authorization servers and clients
+    /// use only PS256, ES256 and EdDSA (Ed25519). RS256 — RSASSA-PKCS1-v1_5 —
+    /// is not among them, so a FAPI 2.0 client, or any client of a realm with a
+    /// `fapi_profile`, gets EdDSA ID tokens or none.
+    ///
+    /// # Errors
+    /// [`IdentityError::FapiViolation`] when `alg` is RS256 and `fapi` is set.
+    pub(super) fn refuse_rs256_under_fapi(
+        alg: IdTokenSigningAlg,
+        fapi: bool,
+    ) -> Result<(), IdentityError> {
+        if fapi && alg == IdTokenSigningAlg::Rs256 {
+            return Err(IdentityError::FapiViolation {
+                reason: "FAPI 2.0 permits only PS256, ES256 and EdDSA; RS256 ID tokens are not \
+                         available to a FAPI 2.0 client or in a FAPI realm \
+                         (use id_token_signed_response_alg EdDSA)"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Validates a client's requested `id_token_signed_response_alg` and, for
     /// RS256, provisions the realm's RSA key.
     ///
@@ -86,17 +120,22 @@ impl EmbeddedIdentityEngine {
     /// import) calls this before it persists the client, so an RS256 client
     /// never exists without the key that signs its ID tokens, and a key
     /// failure refuses the write instead of the client's first login. `None`
-    /// is the administrative default, EdDSA.
+    /// is the administrative default, EdDSA. `fapi` is whether FAPI 2.0
+    /// applies to the client once written (its profile, or its realm's); RS256
+    /// is then refused before any key is provisioned.
     ///
     /// # Errors
-    /// [`IdentityError::InvalidInput`] for anything but `RS256`/`EdDSA`, and
-    /// any provisioning error.
+    /// [`IdentityError::InvalidInput`] for anything but `RS256`/`EdDSA`,
+    /// [`IdentityError::FapiViolation`] for RS256 under FAPI, and any
+    /// provisioning error.
     pub(super) fn resolve_client_id_token_alg(
         &self,
         realm_id: &RealmId,
         requested: Option<&str>,
+        fapi: bool,
     ) -> Result<IdTokenSigningAlg, IdentityError> {
         let alg = requested.map_or(Ok(IdTokenSigningAlg::EdDsa), IdTokenSigningAlg::parse)?;
+        Self::refuse_rs256_under_fapi(alg, fapi)?;
         if alg == IdTokenSigningAlg::Rs256 {
             self.ensure_realm_id_token_rsa_key(realm_id)?;
         }
@@ -108,18 +147,28 @@ impl EmbeddedIdentityEngine {
     /// `ed_key` is the Ed25519 key the caller signs the grant's access token
     /// with; an EdDSA client's ID token is signed with that same key, exactly
     /// as before RS256 existed. An RS256 client provisions the realm's RSA key
-    /// on first use.
+    /// on first use — unless FAPI 2.0 now applies to it (its realm turned a
+    /// `fapi_profile` on after it registered): then the grant is refused rather
+    /// than answered with an ID token FAPI 2.0 forbids.
+    ///
+    /// # Errors
+    /// [`IdentityError::FapiViolation`] for an RS256 client under FAPI, and any
+    /// realm-lookup or key-provisioning error.
     pub(super) fn id_token_signer(
         &self,
         realm_id: &RealmId,
         client: Option<&OAuthClient>,
         ed_key: Arc<SigningKey>,
     ) -> Result<IdTokenSigner, IdentityError> {
-        match client.map(OAuthClient::id_token_signed_response_alg) {
-            Some(IdTokenSigningAlg::Rs256) => Ok(IdTokenSigner::Rs256(
-                self.ensure_realm_id_token_rsa_key(realm_id)?,
-            )),
-            Some(IdTokenSigningAlg::EdDsa) | None => Ok(IdTokenSigner::EdDsa(ed_key)),
+        match client {
+            Some(client) if client.id_token_signed_response_alg() == IdTokenSigningAlg::Rs256 => {
+                let fapi = client.profile().is_fapi2() || self.realm_enforces_fapi(realm_id)?;
+                Self::refuse_rs256_under_fapi(IdTokenSigningAlg::Rs256, fapi)?;
+                Ok(IdTokenSigner::Rs256(
+                    self.ensure_realm_id_token_rsa_key(realm_id)?,
+                ))
+            }
+            Some(_) | None => Ok(IdTokenSigner::EdDsa(ed_key)),
         }
     }
 

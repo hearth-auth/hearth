@@ -1058,22 +1058,34 @@ struct DcrResponse {
 /// honour. The rejected value is deliberately not echoed.
 const DCR_UNSUPPORTED_ID_TOKEN_ALG: &str = "id_token_signed_response_alg must be RS256 or EdDSA";
 
+/// Error description for RS256 requested in a FAPI realm.
+const DCR_FAPI_FORBIDS_RS256: &str =
+    "id_token_signed_response_alg RS256 is not permitted in a FAPI 2.0 realm; use EdDSA";
+
 /// Resolves a dynamic registration's `id_token_signed_response_alg`.
 ///
 /// Omitted means RS256 — the default OpenID Connect Dynamic Client
 /// Registration 1.0 §2 prescribes, and what a certification client registering
-/// without the parameter expects (task 26.55). Anything but `RS256`/`EdDSA`
-/// (notably `none` and every `HS*`) is `Err`, which the caller answers with
-/// RFC 7591 §3.2.2 `invalid_client_metadata`.
-fn resolve_dcr_id_token_alg(requested: Option<&str>) -> Result<String, ()> {
-    match requested {
-        None => Ok(crate::identity::IdTokenSigningAlg::Rs256
-            .as_str()
-            .to_string()),
-        Some(alg) => crate::identity::IdTokenSigningAlg::parse(alg)
-            .map(|alg| alg.as_str().to_string())
-            .map_err(|_| ()),
+/// without the parameter expects (task 26.55) — except in a realm with a FAPI
+/// profile (`fapi_realm`): FAPI 2.0 Security Profile §5.4.1 permits only
+/// PS256, ES256 and EdDSA, so there it means EdDSA and an explicit RS256 is
+/// refused. Anything but `RS256`/`EdDSA` (notably `none` and every `HS*`) is
+/// refused too. `Err` carries the `error_description` for RFC 7591 §3.2.2
+/// `invalid_client_metadata`.
+fn resolve_dcr_id_token_alg(
+    requested: Option<&str>,
+    fapi_realm: bool,
+) -> Result<String, &'static str> {
+    use crate::identity::IdTokenSigningAlg;
+    let alg = match requested {
+        None if fapi_realm => IdTokenSigningAlg::EdDsa,
+        None => IdTokenSigningAlg::Rs256,
+        Some(alg) => IdTokenSigningAlg::parse(alg).map_err(|_| DCR_UNSUPPORTED_ID_TOKEN_ALG)?,
+    };
+    if fapi_realm && alg == IdTokenSigningAlg::Rs256 {
+        return Err(DCR_FAPI_FORBIDS_RS256);
     }
+    Ok(alg.as_str().to_string())
 }
 
 /// Dynamic Client Registration (RFC 7591) endpoint.
@@ -1162,10 +1174,14 @@ async fn register_client_dynamic(
     request.client_secret = None;
     request.trust_level = crate::identity::ClientTrustLevel::ThirdParty;
 
-    // OIDC Registration §2: omitted means RS256 (task 26.55).
-    match resolve_dcr_id_token_alg(request.id_token_signed_response_alg.as_deref()) {
+    // OIDC Registration §2: omitted means RS256 — EdDSA in a FAPI realm,
+    // where FAPI 2.0 forbids RS256 (task 26.55).
+    match resolve_dcr_id_token_alg(
+        request.id_token_signed_response_alg.as_deref(),
+        realm.config().fapi_profile.is_some(),
+    ) {
         Ok(alg) => request.id_token_signed_response_alg = Some(alg),
-        Err(()) => return dcr_invalid_metadata(DCR_UNSUPPORTED_ID_TOKEN_ALG),
+        Err(description) => return dcr_invalid_metadata(description),
     }
 
     // Generate server-side random secret.
@@ -3546,15 +3562,20 @@ async fn realm_register_client_dynamic(
         }
         Some(_) => return dcr_invalid_metadata("grant_types must be an array of strings"),
     };
-    // OIDC Registration §2: omitted (or null) means RS256; anything but
-    // RS256/EdDSA is refused rather than narrowed (task 26.55).
+    // OIDC Registration §2: omitted (or null) means RS256 — EdDSA in a FAPI
+    // realm, where FAPI 2.0 forbids RS256; anything but RS256/EdDSA is refused
+    // rather than narrowed (task 26.55).
     let requested_id_token_alg = match body.get("id_token_signed_response_alg") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(alg)) => Some(alg.as_str()),
         Some(_) => return dcr_invalid_metadata(DCR_UNSUPPORTED_ID_TOKEN_ALG),
     };
-    let Ok(id_token_signed_response_alg) = resolve_dcr_id_token_alg(requested_id_token_alg) else {
-        return dcr_invalid_metadata(DCR_UNSUPPORTED_ID_TOKEN_ALG);
+    let id_token_signed_response_alg = match resolve_dcr_id_token_alg(
+        requested_id_token_alg,
+        realm.config().fapi_profile.is_some(),
+    ) {
+        Ok(alg) => alg,
+        Err(description) => return dcr_invalid_metadata(description),
     };
     let base_slug = client_name
         .to_lowercase()

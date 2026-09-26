@@ -286,8 +286,10 @@ Every registration surface above — and `PATCH /admin/applications/{id}` — ac
 `400` on the admin routes. When the field is omitted, **dynamic registration defaults to
 `RS256`** (OpenID Connect Registration §2) and the admin routes default to `EdDSA`; the
 registration response and the client record always report the resolved value. The setting
-affects ID tokens only — access and refresh tokens are EdDSA for every client. See
-[OIDC.md §1.2](../specs/OIDC.md#12-signing).
+affects ID tokens only — access and refresh tokens are EdDSA for every client. Under FAPI 2.0 —
+a client with the `fapi2` profile, or any client of a realm with a `fapi_profile` — RS256 is
+refused (FAPI 2.0 permits only PS256, ES256 and EdDSA), and dynamic registration in such a realm
+defaults to `EdDSA`. See [OIDC.md §1.2](../specs/OIDC.md#12-signing).
 
 ---
 

@@ -98,6 +98,12 @@ only specific clients in a realm require FAPI 2.0 constraints; use realm-level `
 | `client_secret` | | Must be absent — FAPI 2.0 clients authenticate with `private_key_jwt` |
 | `redirect_uris` | At least one HTTPS URI | `http://` (non-TLS) |
 | `response_type` | `"code"` only | `"token"`, `"id_token"` |
+| `id_token_signed_response_alg` | `"EdDSA"` (the default when omitted) | `"RS256"` — FAPI 2.0 §5.4.1 permits only PS256, ES256 and EdDSA |
+
+The RS256 restriction also applies to every client of a realm with a `fapi_profile` (§2):
+registration and updates that select RS256 are refused, dynamic registration in such a realm
+defaults to `EdDSA`, and an RS256 client that predates the realm's `fapi_profile` has its
+ID-token grants (authorization code, device) refused until it is switched to `EdDSA`.
 
 ### Generate a key pair
 
