@@ -1102,6 +1102,12 @@ impl EmbeddedStorageEngine {
     /// Leaked old files are otherwise harmless orphans, cleaned up by the next
     /// compaction.
     pub fn compact_ssts(&self, min_sst_count: usize) -> Result<usize, StorageError> {
+        // Release any reader list an earlier flush or compaction replaced while
+        // a reader was pinned, merge or no merge: every wake of the compaction
+        // task passes here, so an idle engine does not keep merged-away files
+        // mapped until its next write.
+        self.sst_readers.reclaim();
+
         // Serialize against other compactions for the whole operation, but hold
         // `flush_lock` only for two brief phases — the snapshot+number allocation
         // and the commit. The O(total-data) merge I/O between them runs off
@@ -1176,7 +1182,7 @@ impl EmbeddedStorageEngine {
         drop(sst_readers);
 
         // --- Commit phase: hold `flush_lock` only for these metadata ops ---
-        let Ok(_guard) = self.flush_lock.lock() else {
+        let Ok(commit_guard) = self.flush_lock.lock() else {
             return Err(StorageError::Io(std::io::Error::other(
                 "flush mutex poisoned",
             )));
@@ -1247,6 +1253,14 @@ impl EmbeddedStorageEngine {
             );
         }
         self.sst_readers.store(Arc::new(rebuilt));
+        drop(commit_guard);
+        #[cfg(test)]
+        run_after_compaction_publish_hook();
+        // As in `trigger_flush`: the list just replaced maps every input this
+        // commit unlinked, so a reader pinned across the store above would
+        // otherwise hold their disk space until the next write to the list.
+        // Released after `flush_lock`, so no writer waits on the unmaps.
+        self.sst_readers.reclaim();
 
         Ok(input_count)
     }
@@ -1292,6 +1306,9 @@ impl EmbeddedStorageEngine {
     /// across the merge I/O (HEA-1931). Like [`Self::compact_ssts`], async callers
     /// should wrap it in `spawn_blocking`.
     pub fn compact_partial(&self) -> Result<usize, StorageError> {
+        // As in `compact_ssts`: release what earlier writes left retired.
+        self.sst_readers.reclaim();
+
         let merge_min = self.compaction.merge_min.max(2);
 
         // Serialize against other compactions for the whole operation. `flush_lock`
@@ -1383,7 +1400,7 @@ impl EmbeddedStorageEngine {
         // --- Commit phase: hold `flush_lock` only for these metadata ops, so a
         // writer contends with compaction for the rename+fsync+reload, never for
         // the merge I/O above (HEA-1931). ---
-        let Ok(_guard) = self.flush_lock.lock() else {
+        let Ok(commit_guard) = self.flush_lock.lock() else {
             return Err(StorageError::Io(std::io::Error::other(
                 "flush mutex poisoned",
             )));
@@ -1452,9 +1469,35 @@ impl EmbeddedStorageEngine {
             );
         }
         self.sst_readers.store(Arc::new(rebuilt));
+        drop(commit_guard);
+        #[cfg(test)]
+        run_after_compaction_publish_hook();
+        // Release the replaced list, which maps the unlinked run members, as
+        // `compact_ssts` does.
+        self.sst_readers.reclaim();
 
         Ok(input_count)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only hook a compaction runs on its own thread after publishing its
+    /// rebuilt reader list and releasing `flush_lock`, and before releasing
+    /// the list it replaced. A test sets it to let a reader it pinned across
+    /// the publish go at exactly that point.
+    static AFTER_COMPACTION_PUBLISH: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the [`AFTER_COMPACTION_PUBLISH`] hook, if this thread set one.
+#[cfg(test)]
+fn run_after_compaction_publish_hook() {
+    AFTER_COMPACTION_PUBLISH.with_borrow_mut(|hook| {
+        if let Some(hook) = hook {
+            hook();
+        }
+    });
 }
 
 /// Selects a contiguous run of same-size-tier SSTs to merge, or `None` if no tier
@@ -4945,5 +4988,207 @@ mod tests {
             realms, expected,
             "list_realms must include realms whose data flushed to SST files"
         );
+    }
+
+    // ===== Releasing replaced SST reader lists =====
+
+    /// Which compaction entry point a reclamation test drives.
+    #[derive(Clone, Copy)]
+    enum Compaction {
+        /// `compact_ssts`, the periodic full merge.
+        Full,
+        /// `compact_partial`, the count-triggered size-tiered merge.
+        Partial,
+    }
+
+    impl Compaction {
+        /// Runs one compaction of this kind, returning how many SSTs it merged.
+        fn run(self, engine: &EmbeddedStorageEngine) -> usize {
+            match self {
+                Self::Full => engine.compact_ssts(2).expect("compact_ssts"),
+                Self::Partial => engine.compact_partial().expect("compact_partial"),
+            }
+        }
+    }
+
+    /// An engine holding `ssts` equally sized SSTs, one flush each, that only
+    /// compacts when a test asks it to. Both compaction kinds merge all of
+    /// them: the full merge needs two, and they form one size tier of at
+    /// least `merge_min` = 2.
+    fn engine_with_ssts(ssts: usize) -> (tempfile::TempDir, EmbeddedStorageEngine) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.memtable_config.flush_threshold_bytes = 1 << 20;
+        config.compaction = CompactionConfig {
+            enabled: false,
+            interval_secs: 0,
+            min_sst_count: 2,
+            max_sst_count: 0,
+            merge_min: 2,
+        };
+        let engine = EmbeddedStorageEngine::open(config).expect("open");
+        let realm = RealmId::generate();
+        for i in 0..ssts {
+            engine
+                .put(&realm, format!("key-{i}").as_bytes(), b"value")
+                .expect("put");
+            engine.flush_memtable().expect("flush");
+        }
+        assert_eq!(count_sst_files(dir.path()), ssts, "one SST per flush");
+        (dir, engine)
+    }
+
+    /// How many memory maps this process still holds of SST files under
+    /// `dir` that have been unlinked: the disk space a replaced reader list
+    /// keeps allocated for as long as it lives.
+    #[cfg(target_os = "linux")]
+    fn unlinked_sst_maps(dir: &std::path::Path) -> usize {
+        let dir = dir.canonicalize().expect("canonical data dir");
+        let dir = dir.to_string_lossy();
+        std::fs::read_to_string("/proc/self/maps")
+            .expect("read /proc/self/maps")
+            .lines()
+            .filter(|line| {
+                line.contains(dir.as_ref()) && line.contains(".sst") && line.ends_with("(deleted)")
+            })
+            .count()
+    }
+
+    /// A compaction replaces the reader list with one over its merged output,
+    /// and the list it replaces maps every file it just unlinked. A reader
+    /// pinned across that write stops the write releasing it, so the
+    /// compaction must release it again before returning, once the reader
+    /// has let go — as a flush does — rather than hold the unlinked files'
+    /// disk space until the next write to the list.
+    ///
+    /// Exact when nothing else in the process pins, which nextest's
+    /// process-per-test model provides. The reader thread outlives the
+    /// compaction because a thread's exit pins it once more, to hand its
+    /// deferred work to the collector, which could refuse the epoch advances
+    /// the release needs.
+    fn assert_compaction_releases_the_list_it_replaced(kind: Compaction) {
+        use std::sync::mpsc;
+
+        let (dir, engine) = engine_with_ssts(3);
+        let engine = Arc::new(engine);
+
+        let (pinned_tx, pinned_rx) = mpsc::channel();
+        let (unpin_tx, unpin_rx) = mpsc::channel::<()>();
+        let (unpinned_tx, unpinned_rx) = mpsc::channel();
+        let (exit_tx, exit_rx) = mpsc::channel::<()>();
+        let reader = std::thread::spawn({
+            let engine = Arc::clone(&engine);
+            move || {
+                let pinned = engine.sst_readers.load();
+                pinned_tx
+                    .send(pinned.len())
+                    .expect("compactor is listening");
+                unpin_rx.recv().expect("compactor releases the reader");
+                drop(pinned);
+                unpinned_tx.send(()).expect("compactor is listening");
+                exit_rx.recv().expect("compactor lets the reader exit");
+            }
+        });
+        assert_eq!(pinned_rx.recv().expect("reader pinned"), 3);
+
+        let data_dir = dir.path().to_path_buf();
+        AFTER_COMPACTION_PUBLISH.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                // The merged-away files are unlinked, and the replaced list,
+                // held back by the pinned reader, still maps them.
+                #[cfg(target_os = "linux")]
+                assert!(
+                    unlinked_sst_maps(&data_dir) > 0,
+                    "precondition: the replaced list maps the unlinked inputs"
+                );
+                #[cfg(not(target_os = "linux"))]
+                let _ = &data_dir;
+                unpin_tx.send(()).expect("reader is waiting");
+                unpinned_rx.recv().expect("reader unpinned");
+            }));
+        });
+        let merged = kind.run(&engine);
+        AFTER_COMPACTION_PUBLISH.with_borrow_mut(Option::take);
+
+        assert_eq!(merged, 3, "the compaction merged every SST");
+        assert_eq!(
+            engine.sst_readers.retired_len(),
+            0,
+            "the reader-list cell still holds the list the compaction replaced"
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            unlinked_sst_maps(dir.path()),
+            0,
+            "the compaction returned still mapping the SSTs it unlinked"
+        );
+
+        exit_tx.send(()).expect("reader is waiting to exit");
+        reader.join().expect("reader thread");
+    }
+
+    #[test]
+    fn compact_ssts_releases_the_reader_list_it_replaced_even_if_a_reader_held_it() {
+        assert_compaction_releases_the_list_it_replaced(Compaction::Full);
+    }
+
+    #[test]
+    fn compact_partial_releases_the_reader_list_it_replaced_even_if_a_reader_held_it() {
+        assert_compaction_releases_the_list_it_replaced(Compaction::Partial);
+    }
+
+    /// A reader still pinned when a write's own release ran leaves the list
+    /// that write replaced retired, and the list is written only by flushes
+    /// and compactions. Every compaction wake — the periodic sweep and the
+    /// count trigger, including one with nothing to merge — must release it,
+    /// so an idle engine does not hold merged-away files mapped until its
+    /// next write.
+    fn assert_a_compaction_wake_releases_a_list_left_retired(kind: Compaction) {
+        let (dir, engine) = engine_with_ssts(3);
+
+        // Pinned on this thread across the whole compaction, so neither its
+        // write nor anything it runs afterwards can release what it replaced.
+        let pinned = engine.sst_readers.load();
+        assert_eq!(
+            kind.run(&engine),
+            3,
+            "the first compaction merged every SST"
+        );
+        drop(pinned);
+        assert_eq!(
+            engine.sst_readers.retired_len(),
+            1,
+            "precondition: the pinned reader kept the replaced list retired"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            unlinked_sst_maps(dir.path()) > 0,
+            "precondition: the retired list maps the unlinked inputs"
+        );
+
+        assert_eq!(kind.run(&engine), 0, "one SST left: nothing to merge");
+        assert_eq!(
+            engine.sst_readers.retired_len(),
+            0,
+            "a compaction wake left a replaced reader list retired"
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            unlinked_sst_maps(dir.path()),
+            0,
+            "a compaction wake left unlinked SSTs mapped"
+        );
+        #[cfg(not(target_os = "linux"))]
+        let _ = &dir;
+    }
+
+    #[test]
+    fn a_compact_ssts_wake_releases_a_reader_list_left_retired() {
+        assert_a_compaction_wake_releases_a_list_left_retired(Compaction::Full);
+    }
+
+    #[test]
+    fn a_compact_partial_wake_releases_a_reader_list_left_retired() {
+        assert_a_compaction_wake_releases_a_list_left_retired(Compaction::Partial);
     }
 }

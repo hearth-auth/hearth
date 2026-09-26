@@ -941,7 +941,11 @@ mod tests {
     /// had the SST write to unpin.
     ///
     /// Exact when nothing else in the process pins, which nextest's
-    /// process-per-test model provides.
+    /// process-per-test model provides. The reader thread outlives the flush
+    /// because a thread's exit pins it once more, to hand its deferred work to
+    /// the collector, and a flush that raced it could see the epoch advances
+    /// its release needs refused (9 failures in 1,500 loaded runs when the
+    /// reader exited straight after unpinning).
     #[test]
     fn a_flush_releases_the_flushed_map_even_if_a_reader_held_it() {
         use std::sync::mpsc;
@@ -953,6 +957,7 @@ mod tests {
         let (pinned_tx, pinned_rx) = mpsc::channel();
         let (unpin_tx, unpin_rx) = mpsc::channel::<()>();
         let (unpinned_tx, unpinned_rx) = mpsc::channel();
+        let (exit_tx, exit_rx) = mpsc::channel::<()>();
         let reader = std::thread::spawn({
             let mt = Arc::clone(&mt);
             move || {
@@ -961,6 +966,7 @@ mod tests {
                 unpin_rx.recv().expect("flusher releases the reader");
                 drop(pinned);
                 unpinned_tx.send(()).expect("flusher is listening");
+                exit_rx.recv().expect("flusher lets the reader exit");
             }
         });
         assert_eq!(pinned_rx.recv().expect("reader pinned"), 1);
@@ -972,7 +978,6 @@ mod tests {
             Ok(())
         })
         .expect("flush");
-        reader.join().expect("reader thread");
 
         assert_eq!(
             mt.data.retired_len(),
@@ -984,6 +989,9 @@ mod tests {
             0,
             "the parked slot still holds the flushed map after the flush returned"
         );
+
+        exit_tx.send(()).expect("reader is waiting to exit");
+        reader.join().expect("reader thread");
     }
 
     #[test]
