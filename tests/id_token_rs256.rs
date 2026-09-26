@@ -718,9 +718,16 @@ async fn rs256_client_receives_an_id_token_that_verifies_against_the_realm_jwks(
     assert_eq!(header_alg(tokens.access_token()), "EdDSA");
     let access_jwk = verify_against_jwks(tokens.access_token(), &jwks);
     assert_eq!(access_jwk["kty"], "OKP");
-    h.identity()
+    let access = h
+        .identity()
         .validate_token(&realm.id, tokens.access_token())
         .expect("the EdDSA access token must still validate");
+    assert_eq!(access.token_type, "access");
+    assert_eq!(
+        access.sub,
+        jws_part(tokens.id_token(), 1)["sub"].as_str().expect("sub"),
+        "the access token and the RS256 ID token describe the same user"
+    );
 }
 
 /// An EdDSA client — including every client created before this change,
@@ -882,9 +889,14 @@ async fn an_rs256_id_token_is_never_accepted_as_an_access_token() {
     );
 
     // Control: the EdDSA access token from the same grant is accepted.
-    h.identity()
+    let control = h
+        .identity()
         .validate_token(&realm.id, tokens.access_token())
         .expect("control: the access token validates");
+    assert_eq!(
+        control.token_type, "access",
+        "control: the EdDSA access token from the same grant is accepted as an access token"
+    );
 }
 
 /// RP-Initiated Logout: an RS256 ID token is exactly what an RS256 client
@@ -913,16 +925,17 @@ async fn an_rs256_id_token_hint_ends_the_session_and_a_forged_one_does_not() {
     claims["sub"] = serde_json::json!("user_00000000-0000-0000-0000-000000000000");
     parts[1] = URL_SAFE_NO_PAD.encode(claims.to_string());
     let forged = parts.join(".");
-    assert!(h
-        .identity()
-        .initiate_logout(
-            &realm,
-            &RpLogoutRequest {
-                id_token_hint: Some(forged),
-                ..Default::default()
-            },
-        )
-        .is_err());
+    let refused = h.identity().initiate_logout(
+        &realm,
+        &RpLogoutRequest {
+            id_token_hint: Some(forged),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(refused, Err(IdentityError::InvalidToken)),
+        "a forged RS256 hint must fail signature verification, got {refused:?}"
+    );
     assert!(
         h.identity()
             .get_session(&realm, &session)
@@ -1034,15 +1047,17 @@ fn rotation_keeps_the_old_rsa_kid_valid_through_its_grace_period() {
         vec![new_kid],
         "the retired RSA kid must leave the JWKS"
     );
-    assert!(engine
-        .initiate_logout(
-            &realm,
-            &RpLogoutRequest {
-                id_token_hint: Some(before.id_token().to_string()),
-                ..Default::default()
-            },
-        )
-        .is_err());
+    let refused = engine.initiate_logout(
+        &realm,
+        &RpLogoutRequest {
+            id_token_hint: Some(before.id_token().to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(refused, Err(IdentityError::InvalidToken)),
+        "a hint signed by an RSA key past its grace deadline must be refused, got {refused:?}"
+    );
 }
 
 /// A revoking rotation (grace 0) — the response to a leaked key — cuts the old
@@ -1073,15 +1088,17 @@ fn revoking_rotation_drops_the_old_rsa_key_immediately() {
     assert_eq!(kids.len(), 1);
     assert!(!kids.contains(&old_kid));
     assert_eq!(rsa_retiring_blobs(&storage, &realm), 0);
-    assert!(engine
-        .initiate_logout(
-            &realm,
-            &RpLogoutRequest {
-                id_token_hint: Some(before.id_token().to_string()),
-                ..Default::default()
-            },
-        )
-        .is_err());
+    let refused = engine.initiate_logout(
+        &realm,
+        &RpLogoutRequest {
+            id_token_hint: Some(before.id_token().to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(refused, Err(IdentityError::InvalidToken)),
+        "a hint signed by a revoked RSA key must be refused, got {refused:?}"
+    );
 }
 
 /// Rotation never provisions RS256 for a realm no client asked it of.
