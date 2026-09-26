@@ -2,6 +2,7 @@
 //!
 //! Contains only types and traits — no logic, no state, no I/O.
 
+mod epoch_cell;
 mod error;
 pub mod pagination;
 pub mod secrets;
@@ -9,6 +10,7 @@ mod swap_cell;
 mod time;
 mod types;
 
+pub use epoch_cell::{EpochCell, EpochCellOption, EpochGuard};
 pub use error::CoreError;
 pub use pagination::{
     Page, PageRequest, PagedResult, DEFAULT_COUNT_CAP, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,

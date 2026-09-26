@@ -35,8 +35,9 @@
 //!
 //! Permission resolution is explicitly **not** on the hot path — permissions
 //! are embedded in the JWT at issue time — so a read lock is allowed here where
-//! it would not be in `validate_token`. The remaining `ArcSwap` call sites,
-//! including the genuinely hot ones, are enumerated in
+//! it would not be in `validate_token`. The hot call sites that were still on
+//! `ArcSwap` moved to the epoch-reclaimed [`EpochCell`](crate::core::EpochCell)
+//! in task 26.5, and the crate is no longer a dependency; see
 //! `reports/arc-swap-use-after-free-2026-09-21.md`.
 //!
 //! # Correctness (security boundary)
@@ -80,7 +81,7 @@ use super::types::ResolvedPermissions;
 const MAX_RESOLUTION_CACHE_ENTRIES: usize = 50_000;
 
 /// Number of independent entry shards. A power of two so shard selection is a
-/// cheap mask of the key hash. Matches the `ShardedArcSwapMap` fan-out (HEA-1772)
+/// cheap mask of the key hash. Matches the `ShardedEpochMap` fan-out (HEA-1772)
 /// — 64 keeps per-shard clone cost at ~`1/64` of the working set while the fixed
 /// overhead (64 empty `Arc<HashMap>` pointers) stays negligible.
 const SHARD_COUNT: usize = 64;
@@ -425,8 +426,12 @@ mod tests {
         //
         // three copies at a time. On `ArcSwap` that measured 3 failures in 150
         // runs (two SIGSEGV, one `free(): invalid size`); on `SwapCell` it
-        // measures 0. Full evidence and the remaining call sites are in
-        // `reports/arc-swap-use-after-free-2026-09-21.md`.
+        // measures 0. Full evidence is in
+        // `reports/arc-swap-use-after-free-2026-09-21.md`. On glibc 2.34 and
+        // later `MALLOC_CHECK_` does nothing unless `libc_malloc_debug.so` is
+        // preloaded (`LD_PRELOAD=<glibc>/lib/libc_malloc_debug.so`), which
+        // leaves only glibc's always-on `free()` checks; `MALLOC_PERTURB_=165`
+        // also overwrites freed chunks, so a stale read sees garbage.
         //
         // So do NOT "fix" a failure here by lowering the count again or by
         // #[ignore]-ing it. This module is 100% safe Rust with no `unsafe`; a

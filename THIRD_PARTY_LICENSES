@@ -4874,7 +4874,6 @@ limitations under the License.
 --------------------------------------------------------------------------------
 License: Apache License 2.0 (Apache-2.0)
 Used by:
-  - arc-swap 1.9.2
   - arrayvec 0.7.6
   - asn1-rs-derive 0.5.1
   - asn1-rs-derive 0.6.0

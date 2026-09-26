@@ -93,9 +93,11 @@ jobs:
       - name: Setup Rust nightly + protoc (HEA-676 reusable)
         uses: ./.github/actions/setup-rust
         with:
-          # HEA-2019: pinned, not floating `nightly`. This is the only workflow
-          # in the repo on the nightly channel (cargo-fuzz requires it), so it is
-          # the only one exposed to nightly drift. A nightly published between
+          # HEA-2019: pinned, not floating `nightly`. cargo-fuzz requires the
+          # nightly channel, which exposes this workflow to nightly drift (as
+          # it does ci.yml's `unsafe-code` job, for Miri and AddressSanitizer,
+          # which pins the same nightly in unsafe-check/rust-toolchain.toml).
+          # A nightly published between
           # 2026-07-29 and 2026-08-02 regressed rustc's memory use under
           # ASAN + sancov: one rustc reached 15.1 GB on a 15,989 MB runner and
           # every leg died with exit 143 ("runner has received a shutdown

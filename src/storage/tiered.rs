@@ -1,6 +1,6 @@
 //! Hot tier with clock-based LRU eviction for frequently accessed data.
 //!
-//! Provides lock-free reads via `ArcSwap<HashMap>`. The tier is split into
+//! Provides lock-free reads via `EpochCell<HashMap>`. The tier is split into
 //! power-of-two shards; writes (promote, invalidate, evict) are serialized
 //! behind their shard's `Mutex` and use clone-mutate-swap on that shard's map
 //! only — `O(capacity / shard count)` per write, off the hot path
@@ -23,9 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use hashbrown::{DefaultHashBuilder, HashMap};
 
-use arc_swap::ArcSwap;
-
-use crate::core::RealmId;
+use crate::core::{EpochCell, RealmId};
 use crate::storage::memtable::CompositeKey;
 
 /// A single entry in the hot tier.
@@ -146,7 +144,7 @@ fn shard_count_for(capacity: usize) -> usize {
 /// shard's map and contends only with writers on the same shard.
 struct Shard {
     /// The shard's cached data, swapped atomically on mutations.
-    data: ArcSwap<HashMap<CompositeKey, HotEntry>>,
+    data: EpochCell<HashMap<CompositeKey, HotEntry>>,
     /// Serializes this shard's write operations (promote, invalidate, evict).
     write_lock: Mutex<()>,
     /// Clock hand position for sweeps over this shard.
@@ -199,7 +197,7 @@ impl HotTier {
                 // Every shard map clones the tier-level hash builder so all
                 // maps hash identically — `get` computes one hash for both
                 // shard selection and the in-map `raw_entry` lookup.
-                data: ArcSwap::from_pointee(HashMap::with_hasher(hash_builder.clone())),
+                data: EpochCell::from_pointee(HashMap::with_hasher(hash_builder.clone())),
                 write_lock: Mutex::new(()),
                 clock_hand: AtomicUsize::new(0),
                 invalidation_epoch: AtomicU64::new(0),
@@ -999,6 +997,122 @@ mod tests {
     fn hot_tier_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<HotTier>();
+    }
+
+    /// `get` reads a shard's map with no lock while `promote`, `invalidate`
+    /// and the clock sweep replace it — the hottest read in storage, moved
+    /// from `ArcSwap` onto `EpochCell` in task 26.5. Readers racing all three
+    /// writers on one shard must only ever read back a value written for the
+    /// key they asked for, and the storm must leave the tier writable.
+    ///
+    /// This is the shape of the `arc-swap` fault (task 26.1). Run several
+    /// copies at once with glibc's heap checking on (`MALLOC_CHECK_=3` with
+    /// `libc_malloc_debug.so` preloaded, plus `MALLOC_PERTURB_=165`): with the
+    /// cell's grace period removed, that fails 10 runs in 10. `make heap-check`
+    /// runs it that way (CI: the `quality` job).
+    #[test]
+    fn concurrent_reads_see_only_values_written_for_their_key() {
+        const KEYS: usize = 32;
+        const ROUNDS: u32 = 200;
+
+        // Below the key count, so promotes keep the tier at capacity and the
+        // eviction path runs too; a tier this small is a single shard, so
+        // every write contends with every read.
+        let tier = Arc::new(HotTier::new(TieredConfig {
+            hot_tier_capacity: KEYS / 2,
+            eviction_batch_size: 4,
+            promote_sample_rate: 1,
+            per_realm_metrics: false,
+        }));
+        assert_eq!(tier.shard_count(), 1, "the test needs one contended shard");
+        let realm = RealmId::generate();
+        let keys: Arc<Vec<Vec<u8>>> =
+            Arc::new((0..KEYS).map(|i| format!("key-{i}").into_bytes()).collect());
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let (tier, realm, keys, stop) = (
+                    Arc::clone(&tier),
+                    realm.clone(),
+                    Arc::clone(&keys),
+                    Arc::clone(&stop),
+                );
+                std::thread::spawn(move || {
+                    let mut hits = 0_u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        for key in keys.iter() {
+                            let Some(value) = tier.get(&realm, key) else {
+                                continue;
+                            };
+                            hits += 1;
+                            // `{key}@{round}`: the key it was written for, then
+                            // a round that was actually written.
+                            let (owner, round) =
+                                value.split_at(value.iter().rposition(|b| *b == b'@').unwrap_or(0));
+                            assert_eq!(owner, key.as_slice(), "read another key's value");
+                            let round: u32 = std::str::from_utf8(&round[1..])
+                                .expect("utf-8 round")
+                                .parse()
+                                .expect("numeric round");
+                            assert!(round < ROUNDS, "read a round never written: {round}");
+                        }
+                    }
+                    hits
+                })
+            })
+            .collect();
+
+        let writers: Vec<_> = (0..2)
+            .map(|w| {
+                let (tier, realm, keys) = (Arc::clone(&tier), realm.clone(), Arc::clone(&keys));
+                std::thread::spawn(move || {
+                    for round in 0..ROUNDS {
+                        for key in keys.iter().skip(w).step_by(2) {
+                            let mut value = key.clone();
+                            value.extend_from_slice(format!("@{round}").as_bytes());
+                            tier.promote_now(&realm, key, &value);
+                            if round % 3 == 0 {
+                                tier.invalidate(&realm, key);
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        let sweeper = {
+            let (tier, stop) = (Arc::clone(&tier), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    tier.clock_sweep_step();
+                }
+            })
+        };
+
+        for w in writers {
+            w.join().expect("writer thread");
+        }
+        stop.store(true, Ordering::Relaxed);
+        sweeper.join().expect("sweeper thread");
+        let hits: u64 = readers
+            .into_iter()
+            .map(|r| r.join().expect("reader thread"))
+            .sum();
+        assert!(
+            hits > 0,
+            "the readers never read a cached value: nothing was checked"
+        );
+
+        // The storm is over: a promote must still land and read back.
+        for key in keys.iter() {
+            tier.promote_now(&realm, key, b"settled");
+            assert_eq!(
+                tier.get(&realm, key).as_deref(),
+                Some(b"settled" as &[u8]),
+                "a promote after the storm did not publish"
+            );
+        }
     }
 
     // ===== HEA-1775: Promote write-lock / clone churn (probabilistic admission) =====

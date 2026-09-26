@@ -4,7 +4,7 @@
 //! lookup-performance fix track.
 //!
 //! Two scenarios × three realm sizes (10 k / 100 k / 500 k users):
-//!   (a) **hot-tier hit** — key already promoted to the ArcSwap hot tier;
+//!   (a) **hot-tier hit** — key already promoted to the `EpochCell` hot tier;
 //!       exercises the lock-free O(1) read path only.
 //!   (b) **cold random** — key not present in hot tier; exercises the
 //!       memtable BTreeMap O(log n) + SST binary-search O(k · log n) path.
@@ -39,7 +39,7 @@ const HOT_TIER_CAPACITY: usize = 100_000;
 /// Number of keys pre-warmed into the hot tier before hot-hit measurement.
 ///
 /// Hot-tier lookup is O(1) regardless of how many entries are in the tier,
-/// so warming a small fixed count is sufficient to measure the ArcSwap path.
+/// so warming a small fixed count is sufficient to measure the `EpochCell` path.
 /// Warming the full `HOT_TIER_CAPACITY` (100 k) would require O(N²) HashMap
 /// clone-swap operations in `promote()` — 5 billion malloc calls for 100 k
 /// entries — making bench setup impractically slow. A fixed 1 k warm is enough
@@ -61,7 +61,7 @@ const WARMUP: usize = 200;
 
 /// p99 ceiling for hot-tier hit reads, any realm size.
 ///
-/// The hot tier is a lock-free `ArcSwap` load + atomic `reference_bit` set.
+/// The hot tier is a lock-free `EpochCell` load + atomic `reference_bit` set.
 /// Sub-microsecond in practice; 100 µs is very generous to tolerate CI noise.
 const HOT_P99_CEILING: Duration = Duration::from_micros(100);
 
@@ -207,7 +207,7 @@ fn gate_flat_latency() {
 
     // ── Hot-tier hit ──────────────────────────────────────────────────────────
     // Each realm is fully populated but only a fixed 1 k subset is warmed into
-    // the hot tier. The hot-tier path is O(1) ArcSwap regardless of realm size,
+    // the hot tier. The hot-tier path is an O(1) `EpochCell` read regardless of realm size,
     // so p99 must stay flat across all three realm sizes.
 
     let mut hot_p99s: Vec<(usize, Duration)> = Vec::new();
@@ -230,7 +230,7 @@ fn gate_flat_latency() {
         assert!(
             p99 <= HOT_P99_CEILING,
             "hot-tier p99 {p99:?} at {user_count} users exceeds ceiling {HOT_P99_CEILING:?} — \
-             expected O(1) ArcSwap read; see benches/point_lookup.rs for threshold rationale"
+             expected O(1) EpochCell read; see benches/point_lookup.rs for threshold rationale"
         );
         hot_p99s.push((user_count, p99));
     }

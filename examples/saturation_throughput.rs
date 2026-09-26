@@ -1162,7 +1162,7 @@ fn print_summary(results: &[OpResult], wr: &WriteResult) {
     println!(
         "Engine-cost floor only. The HTTP/axum/tokio delta on top is NOT-MEASURABLE in this\n\
          environment (HEA-1871 C3 / HEA-1876 C8: the generator, not the server, is the ceiling).\n\
-         Reads are lock-free hot-path (epoch-reclaimed, ArcSwap caches) and are expected to scale;\n\
+         Reads are lock-free hot-path (epoch-reclaimed EpochCell caches) and are expected to scale;\n\
          session_create is WAL-fsync + group-commit (fsyncs/write drops with concurrency).\n\
          Device F = {:.1} fsyncs/s; W = {:.3} WAL syncs/op; T4 ceiling at T={}: {:.0} ops/s.",
         wr.device_fsyncs_s,

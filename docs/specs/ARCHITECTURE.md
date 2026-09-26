@@ -110,6 +110,7 @@ Authorization decisions are NOT on the hot path. Permissions are resolved at tok
 Hot path code MUST obey all of the following:
 
 1. **Zero heap allocations.** MUST NOT call `Box::new`, `Vec::new`, `String::from`, `format!()`, `to_string()`, or any other allocating operation in the steady state. Pre-allocated buffers and arena allocators are the alternatives.
+   - The one sanctioned exception is the bookkeeping of the epoch collector that rule 3 requires. A read through `core::EpochCell` pins its thread in the cells' `crossbeam-epoch` collector, and every 128th pin on a thread runs a slice of that collector's pending work, which allocates at most once per 1,024 loads on the thread — and only while there is collector work pending, which `EpochCell` writes (and threads that used a cell exiting) produce; with neither, a warm load allocates nothing. The cells have a collector of their own, so no other code's deferred work (such as `crossbeam-skiplist`'s node frees) runs in, or allocates in, a hot-path read. `src/core/epoch_cell.rs` explains the mechanism and `tests/epoch_cell_hot_path.rs` gates both bounds, measuring the second with a writer running. Hot-path code MUST NOT add any other allocation, amortised or not.
 2. **No syscalls for reads.** Hot-tier reads MUST be satisfied from memory-mapped structures or in-process data. No `read()`, `pread()`, or file I/O.
 3. **No locks on the read path.** Readers MUST NOT acquire mutexes, `RwLock` write locks, or any blocking synchronization primitive. Epoch-based reclamation (e.g., `crossbeam-epoch`) or read-copy-update patterns are required.
 4. **No yielding.** Hot path async functions MUST NOT `.await` on I/O operations. They complete synchronously within the async context.
@@ -368,18 +369,23 @@ Each layer validates what it is responsible for. **Each layer MUST validate its 
 ### 9.1 Shared State
 
 - Global mutable state is prohibited. All shared state MUST be passed explicitly via function parameters or held in typed state containers (e.g., `Arc<AppState>`).
-- Read-heavy shared data MUST use lock-free structures (`crossbeam-epoch`, `arc-swap`). `RwLock` is a fallback when lock-free is impractical.
+- Read-heavy shared data MUST use lock-free structures: `core::EpochCell` (built on `crossbeam-epoch`) on the hot path. `RwLock` (`core::SwapCell`) is a fallback when lock-free is impractical, and is not permitted on the hot path.
+- `arc-swap` MUST NOT be used: 1.9.2 corrupts the heap under the `load` + `rcu` pattern and no release fixes it (tasks 26.1 and 26.5, `reports/arc-swap-use-after-free-2026-09-21.md`). `deny.toml` bans it.
 - `Mutex` MUST NOT be held across `.await` points. Use `tokio::sync::Mutex` only when necessary, with a comment explaining why.
 
 ### 9.2 Unsafe Code
 
-`unsafe` MUST be minimized and isolated. Hearth leans on well-audited crates (`memmap2`, `crossbeam-epoch`, `arc-swap`) for operations that would otherwise require custom `unsafe` code.
+`unsafe` MUST be minimized and isolated. Hearth leans on well-audited crates (`memmap2`, `crossbeam-epoch`) for operations that would otherwise require custom `unsafe` code.
 
 - Every `unsafe` block MUST have a `// SAFETY:` comment explaining why the operation is sound.
 - `unsafe` MUST NOT appear in the protocol or identity layers. It is permitted only in:
   - Storage engine (memory-mapped I/O, pointer arithmetic for data structures) — only if crate abstractions prove insufficient via profiling
+  - `src/core/epoch_cell.rs` — the `Arc` raw-pointer round trip and pinned dereference behind `EpochCell`, the hot path's epoch-reclaimed atomic `Arc` (task 26.5). The grace period itself is `crossbeam-epoch`'s; the cell adds four small blocks, each with its `// SAFETY:` argument
   - Performance-critical data structures in the RBAC engine (if profiling shows crate abstractions are insufficient; this is unlikely given RBAC runs off the hot path)
 - All `unsafe` code MUST be covered by Miri tests where feasible, and by address sanitizer runs in CI.
+  - Hearth cannot be built for Miri (`ring`, `aws-lc-sys` and `zstd-sys` are C), so `unsafe-check/` compiles each source file that holds `unsafe` on its own, with its unit tests, against the dependency releases Hearth ships. `make miri` runs those tests under Miri (Tree Borrows, several scheduler seeds) and `make asan` under AddressSanitizer; CI runs both in the `unsafe-code` job, on the nightly `unsafe-check/rust-toolchain.toml` pins.
+  - The cells built on `EpochCell` (hot tier, block cache, memtable, identity caches) run their concurrency tests under glibc heap checking: `make heap-check`, a step of CI's `quality` job.
+  - `tests/unsafe_check_harness.rs` fails when a file in `src/` gains `unsafe` that `unsafe-check/` does not compile, unless the file is listed there with the reason Miri cannot run it. The one such file is `src/storage/fs.rs`, whose `memmap2::Mmap::map` call Miri cannot model; its soundness rests on the data directory's files not being truncated under a mapping.
 - New `unsafe` blocks require explicit reviewer approval.
 
 ---
@@ -552,7 +558,7 @@ These crates are pre-approved and need no additional justification:
 | gRPC | `tonic` | `tower`-compatible |
 | Logging | `tracing`, `tracing-subscriber` | Structured, async-aware |
 | CLI | `clap` | Derive-based |
-| Lock-free concurrency | `crossbeam-epoch`, `arc-swap` | |
+| Lock-free concurrency | `crossbeam-epoch` (via `core::EpochCell`) | `arc-swap` is banned — see §9.1 |
 | Memory-mapped I/O | `memmap2` | |
 | Raft consensus | `openraft` | Implemented — `src/cluster/`; gated on `cluster:` config; **EXPERIMENTAL in 1.x — not production-supported.** Known defects: C-5 (no follower cache invalidation), C-6 (immutable membership), H-3 (follower writes return HTTP 500). |
 | HTTP framework | `axum` | `tower`-compatible |
@@ -680,7 +686,7 @@ Key architectural decisions codified in this document, with rationale:
 | API contracts | Protobuf (`.proto` files) | Single source of truth for REST, gRPC, events, and SDK codegen |
 | Audit trail | WAL-derived, async materialization | Zero write-path overhead; WAL is the durable record, audit store is a materialized view |
 | Embedded mode | Not supported | FFI tax unjustified without proven demand; sync core makes future addition feasible |
-| Unsafe code | Lean on crates | `memmap2`, `crossbeam-epoch`, `arc-swap` over custom `unsafe`. Matches Hearth's "leverage ecosystem" philosophy |
+| Unsafe code | Lean on crates | `memmap2`, `crossbeam-epoch` over custom `unsafe`. Matches Hearth's "leverage ecosystem" philosophy |
 | TDD | Strict, test-first | Database + security = zero tolerance for "I think this works." Tests define correctness before implementation. |
 | Compatibility | **Strict SemVer, in force now** | 1.0 GA shipped 2026-06-21 (`git tag v1.0.0`; CHANGELOG `[1.0.0]`), so the rules in [`VERSIONING.md`](../../VERSIONING.md) — per-surface breaking-change definitions, the support window, the deprecation policy and the 2.0 process — are **normative today**, not aspirational. The earlier "pre-1.0-GA: breaking changes permitted" entry in this row outlived the release that ended it and is withdrawn. |
 | Encryption at rest mechanism | Envelope encryption (AES-256-GCM) | Key rotation is O(DEKs) not O(data). Industry standard (AWS KMS, GCP KMS). |

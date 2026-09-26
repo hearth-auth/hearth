@@ -125,13 +125,16 @@ pub trait IpReputationProvider: Send + Sync {
 
 ### Data structure
 
-`SpamhausDropProvider` holds a `Arc<ArcSwap<CidrFilter>>`.  The background
-refresh task builds a new `CidrFilter` from the downloaded DROP + EDROP text,
-then calls `ArcSwap::store(Arc::new(new_filter))` to replace it atomically.
-Hot-path reads call `ArcSwap::load()` (zero allocation, no locks), then perform
-a linear scan over the deny `Vec<Cidr>`.  For the current DROP list size (~800
-IPv4 + ~100 IPv6 CIDRs) this stays well under the 5 µs `AbuseGuard.check()`
-budget.
+`SpamhausDropProvider` holds an `Arc<SwapCell<CidrFilter>>` (`core::SwapCell`).
+The background refresh task builds a new `CidrFilter` from the downloaded DROP +
+EDROP text, then calls `SwapCell::store(Arc::new(new_filter))` to replace it
+atomically. Reads call `SwapCell::load()` — a read lock, on which readers never
+block one another, permitted here because reputation checks are not on the
+`validate_token` / `lookup_session` hot path — then perform a linear scan over
+the deny `Vec<Cidr>`.  For the current DROP list size (~800 IPv4 + ~100 IPv6
+CIDRs) this stays well under the 5 µs `AbuseGuard.check()` budget. (The filter
+was held in an `ArcSwap` until task 26.5; `arc-swap` is now banned, see
+`ARCHITECTURE.md` §9.1.)
 
 ### Outcome and caller contract
 
@@ -1651,9 +1654,9 @@ in each realm.  There is no cross-realm sharing.
 **Module:** `src/abuse/cidr`  
 **Storage prefix:** `abuse:{realm}:cidr:{allow|deny}:{seq}`
 
-Per-realm IPv4/IPv6 CIDR lists that gate every public auth request.  Loaded
-from storage by the admin plane and held in an `Arc<ArcSwap<CidrFilter>>`
-for zero-lock hot-path lookup.
+Per-realm IPv4/IPv6 CIDR lists that gate every public auth request.  The
+realm's `security.cidr_policy` is compiled into a `CidrFilter` on each
+pre-auth check (`abuse::runtime::compile_filter`); no shared cell holds it.
 
 ### Evaluation order
 
@@ -1688,8 +1691,8 @@ realms:
 
 - Admin UI action ("block this IP") wired to A-9 storage (tracked in
   the A-8 admin-abuse-dashboard stub).
-- Reload-on-change without restart (requires `ArcSwap` integration in
-  the realm-config reloader).
+- Reload-on-change without restart (requires a hot-swapped holder, such as
+  `core::SwapCell`, in the realm-config reloader).
 
 ---
 
