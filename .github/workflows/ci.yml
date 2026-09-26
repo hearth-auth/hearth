@@ -564,8 +564,12 @@ jobs:
     # passing — allowing a PR to merge with zero quality checks run.
     if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # 30, plus headroom for `make heap-check` (three passes of ~95 tests, no
-    # new build: `make check` has built the binary).
+    # Its green runs among the last 25 CI runs (to 2026-09-23) took 12-20
+    # minutes, nearly all of it `make check`. `make heap-check` adds a minute
+    # or two — three passes of ~95 tests, about 30 s on a warm build with four
+    # test threads — and compiles nothing: it selects the test binaries
+    # `make check` has just built (see that step). 35 leaves half again the
+    # slowest green run plus those two minutes.
     timeout-minutes: 35
     env:
       # `nextest --workspace` links 307 test binaries. Measured on one of them:
@@ -639,10 +643,14 @@ jobs:
       # below: EpochCell's tests and those of every cell built on it — hot
       # tier, block cache, memtable, flush-vs-read, identity caches — under
       # glibc heap checking, three passes. It runs here because `make check`
-      # has just built the test binary it needs. `make heap-check` passes
-      # `--retries 0` itself: the `ci` profile's retries would turn a heap
-      # error that fires one run in three into a pass. `!cancelled()`: a red
-      # test suite above must not also hide this verdict.
+      # has just built the test binaries it needs, and it reuses them only
+      # because `make heap-check` selects them with `--workspace`, as
+      # `make test` does: the simulation crate turns on hearth's `test-hooks`
+      # feature, and a hearth-only selection would compile hearth and its lib
+      # tests a second time without it. `make heap-check` passes `--retries 0`
+      # itself: the `ci` profile's retries would turn a heap error that fires
+      # one run in three into a pass. `!cancelled()`: a red test suite above
+      # must not also hide this verdict.
       - name: make heap-check (EpochCell's consumers under glibc heap checking)
         if: ${{ !cancelled() }}
         run: make heap-check
@@ -1420,8 +1428,8 @@ jobs:
   # (in `quality`) fails if a file gains `unsafe` the harness does not compile.
   #
   # The hearth-side half — the cells built on EpochCell under glibc heap
-  # checking — is `make heap-check`, a step of `quality`, which has already
-  # built the test binary it needs.
+  # checking — is `make heap-check`, a step of `quality`, where it reuses the
+  # test binaries `make check` built.
   unsafe-code:
     name: unsafe-code (Miri + AddressSanitizer)
     needs: filter

@@ -209,8 +209,8 @@ HEAP_CHECK_FILTER = binary(epoch_cell_hot_path) \
 	| test(/^storage::engine::tests::(concurrent_writes_during_flush_are_not_lost|a_scan_never_misses|a_key_scan_never_misses)/)
 
 ## Miri, Tree Borrows: a data race, a use-after-free or an aliasing violation
-## in the unsafe modules' tests is an error. Leaks are not: crossbeam-epoch's
-## global collector never frees its own bags at exit.
+## in the unsafe modules' tests is an error. Leaks are not: EpochCell's epoch
+## collector is a static, and never frees its own bags at exit.
 miri: ## Run the unsafe modules' unit tests under Miri
 	cd unsafe-check && MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks -Zmiri-many-seeds=$(MIRI_SEEDS)" \
 	  cargo miri nextest run --locked --no-fail-fast
@@ -224,11 +224,18 @@ asan: ## Run the unsafe modules' unit tests under AddressSanitizer
 ## Hearth's own tests of the cells built on EpochCell, under glibc heap checking
 ## (scripts/heap-check-runner.sh), HEAP_CHECK_RUNS times. `--retries 0`: a
 ## retry would turn a heap error that fires one run in three into a pass.
+##
+## `--workspace`, as `make test` has it, so that after `make check` this builds
+## nothing. The simulation crate turns on hearth's `test-hooks` feature, and a
+## hearth-only selection resolves hearth without it: different units, and cargo
+## compiles hearth and its lib tests a second time (checked with
+## `cargo +nightly test --no-run -Z unstable-options --unit-graph`).
+## `package(hearth)` keeps the simulation crate's tests out.
 heap-check: ## Run EpochCell's consumers' concurrency tests under glibc heap checking
 	CARGO_TARGET_$(HOST_TRIPLE_ENV)_RUNNER="$(CURDIR)/scripts/heap-check-runner.sh" \
-	  PROTOC=$(PROTOC) cargo nextest run --lib --test epoch_cell_hot_path \
+	  PROTOC=$(PROTOC) cargo nextest run --workspace --lib --test epoch_cell_hot_path \
 	  --retries 0 --no-fail-fast --stress-count $(HEAP_CHECK_RUNS) $(CARGO_FLAGS) \
-	  -E '$(HEAP_CHECK_FILTER)'
+	  -E 'package(hearth) & ($(HEAP_CHECK_FILTER))'
 
 ## All three. Each runs to completion and reports; the exit code is the worst.
 unsafe-check: ## Run Miri, AddressSanitizer and heap checking over the unsafe code
