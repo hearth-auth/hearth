@@ -156,6 +156,12 @@
     <fieldset class="space-y-2">
       <legend class="text-sm font-medium text-ht-content-secondary">ID token signing algorithm</legend>
       <p class="mb-2 text-xs text-ht-content-muted">Signs this application's ID tokens only. Access and refresh tokens are always EdDSA.</p>
+      {% if id_token_grants_refused %}
+      <div class="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/[0.08] px-4 py-3">
+        <svg class="mt-0.5 h-4 w-4 shrink-0 text-warning-fg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <p class="text-sm text-warning-fg">This application's ID tokens use RS256, which FAPI 2.0 does not permit, so Hearth refuses its authorization-code and device grants until it is switched to EdDSA.</p>
+      </div>
+      {% endif %}
       <label class="flex cursor-pointer items-start gap-3 rounded border border-divider bg-ht-bg-base px-4 py-3 has-[:checked]:border-brand has-[:checked]:bg-brand/[0.04]">
         <input type="radio" name="id_token_signed_response_alg" value="EdDSA"
                {% if form_id_token_signed_response_alg == "EdDSA" %}checked{% endif %}
@@ -165,15 +171,19 @@
           <span class="block text-xs text-ht-content-muted">Ed25519 — the realm key that signs every other Hearth token.</span>
         </span>
       </label>
-      <label class="flex cursor-pointer items-start gap-3 rounded border border-divider bg-ht-bg-base px-4 py-3 has-[:checked]:border-brand has-[:checked]:bg-brand/[0.04]">
+      <label class="flex {% if fapi_forbids_rs256 %}cursor-not-allowed opacity-50{% else %}cursor-pointer{% endif %} items-start gap-3 rounded border border-divider bg-ht-bg-base px-4 py-3 has-[:checked]:border-brand has-[:checked]:bg-brand/[0.04]">
         <input type="radio" name="id_token_signed_response_alg" value="RS256"
                {% if form_id_token_signed_response_alg == "RS256" %}checked{% endif %}
+               {% if fapi_forbids_rs256 %}disabled aria-describedby="id-token-alg-fapi"{% endif %}
                class="mt-0.5 h-4 w-4 text-ht-content-brand">
         <span>
           <span class="block text-sm font-medium text-ht-content-primary">RS256</span>
           <span class="block text-xs text-ht-content-muted">RSA with SHA-256, for relying parties that only verify the OpenID Connect default. Uses the realm's RSA ID-token key, created on first use.</span>
         </span>
       </label>
+      {% if fapi_forbids_rs256 %}
+      <p id="id-token-alg-fapi" class="text-xs text-ht-content-muted">RS256 is unavailable: FAPI 2.0 applies to this application, through its own profile or its realm's, and permits only PS256, ES256 and EdDSA.</p>
+      {% endif %}
     </fieldset>
 
     <div>

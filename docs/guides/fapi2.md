@@ -103,7 +103,9 @@ only specific clients in a realm require FAPI 2.0 constraints; use realm-level `
 The RS256 restriction also applies to every client of a realm with a `fapi_profile` (§2):
 registration and updates that select RS256 are refused, dynamic registration in such a realm
 defaults to `EdDSA`, and an RS256 client that predates the realm's `fapi_profile` has its
-ID-token grants (authorization code, device) refused until it is switched to `EdDSA`.
+ID-token grants (authorization code, device) refused until it is switched to `EdDSA`. The admin
+console does not offer RS256 wherever this applies, and flags such a client on its edit page, where
+its other settings stay editable.
 
 ### Generate a key pair
 

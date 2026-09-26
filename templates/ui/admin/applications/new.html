@@ -192,15 +192,19 @@
           <span class="block text-xs text-ht-content-muted">Ed25519 — the realm key that signs every other Hearth token.</span>
         </span>
       </label>
-      <label class="flex cursor-pointer items-start gap-3 rounded border border-divider bg-ht-bg-base px-4 py-3 has-[:checked]:border-brand has-[:checked]:bg-brand/[0.04]">
+      <label class="flex {% if fapi_forbids_rs256 %}cursor-not-allowed opacity-50{% else %}cursor-pointer{% endif %} items-start gap-3 rounded border border-divider bg-ht-bg-base px-4 py-3 has-[:checked]:border-brand has-[:checked]:bg-brand/[0.04]">
         <input type="radio" name="id_token_signed_response_alg" value="RS256"
                {% if form_id_token_signed_response_alg == "RS256" %}checked{% endif %}
+               {% if fapi_forbids_rs256 %}disabled aria-describedby="id-token-alg-fapi"{% endif %}
                class="mt-0.5 h-4 w-4 text-ht-content-brand">
         <span>
           <span class="block text-sm font-medium text-ht-content-primary">RS256</span>
           <span class="block text-xs text-ht-content-muted">RSA with SHA-256, for relying parties that only verify the OpenID Connect default. Uses the realm's RSA ID-token key, created on first use.</span>
         </span>
       </label>
+      {% if fapi_forbids_rs256 %}
+      <p id="id-token-alg-fapi" class="text-xs text-ht-content-muted">RS256 is unavailable in this realm: it has a FAPI 2.0 profile, and FAPI 2.0 permits only PS256, ES256 and EdDSA.</p>
+      {% endif %}
     </fieldset>
 
     <div>
