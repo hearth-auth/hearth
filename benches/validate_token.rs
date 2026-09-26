@@ -116,7 +116,11 @@ const VALIDATE_TOKEN_P99: Duration = Duration::from_millis(1);
 /// - the JTI-revocation check formats its `{realm}:{jti}` key into a stack
 ///   buffer (`StackKeyBuf`) instead of `format!()`,
 /// - `EpochCell::load()` pins the thread's epoch participant, which allocates
-///   only on that thread's first pin (registration, done during warm-up).
+///   on that thread's first pin (registration, done during warm-up) and
+///   otherwise only for the epoch collector's amortised bookkeeping while
+///   cells are being written — at most once per 1,024 loads, and never here,
+///   where nothing writes during the measurement
+///   (`tests/epoch_cell_hot_path.rs` gates the bound under a running writer).
 ///
 /// The ceiling is therefore **0**: any allocation on the warm path — a
 /// re-introduced deep `clone()`, a stray `format!()`, or new boxing — trips the

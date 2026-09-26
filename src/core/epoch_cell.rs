@@ -17,19 +17,18 @@
 //! The cell stores the current value as the raw pointer of an `Arc<T>`
 //! (`Arc::into_raw`) in an `AtomicPtr`, and owns that pointer's strong count.
 //!
-//! * **A read** ([`EpochCell::load`]) pins the thread's `crossbeam-epoch`
-//!   participant and reads through the pointer. Pinning writes only
-//!   thread-local state: no lock, no syscall, no heap allocation once the
-//!   thread has pinned for the first time, and no write to the shared
-//!   refcount. [`EpochCell::load_full`] also bumps the refcount — an atomic
-//!   increment, not an allocation — for a caller that keeps the value.
+//! * **A read** ([`EpochCell::load`]) pins the thread in the cells' epoch
+//!   collector and reads through the pointer: no lock, no syscall and no
+//!   write to the shared refcount. What it can cost in allocation is below.
+//!   [`EpochCell::load_full`] also bumps the refcount — an atomic increment,
+//!   not an allocation — for a caller that keeps the value.
 //! * **A write** ([`EpochCell::store`], [`EpochCell::rcu`]) swaps or
 //!   compare-and-swaps the pointer and *retires* the `Arc` it replaced: the
 //!   cell keeps it on a retired list and registers an epoch callback that does
 //!   nothing but raise a flag. `crossbeam-epoch` runs that callback only after
-//!   every thread that was pinned when it was registered has unpinned — the
-//!   grace period after which no reader can still be reading through the old
-//!   pointer.
+//!   every thread that was pinned in the collector when it was registered has
+//!   unpinned — the grace period after which no reader can still be reading
+//!   through the old pointer.
 //! * **The writer releases** retired values whose flag is up.
 //!   `crossbeam-epoch` runs deferred callbacks inside whichever thread's
 //!   `pin()` collects them, which on the hot path is usually a reader, so the
@@ -49,13 +48,49 @@
 //! released their predecessor before returning, and the worst backlog was 42
 //! values after 2,000 back-to-back writes.
 //!
+//! # The collector, and what a read costs
+//!
+//! All `EpochCell`s in the process share one collector, `COLLECTOR`, rather
+//! than `crossbeam-epoch`'s default one. Pinning writes only the thread's own
+//! participant, except that every 128th pin on a thread also runs a slice of
+//! the collector's pending work — `crossbeam-epoch`'s amortised collection,
+//! which no pin can opt out of. The slice tries to advance the epoch and
+//! retires up to eight bags of expired callbacks. Retiring a bag runs its
+//! callbacks — here they only raise a flag or free the collector's own
+//! bookkeeping (a queue node, a flag, an exited thread's participant), never
+//! a replaced value — and queues the bag's emptied queue node for release in
+//! the thread's own bag of deferred work. When that bag is full, at 64
+//! entries, it moves to the collector's queue, which allocates one queue
+//! node. So a load's allocation is amortised and bounded, not zero:
+//!
+//! * With no cell being written (and no thread that used one exiting), a warm
+//!   load allocates nothing.
+//! * While cells are being written, a thread's loads allocate at most once per
+//!   1,024 (eight bags per 128 pins, 64 bags per allocation), however hard
+//!   anything writes. Measured on a 16-core host with a writer storing in a
+//!   tight loop, about 65,000 writes during the window: 13–16 allocations in
+//!   2,000,000 loads.
+//!
+//! `tests/epoch_cell_hot_path.rs` gates both, the second with the writer
+//! running during the measurement. `ARCHITECTURE.md` §3.2 records this
+//! bookkeeping as the one allocation the hot path permits.
+//!
+//! A separate collector keeps everything else out of that slice. On the
+//! default collector a load also ran other crates' deferred work:
+//! `crossbeam-skiplist` frees memtable nodes there, and with one thread
+//! inserting and removing skiplist entries, a reader made about 160,000 frees
+//! and 20 allocations in 2,000,000 loads, where it now makes none. It also
+//! keeps grace periods apart: a guard held on the default collector, a
+//! skiplist read say, cannot hold back a value an `EpochCell` replaced, and an
+//! [`EpochGuard`] cannot hold back the skiplist's garbage.
+//!
 //! # Rules for callers
 //!
 //! * Hold an [`EpochGuard`] only across a short, non-blocking read. While any
-//!   thread is pinned, *no* retired value anywhere in the process can be
-//!   released, so a guard held across I/O, a lock or a long scan stalls
-//!   reclamation for every cell. Use [`EpochCell::load_full`] for anything
-//!   longer.
+//!   thread is pinned in the cells' collector, *no* value any `EpochCell`
+//!   retired can be released, so a guard held across I/O, a lock or a long
+//!   scan stalls reclamation for every cell. Use [`EpochCell::load_full`] for
+//!   anything longer.
 //! * An [`EpochGuard`] is `!Send`: the pin belongs to the thread that took it.
 //!
 //! # `unsafe`
@@ -64,7 +99,9 @@
 //! pinned dereference; each states the invariant it relies on. The grace
 //! period itself is `crossbeam-epoch`'s documented guarantee for
 //! `Guard::defer`: the callback "won't be executed until all currently pinned
-//! threads get unpinned".
+//! threads get unpinned" — pinned in the collector the guard belongs to,
+//! which is why a load and the write that retires what it read must pin the
+//! same one.
 //!
 //! [`SwapCell`]: crate::core::SwapCell
 
@@ -72,28 +109,62 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use crossbeam_epoch as epoch;
+
+/// The collector every `EpochCell` pins and retires into: its own, never
+/// `crossbeam-epoch`'s default one. See the module docs for why.
+///
+/// Soundness rests on one invariant here: [`EpochCell::load`] and the write
+/// that retires a value pin this same collector (through [`pin`]), so the
+/// grace period a write waits for covers every reader that could hold the
+/// value it replaced.
+static COLLECTOR: LazyLock<epoch::Collector> = LazyLock::new(epoch::Collector::new);
+
+thread_local! {
+    /// This thread's participant in [`COLLECTOR`], registered on first use.
+    static PARTICIPANT: epoch::LocalHandle = COLLECTOR.register();
+}
+
+/// Pins this thread in [`COLLECTOR`].
+#[inline]
+fn pin() -> epoch::Guard {
+    PARTICIPANT
+        .try_with(epoch::LocalHandle::pin)
+        // Only while this thread's thread-locals are being destroyed, as
+        // `crossbeam_epoch::pin` does: a participant registered for this one
+        // guard, which unregisters itself when the guard drops.
+        .unwrap_or_else(|_| COLLECTOR.register().pin())
+}
+
+/// Whether this thread is pinned in [`COLLECTOR`] — by a guard further up
+/// its stack, since [`pin`] is the only way in.
+fn is_pinned() -> bool {
+    PARTICIPANT
+        .try_with(epoch::LocalHandle::is_pinned)
+        .unwrap_or(false)
+}
 
 /// How many times a write nudges the epoch collector, waiting for the grace
 /// period of the value it just replaced, before leaving that value for a later
 /// write to release.
 ///
 /// Each nudge is one `pin()` + `flush()`: it hands this thread's deferred
-/// callbacks to the global queue, tries to advance the global epoch by one and
-/// runs the callbacks whose grace period has ended. Two advances end a grace
-/// period; the other two absorb advances refused because some thread was
-/// mid-read in the previous epoch.
+/// callbacks to the collector's queue, tries to advance the collector's epoch
+/// by one and runs the callbacks whose grace period has ended. Two advances
+/// end a grace period; the other two absorb advances refused because some
+/// thread was mid-read in the previous epoch.
 const RECLAIM_NUDGES: usize = 4;
 
-/// A cell holding an `Arc<T>` that readers load without a lock, a syscall or a
-/// heap allocation, and writers replace wholesale.
+/// A cell holding an `Arc<T>` that readers load without a lock or a syscall,
+/// and writers replace wholesale.
 ///
 /// The epoch-reclaimed counterpart of [`SwapCell`](crate::core::SwapCell), for
 /// the hot path, where `SwapCell`'s read lock is not allowed. See the module
-/// docs for how reclamation works and for the one rule callers must keep:
-/// drop an [`EpochGuard`] promptly.
+/// docs for how reclamation works, for what a load can cost in allocation
+/// (amortised, at most one per 1,024 loads on a thread), and for the one rule
+/// callers must keep: drop an [`EpochGuard`] promptly.
 pub struct EpochCell<T> {
     /// `Arc::into_raw` of the current value. Never null; the cell owns one
     /// strong count for it.
@@ -124,7 +195,8 @@ impl<T> Retired<T> {
 ///
 /// Dereferences to that value for as long as the guard lives, even after a
 /// writer replaces it. The guard keeps its thread pinned, which holds back
-/// reclamation process-wide, so drop it promptly — see the module docs.
+/// every `EpochCell`'s reclamation, so drop it promptly — see the module
+/// docs.
 #[must_use = "an EpochGuard pins the thread until it is dropped"]
 pub struct EpochGuard<'a, T> {
     /// The loaded value, valid while `pin` lives.
@@ -141,11 +213,12 @@ impl<T> Deref for EpochGuard<'_, T> {
     #[inline]
     fn deref(&self) -> &T {
         // SAFETY: `ptr` was loaded from an `EpochCell` after `pin` pinned this
-        // thread. The cell only ever holds non-null `Arc::into_raw` pointers
-        // and owns a strong count for each: while it is current, and on the
-        // retired list after a write replaces it. A retired value is dropped
-        // only after its grace-period flag is raised, and `crossbeam-epoch`
-        // runs the callback that raises it only once every thread pinned at
+        // thread in `COLLECTOR`, the collector every write retires into. The
+        // cell only ever holds non-null `Arc::into_raw` pointers and owns a
+        // strong count for each: while it is current, and on the retired list
+        // after a write replaces it. A retired value is dropped only after its
+        // grace-period flag is raised, and `crossbeam-epoch` runs the callback
+        // that raises it only once every thread pinned in `COLLECTOR` at
         // retirement has unpinned — this one included, and it cannot unpin
         // before `pin` drops. The borrow `'a` on the cell rules out the cell
         // itself dropping first. So the value stays allocated for as long as
@@ -182,13 +255,16 @@ impl<T> EpochCell<T> {
 
     /// Returns a pinned view of the current value.
     ///
-    /// Takes no lock, makes no syscall and allocates nothing once this thread
-    /// has pinned before. The guard must be dropped promptly: hold it across a
-    /// short read only, never across I/O, a lock or a long scan — use
+    /// Takes no lock and makes no syscall, and the read allocates nothing
+    /// itself. Every 128th load on a thread also runs a slice of the cells'
+    /// epoch collector, which allocates at most once per 1,024 loads on that
+    /// thread, and only while cells are being written — see the module docs.
+    /// The guard must be dropped promptly: hold it across a short read only,
+    /// never across I/O, a lock or a long scan — use
     /// [`load_full`](Self::load_full) for those.
     #[inline]
     pub fn load(&self) -> EpochGuard<'_, T> {
-        let pin = epoch::pin();
+        let pin = pin();
         // Acquire pairs with the writer's release, making the value's contents
         // visible. Loaded after pinning, so the pin covers it.
         let ptr = self.current.load(Ordering::Acquire);
@@ -201,9 +277,9 @@ impl<T> EpochCell<T> {
 
     /// Returns the current value as an owned `Arc`.
     ///
-    /// One atomic refcount increment on top of [`load`](Self::load); no
-    /// allocation. The `Arc` does not pin the thread, so it may be held for as
-    /// long as the caller likes.
+    /// One atomic refcount increment on top of [`load`](Self::load), which it
+    /// is otherwise identical to, allocation included. The `Arc` does not pin
+    /// the thread, so it may be held for as long as the caller likes.
     #[must_use]
     pub fn load_full(&self) -> Arc<T> {
         let guard = self.load();
@@ -227,7 +303,7 @@ impl<T> EpochCell<T> {
     /// in the common case.
     pub fn store(&self, value: Arc<T>) {
         let next = Arc::into_raw(value).cast_mut();
-        let pin = epoch::pin();
+        let pin = pin();
         let prev = self.current.swap(next, Ordering::AcqRel);
         self.retire(prev, pin);
     }
@@ -284,14 +360,15 @@ impl<T> EpochCell<T> {
 
         let grace_elapsed = Arc::new(AtomicBool::new(false));
         let signal = Arc::clone(&grace_elapsed);
-        // Registered after the exchange, while still pinned: it runs only once
-        // every thread pinned now — every reader that could have loaded
-        // `prev` — has unpinned. It raises a flag instead of dropping `value`
-        // because it may run inside any thread's `pin()`, readers included.
+        // Registered after the exchange, while still pinned in `COLLECTOR`: it
+        // runs only once every thread pinned there now — every reader that
+        // could have loaded `prev`, since a load pins `COLLECTOR` too — has
+        // unpinned. It raises a flag instead of dropping `value` because it
+        // may run inside any thread's `pin()`, readers included.
         pin.defer(move || signal.store(true, Ordering::Release));
-        // Seal the callback into the global queue now, so its grace period is
-        // counted from this write rather than from whenever this thread's
-        // local bag next fills.
+        // Seal the callback into the collector's queue now, so its grace
+        // period is counted from this write rather than from whenever this
+        // thread's local bag next fills.
         pin.flush();
         drop(pin);
 
@@ -362,13 +439,13 @@ fn nudge_collector(grace_elapsed: &AtomicBool) {
         if grace_elapsed.load(Ordering::Acquire) {
             return;
         }
-        // A guard further up this thread's stack holds the global epoch back,
-        // so no nudge can end the grace period until it drops. A later write
-        // releases the value instead.
-        if epoch::is_pinned() {
+        // A guard further up this thread's stack holds the collector's epoch
+        // back, so no nudge can end the grace period until it drops. A later
+        // write releases the value instead.
+        if is_pinned() {
             return;
         }
-        epoch::pin().flush();
+        pin().flush();
     }
 }
 
@@ -403,7 +480,7 @@ impl<T: fmt::Debug> fmt::Debug for EpochCell<T> {
 ///
 /// A safe wrapper over `EpochCell<Option<Arc<T>>>` that adds no `unsafe` of
 /// its own. A store allocates the small `Option` box that loads dereference
-/// through; loads stay allocation-free.
+/// through; a load costs what [`EpochCell::load`] costs.
 pub struct EpochCellOption<T> {
     inner: EpochCell<Option<Arc<T>>>,
 }
@@ -424,8 +501,8 @@ impl<T> EpochCellOption<T> {
         self.inner.load()
     }
 
-    /// Returns the current value as an owned `Arc`, if any. One atomic
-    /// refcount increment when a value is present; no allocation.
+    /// Returns the current value as an owned `Arc`, if any: a load, plus one
+    /// atomic refcount increment when a value is present.
     #[must_use]
     pub fn load_full(&self) -> Option<Arc<T>> {
         self.inner.load().as_ref().map(Arc::clone)
@@ -479,7 +556,8 @@ mod tests {
     /// `make miri` runs these tests that way, from `unsafe-check/` (CI: the
     /// `unsafe-code` job), with `-Zmiri-tree-borrows -Zmiri-ignore-leaks` —
     /// `crossbeam-epoch`'s intrusive list trips Stacked Borrows inside the
-    /// crate, and its global collector never frees its own bags at exit.
+    /// crate, and the cells' collector, a static, never frees its own bags at
+    /// exit.
     const fn stress(n: u64) -> u64 {
         if cfg!(miri) {
             n / 100 + 2
@@ -724,6 +802,77 @@ mod tests {
         );
     }
 
+    /// Work that other code defers to `crossbeam-epoch`'s default collector —
+    /// `crossbeam-skiplist` frees memtable nodes there — must never run inside
+    /// an `EpochCell` load. A load's pin runs a slice of its collector's
+    /// pending work every 128 pins, so on a shared collector a
+    /// `validate_token` read would run another subsystem's destructors.
+    #[test]
+    fn loads_never_run_work_deferred_to_the_default_collector() {
+        static RAN_ON_READER: AtomicUsize = AtomicUsize::new(0);
+        fn note_if_on_reader() {
+            // `try_with`: a deferred function can run while some thread's
+            // thread-locals are being torn down.
+            if IS_READER.try_with(Cell::get).unwrap_or(false) {
+                RAN_ON_READER.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let cell = Arc::new(EpochCell::from_pointee(0_u64));
+        let stop = Arc::new(AtomicBool::new(false));
+        let start = Arc::new(Barrier::new(5));
+
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let cell = Arc::clone(&cell);
+                let stop = Arc::clone(&stop);
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    IS_READER.with(|r| r.set(true));
+                    start.wait();
+                    let mut loads = 0_u64;
+                    while !stop.load(Ordering::Relaxed) || loads < stress(100_000) {
+                        std::hint::black_box(*cell.load());
+                        loads += 1;
+                    }
+                })
+            })
+            .collect();
+
+        start.wait();
+        for _ in 0..stress(20_000) {
+            let guard = crossbeam_epoch::pin();
+            guard.defer(note_if_on_reader);
+            guard.flush();
+        }
+        stop.store(true, Ordering::Relaxed);
+        for r in readers {
+            r.join().expect("reader thread");
+        }
+
+        assert_eq!(
+            RAN_ON_READER.load(Ordering::SeqCst),
+            0,
+            "an EpochCell load ran work deferred to crossbeam-epoch's default collector"
+        );
+    }
+
+    /// The other half of having a collector of its own: a guard held on
+    /// `crossbeam-epoch`'s default collector (a `crossbeam-skiplist` read, say)
+    /// cannot hold back the grace period of a value an `EpochCell` replaced.
+    #[test]
+    fn a_default_collector_guard_does_not_hold_back_reclamation() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let cell = EpochCell::from_pointee(Tracked::new(0, &drops));
+
+        let foreign = crossbeam_epoch::pin();
+        cell.store(Arc::new(Tracked::new(1, &drops)));
+        reclaim_until(&cell, &drops, 1);
+        drop(foreign);
+
+        assert_eq!(cell.load().id, 1);
+    }
+
     /// Writers racing on `rcu` must not lose an increment, and concurrent
     /// readers must never observe a value that went backwards.
     #[test]
@@ -935,9 +1084,10 @@ mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         {
             let cell = EpochCell::from_pointee(Tracked::new(0, &drops));
-            // Keep this thread pinned so no write can release anything: every
-            // replaced value is still on the retired list when the cell drops.
-            let pin = crossbeam_epoch::pin();
+            // Keep this thread pinned in the cells' collector so no write can
+            // release anything: every replaced value is still on the retired
+            // list when the cell drops.
+            let pin = super::pin();
             for id in 1..=5 {
                 cell.store(Arc::new(Tracked::new(id, &drops)));
             }

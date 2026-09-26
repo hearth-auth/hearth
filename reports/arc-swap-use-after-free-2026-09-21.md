@@ -232,10 +232,11 @@ a `deny.toml` ban (`cargo deny check bans` fails on the pre-removal graph) and
 one `ArcSwapOption` site — keeps the current value as the raw pointer of an
 `Arc<T>` in an `AtomicPtr`:
 
-* **Read.** `load()` pins the thread's `crossbeam-epoch` participant and returns
-  a guard that dereferences to the value: no lock, no syscall, no write to the
-  shared refcount, and no allocation once the thread has pinned before.
-  `load_full()` adds one refcount increment for a caller that keeps the value.
+* **Read.** `load()` pins the thread in the cells' own `crossbeam-epoch`
+  collector and returns a guard that dereferences to the value: no lock, no
+  syscall, no write to the shared refcount. Its allocation is amortised, not
+  zero — see *Found in review* below. `load_full()` adds one refcount increment
+  for a caller that keeps the value.
 * **Write.** `store` swaps the pointer; `rcu` is a compare-and-swap retry loop
   with `ArcSwap::rcu`'s semantics, so a check inside the closure — the claims
   cache's HEA-2097 generation guard — is re-read on every attempt.
@@ -280,6 +281,25 @@ an acknowledged key, measured. `list_sessions_by_user` is a scan, so
 `revoke_all_user_sessions` could skip a live session and leave its tokens
 valid. Reading the memtable first closed it (0 misses in 15 stress runs); like
 the park-order fix, it predates and is independent of the primitive.
+
+**Also found in review: a load is not allocation-free.** Every 128th
+`crossbeam-epoch` pin on a thread runs a slice of its collector's pending work,
+and retiring those bags allocates a queue node once per 64 — so a load
+allocates at most once per 1,024 on a thread, whenever there is work pending.
+The cell first pinned the crate's default collector, where
+`crossbeam-skiplist` also frees memtable nodes: with one thread inserting and
+removing skiplist entries, a reader made about 160,000 frees and 20
+allocations in 2,000,000 `EpochCell` loads, and with a thread deferring work
+there directly, about 175 allocations. The cells now have a collector of their
+own, which took both to zero and keeps grace periods apart (a skiplist guard
+no longer holds back an `EpochCell` release). What remains is the cells' own
+bookkeeping while they are written: with a writer storing in a tight loop,
+13–16 allocations in 2,000,000 loads (18–36 on the shared collector). The
+isolated contract test, `tests/epoch_cell_hot_path.rs`, now measures that with
+the writer running and asserts the 1-in-1,024 bound; its old zero-allocation
+check had drained the collector first and measured with nothing writing.
+`ARCHITECTURE.md` §3.2 records the bookkeeping as the hot path's one permitted
+allocation.
 
 ### Measured
 

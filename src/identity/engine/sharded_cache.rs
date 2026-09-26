@@ -2,8 +2,9 @@
 //!
 //! Wraps a fixed array of [`EpochCell`]-backed `HashMap` shards. Reads take a
 //! single epoch-pinned `load()` on the shard selected by the key's hash — no
-//! locks, no allocation, no syscall — preserving the O(1) hot-path read the
-//! revocation and signing-key caches depend on.
+//! lock, no syscall, and no allocation beyond the epoch collector's amortised
+//! bookkeeping (see [`EpochCell::load`]) — preserving the O(1) hot-path read
+//! the revocation and signing-key caches depend on.
 //!
 //! The win over a single cell holding the whole map (HEA-1772, C-3) is on the
 //! write path: an insert or remove `rcu()`s only the one shard the key maps to,
@@ -79,7 +80,8 @@ where
     }
 
     /// Lock-free membership test. A single epoch-pinned `load()` on the key's
-    /// shard — no lock, no allocation, no syscall.
+    /// shard — no lock, no syscall, and what `EpochCell::load` allocates:
+    /// nothing but the collector's amortised bookkeeping.
     #[inline]
     pub(crate) fn contains_key<Q>(&self, key: &Q) -> bool
     where
