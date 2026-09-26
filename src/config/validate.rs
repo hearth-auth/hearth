@@ -1774,6 +1774,41 @@ fn validate_realm_auth_configs_all(
     }
 }
 
+/// Validates an application's `id_token_signed_response_alg` (task 26.55).
+///
+/// The engine refuses anything but RS256/EdDSA, and RS256 wherever FAPI 2.0
+/// applies (FAPI 2.0 Security Profile §5.4.1 permits only PS256, ES256 and
+/// EdDSA), at reconcile time; `hearth config validate` must say so first, not
+/// after a boot that already failed. `realm_fapi` is whether the realm has a
+/// `fapi_profile`.
+fn validate_app_id_token_alg(
+    prefix: &str,
+    app: &super::types::ApplicationYamlConfig,
+    realm_fapi: bool,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(alg) = &app.id_token_signed_response_alg else {
+        return;
+    };
+    let reason = match crate::identity::IdTokenSigningAlg::parse(alg) {
+        Err(_) => {
+            "must be \"RS256\" or \"EdDSA\" (case-sensitive); \"none\" and symmetric HS* \
+             algorithms are never supported"
+        }
+        Ok(crate::identity::IdTokenSigningAlg::Rs256)
+            if realm_fapi || app.profile.as_deref() == Some("fapi2") =>
+        {
+            "RS256 is not permitted under FAPI 2.0 (a `profile: fapi2` application or a realm \
+             with `fapi_profile`); use \"EdDSA\""
+        }
+        Ok(_) => return,
+    };
+    issues.push(ValidationIssue {
+        field: format!("{prefix}.id_token_signed_response_alg"),
+        reason: reason.to_string(),
+    });
+}
+
 fn validate_realm_applications_all(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
     issues: &mut Vec<ValidationIssue>,
@@ -1810,6 +1845,7 @@ fn validate_realm_applications_all(
                     }
                 }
             }
+            validate_app_id_token_alg(&prefix, app, cfg.fapi_profile.is_some(), issues);
             // A confidential client whose `client_secret` is present but empty
             // authenticates with `Authorization: Basic base64("<client_id>:")`,
             // which any caller who knows the client id can send. The `is_none()`
@@ -3095,6 +3131,99 @@ auth:
             "SECURITY: 'password' (ROPC, RFC 6749 §4.3) must not appear in \
              VALID_GRANT_TYPES — remove it and use client_credentials or auth-code+PKCE instead"
         );
+    }
+
+    #[test]
+    fn config_validates_application_id_token_signed_response_alg() {
+        let yaml = |alg: &str| {
+            format!(
+                r#"
+oidc:
+  issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+realms:
+  myrealm:
+    applications:
+      my-app:
+        name: "My App"
+        redirect_uris: ["https://app.example.com/cb"]
+        id_token_signed_response_alg: "{alg}"
+"#
+            )
+        };
+        // Look only at this field's issues: the fixture is deliberately
+        // minimal and trips unrelated production-mode rules (email transport).
+        let alg_issues = |alg: &str| {
+            Config::from_yaml_str_unchecked(&yaml(alg))
+                .expect("fixture parses")
+                .validate_all()
+                .into_iter()
+                .filter(|issue| {
+                    issue.field == "realms.myrealm.applications.my-app.id_token_signed_response_alg"
+                })
+                .count()
+        };
+        for ok in ["RS256", "EdDSA"] {
+            assert_eq!(alg_issues(ok), 0, "{ok} must be accepted");
+        }
+        for bad in ["HS256", "none", "rs256", "ES256", ""] {
+            assert_eq!(
+                alg_issues(bad),
+                1,
+                "{bad:?} must be refused by `hearth config validate`, not first at reconcile"
+            );
+        }
+    }
+
+    /// FAPI 2.0 Security Profile §5.4.1 permits only PS256, ES256 and EdDSA, so
+    /// `hearth config validate` refuses RS256 for a `profile: fapi2`
+    /// application and for any application of a realm with a `fapi_profile` —
+    /// the engine refuses both at reconcile, and the operator should hear first.
+    #[test]
+    fn config_refuses_rs256_id_tokens_under_fapi() {
+        let yaml = |realm_fapi: &str, app_profile: &str, alg: &str| {
+            format!(
+                r#"
+oidc:
+  issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+realms:
+  myrealm:
+{realm_fapi}
+    applications:
+      my-app:
+        name: "My App"
+        redirect_uris: ["https://app.example.com/cb"]
+{app_profile}
+        id_token_signed_response_alg: "{alg}"
+"#
+            )
+        };
+        let alg_issues = |realm_fapi: &str, app_profile: &str, alg: &str| {
+            Config::from_yaml_str_unchecked(&yaml(realm_fapi, app_profile, alg))
+                .expect("fixture parses")
+                .validate_all()
+                .into_iter()
+                .filter(|issue| {
+                    issue.field == "realms.myrealm.applications.my-app.id_token_signed_response_alg"
+                })
+                .count()
+        };
+        let fapi_realm = "    fapi_profile: baseline";
+        let fapi_app = "        profile: fapi2";
+        assert_eq!(alg_issues(fapi_realm, "", "RS256"), 1, "FAPI realm + RS256");
+        assert_eq!(alg_issues("", fapi_app, "RS256"), 1, "FAPI 2.0 app + RS256");
+        assert_eq!(alg_issues(fapi_realm, "", "EdDSA"), 0, "FAPI realm + EdDSA");
+        assert_eq!(alg_issues("", fapi_app, "EdDSA"), 0, "FAPI 2.0 app + EdDSA");
+        assert_eq!(alg_issues("", "", "RS256"), 0, "no FAPI + RS256");
     }
 
     #[test]

@@ -33,7 +33,17 @@ SDKs **must** auto-discover all endpoint URLs from `{issuer_url}/.well-known/ope
 
 ## 2. JWKS & Token Verification
 
-**Required algorithm:** Ed25519 (`alg: "EdDSA"`, `kty: "OKP"`). Hearth exclusively issues tokens signed with Ed25519; SDKs **must** support OKP key verification.
+**Required algorithm:** Ed25519 (`alg: "EdDSA"`, `kty: "OKP"`). Hearth signs every access token with Ed25519; SDKs **must** support OKP key verification.
+
+> **RS256 ID tokens (task 26.55).** A client that registered `id_token_signed_response_alg: RS256` —
+> the OpenID Connect default, and what every Dynamic Client Registration gets when it omits the
+> parameter — receives **ID tokens** signed RS256 with the realm's RSA key, which the realm JWKS
+> then publishes (`kty: "RSA"`, `alg: "RS256"`, `x-key-role: "id-token-signing"`). This does not
+> change `verifyToken()`: it verifies **access** tokens, which are EdDSA without exception, so it
+> MUST keep refusing RS256 — even when the RSA key that signed the token is in the JWKS. Accepting
+> it would let an ID token be replayed as a bearer token. An application that needs to validate an
+> RS256 ID token does so with its OIDC library against the same JWKS; no SDK in this repository
+> verifies ID tokens.
 
 > **There is no federation exception.** An earlier revision of this section told SDKs they _should_ accept
 > RS256 and ES256 "when the corresponding key is present in the JWKS", on the theory that Hearth relays
@@ -64,10 +74,13 @@ SDKs must parse OKP JWKs that omit `y`. Parsers that assume `y` is always presen
 3. On cache miss for a `kid`: re-fetch once before returning an error.
 4. On HTTP 401 from a protected resource: re-fetch JWKS once, then retry the verification.
 5. Maximum cache age: 24 hours regardless of Cache-Control.
-6. When parsing a cached JWKS, skip (do not error on) any key with an unrecognized `kty` — forward
-   compatibility only. Every key Hearth publishes today is `OKP`/`Ed25519`, and the non-standard
-   `x-key-role` hint on those keys is always `"access-token-signing"`. Do not branch on `x-key-role`:
-   the `"saml-signing"` and `"ecdsa-compat"` roles named in older notes are not published in any JWKS.
+6. When parsing a cached JWKS, skip (do not error on) any key that is not `OKP`/`Ed25519`. A realm
+   JWKS carries `OKP`/`Ed25519` access-token keys (`x-key-role: "access-token-signing"`) and — once a
+   client in the realm selected RS256 — `RSA`/`RS256` ID-token keys (`x-key-role:
+   "id-token-signing"`). An SDK that errors on the RSA entry breaks access-token verification for the
+   whole realm. Do not branch on `x-key-role`, and never select a verifier from it: the `alg` check
+   above is what refuses an RS256 token. The `"saml-signing"` and `"ecdsa-compat"` roles named in
+   older notes are not published in any JWKS.
 
 **JWT validation steps (mandatory, in order):**
 1. Verify signature against cached JWKS.
@@ -624,7 +637,8 @@ For use in PR reviews and automated CI checks (see `.github/workflows/sdk-confor
 - [ ] README includes quickstart, API reference, and troubleshooting (Section 10)
 - [ ] CHANGELOG.md present and updated (Section 8)
 - [ ] `access_token_authorization` mode handling: `Introspection` and `Decision` modes enforce introspect/authorize call before accepting claims; JWKS-only verification is not used for authorization in those modes (Section 3.5)
-- [ ] Ed25519/OKP JWKS key parsing: SDK correctly parses OKP keys (`kty: "OKP"`, `crv: "Ed25519"`) from the JWKS endpoint; does not require a `y` coordinate; does not error on unrecognized `kty` values (Section 2)
+- [ ] Ed25519/OKP JWKS key parsing: SDK correctly parses OKP keys (`kty: "OKP"`, `crv: "Ed25519"`) from the JWKS endpoint; does not require a `y` coordinate; does not error on unrecognized `kty` values, including the realm's `RSA`/`RS256` ID-token key (Section 2)
+- [ ] RS256 containment: `verifyToken()` refuses an RS256 token signed by an RSA key the JWKS publishes, while still verifying EdDSA tokens against that same JWKS (Section 2, task 26.55)
 - [ ] Admin SDK entry-point pattern: `AdminClient` is a separate type from `HearthClient`; takes `(base_url, realm_id, access_token)` directly (no OIDC discovery); sends `X-Realm-ID` header on every request; implements minimum CRUD + list for users, realms, clients, roles, groups, and org memberships (Section 12)
 - [ ] Agent auth section present in README: covers agent CRUD (`/v1/agents`), API-key issuance, DPoP proof construction (RFC 9449), RFC 8693 token exchange, AAT issuance/derivation (`/v1/aats`), transaction token lifecycle (`/v1/transaction-tokens`), and draft-tracking owner reference (Section 13)
 - [ ] `verifyToken()` (or language-idiomatic equivalent `VerifyToken` / `verify_token`) present in every SDK: performs full Ed25519/EdDSA JWKS signature verification locally; returns typed `Claims` on success; returns typed §5 error on failure; does not delegate to introspection-only or reverse-proxy verification (§2)

@@ -1502,10 +1502,11 @@ Declarative OAuth 2.0 client definitions. Keyed by a **slug** (used to derive a 
 | `access_token_authorization` | *not a YAML key* | `embedded` | **Admin API / admin UI only — not settable in `hearth.yaml`.** Controls how resource servers resolve RBAC permissions for tokens issued to this client. One of: `embedded`, `introspection`, `decision`. Set it via `POST /admin/applications` / `PATCH /admin/applications/{id}` or the client edit form. Putting it under `applications.<slug>` in a config file is rejected at startup by `deny_unknown_fields`. See [Token Authorization Modes](../guides/rbac.md#token-authorization-modes). |
 | `require_consent` | bool | `true` | Whether users must approve the OAuth consent screen before tokens are issued. Set `false` only for first-party clients you control. |
 | `profile` | string | `"standard"` | Security profile for this client: `"fapi2"` or `"standard"`. Setting `"fapi2"` subjects this client to FAPI 2.0 constraints (DPoP sender-constrained tokens, PAR, PKCE S256) regardless of the realm-level `fapi_profile`. |
+| `id_token_signed_response_alg` | string | `"EdDSA"` | Algorithm this client's **ID tokens** are signed with: `"EdDSA"` or `"RS256"` (case-sensitive; anything else fails `hearth config validate` and startup). `RS256` is for relying parties that only verify the OpenID Connect default; it creates the realm's RSA-3072 ID-token key on first use and publishes it in the realm JWKS. Access and refresh tokens are always EdDSA. `RS256` is refused under FAPI 2.0 — with `profile: fapi2`, or in a realm with `fapi_profile` — since FAPI 2.0 permits only PS256, ES256 and EdDSA. Clients registered through Dynamic Client Registration default to `RS256` instead (`EdDSA` in a FAPI realm) — see [OIDC.md §1.2](OIDC.md#12-signing). |
 
 Reconciliation:
 - New slug → client **created** with deterministic UUID
-- Existing slug → `name`, `redirect_uris`, `post_logout_redirect_uris`, `grant_types` **updated** if changed
+- Existing slug → `name`, `redirect_uris`, `post_logout_redirect_uris`, `grant_types`, `id_token_signed_response_alg` **updated** if changed
 - Removed slug → client **archived**
 
 ```yaml
@@ -1519,6 +1520,8 @@ realms:
         grant_types:
           - authorization_code
           - refresh_token
+        # This RP's OIDC library only verifies RS256 ID tokens.
+        id_token_signed_response_alg: RS256
       api-service:
         name: "API Service"
         confidential: true

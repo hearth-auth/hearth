@@ -128,6 +128,12 @@
         {% endif %}
       </dd>
     </div>
+    <div>
+      <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">ID token signing</dt>
+      <dd class="mt-1">
+        <span class="inline-flex items-center rounded-full bg-ht-surface-elevated px-2 py-0.5 text-xs font-medium text-ht-content-muted">{{ app.id_token_signed_response_alg().as_str() }}</span>
+      </dd>
+    </div>
     {% if !app.declared_scopes().is_empty() %}
     <div>
       <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Declared scopes</dt>

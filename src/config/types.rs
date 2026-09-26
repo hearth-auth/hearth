@@ -2543,6 +2543,13 @@ pub struct ApplicationYamlConfig {
     /// (DPoP, PAR, PKCE S256) regardless of the realm-level `fapi_profile`.
     #[serde(default)]
     pub profile: Option<String>,
+    /// Algorithm this client's ID tokens are signed with
+    /// (`id_token_signed_response_alg`, OIDC Registration §2): `"EdDSA"` or
+    /// `"RS256"`. Absent means `"EdDSA"`. Only ID tokens are affected — access
+    /// and refresh tokens are always EdDSA. `RS256` provisions the realm's RSA
+    /// ID-token key on first use (task 26.55).
+    #[serde(default)]
+    pub id_token_signed_response_alg: Option<String>,
 }
 
 /// YAML permission definition.

@@ -95,6 +95,8 @@ the user once via email, then discarded.
 |----------|-------------|-------|-------|
 | Active signing key (Ed25519) | `realm:key:{realm_uuid}` | **System realm** | PKCS#8 DER; protected by `ZeroizingPkcs8` in memory |
 | Retiring signing keys | `realm:retiring:{realm_uuid}:{deadline}:{key_id}` | **System realm** | Grace-period keys kept for in-flight token validation |
+| RS256 ID-token signing key (RSA-3072) | `realm:idtoken_rsa:{realm_uuid}` | **System realm** | Present only once a client in the realm selected `id_token_signed_response_alg: RS256`; PKCS#8 DER, KEK-sealed at rest, zeroized in memory; signs ID tokens only |
+| Retiring RS256 ID-token keys | `realm:idtoken_rsa_retiring:{realm_uuid}:{deadline}:{key_id}` | **System realm** | Grace-period keys kept so pre-rotation ID tokens keep verifying |
 
 Signing keys are **never realm-scoped** — they live in the system realm
 (`RealmId::nil()`) and are inaccessible to tenant realm scans.

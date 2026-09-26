@@ -1060,6 +1060,17 @@ pub(crate) fn reconcile_applications(
             .post_logout_redirect_uris
             .clone()
             .unwrap_or_default();
+        // YAML is authoritative for the ID-token algorithm, like every other
+        // managed field: absent means EdDSA (task 26.55). An unparseable value
+        // is compared as-is and refused by the engine on write.
+        let cfg_id_token_alg = app_cfg
+            .id_token_signed_response_alg
+            .clone()
+            .unwrap_or_else(|| {
+                crate::identity::IdTokenSigningAlg::EdDsa
+                    .as_str()
+                    .to_string()
+            });
         let cfg_profile = match app_cfg.profile.as_deref() {
             None | Some("standard") => ClientProfile::Standard,
             Some("fapi2") => ClientProfile::Fapi2,
@@ -1085,6 +1096,8 @@ pub(crate) fn reconcile_applications(
                 let logo_changed = existing.client_logo_url() != cfg_logo.as_deref();
                 let profile_changed = existing.profile() != cfg_profile;
                 let post_logout_changed = existing.post_logout_redirect_uris() != cfg_post_logout;
+                let id_token_alg_changed =
+                    existing.id_token_signed_response_alg().as_str() != cfg_id_token_alg;
 
                 if was_archived
                     || name_changed
@@ -1094,6 +1107,7 @@ pub(crate) fn reconcile_applications(
                     || logo_changed
                     || profile_changed
                     || post_logout_changed
+                    || id_token_alg_changed
                 {
                     engine.update_client(
                         realm_id,
@@ -1134,6 +1148,8 @@ pub(crate) fn reconcile_applications(
                             } else {
                                 None
                             },
+                            id_token_signed_response_alg: id_token_alg_changed
+                                .then(|| cfg_id_token_alg.clone()),
                             slug: app_cfg.slug.clone(),
                             trust_level: app_cfg.trust_level,
                             declared_scopes: app_cfg.declared_scopes.clone(),
@@ -1194,6 +1210,7 @@ pub(crate) fn reconcile_applications(
                             .unwrap_or(crate::identity::ClientTrustLevel::FirstParty),
                         declared_scopes: app_cfg.declared_scopes.clone().unwrap_or_default(),
                         consent_spans_orgs: app_cfg.consent_spans_orgs.unwrap_or(false),
+                        id_token_signed_response_alg: Some(cfg_id_token_alg.clone()),
                     },
                 )?;
                 // Apply consent-policy and profile fields: the import path

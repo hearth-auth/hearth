@@ -24,7 +24,8 @@ private const val CLOCK_SKEW_SECONDS = 5
  * JWT signature verifier backed by a [JwksClient].
  *
  * Implements the mandatory validation order from SDK.md §2:
- * 1. Signature against JWKS (EdDSA/Ed25519 — Hearth's only signing algorithm)
+ * 1. Signature against JWKS (EdDSA/Ed25519 — the only access-token algorithm; the RS256 key a
+ *    realm JWKS may publish signs ID tokens only and is refused here)
  * 2. `exp` claim
  * 3. `iss` matches configured issuer
  * 4. `aud` contains configured client_id (optional — server SDK mode)

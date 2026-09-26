@@ -313,7 +313,7 @@ hearth config reload
 
 2. **Stale cached keys after key rotation.** Hearth rotates signing keys per-realm. If your application caches the JWKS document indefinitely it will hold a stale public key. Configure your JWT library to honor the `Cache-Control` header or set a short TTL (5–15 minutes) on the JWKS cache.
 
-3. **Algorithm mismatch.** Hearth signs tokens with **Ed25519** by default. Some libraries require explicit algorithm allow-listing. Ensure `EdDSA` (or `Ed25519`) is in your allowed list.
+3. **Algorithm mismatch.** Hearth signs tokens with **Ed25519** by default. Some libraries require explicit algorithm allow-listing. Ensure `EdDSA` (or `Ed25519`) is in your allowed list. If your OIDC relying-party library can only verify **ID tokens** signed RS256, register the client with `id_token_signed_response_alg: RS256` (admin API, console, `hearth.yaml`, or Dynamic Client Registration, where RS256 is already the default) — access tokens stay EdDSA either way.
 
 4. **Issuer mismatch.** The `iss` claim in the token is set from `oidc.issuer` in `hearth.yaml`. Ensure your library's expected issuer matches exactly (scheme, host, port, no trailing slash):
    ```yaml

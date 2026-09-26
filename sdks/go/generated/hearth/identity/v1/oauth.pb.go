@@ -461,9 +461,15 @@ type RegisterClientRequest struct {
 	AccessTokenAuthorization AccessTokenAuthorization `protobuf:"varint,5,opt,name=access_token_authorization,json=accessTokenAuthorization,proto3,enum=hearth.identity.v1.AccessTokenAuthorization" json:"access_token_authorization,omitempty"`
 	// Trust level for this client.  Unspecified defaults to ThirdParty on the
 	// DCR path.  The authenticated admin create path respects this field.
-	TrustLevel    *ClientTrustLevel `protobuf:"varint,6,opt,name=trust_level,json=trustLevel,proto3,enum=hearth.identity.v1.ClientTrustLevel,oneof" json:"trust_level,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	TrustLevel *ClientTrustLevel `protobuf:"varint,6,opt,name=trust_level,json=trustLevel,proto3,enum=hearth.identity.v1.ClientTrustLevel,oneof" json:"trust_level,omitempty"`
+	// JWS algorithm for this client's ID tokens (OIDC Dynamic Client
+	// Registration 1.0 s2): "RS256" or "EdDSA"; anything else is rejected.
+	// Omitted means RS256 on the dynamic registration path (the OIDC default)
+	// and EdDSA on the authenticated admin path. Only ID tokens are affected;
+	// access and refresh tokens are always EdDSA.
+	IdTokenSignedResponseAlg *string `protobuf:"bytes,7,opt,name=id_token_signed_response_alg,proto3,oneof" json:"id_token_signed_response_alg,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *RegisterClientRequest) Reset() {
@@ -538,6 +544,13 @@ func (x *RegisterClientRequest) GetTrustLevel() ClientTrustLevel {
 	return ClientTrustLevel_CLIENT_TRUST_LEVEL_UNSPECIFIED
 }
 
+func (x *RegisterClientRequest) GetIdTokenSignedResponseAlg() string {
+	if x != nil && x.IdTokenSignedResponseAlg != nil {
+		return *x.IdTokenSignedResponseAlg
+	}
+	return ""
+}
+
 // Request to update an existing OAuth 2.0 client.
 type UpdateClientRequest struct {
 	state                    protoimpl.MessageState    `protogen:"open.v1"`
@@ -546,9 +559,11 @@ type UpdateClientRequest struct {
 	GrantTypes               []string                  `protobuf:"bytes,3,rep,name=grant_types,json=grantTypes,proto3" json:"grant_types,omitempty"`
 	AccessTokenAuthorization *AccessTokenAuthorization `protobuf:"varint,4,opt,name=access_token_authorization,json=accessTokenAuthorization,proto3,enum=hearth.identity.v1.AccessTokenAuthorization,oneof" json:"access_token_authorization,omitempty"`
 	// Trust level override.  Omit to leave unchanged.
-	TrustLevel    *ClientTrustLevel `protobuf:"varint,5,opt,name=trust_level,json=trustLevel,proto3,enum=hearth.identity.v1.ClientTrustLevel,oneof" json:"trust_level,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	TrustLevel *ClientTrustLevel `protobuf:"varint,5,opt,name=trust_level,json=trustLevel,proto3,enum=hearth.identity.v1.ClientTrustLevel,oneof" json:"trust_level,omitempty"`
+	// ID-token signing algorithm: "RS256" or "EdDSA". Omit to leave unchanged.
+	IdTokenSignedResponseAlg *string `protobuf:"bytes,6,opt,name=id_token_signed_response_alg,proto3,oneof" json:"id_token_signed_response_alg,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *UpdateClientRequest) Reset() {
@@ -616,6 +631,13 @@ func (x *UpdateClientRequest) GetTrustLevel() ClientTrustLevel {
 	return ClientTrustLevel_CLIENT_TRUST_LEVEL_UNSPECIFIED
 }
 
+func (x *UpdateClientRequest) GetIdTokenSignedResponseAlg() string {
+	if x != nil && x.IdTokenSignedResponseAlg != nil {
+		return *x.IdTokenSignedResponseAlg
+	}
+	return ""
+}
+
 // A registered OAuth 2.0 client.
 type OAuthClient struct {
 	state                    protoimpl.MessageState   `protogen:"open.v1"`
@@ -626,6 +648,8 @@ type OAuthClient struct {
 	IsConfidential           bool                     `protobuf:"varint,5,opt,name=is_confidential,json=isConfidential,proto3" json:"is_confidential,omitempty"`
 	GrantTypes               []string                 `protobuf:"bytes,6,rep,name=grant_types,json=grantTypes,proto3" json:"grant_types,omitempty"`
 	AccessTokenAuthorization AccessTokenAuthorization `protobuf:"varint,7,opt,name=access_token_authorization,json=accessTokenAuthorization,proto3,enum=hearth.identity.v1.AccessTokenAuthorization" json:"access_token_authorization,omitempty"`
+	// The algorithm this client's ID tokens are signed with: "RS256" or "EdDSA".
+	IdTokenSignedResponseAlg string `protobuf:"bytes,8,opt,name=id_token_signed_response_alg,proto3" json:"id_token_signed_response_alg,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -707,6 +731,13 @@ func (x *OAuthClient) GetAccessTokenAuthorization() AccessTokenAuthorization {
 		return x.AccessTokenAuthorization
 	}
 	return AccessTokenAuthorization_EMBEDDED
+}
+
+func (x *OAuthClient) GetIdTokenSignedResponseAlg() string {
+	if x != nil {
+		return x.IdTokenSignedResponseAlg
+	}
+	return ""
 }
 
 // A cursor-based page of OAuth clients.
@@ -2149,7 +2180,7 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"token_type\x18\x03 \x01(\tR\ttokenType\x12\x1d\n" +
 	"\n" +
 	"expires_in\x18\x04 \x01(\x03R\texpiresIn\x12#\n" +
-	"\rrefresh_token\x18\x05 \x01(\tR\frefreshToken\"\x82\x03\n" +
+	"\rrefresh_token\x18\x05 \x01(\tR\frefreshToken\"\xec\x03\n" +
 	"\x15RegisterClientRequest\x12\x1f\n" +
 	"\vclient_name\x18\x01 \x01(\tR\n" +
 	"clientName\x12#\n" +
@@ -2159,9 +2190,11 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"grantTypes\x12j\n" +
 	"\x1aaccess_token_authorization\x18\x05 \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationR\x18accessTokenAuthorization\x12J\n" +
 	"\vtrust_level\x18\x06 \x01(\x0e2$.hearth.identity.v1.ClientTrustLevelH\x01R\n" +
-	"trustLevel\x88\x01\x01B\x10\n" +
+	"trustLevel\x88\x01\x01\x12G\n" +
+	"\x1cid_token_signed_response_alg\x18\a \x01(\tH\x02R\x1cid_token_signed_response_alg\x88\x01\x01B\x10\n" +
 	"\x0e_client_secretB\x0e\n" +
-	"\f_trust_level\"\xfd\x02\n" +
+	"\f_trust_levelB\x1f\n" +
+	"\x1d_id_token_signed_response_alg\"\xe7\x03\n" +
 	"\x13UpdateClientRequest\x12$\n" +
 	"\vclient_name\x18\x01 \x01(\tH\x00R\n" +
 	"clientName\x88\x01\x01\x12#\n" +
@@ -2170,10 +2203,12 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"grantTypes\x12o\n" +
 	"\x1aaccess_token_authorization\x18\x04 \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationH\x01R\x18accessTokenAuthorization\x88\x01\x01\x12J\n" +
 	"\vtrust_level\x18\x05 \x01(\x0e2$.hearth.identity.v1.ClientTrustLevelH\x02R\n" +
-	"trustLevel\x88\x01\x01B\x0e\n" +
+	"trustLevel\x88\x01\x01\x12G\n" +
+	"\x1cid_token_signed_response_alg\x18\x06 \x01(\tH\x03R\x1cid_token_signed_response_alg\x88\x01\x01B\x0e\n" +
 	"\f_client_nameB\x1d\n" +
 	"\x1b_access_token_authorizationB\x0e\n" +
-	"\f_trust_level\"\xc5\x02\n" +
+	"\f_trust_levelB\x1f\n" +
+	"\x1d_id_token_signed_response_alg\"\x89\x03\n" +
 	"\vOAuthClient\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x1f\n" +
 	"\vclient_name\x18\x02 \x01(\tR\n" +
@@ -2184,7 +2219,8 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\x0fis_confidential\x18\x05 \x01(\bR\x0eisConfidential\x12\x1f\n" +
 	"\vgrant_types\x18\x06 \x03(\tR\n" +
 	"grantTypes\x12j\n" +
-	"\x1aaccess_token_authorization\x18\a \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationR\x18accessTokenAuthorization\"~\n" +
+	"\x1aaccess_token_authorization\x18\a \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationR\x18accessTokenAuthorization\x12B\n" +
+	"\x1cid_token_signed_response_alg\x18\b \x01(\tR\x1cid_token_signed_response_alg\"~\n" +
 	"\x0fOAuthClientPage\x125\n" +
 	"\x05items\x18\x01 \x03(\v2\x1f.hearth.identity.v1.OAuthClientR\x05items\x12$\n" +
 	"\vnext_cursor\x18\x02 \x01(\tH\x00R\n" +

@@ -2553,3 +2553,391 @@ fn sessions_are_the_only_family_left_unexported_and_that_is_deliberate() {
          archive, so restoring sessions would resurrect exactly what an operator revoked"
     );
 }
+
+// ── RS256 ID-token signing key (task 26.55) ──────────────────────────────────
+
+/// Runs an authorization-code + PKCE grant for `client` and returns the ID
+/// token — the token whose signature the RS256 key exists to produce.
+fn rs256_id_token(
+    h: &common::TestHarness,
+    realm: &hearth::core::RealmId,
+    client: &hearth::core::ClientId,
+) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use hearth::identity::{AuthorizationRequest, CodeChallengeMethod, TokenExchangeRequest};
+
+    let user = h
+        .identity()
+        .create_user(
+            realm,
+            &CreateUserRequest {
+                email: format!("rs-{}@backup-test.example", uuid::Uuid::new_v4()),
+                display_name: "RS256 User".into(),
+                first_name: "R".into(),
+                last_name: "S".into(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    let verifier = "backup-rs256-verifier-abcdefghijklmnopqrstuvwxyz-0123456789";
+    let challenge = URL_SAFE_NO_PAD
+        .encode(ring::digest::digest(&ring::digest::SHA256, verifier.as_bytes()).as_ref());
+    let code = h
+        .identity()
+        .authorize(
+            realm,
+            &AuthorizationRequest {
+                client_id: client.clone(),
+                redirect_uri: "https://rp.example.com/cb".to_string(),
+                scope: "openid".to_string(),
+                state: "st".to_string(),
+                response_type: "code".to_string(),
+                user_id: user.id().clone(),
+                code_challenge: Some(challenge),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                nonce: None,
+                resource: None,
+                amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
+            },
+        )
+        .expect("authorize")
+        .code()
+        .to_string();
+    h.identity()
+        .exchange_authorization_code(
+            realm,
+            &TokenExchangeRequest {
+                client_id: client.clone(),
+                code,
+                redirect_uri: "https://rp.example.com/cb".to_string(),
+                code_verifier: Some(verifier.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("exchange")
+        .id_token()
+        .to_string()
+}
+
+/// Registers an RS256 client, which provisions the realm's RSA ID-token key.
+fn register_rs256_client(
+    h: &common::TestHarness,
+    realm: &hearth::core::RealmId,
+) -> hearth::core::ClientId {
+    h.identity()
+        .register_client(
+            realm,
+            &hearth::identity::RegisterClientRequest {
+                client_name: "RS256 RP".to_string(),
+                redirect_uris: vec!["https://rp.example.com/cb".to_string()],
+                grant_types: vec!["authorization_code".to_string()],
+                id_token_signed_response_alg: Some("RS256".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("register RS256 client")
+        .client_id()
+        .clone()
+}
+
+/// Verifies an RS256 JWT against the RSA JWK with its `kid` in `jwks`.
+fn verifies_against(token: &str, jwks: &hearth::identity::JwksDocument) -> bool {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header: serde_json::Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(token.split('.').next().expect("header"))
+            .expect("b64"),
+    )
+    .expect("json");
+    let Some(jwk) = jwks
+        .keys
+        .iter()
+        .find(|k| k.kty == "RSA" && Some(k.kid.as_str()) == header["kid"].as_str())
+    else {
+        return false;
+    };
+    let n = URL_SAFE_NO_PAD
+        .decode(jwk.n.as_deref().expect("n"))
+        .expect("n");
+    let e = URL_SAFE_NO_PAD
+        .decode(jwk.e.as_deref().expect("e"))
+        .expect("e");
+    let (signing_input, sig) = token.rsplit_once('.').expect("jws");
+    ring::signature::RsaPublicKeyComponents { n: &n, e: &e }
+        .verify(
+            &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+            signing_input.as_bytes(),
+            &URL_SAFE_NO_PAD.decode(sig).expect("sig"),
+        )
+        .is_ok()
+}
+
+/// The RS256 ID-token key — active and retiring — survives a backup/restore
+/// across deployments with different KEKs. Every ID token issued before the
+/// backup still verifies against the restored realm's JWKS, the RS256 client
+/// comes back RS256, and new ID tokens are signed by the restored active key
+/// rather than a freshly provisioned one.
+#[tokio::test]
+async fn restore_carries_the_rs256_id_token_key_and_its_retiring_predecessor() {
+    let src = common::TestHarness::embedded_with_kek([3u8; 32])
+        .await
+        .expect("src harness");
+    let (realm, _email, _password) = seeded_realm(&src);
+    let client = register_rs256_client(&src, &realm);
+
+    let pre_rotation = rs256_id_token(&src, &realm, &client);
+    src.identity()
+        .rotate_realm_signing_key(&realm, 3_600)
+        .expect("rotate");
+    let post_rotation = rs256_id_token(&src, &realm, &client);
+    let mut src_rsa_kids: Vec<String> = src
+        .identity()
+        .realm_jwks(&realm)
+        .expect("jwks")
+        .keys
+        .into_iter()
+        .filter(|k| k.kty == "RSA")
+        .map(|k| k.kid)
+        .collect();
+    assert_eq!(
+        src_rsa_kids.len(),
+        2,
+        "active + retiring RSA key before export"
+    );
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded_with_kek([5u8; 32])
+        .await
+        .expect("dst harness");
+    let (restored, report) = restore_into(&dst, &tmp, &slug);
+    assert_eq!(report.id_token_signing_key.created, 1);
+    assert_eq!(report.retiring_id_token_signing_keys.created, 1);
+
+    let jwks = dst.identity().realm_jwks(&restored).expect("restored jwks");
+    let mut dst_rsa_kids: Vec<String> = jwks
+        .keys
+        .iter()
+        .filter(|k| k.kty == "RSA")
+        .map(|k| k.kid.clone())
+        .collect();
+    dst_rsa_kids.sort();
+    src_rsa_kids.sort();
+    assert_eq!(
+        dst_rsa_kids, src_rsa_kids,
+        "the restored JWKS must carry both RSA kids"
+    );
+    assert!(
+        verifies_against(&pre_rotation, &jwks),
+        "retiring key restored"
+    );
+    assert!(
+        verifies_against(&post_rotation, &jwks),
+        "active key restored"
+    );
+
+    let restored_client = dst
+        .identity()
+        .get_client(&restored, &client)
+        .expect("get client")
+        .expect("client restored");
+    assert_eq!(
+        restored_client.id_token_signed_response_alg(),
+        hearth::identity::IdTokenSigningAlg::Rs256,
+        "an RS256 client must come back RS256"
+    );
+    let fresh = rs256_id_token(&dst, &restored, &client);
+    assert_eq!(
+        fresh.split('.').next(),
+        post_rotation.split('.').next(),
+        "the restored realm must sign with the restored active key, not a new one"
+    );
+}
+
+/// HEA-2168's fail-closed rule, applied to the RSA key: an archive whose
+/// clients receive RS256 ID tokens but which does not carry the key refuses
+/// to restore by default, and proceeds only on the explicit override.
+#[tokio::test]
+async fn restore_refuses_rs256_clients_without_their_id_token_key() {
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, _email, _password) = seeded_realm(&src);
+    register_rs256_client(&src, &realm);
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let stripped = strip_member(
+        tmp.path(),
+        &format!("realms/{slug}/id_token_signing_key.json"),
+    );
+    let reader = BackupArchive::open(stripped.path()).expect("open stripped");
+
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let err = make_importer(&dst)
+        .import_realm(&slug, &reader, &import_opts_with_passphrase())
+        .expect_err("RS256 clients without their key must not restore by default");
+    assert!(
+        matches!(err, hearth::backup::BackupError::IdTokenSigningKeyMissing { slug: ref s } if s == &slug),
+        "expected IdTokenSigningKeyMissing, got: {err:?}"
+    );
+    assert!(
+        dst.identity().get_realm(&realm).expect("get").is_none(),
+        "a refused restore must write nothing"
+    );
+
+    let report = make_importer(&dst)
+        .import_realm(
+            &slug,
+            &reader,
+            &ImportOptions {
+                allow_missing_signing_key: true,
+                ..import_opts_with_passphrase()
+            },
+        )
+        .expect("the explicit override proceeds");
+    assert_eq!(report.id_token_signing_key.created, 0);
+    let jwks = dst.identity().realm_jwks(&realm).expect("jwks");
+    assert_eq!(
+        jwks.keys.iter().filter(|k| k.kty == "RSA").count(),
+        1,
+        "under the override the restored RS256 client provisions a fresh key"
+    );
+}
+
+/// Runs an authorization-code grant that satisfies FAPI 2.0 Baseline (PAR,
+/// PKCE S256 and a DPoP binding) for `client`, so the only thing left for a
+/// FAPI realm to refuse is an RS256 ID token.
+fn fapi_code_grant(
+    h: &common::TestHarness,
+    realm: &hearth::core::RealmId,
+    client: &hearth::core::ClientId,
+) -> Result<hearth::identity::OidcTokenResponse, hearth::identity::IdentityError> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use hearth::identity::{AuthorizationRequest, CodeChallengeMethod, TokenExchangeRequest};
+
+    let user = h
+        .identity()
+        .create_user(
+            realm,
+            &CreateUserRequest {
+                email: format!("fapi-{}@backup-test.example", uuid::Uuid::new_v4()),
+                display_name: "FAPI User".into(),
+                first_name: "F".into(),
+                last_name: "A".into(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    let verifier = "backup-fapi-verifier-abcdefghijklmnopqrstuvwxyz-0123456789";
+    let challenge = URL_SAFE_NO_PAD
+        .encode(ring::digest::digest(&ring::digest::SHA256, verifier.as_bytes()).as_ref());
+    let code = h
+        .identity()
+        .authorize(
+            realm,
+            &AuthorizationRequest {
+                client_id: client.clone(),
+                redirect_uri: "https://rp.example.com/cb".to_string(),
+                scope: "openid".to_string(),
+                state: "st".to_string(),
+                response_type: "code".to_string(),
+                user_id: user.id().clone(),
+                code_challenge: Some(challenge),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                nonce: Some("n-fapi".to_string()),
+                resource: None,
+                amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: true,
+            },
+        )
+        .expect("a PAR + PKCE request satisfies FAPI 2.0 Baseline")
+        .code()
+        .to_string();
+    h.identity().exchange_authorization_code(
+        realm,
+        &TokenExchangeRequest {
+            client_id: client.clone(),
+            code,
+            redirect_uri: "https://rp.example.com/cb".to_string(),
+            code_verifier: Some(verifier.to_string()),
+            dpop_jkt: Some("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I".to_string()),
+            client_assertion_type: None,
+            client_assertion: None,
+        },
+    )
+}
+
+/// A realm that turns `fapi_profile` on after an RS256 client registered keeps
+/// that client: FAPI 2.0 refuses its ID-token grants, but the client, its
+/// other grants and its settings remain. A backup of that realm must restore
+/// the client as it was, not drop it. Refusing RS256 under FAPI is a rule for
+/// choosing an algorithm; a restore chooses nothing, and the restored realm
+/// refuses the client's ID-token grants just as the source did.
+#[tokio::test]
+async fn restore_keeps_an_rs256_client_of_a_realm_that_turned_fapi_on() {
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, _email, _password) = seeded_realm(&src);
+    let client = register_rs256_client(&src, &realm);
+    let mut config = src
+        .identity()
+        .get_realm(&realm)
+        .expect("get realm")
+        .expect("realm exists")
+        .config()
+        .clone();
+    config.fapi_profile = Some(hearth::identity::FapiProfile::Baseline);
+    src.identity()
+        .update_realm(
+            &realm,
+            &hearth::identity::UpdateRealmRequest {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .expect("turn fapi_profile on");
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let (restored, report) = restore_into(&dst, &tmp, &slug);
+
+    assert!(
+        dst.identity()
+            .get_realm(&restored)
+            .expect("get restored realm")
+            .expect("realm restored")
+            .config()
+            .fapi_profile
+            .is_some(),
+        "precondition: the restored realm has its FAPI profile"
+    );
+    assert_eq!(report.clients.errored, 0, "no client may fail to restore");
+    let restored_client = dst
+        .identity()
+        .get_client(&restored, &client)
+        .expect("get client")
+        .expect("the RS256 client of a FAPI realm must be restored, not dropped");
+    assert_eq!(
+        restored_client.id_token_signed_response_alg(),
+        hearth::identity::IdTokenSigningAlg::Rs256,
+        "the client must come back as it was"
+    );
+
+    // FAPI still governs issuance, in the source and in the restored realm.
+    for (h, realm_id, side) in [(&src, &realm, "source"), (&dst, &restored, "restored")] {
+        let refused = fapi_code_grant(h, realm_id, &client);
+        assert!(
+            matches!(
+                &refused,
+                Err(hearth::identity::IdentityError::FapiViolation { reason })
+                    if reason.contains("RS256")
+            ),
+            "the {side} realm must refuse the RS256 ID token, got {refused:?}"
+        );
+    }
+}

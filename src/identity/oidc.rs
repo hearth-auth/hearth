@@ -58,6 +58,76 @@ impl ClientProfile {
     }
 }
 
+/// The JWS algorithm Hearth signs a client's ID tokens with — the client's
+/// `id_token_signed_response_alg` (OpenID Connect Dynamic Client Registration
+/// 1.0 §2).
+///
+/// Only ID tokens are affected. Access, refresh, logout and JARM tokens are
+/// always Ed25519, whatever this says, and Hearth never accepts an RS256 token
+/// where it validates one of those.
+///
+/// # Defaults
+///
+/// The *registration surface* decides what an omitted value means, and the
+/// resolved value is always persisted explicitly:
+///
+/// - **Dynamic Client Registration** (`POST /register`,
+///   `POST /realms/{realm}/register`): omitted means [`Self::Rs256`], the
+///   default OIDC Registration §2 prescribes. A client registering the way the
+///   OpenID certification suite does gets what the specification says.
+/// - **Administrative surfaces** (admin REST, gRPC, console, `hearth.yaml`,
+///   backup/migration import): omitted means [`Self::EdDsa`], Hearth's native
+///   algorithm, so existing automation keeps the behaviour it was written for.
+///
+/// A client record stored before this setting existed carries no value and
+/// reads as [`Self::EdDsa`] (the `Default`), so no existing client changes
+/// algorithm on upgrade.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IdTokenSigningAlg {
+    /// Ed25519 (`EdDSA`) with the realm's signing key.
+    #[default]
+    #[serde(rename = "EdDSA")]
+    EdDsa,
+    /// RSASSA-PKCS1-v1_5 SHA-256 (`RS256`) with the realm's RSA ID-token key.
+    #[serde(rename = "RS256")]
+    Rs256,
+}
+
+impl IdTokenSigningAlg {
+    /// Every supported value, in the order discovery advertises them
+    /// (`id_token_signing_alg_values_supported`).
+    pub const SUPPORTED: [Self; 2] = [Self::Rs256, Self::EdDsa];
+
+    /// Returns the JWA name (`"EdDSA"` / `"RS256"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EdDsa => "EdDSA",
+            Self::Rs256 => "RS256",
+        }
+    }
+
+    /// Parses a client-supplied `id_token_signed_response_alg`.
+    ///
+    /// Matching is exact and case-sensitive, as JWA names are. Everything but
+    /// `RS256` and `EdDSA` is refused — notably `none`, every `HS*` (a shared
+    /// secret the client also holds could forge the client's own ID tokens),
+    /// and algorithms Hearth holds no key for.
+    ///
+    /// # Errors
+    /// Returns [`IdentityError::InvalidInput`](crate::identity::IdentityError::InvalidInput)
+    /// naming the supported values. The rejected value is not echoed back.
+    pub fn parse(value: &str) -> Result<Self, crate::identity::IdentityError> {
+        Self::SUPPORTED
+            .into_iter()
+            .find(|alg| alg.as_str() == value)
+            .ok_or_else(|| crate::identity::IdentityError::InvalidInput {
+                reason: "unsupported id_token_signed_response_alg; supported values are RS256 \
+                         and EdDSA"
+                    .to_string(),
+            })
+    }
+}
+
 /// The lifecycle status of an OAuth 2.0 application client.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -146,6 +216,13 @@ pub struct RegisterClientRequest {
     ///
     /// When set, JARM is mandatory for this client. Supported values: `"EdDSA"`.
     pub authorization_signed_response_alg: Option<String>,
+    /// ID-token signing algorithm (`id_token_signed_response_alg`, OIDC
+    /// Registration §2): `"RS256"` or `"EdDSA"`; anything else is refused.
+    ///
+    /// `None` means [`IdTokenSigningAlg::EdDsa`] — the administrative default.
+    /// The Dynamic Client Registration handlers resolve an omitted value to
+    /// `"RS256"` before calling the engine, as the specification requires.
+    pub id_token_signed_response_alg: Option<String>,
     /// Security profile for this client. Defaults to `Standard`.
     pub profile: ClientProfile,
     /// When `Some(true)`, users must have an enrolled MFA factor to complete
@@ -182,6 +259,7 @@ impl Default for RegisterClientRequest {
             jwks: None,
             jwks_uri: None,
             authorization_signed_response_alg: None,
+            id_token_signed_response_alg: None,
             profile: ClientProfile::Standard,
             mfa_required: None,
         }
@@ -306,6 +384,15 @@ pub struct OAuthClient {
     /// values: `"EdDSA"`. Omit to allow plain responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     authorization_signed_response_alg: Option<String>,
+    /// ID-token signing algorithm (`id_token_signed_response_alg`).
+    ///
+    /// Every client registered since this field existed stores an explicit
+    /// value. `None` only appears on a record written before it, and reads as
+    /// [`IdTokenSigningAlg::EdDsa`] — what that client was always issued — so
+    /// an upgrade changes no existing client's algorithm. See
+    /// [`IdTokenSigningAlg`] for how each registration surface defaults it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id_token_signed_response_alg: Option<IdTokenSigningAlg>,
     /// Security profile for this client. Defaults to `Standard` for
     /// backward-compatible deserialization of records written before the
     /// profile field was introduced.
@@ -353,6 +440,7 @@ impl OAuthClient {
             jwks: None,
             jwks_uri: None,
             authorization_signed_response_alg: None,
+            id_token_signed_response_alg: Some(IdTokenSigningAlg::EdDsa),
             profile: ClientProfile::Standard,
             mfa_required: None,
         }
@@ -390,6 +478,7 @@ impl OAuthClient {
             jwks: None,
             jwks_uri: None,
             authorization_signed_response_alg: None,
+            id_token_signed_response_alg: Some(IdTokenSigningAlg::EdDsa),
             profile: ClientProfile::Standard,
             mfa_required: None,
         }
@@ -613,6 +702,19 @@ impl OAuthClient {
         self.authorization_signed_response_alg = alg;
     }
 
+    /// Returns the algorithm this client's ID tokens are signed with.
+    ///
+    /// A record stored before the setting existed reads as
+    /// [`IdTokenSigningAlg::EdDsa`], the algorithm it was always issued.
+    pub fn id_token_signed_response_alg(&self) -> IdTokenSigningAlg {
+        self.id_token_signed_response_alg.unwrap_or_default()
+    }
+
+    /// Records the client's ID-token signing algorithm explicitly.
+    pub(crate) fn set_id_token_signed_response_alg(&mut self, alg: IdTokenSigningAlg) {
+        self.id_token_signed_response_alg = Some(alg);
+    }
+
     /// Returns the client's security profile.
     pub fn profile(&self) -> ClientProfile {
         self.profile
@@ -689,6 +791,9 @@ pub struct UpdateClientRequest {
     /// JARM signing algorithm update. `Some(Some("EdDSA"))` enables mandatory JARM,
     /// `Some(None)` clears it (disables mandatory JARM). `None` leaves unchanged.
     pub authorization_signed_response_alg: Option<Option<String>>,
+    /// ID-token signing algorithm update: `Some("RS256")` or `Some("EdDSA")`;
+    /// anything else is refused. `None` leaves the current value unchanged.
+    pub id_token_signed_response_alg: Option<String>,
     /// Updated security profile. `None` leaves unchanged.
     pub profile: Option<ClientProfile>,
     /// Per-client MFA requirement.
@@ -1824,6 +1929,88 @@ mod tests {
         let json = serde_json::to_string(&client).expect("serialize");
         let deserialized: OAuthClient = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(client, deserialized);
+    }
+
+    // ===== id_token_signed_response_alg (task 26.55) =====
+
+    #[test]
+    fn id_token_signing_alg_accepts_exactly_rs256_and_eddsa() {
+        assert_eq!(
+            IdTokenSigningAlg::parse("RS256").expect("RS256"),
+            IdTokenSigningAlg::Rs256
+        );
+        assert_eq!(
+            IdTokenSigningAlg::parse("EdDSA").expect("EdDSA"),
+            IdTokenSigningAlg::EdDsa
+        );
+        // `none`, every symmetric algorithm, algorithms Hearth holds no key for,
+        // and case variants are all refused.
+        for refused in [
+            "none", "None", "HS256", "HS384", "HS512", "rs256", "eddsa", "ES256", "PS256", "RS512",
+            "", " RS256",
+        ] {
+            assert!(
+                matches!(
+                    IdTokenSigningAlg::parse(refused),
+                    Err(crate::identity::IdentityError::InvalidInput { .. })
+                ),
+                "{refused:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn id_token_signing_alg_serializes_as_its_jwa_name() {
+        assert_eq!(
+            serde_json::to_string(&IdTokenSigningAlg::Rs256).expect("ser"),
+            "\"RS256\""
+        );
+        assert_eq!(
+            serde_json::to_string(&IdTokenSigningAlg::EdDsa).expect("ser"),
+            "\"EdDSA\""
+        );
+        assert_eq!(IdTokenSigningAlg::Rs256.as_str(), "RS256");
+        assert_eq!(IdTokenSigningAlg::EdDsa.as_str(), "EdDSA");
+    }
+
+    /// A client stored before the setting existed has no
+    /// `id_token_signed_response_alg` in its record. It must keep getting the
+    /// EdDSA ID tokens it was always issued.
+    #[test]
+    fn legacy_client_record_without_the_field_reads_as_eddsa() {
+        let client = OAuthClient::new(
+            ClientId::generate(),
+            "Legacy App".to_string(),
+            vec!["https://app.example.com/cb".to_string()],
+            Timestamp::from_micros(1_000_000),
+        );
+        let mut json = serde_json::to_value(&client).expect("serialize");
+        json.as_object_mut()
+            .expect("object")
+            .remove("id_token_signed_response_alg");
+        let legacy: OAuthClient = serde_json::from_value(json).expect("deserialize legacy");
+        assert_eq!(
+            legacy.id_token_signed_response_alg(),
+            IdTokenSigningAlg::EdDsa
+        );
+    }
+
+    #[test]
+    fn client_alg_round_trips_through_storage_json() {
+        let mut client = OAuthClient::new(
+            ClientId::generate(),
+            "RS App".to_string(),
+            vec!["https://app.example.com/cb".to_string()],
+            Timestamp::from_micros(1_000_000),
+        );
+        client.set_id_token_signed_response_alg(IdTokenSigningAlg::Rs256);
+        let json = serde_json::to_value(&client).expect("serialize");
+        assert_eq!(json["id_token_signed_response_alg"], "RS256");
+        let back: OAuthClient = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(
+            back.id_token_signed_response_alg(),
+            IdTokenSigningAlg::Rs256
+        );
     }
 
     #[test]

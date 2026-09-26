@@ -31,6 +31,8 @@
 //! realms/<realm-slug>/invitations.ndjson
 //! realms/<realm-slug>/retiring_signing_keys.json (AES-256-GCM encrypted)
 //! realms/<realm-slug>/signing_key.json   (AES-256-GCM encrypted)
+//! realms/<realm-slug>/id_token_signing_key.json           (RS256 ID-token key; encrypted)
+//! realms/<realm-slug>/retiring_id_token_signing_keys.json (encrypted)
 //! realms/<realm-slug>/audit.ndjson       (optional)
 //! realms/<realm-slug>/audit_chain.json   (optional, with audit.ndjson)
 //! ```

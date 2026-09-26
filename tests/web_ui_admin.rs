@@ -12,13 +12,14 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use hearth::core::Clock;
 use hearth::core::SystemClock;
-use hearth::core::{RealmId, SessionId};
+use hearth::core::{PageRequest, RealmId, SessionId};
 use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
 use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::{
-    CleartextPassword, CreateRealmRequest, CreateUserRequest, CredentialConfig,
-    EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, RegisterClientRequest,
-    UpdateUserRequest, UserStatus,
+    CleartextPassword, ClientProfile, CreateRealmRequest, CreateUserRequest, CredentialConfig,
+    EmbeddedIdentityEngine, FapiProfile, IdTokenSigningAlg, IdentityConfig, IdentityEngine,
+    OAuthClient, RealmConfig, RegisterClientRequest, UpdateRealmRequest, UpdateUserRequest,
+    UserStatus,
 };
 use hearth::protocol::web::{self, CookieSecret, WebState};
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
@@ -1490,6 +1491,323 @@ async fn admin_app_detail_renders() {
     let body = std::str::from_utf8(&body_bytes).expect("utf-8");
     assert!(body.contains("DetailApp"));
     assert!(body.contains("https://example.com/cb"));
+}
+
+// ===========================================================================
+// ID-token signing algorithm under FAPI 2.0 (task 26.55)
+// ===========================================================================
+//
+// FAPI 2.0 Security Profile §5.4.1 permits only PS256, ES256 and EdDSA, so the
+// engine refuses RS256 ID tokens for a client with the FAPI 2.0 profile and
+// for every client of a realm with a `fapi_profile` (`FapiViolation`). The
+// console must report that refusal on the form, not as a 500 or a generic
+// message; must not re-assert an unchanged RS256 on an unrelated edit (the
+// edit form always posts the radio, while an omitted field means "unchanged"
+// on the REST and gRPC update paths); and must not offer RS256 where the
+// engine would refuse it.
+
+/// Application form fields shared by the create and edit posts below.
+const RP_FORM: &str = "redirect_uris=https%3A%2F%2Frp.example.com%2Fcb\
+                       &grant_authorization_code=1&trust_level=third_party";
+
+/// Turns a FAPI 2.0 profile on for the rig's `acme` realm.
+fn enable_realm_fapi(rig: &TestRig) {
+    rig.identity
+        .update_realm(
+            &rig.realm_id,
+            &UpdateRealmRequest {
+                config: Some(RealmConfig {
+                    fapi_profile: Some(FapiProfile::Baseline),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("turn fapi_profile on");
+}
+
+/// Registers an `acme` client whose ID tokens use `alg`. A FAPI 2.0 client
+/// registers the JWKS its `private_key_jwt` authentication requires.
+fn register_rp(rig: &TestRig, alg: &str, profile: ClientProfile) -> OAuthClient {
+    let jwks = profile.is_fapi2().then(|| {
+        r#"{"keys":[{"kty":"OKP","use":"sig","alg":"EdDSA","crv":"Ed25519","kid":"fapi2-rp"}]}"#
+            .to_string()
+    });
+    rig.identity
+        .register_client(
+            &rig.realm_id,
+            &RegisterClientRequest {
+                client_name: "Console RP".to_string(),
+                redirect_uris: vec!["https://rp.example.com/cb".to_string()],
+                grant_types: vec!["authorization_code".to_string()],
+                jwks,
+                profile,
+                id_token_signed_response_alg: Some(alg.to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("register_client")
+}
+
+/// An admin console request: a POST of `form` (the CSRF field is appended),
+/// or a GET when `form` is `None`. Returns the status, `Location` and body.
+async fn console_request(
+    rig: &TestRig,
+    uri: &str,
+    form: Option<&str>,
+) -> (StatusCode, String, String) {
+    let csrf = "csrf-id-token-alg";
+    let builder = Request::builder()
+        .uri(uri)
+        .header(header::COOKIE, admin_cookie(rig, csrf));
+    let request = match form {
+        Some(form) => builder
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!("{form}&_csrf={csrf}"))),
+        None => builder.method("GET").body(Body::empty()),
+    }
+    .expect("build request");
+    let response = rig.app.clone().oneshot(request).await.expect("oneshot");
+    let status = response.status();
+    let location = location_of(&response);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = String::from_utf8(body.to_vec()).expect("utf-8");
+    (status, location, body)
+}
+
+/// The form error a page shows — its `role="alert"` element — if any.
+fn form_error(body: &str) -> Option<&str> {
+    const OPEN: &str = r#"role="alert">"#;
+    let start = body.find(OPEN)? + OPEN.len();
+    let len = body[start..].find("</div>")?;
+    Some(body[start..start + len].trim())
+}
+
+/// The attributes of the ID-token algorithm radio for `alg`, as written in
+/// its `<input …>` tag.
+fn id_token_alg_radio(body: &str, alg: &str) -> Vec<String> {
+    let at = body
+        .find(&format!(
+            r#"name="id_token_signed_response_alg" value="{alg}""#
+        ))
+        .unwrap_or_else(|| panic!("the {alg} ID-token radio is rendered"));
+    let start = body[..at].rfind("<input").expect("radio tag start");
+    let end = at + body[at..].find('>').expect("radio tag end");
+    body[start..end]
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether a tag's attributes (from [`id_token_alg_radio`]) include the bare
+/// boolean attribute `name`.
+fn has_flag(attributes: &[String], name: &str) -> bool {
+    attributes.iter().any(|attribute| attribute == name)
+}
+
+/// The engine's FAPI refusal reaches the form: it names FAPI 2.0 and RS256.
+fn assert_fapi_rs256_refusal(status: StatusCode, body: &str) {
+    assert_eq!(status, StatusCode::OK, "the refusal re-renders the form");
+    let error = form_error(body).expect("the form shows an error");
+    assert!(
+        error.contains("FAPI 2.0") && error.contains("RS256"),
+        "the form must say why RS256 was refused, got: {error}"
+    );
+}
+
+/// Creating an RS256 application in a FAPI realm shows the engine's reason on
+/// the form and stores nothing; the same form with EdDSA registers.
+#[tokio::test]
+async fn console_create_reports_the_fapi_refusal_of_rs256() {
+    let rig = build_rig();
+    enable_realm_fapi(&rig);
+    let uri = "/ui/admin/realms/acme/applications/new";
+
+    let (status, _, body) = console_request(
+        &rig,
+        uri,
+        Some(&format!(
+            "client_name=Refused+RP&{RP_FORM}&id_token_signed_response_alg=RS256"
+        )),
+    )
+    .await;
+    assert_fapi_rs256_refusal(status, &body);
+    let stored = rig
+        .identity
+        .list_clients(&rig.realm_id, &PageRequest::default())
+        .expect("list_clients");
+    assert!(
+        stored
+            .items
+            .iter()
+            .all(|client| client.client_name() != "Refused RP"),
+        "a refused registration stores nothing"
+    );
+
+    // Control: RS256 is the only thing refused.
+    let (status, location, body) = console_request(
+        &rig,
+        uri,
+        Some(&format!(
+            "client_name=EdDSA+RP&{RP_FORM}&id_token_signed_response_alg=EdDSA"
+        )),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "EdDSA registers in a FAPI realm, got: {:?}",
+        form_error(&body)
+    );
+    assert!(
+        location.starts_with("/ui/admin/realms/acme/applications/"),
+        "expected the new application's page, got: {location}"
+    );
+}
+
+/// An RS256 application whose realm has since turned FAPI on can still be
+/// edited. The form posts the stored RS256 back, which is no change, so an
+/// unrelated edit saves, as it does over REST and gRPC, and the algorithm
+/// stays as it was.
+#[tokio::test]
+async fn console_edit_of_an_rs256_client_in_a_fapi_realm_saves_unrelated_changes() {
+    let rig = build_rig();
+    let client = register_rp(&rig, "RS256", ClientProfile::Standard);
+    enable_realm_fapi(&rig);
+    let cid = client.client_id().as_uuid();
+
+    let (status, location, body) = console_request(
+        &rig,
+        &format!("/ui/admin/realms/acme/applications/{cid}/edit"),
+        Some(&format!(
+            "client_name=Renamed+RP&{RP_FORM}&id_token_signed_response_alg=RS256"
+        )),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "an unrelated edit must save, got: {:?}",
+        form_error(&body)
+    );
+    assert_eq!(
+        location,
+        format!("/ui/admin/realms/acme/applications/{cid}")
+    );
+    let stored = rig
+        .identity
+        .get_client(&rig.realm_id, client.client_id())
+        .expect("get_client")
+        .expect("the client exists");
+    assert_eq!(stored.client_name(), "Renamed RP", "the edit was saved");
+    assert_eq!(
+        stored.id_token_signed_response_alg(),
+        IdTokenSigningAlg::Rs256,
+        "the algorithm the form did not change stays as it was"
+    );
+}
+
+/// Posts the edit form of an EdDSA `client` with RS256 selected and asserts
+/// the FAPI refusal reaches the form and nothing changed.
+async fn assert_console_edit_refuses_rs256(rig: &TestRig, client: &OAuthClient) {
+    let cid = client.client_id().as_uuid();
+    let (status, _, body) = console_request(
+        rig,
+        &format!("/ui/admin/realms/acme/applications/{cid}/edit"),
+        Some(&format!(
+            "client_name=Console+RP&{RP_FORM}&id_token_signed_response_alg=RS256"
+        )),
+    )
+    .await;
+    assert_fapi_rs256_refusal(status, &body);
+    let stored = rig
+        .identity
+        .get_client(&rig.realm_id, client.client_id())
+        .expect("get_client")
+        .expect("the client exists");
+    assert_eq!(
+        stored.id_token_signed_response_alg(),
+        IdTokenSigningAlg::EdDsa,
+        "a refused edit changes nothing"
+    );
+}
+
+/// Selecting RS256 on the edit form where FAPI 2.0 applies, through the
+/// application's own FAPI 2.0 profile or through its realm's `fapi_profile`,
+/// shows the engine's reason and changes nothing.
+#[tokio::test]
+async fn console_edit_reports_the_fapi_refusal_of_rs256() {
+    let rig = build_rig();
+    let fapi2_client = register_rp(&rig, "EdDSA", ClientProfile::Fapi2);
+    let standard_client = register_rp(&rig, "EdDSA", ClientProfile::Standard);
+
+    // The application's own profile, while the realm has no FAPI profile ...
+    assert_console_edit_refuses_rs256(&rig, &fapi2_client).await;
+    // ... and the realm's.
+    enable_realm_fapi(&rig);
+    assert_console_edit_refuses_rs256(&rig, &standard_client).await;
+}
+
+/// The forms do not offer RS256 where FAPI 2.0 forbids it, and the edit page
+/// of an RS256 application in a FAPI realm says its ID-token grants are
+/// refused until it is switched to EdDSA.
+#[tokio::test]
+async fn console_forms_do_not_offer_rs256_under_fapi() {
+    const REFUSED_NOTICE: &str = "until it is switched to EdDSA";
+    let rig = build_rig();
+    let new_uri = "/ui/admin/realms/acme/applications/new";
+    let edit_uri = |client: &OAuthClient| {
+        format!(
+            "/ui/admin/realms/acme/applications/{}/edit",
+            client.client_id().as_uuid()
+        )
+    };
+    let rs256_client = register_rp(&rig, "RS256", ClientProfile::Standard);
+    let fapi2_client = register_rp(&rig, "EdDSA", ClientProfile::Fapi2);
+
+    // Control: without FAPI, both forms offer RS256.
+    let (_, _, body) = console_request(&rig, new_uri, None).await;
+    let rs256 = id_token_alg_radio(&body, "RS256");
+    assert!(!has_flag(&rs256, "disabled"), "got: {rs256:?}");
+    let (_, _, body) = console_request(&rig, &edit_uri(&rs256_client), None).await;
+    let rs256 = id_token_alg_radio(&body, "RS256");
+    assert!(
+        has_flag(&rs256, "checked") && !has_flag(&rs256, "disabled"),
+        "got: {rs256:?}"
+    );
+    assert!(!body.contains(REFUSED_NOTICE));
+
+    // An application with the FAPI 2.0 profile is not offered RS256.
+    let (_, _, body) = console_request(&rig, &edit_uri(&fapi2_client), None).await;
+    let rs256 = id_token_alg_radio(&body, "RS256");
+    assert!(has_flag(&rs256, "disabled"), "got: {rs256:?}");
+
+    // Nor is a new application of a FAPI realm; EdDSA stays the default.
+    enable_realm_fapi(&rig);
+    let (_, _, body) = console_request(&rig, new_uri, None).await;
+    let rs256 = id_token_alg_radio(&body, "RS256");
+    assert!(has_flag(&rs256, "disabled"), "got: {rs256:?}");
+    let eddsa = id_token_alg_radio(&body, "EdDSA");
+    assert!(
+        has_flag(&eddsa, "checked") && !has_flag(&eddsa, "disabled"),
+        "got: {eddsa:?}"
+    );
+
+    // An RS256 application registered before the realm turned FAPI on shows
+    // its algorithm, cannot re-select it, and is flagged.
+    let (_, _, body) = console_request(&rig, &edit_uri(&rs256_client), None).await;
+    let rs256 = id_token_alg_radio(&body, "RS256");
+    assert!(
+        has_flag(&rs256, "checked") && has_flag(&rs256, "disabled"),
+        "got: {rs256:?}"
+    );
+    assert!(
+        body.contains(REFUSED_NOTICE),
+        "the edit page must say the application's ID-token grants are refused"
+    );
 }
 
 // ===========================================================================

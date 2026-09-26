@@ -68,10 +68,11 @@ export class JwksVerifier {
   /**
    * Verify a JWT using the JWKS endpoint.
    *
-   * `EdDSA` only. Hearth signs every access token with Ed25519 — there is no
-   * configuration in which it emits RS256 or ES256 — so accepting those
-   * algorithms only widens what a forged token can be signed with (audit
-   * 2026-08-28 §25.10).
+   * `EdDSA` only. Hearth signs every access token with Ed25519. The realm
+   * JWKS may also publish an RS256 key, but it signs ID tokens only (for
+   * clients that registered `id_token_signed_response_alg: RS256`), so
+   * accepting RS256 or ES256 here would only let an ID token — or a forgery —
+   * pass as an access token (audit 2026-08-28 §25.10, task 26.55).
    */
   async verifyToken(token: string): Promise<VerifiedToken> {
     const jwkSet = await this.getJwkSet();

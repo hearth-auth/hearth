@@ -3019,6 +3019,7 @@ dependencies = [
  "rustls-pki-types",
  "time",
  "yasna",
+ "zeroize",
 ]
 
 [[package]]

@@ -80,6 +80,10 @@ pub struct RecordCounts {
     /// window at export time (OpenSpec 26.40).
     #[serde(default)]
     pub retiring_signing_keys: u64,
+    /// Number of retiring RS256 ID-token signing keys still inside their
+    /// rotation grace window at export time (task 26.55).
+    #[serde(default)]
+    pub retiring_id_token_signing_keys: u64,
     /// Number of OAuth scope definitions.
     pub scopes: u64,
     /// Number of audit events exported (0 when audit export was omitted).

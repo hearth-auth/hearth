@@ -292,7 +292,8 @@ export function hearthEdgeMiddleware(options: EdgeMiddlewareOptions): (req: Requ
         issuer: issuerUrl,
         audience: options.audience,
         clockTolerance: clockSkewSeconds,
-        // EdDSA only — Hearth never signs with RSA or ECDSA (§25.10).
+        // EdDSA only (§25.10): every access token is Ed25519. A realm's RS256
+        // key signs ID tokens only and must never pass here (task 26.55).
         algorithms: ["EdDSA"],
       });
       token = new EdgeToken(result.payload, result.protectedHeader as Record<string, unknown>);
