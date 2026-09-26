@@ -139,7 +139,9 @@ pub struct ImportClientRequest {
     /// ID-token signing algorithm (`"RS256"` or `"EdDSA"`), task 26.55.
     ///
     /// `None` means EdDSA, the administrative default. A backup restore passes
-    /// the archived client's value, so an RS256 client comes back RS256.
+    /// the archived client's value, so an RS256 client comes back RS256, even
+    /// in a realm whose `fapi_profile` refuses RS256 to a registration; there
+    /// its ID-token grants are refused at issuance, as they were before.
     pub id_token_signed_response_alg: Option<String>,
 }
 

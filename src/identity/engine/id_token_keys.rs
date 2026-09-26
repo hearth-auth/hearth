@@ -122,7 +122,9 @@ impl EmbeddedIdentityEngine {
     /// failure refuses the write instead of the client's first login. `None`
     /// is the administrative default, EdDSA. `fapi` is whether FAPI 2.0
     /// applies to the client once written (its profile, or its realm's); RS256
-    /// is then refused before any key is provisioned.
+    /// is then refused before any key is provisioned. An import passes
+    /// `false`: it records the algorithm the source held rather than choosing
+    /// one, and issuance refuses what FAPI forbids ([`Self::id_token_signer`]).
     ///
     /// # Errors
     /// [`IdentityError::InvalidInput`] for anything but `RS256`/`EdDSA`,
