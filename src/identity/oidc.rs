@@ -912,6 +912,17 @@ impl AuthorizationResponse {
         }
     }
 
+    /// Sets the delivery mode of a plain (non-JARM) response: `query` or
+    /// `fragment`. A JARM mode is ignored here — it needs the signed JWT that
+    /// only [`Self::new_jarm`] carries.
+    #[must_use]
+    pub(crate) fn with_plain_response_mode(mut self, mode: ResponseMode) -> Self {
+        if !mode.is_jarm() {
+            self.response_mode = mode;
+        }
+        self
+    }
+
     /// Creates a JARM authorization response with a signed JWT.
     pub(crate) fn new_jarm(
         code: String,
@@ -1296,6 +1307,11 @@ pub struct JarClaims {
     /// downgrading a signed response to plain `query` mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_mode: Option<String>,
+    /// OIDC `prompt` (RFC 9101 §4 — overrides the outer `prompt` query
+    /// param). `none` forbids any interactive step; `consent` forces the
+    /// consent prompt even when a recorded consent covers the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 // ===== Pushed Authorization Requests (RFC 9126) =====

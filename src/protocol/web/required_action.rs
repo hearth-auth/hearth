@@ -38,12 +38,11 @@ use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{ClientId, RealmId, Timestamp, UserId};
 use crate::identity::error::IdentityError;
 use crate::identity::ra_token::{self, OidcParams};
-use crate::identity::CodeChallengeMethod;
 use crate::identity::RequiredAction;
 use crate::identity::{CleartextPassword, SessionContext, UpdateUserRequest};
 use crate::protocol::web::auth::{issue_auth_cookies, IssuedCookies};
-use crate::protocol::web::oauth_consent::{issue_code_and_redirect, AuthorizeQuery};
 
+use super::authorize_gate::{run_authorize_gates, AuthorizeParams, Gate};
 use super::handlers::append_cookie;
 use super::handlers_common;
 use super::templates::render;
@@ -125,34 +124,35 @@ fn action_label(action: &str) -> &'static str {
 // Public entry point: called from oauth_consent::authorize_get_impl  (AC-1)
 // ---------------------------------------------------------------------------
 
-/// Checks whether the authenticated user has pending required actions.
+/// The required-action gate of the authorization flow (see
+/// `authorize_gate`): checks whether the authenticated user has pending
+/// required actions before a code is issued.
 ///
-/// Returns `Some(redirect_response)` when actions are present — the caller
-/// MUST return this response immediately.  Returns `None` to indicate the
-/// normal flow should continue (AC-5: no-op path).
+/// Returns `Some(response)` when the flow must stop here — a redirect into
+/// the first action, or an error — and the caller MUST return it. Returns
+/// `None` when nothing is pending (AC-5: no-op path).
 ///
-/// The OIDC params are embedded in the signed RA session JWT so the flow can
+/// A lookup *error* is `Some(error)`, never `None`: reading a storage fault
+/// as "no required actions" issued the code past a pending forced password
+/// change or enrolment. A user that does not exist has no stored actions
+/// (`None`); the code exchange refuses a missing user (`UserNotFound`).
+///
+/// The parameters are embedded in the signed RA session JWT so the flow can
 /// be resumed by [`resume_oidc_flow`] once all actions are complete.
-pub fn required_action_check(
+pub(super) fn required_action_intercept(
     state: &Arc<WebState>,
     realm: &RealmId,
     user_id: &UserId,
-    q: &AuthorizeQuery,
-    headers: &HeaderMap,
+    params: &AuthorizeParams,
+    secure: bool,
     now: Timestamp,
-    via_par: bool,
 ) -> Option<Response> {
-    let user = state.identity.get_user(realm, user_id).ok().flatten()?;
-
-    let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
-
-    // Dynamic injection: SMS MFA enrollment if realm requires it.
-    inject_enroll_phone_otp_if_needed(state, realm, user_id, &user, &mut actions);
-    // Dynamic injection: Email OTP enrollment if realm requires it.
-    inject_enroll_email_otp_if_needed(state, realm, user_id, &user, &mut actions);
-    // Dynamic injection: TOTP/MFA enrollment if client or role requires it.
-    inject_enroll_mfa_if_needed(state, realm, user_id, Some(&q.client_id), &mut actions);
-
+    let client_id = params.client_id.as_uuid().to_string();
+    let mut actions = match pending_required_actions(state, realm, user_id, Some(&client_id)) {
+        Ok(Some(actions)) => actions,
+        Ok(None) => return None,
+        Err(resp) => return Some(resp),
+    };
     if actions.is_empty() {
         return None;
     }
@@ -162,45 +162,98 @@ pub fn required_action_check(
     actions.sort_by_key(|a| a.priority());
     let first = actions[0];
 
-    let oidc_params = OidcParams {
-        client_id: q.client_id.clone(),
-        redirect_uri: q.redirect_uri.clone(),
-        scope: q.scope.clone(),
-        code_challenge: q.code_challenge.clone(),
-        code_challenge_method: q.code_challenge_method.clone(),
-        nonce: if q.nonce.is_empty() {
-            None
-        } else {
-            Some(q.nonce.clone())
-        },
-        state: if q.state.is_empty() {
-            None
-        } else {
-            Some(q.state.clone())
-        },
-        response_type: q.response_type.clone(),
-        response_mode: q.response_mode.clone().filter(|m| !m.is_empty()),
-        resource: q.resource.clone(),
-        via_par,
-    };
-
-    let token = match state
-        .identity
-        .generate_ra_token(realm, user_id, actions, oidc_params, now)
-    {
+    let token = match state.identity.generate_ra_token(
+        realm,
+        user_id,
+        actions,
+        params.to_oidc_params(),
+        now,
+    ) {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!(error = %e, "required_action_check: generate_ra_token failed");
+            tracing::warn!(error = %e, "required_action_intercept: generate_ra_token failed");
             return Some(handlers_common::server_error());
         }
     };
 
-    let secure = state.is_secure_request(headers);
     let cookie = ra_token::ra_session_cookie(&token, secure);
     let path = format!("/required-action/{}", first.as_path_segment());
     let mut response = Redirect::to(&path).into_response();
     append_cookie(&mut response, &cookie);
     Some(response)
+}
+
+/// The user's pending required actions: the stored list plus the
+/// dynamically injected enrolment requirements.
+///
+/// * `Ok(None)` — the user does not exist, so nothing is stored for them.
+///   Every caller's next step (session creation, code exchange) refuses a
+///   missing user, so this is not the place to decide it.
+/// * `Err(response)` — a lookup failed. The actions (or the realm's
+///   enrolment requirements) are unknown, so the caller must refuse: reading
+///   the fault as "nothing pending" skipped the actions.
+fn pending_required_actions(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    client_id: Option<&str>,
+) -> Result<Option<Vec<RequiredAction>>, Response> {
+    let user = match state.identity.get_user(realm, user_id) {
+        Ok(Some(u)) => u,
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                realm_id = %realm.as_uuid(),
+                "required actions: user lookup failed; refusing"
+            );
+            return Err(handlers_common::server_error());
+        }
+    };
+    // The realm's enrolment requirements (SMS / email OTP / passkey) are read
+    // from the realm record; an error there is equally unknown.
+    let realm_config = match state.identity.get_realm(realm) {
+        Ok(r) => r.map(|r| r.config().clone()),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                realm_id = %realm.as_uuid(),
+                "required actions: realm lookup failed; refusing"
+            );
+            return Err(handlers_common::server_error());
+        }
+    };
+
+    let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
+    // Dynamic injection: SMS MFA enrollment if realm requires it.
+    inject_enroll_phone_otp_if_needed(
+        state,
+        realm,
+        user_id,
+        &user,
+        realm_config.as_ref(),
+        &mut actions,
+    );
+    // Dynamic injection: Email OTP enrollment if realm requires it.
+    inject_enroll_email_otp_if_needed(
+        state,
+        realm,
+        user_id,
+        &user,
+        realm_config.as_ref(),
+        &mut actions,
+    );
+    // Dynamic injection: TOTP/MFA enrollment if the client (OIDC only) or a
+    // role requires it.
+    inject_enroll_mfa_if_needed(
+        state,
+        realm,
+        user_id,
+        realm_config.as_ref(),
+        client_id,
+        &mut actions,
+    );
+    Ok(Some(actions))
 }
 
 /// Checks whether the authenticating user has pending required actions for
@@ -209,8 +262,11 @@ pub fn required_action_check(
 /// Returns `Some(redirect_response)` when actions are pending — the caller
 /// MUST return this response immediately instead of creating a session.
 /// Returns `None` when no actions are pending and the login can proceed.
+/// A user or realm lookup error returns `Some(error)`: it is never read as
+/// "nothing pending". A user that does not exist returns `None`;
+/// `create_session` refuses it (`UserNotFound`).
 ///
-/// Unlike [`required_action_check`], this generates an RA token without
+/// Unlike the OIDC intercept, this generates an RA token without
 /// OIDC params; flow resumption creates a session cookie and redirects to
 /// `return_to` once all actions are complete.
 pub fn required_action_check_browser(
@@ -221,17 +277,14 @@ pub fn required_action_check_browser(
     headers: &HeaderMap,
     now: Timestamp,
 ) -> Option<Response> {
-    let user = state.identity.get_user(realm, user_id).ok().flatten()?;
-
-    let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
-
-    // Dynamic injection: SMS MFA enrollment if realm requires it.
-    inject_enroll_phone_otp_if_needed(state, realm, user_id, &user, &mut actions);
-    // Dynamic injection: Email OTP enrollment if realm requires it.
-    inject_enroll_email_otp_if_needed(state, realm, user_id, &user, &mut actions);
-    // Dynamic injection: TOTP/MFA enrollment if role requires it (no client on
-    // the direct browser login path; client-level enforcement is OIDC-only).
-    inject_enroll_mfa_if_needed(state, realm, user_id, None, &mut actions);
+    // No client on the direct browser login path; client-level MFA
+    // enforcement is OIDC-only. A lookup error refuses (see
+    // `pending_required_actions`).
+    let mut actions = match pending_required_actions(state, realm, user_id, None) {
+        Ok(Some(actions)) => actions,
+        Ok(None) => return None,
+        Err(resp) => return Some(resp),
+    };
 
     if actions.is_empty() {
         return None;
@@ -441,11 +494,15 @@ pub async fn action_complete(
 // Flow helpers (also used in tests)
 // ---------------------------------------------------------------------------
 
-/// Clears the RA cookie and issues the authorization code.
+/// Clears the RA cookie and resumes the authorization after the last
+/// required action.
 ///
-/// Called when all required actions have been completed.  Reconstructs the
-/// original OIDC authorize request from `RaClaims`, runs the SMS MFA gate,
-/// and issues the code through `issue_code_and_redirect`.
+/// Reconstructs the original request from the signed `RaClaims` and
+/// re-enters the shared gate sequence (`authorize_gate`) at the gate after
+/// this one: the SMS MFA challenge, then consent / `prompt`, then issuance.
+/// This used to issue the code directly — skipping the SMS factor (fixed
+/// earlier) and the consent prompt, so any request that detoured through a
+/// required action got a code for a client the user never approved.
 pub fn resume_oidc_flow(
     state: &Arc<WebState>,
     realm: &RealmId,
@@ -458,83 +515,23 @@ pub fn resume_oidc_flow(
     let Ok(user_uuid) = uuid::Uuid::parse_str(user_sub) else {
         return handlers_common::server_error();
     };
-    let Ok(client_uuid) = uuid::Uuid::parse_str(&oidc_params.client_id) else {
+    let user_id = UserId::new(user_uuid);
+    // Server-signed state built from validated parameters: a value that does
+    // not parse is an internal fault, refused rather than defaulted.
+    let Some(params) = AuthorizeParams::from_oidc_params(&oidc_params) else {
+        tracing::warn!("resume_oidc_flow: RA session carries unparseable OIDC params");
         return handlers_common::server_error();
     };
 
-    let user_id = UserId::new(user_uuid);
-    let client_id = ClientId::new(client_uuid);
-
-    // The SMS MFA intercept. On every authorize branch it runs only AFTER the
-    // required-action intercept, and that one returns first — so an authorize
-    // that detoured through required actions arrives here without the SMS
-    // factor ever having been challenged. This used to issue the code
-    // straight away: a session made without the SMS factor (passkey, magic
-    // link, federation) got a code on a realm that requires it just by having
-    // a required action pending. Run the same gate, with the same parameters,
-    // before anything is issued; it fails closed exactly as it does there.
-    let resumed_q = AuthorizeQuery {
-        client_id: oidc_params.client_id.clone(),
-        redirect_uri: oidc_params.redirect_uri.clone(),
-        response_type: oidc_params.response_type.clone(),
-        scope: oidc_params.scope.clone(),
-        state: oidc_params.state.clone().unwrap_or_default(),
-        code_challenge: oidc_params.code_challenge.clone(),
-        code_challenge_method: oidc_params.code_challenge_method.clone(),
-        nonce: oidc_params.nonce.clone().unwrap_or_default(),
-        prompt: String::new(),
-        response_mode: oidc_params.response_mode.clone(),
-        request: None,
-        request_uri: None,
-        resource: oidc_params.resource.clone(),
-    };
-    if let Some(mut sms_response) = super::sms_challenge::sms_mfa_challenge_gate(
+    let mut response = run_authorize_gates(
         state,
         realm,
         &user_id,
-        &resumed_q,
-        secure,
-        oidc_params.via_par,
-    ) {
-        append_cookie(&mut sms_response, &clear_cookie);
-        return sms_response;
-    }
-
-    let code_challenge_method = match oidc_params.code_challenge_method.as_str() {
-        "S256" => Some(CodeChallengeMethod::S256),
-        _ => None,
-    };
-    let state_param = oidc_params.state.as_deref().unwrap_or("");
-    let code_challenge = if oidc_params.code_challenge.is_empty() {
-        None
-    } else {
-        Some(oidc_params.code_challenge.clone())
-    };
-
-    let response_mode = oidc_params
-        .response_mode
-        .as_deref()
-        .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok());
-
-    // The shared issuer: it redirects to the engine-validated URI (22.3) and
-    // binds the code to the carried RFC 8707 `resource` — which this path
-    // used to drop, so a JAR / PAR `resource` never reached the token `aud`
-    // once a required action had intervened.
-    let mut response = issue_code_and_redirect(
-        state,
-        realm,
-        &user_id,
-        &client_id,
-        &oidc_params.redirect_uri,
-        &oidc_params.scope,
-        state_param,
-        code_challenge,
-        code_challenge_method,
-        oidc_params.nonce.clone(),
+        &params,
+        Gate::SmsMfa,
         Vec::new(),
-        response_mode,
-        oidc_params.resource.clone(),
-        oidc_params.via_par, // propagated from the original authorize request
+        secure,
+        Timestamp::from_micros(now_micros()),
     );
     append_cookie(&mut response, &clear_cookie);
     response
@@ -611,6 +608,7 @@ fn inject_enroll_phone_otp_if_needed(
     realm: &RealmId,
     user_id: &UserId,
     user: &crate::identity::User,
+    realm_config: Option<&crate::identity::RealmConfig>,
     actions: &mut Vec<RequiredAction>,
 ) {
     if user.phone_verified() {
@@ -619,14 +617,9 @@ fn inject_enroll_phone_otp_if_needed(
     if actions.contains(&RequiredAction::EnrollPhoneOtp) {
         return;
     }
-    let sms_required = state
-        .identity
-        .get_realm(realm)
-        .ok()
-        .flatten()
-        .and_then(|r| r.config().mfa_methods.clone())
-        .map(|methods| methods.iter().any(|m| m == "sms"))
-        .unwrap_or(false);
+    let sms_required = realm_config
+        .and_then(|c| c.mfa_methods.as_ref())
+        .is_some_and(|methods| methods.iter().any(|m| m == "sms"));
 
     if !sms_required {
         return;
@@ -664,6 +657,7 @@ fn inject_enroll_email_otp_if_needed(
     realm: &RealmId,
     user_id: &UserId,
     user: &crate::identity::User,
+    realm_config: Option<&crate::identity::RealmConfig>,
     actions: &mut Vec<RequiredAction>,
 ) {
     if user.email_otp_enabled() {
@@ -672,14 +666,9 @@ fn inject_enroll_email_otp_if_needed(
     if actions.contains(&RequiredAction::EnrollEmailOtp) {
         return;
     }
-    let email_otp_required = state
-        .identity
-        .get_realm(realm)
-        .ok()
-        .flatten()
-        .and_then(|r| r.config().mfa_methods.clone())
-        .map(|methods| methods.iter().any(|m| m == "email_otp"))
-        .unwrap_or(false);
+    let email_otp_required = realm_config
+        .and_then(|c| c.mfa_methods.as_ref())
+        .is_some_and(|methods| methods.iter().any(|m| m == "email_otp"));
 
     if !email_otp_required {
         return;
@@ -728,6 +717,7 @@ fn inject_enroll_mfa_if_needed(
     state: &Arc<WebState>,
     realm: &RealmId,
     user_id: &UserId,
+    realm_config: Option<&crate::identity::RealmConfig>,
     client_id_str: Option<&str>,
     actions: &mut Vec<RequiredAction>,
 ) {
@@ -748,12 +738,8 @@ fn inject_enroll_mfa_if_needed(
     // `to_realm_config`, and nothing read it. It is a *passkey* requirement,
     // so TOTP does not satisfy it and it must be evaluated before the
     // "any factor will do" short-circuit below.
-    let realm_requires_passkey = state
-        .identity
-        .get_realm(realm)
-        .ok()
-        .flatten()
-        .and_then(|r| r.config().webauthn_required)
+    let realm_requires_passkey = realm_config
+        .and_then(|c| c.webauthn_required)
         .unwrap_or(false);
     if enroll_mfa_needed(realm_requires_passkey, has_passkeys) {
         actions.push(RequiredAction::EnrollMfa);
@@ -775,14 +761,7 @@ fn inject_enroll_mfa_if_needed(
     // Per-role requirement: any role the user holds that appears in
     // `realm.config.mfa_required_roles` triggers enforcement.
     let role_requires_mfa = (|| -> Option<bool> {
-        let required_roles = state
-            .identity
-            .get_realm(realm)
-            .ok()
-            .flatten()?
-            .config()
-            .mfa_required_roles
-            .clone()?;
+        let required_roles = realm_config?.mfa_required_roles.clone()?;
         if required_roles.is_empty() {
             return Some(false);
         }

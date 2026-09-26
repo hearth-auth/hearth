@@ -684,6 +684,9 @@ impl EmbeddedIdentityEngine {
             ));
         }
 
+        // A plain mode is `query` or `fragment`. `fragment` is advertised in
+        // discovery and accepted above, but the response used to be built as
+        // `query` regardless, so the code always travelled in the query string.
         Ok(AuthorizationResponse::new(
             raw_code,
             request.state.clone(),
@@ -691,7 +694,8 @@ impl EmbeddedIdentityEngine {
             // 22.3: the JAR-effective, registration-validated URI — never the
             // caller's outer `redirect_uri`, which a JAR may have overridden.
             request.redirect_uri.clone(),
-        ))
+        )
+        .with_plain_response_mode(response_mode))
     }
 
     #[allow(clippy::too_many_lines)]

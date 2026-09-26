@@ -259,6 +259,19 @@ pub struct PendingAuthorizationRequest {
     /// JWT-wrapped without an extra client lookup (JARM §4.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization_signed_response_alg: Option<String>,
+    /// RFC 8707 resource indicator from a verified request object (JAR) or
+    /// PAR entry. Carried so the code issued on approval is bound to the
+    /// audience the client asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    /// Whether the originating request went through PAR (RFC 9126). FAPI 2.0
+    /// realms refuse code issuance without it, so approval must keep it.
+    #[serde(default)]
+    pub via_par: bool,
+    /// Authentication methods already proved on the way here (e.g. `["sms"]`
+    /// after the SMS MFA challenge), carried into the issued code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub amr_values: Vec<String>,
     /// When the ticket was created.
     pub created_at: Timestamp,
     /// When the ticket expires. Past this point `take_pending_authorization`

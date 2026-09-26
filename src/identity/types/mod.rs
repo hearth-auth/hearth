@@ -784,6 +784,9 @@ mod tests {
             nonce: Some("n-0".to_string()),
             response_mode: None,
             authorization_signed_response_alg: Some("EdDSA".to_string()),
+            resource: None,
+            via_par: false,
+            amr_values: Vec::new(),
             created_at: Timestamp::from_micros(1_000_000),
             expires_at: Timestamp::from_micros(1_600_000_000),
         };

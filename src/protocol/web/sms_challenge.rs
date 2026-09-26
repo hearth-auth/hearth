@@ -47,14 +47,15 @@ use subtle::ConstantTimeEq;
 
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{ClientId, RealmId, Timestamp, UserId};
-use crate::identity::{CodeChallengeMethod, IdentityError};
+use crate::identity::IdentityError;
 
 use super::auth::{CookieSecret, UiSession};
+use super::authorize_gate::{
+    method_wire, parse_method, parse_response_mode, run_authorize_gates, AuthorizeParams, Gate,
+};
 use super::handlers::append_cookie;
 use super::handlers_common;
-use super::oauth_consent::{
-    append_query, issue_code_and_redirect, redirect_with_oauth_error, AuthorizeQuery,
-};
+use super::oauth_consent::{append_query, redirect_with_oauth_error, AuthorizeQuery};
 use super::templates::render;
 use super::WebState;
 
@@ -107,6 +108,14 @@ struct SmsMfaState {
     /// into the code issued once the OTP verifies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resource: Option<String>,
+    /// Requested response mode wire string (`fragment`, `query.jwt`, …).
+    /// Dropping it redirected a `fragment` / JARM request as plain `query`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response_mode: Option<String>,
+    /// OIDC `prompt` of the original request, applied by the consent gate
+    /// that runs after the OTP verifies.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    prompt: String,
     /// Set when the challenge guards a device approval (`/ui/device`) rather
     /// than an authorization code: the RFC 8628 user code to approve once
     /// the OTP verifies. The OIDC fields are then empty and unused.
@@ -117,11 +126,8 @@ struct SmsMfaState {
 /// What a verified SMS OTP unlocks.
 #[derive(Clone, Copy)]
 enum SmsResume<'a> {
-    /// Issue the authorization code for this (already validated) request.
-    Authorize {
-        q: &'a AuthorizeQuery,
-        via_par: bool,
-    },
+    /// Resume this (already validated) authorization request.
+    Authorize { params: &'a AuthorizeParams },
     /// Approve this device authorization user code (RFC 8628).
     Device { user_code: &'a str },
 }
@@ -150,26 +156,53 @@ impl SmsMfaState {
             response_type: String::new(),
             via_par: false,
             resource: None,
+            response_mode: None,
+            prompt: String::new(),
             device_user_code: None,
         };
         match resume {
-            SmsResume::Authorize { q, via_par } => {
-                s.client_id.clone_from(&q.client_id);
-                s.redirect_uri.clone_from(&q.redirect_uri);
-                s.scope.clone_from(&q.scope);
-                s.oauth_state.clone_from(&q.state);
-                s.code_challenge.clone_from(&q.code_challenge);
-                s.code_challenge_method.clone_from(&q.code_challenge_method);
-                s.nonce.clone_from(&q.nonce);
-                s.response_type.clone_from(&q.response_type);
-                s.via_par = via_par;
-                s.resource.clone_from(&q.resource);
+            SmsResume::Authorize { params } => {
+                s.client_id = params.client_id.as_uuid().to_string();
+                s.redirect_uri.clone_from(&params.redirect_uri);
+                s.scope.clone_from(&params.scope);
+                s.oauth_state.clone_from(&params.state);
+                s.code_challenge = params.code_challenge.clone().unwrap_or_default();
+                s.code_challenge_method = method_wire(params.code_challenge_method.as_ref());
+                s.nonce = params.nonce.clone().unwrap_or_default();
+                s.response_type = "code".to_string();
+                s.via_par = params.via_par;
+                s.resource.clone_from(&params.resource);
+                s.response_mode = params
+                    .response_mode
+                    .as_ref()
+                    .map(|m| m.as_str().to_string());
+                s.prompt.clone_from(&params.prompt);
             }
             SmsResume::Device { user_code } => {
                 s.device_user_code = Some(user_code.to_string());
             }
         }
         s
+    }
+
+    /// The authorization request to resume, restored from this state.
+    ///
+    /// `None` when a value does not parse: the cookie is MAC'd and was built
+    /// from validated parameters, so that is refused rather than defaulted.
+    fn authorize_params(&self) -> Option<AuthorizeParams> {
+        Some(AuthorizeParams {
+            client_id: ClientId::new(uuid::Uuid::parse_str(&self.client_id).ok()?),
+            redirect_uri: self.redirect_uri.clone(),
+            scope: self.scope.clone(),
+            state: self.oauth_state.clone(),
+            code_challenge: Some(self.code_challenge.clone()).filter(|c| !c.is_empty()),
+            code_challenge_method: parse_method(&self.code_challenge_method)?,
+            nonce: Some(self.nonce.clone()).filter(|n| !n.is_empty()),
+            prompt: self.prompt.clone(),
+            response_mode: parse_response_mode(self.response_mode.as_deref())?,
+            resource: self.resource.clone(),
+            via_par: self.via_par,
+        })
     }
 }
 
@@ -265,26 +298,50 @@ pub fn sms_mfa_challenge_check(
     // Task 21.6: the pending-MFA cookie must carry `Secure` on a TLS request,
     // like every other `/ui` cookie. `headers` was previously unused.
     let secure = state.is_secure_request(headers);
-    sms_mfa_challenge_gate(state, realm, user_id, q, secure, via_par)
+    let Ok(client_uuid) = uuid::Uuid::parse_str(&q.client_id) else {
+        return Some(handlers_common::bad_request("invalid client_id"));
+    };
+    let (Some(code_challenge_method), Some(response_mode)) = (
+        parse_method(&q.code_challenge_method),
+        parse_response_mode(q.response_mode.as_deref()),
+    ) else {
+        return Some(handlers_common::bad_request(
+            "invalid authorization request",
+        ));
+    };
+    let params = AuthorizeParams {
+        client_id: ClientId::new(client_uuid),
+        redirect_uri: q.redirect_uri.clone(),
+        scope: q.scope.clone(),
+        state: q.state.clone(),
+        code_challenge: Some(q.code_challenge.clone()).filter(|c| !c.is_empty()),
+        code_challenge_method,
+        nonce: Some(q.nonce.clone()).filter(|n| !n.is_empty()),
+        prompt: q.prompt.clone(),
+        response_mode,
+        resource: q.resource.clone(),
+        via_par,
+    };
+    sms_mfa_challenge_gate(state, realm, user_id, &params, secure)
 }
 
-/// [`sms_mfa_challenge_check`] for a caller that has already resolved whether
-/// the request is secure — the required-action resume path, which carries
-/// `secure` rather than the request headers.
+/// The SMS MFA gate of the authorization flow (see `authorize_gate`), for a
+/// request the caller has already validated. Same conditions and refusals as
+/// [`sms_mfa_challenge_check`]; on success `POST /ui/sms-challenge` resumes
+/// the flow at the consent gate.
 pub(super) fn sms_mfa_challenge_gate(
     state: &Arc<WebState>,
     realm: &RealmId,
     user_id: &UserId,
-    q: &AuthorizeQuery,
+    params: &AuthorizeParams,
     secure: bool,
-    via_par: bool,
 ) -> Option<Response> {
     sms_gate(
         state,
         realm,
         user_id,
         secure,
-        SmsResume::Authorize { q, via_par },
+        SmsResume::Authorize { params },
     )
 }
 
@@ -632,42 +689,30 @@ pub async fn sms_challenge_post(
                 return response;
             }
 
-            let Ok(client_uuid) = uuid::Uuid::parse_str(&sms_state.client_id) else {
+            // The factor is proved: resume the authorization at the gate
+            // after this one — consent / `prompt`, then issuance with the
+            // request's response mode. This used to issue the code directly,
+            // skipping the consent prompt and dropping `response_mode`.
+            let Some(params) = sms_state.authorize_params() else {
+                tracing::warn!("sms_challenge_post: challenge state carries unparseable params");
                 return handlers_common::server_error();
             };
-            let client_id = ClientId::new(client_uuid);
-
-            // Reconstruct PKCE and nonce params.
-            let code_challenge = if sms_state.code_challenge.is_empty() {
-                None
-            } else {
-                Some(sms_state.code_challenge.clone())
-            };
-            let code_challenge_method = match sms_state.code_challenge_method.as_str() {
-                "S256" => Some(CodeChallengeMethod::S256),
-                _ => None,
-            };
-            let nonce = if sms_state.nonce.is_empty() {
-                None
-            } else {
-                Some(sms_state.nonce.clone())
-            };
-
-            let mut response = issue_code_and_redirect(
+            let now = Timestamp::from_micros(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .and_then(|d| i64::try_from(d.as_micros()).ok())
+                    .unwrap_or(0),
+            );
+            let mut response = run_authorize_gates(
                 &state,
                 &realm,
                 &user_id,
-                &client_id,
-                &sms_state.redirect_uri,
-                &sms_state.scope,
-                &sms_state.oauth_state,
-                code_challenge,
-                code_challenge_method,
-                nonce,
+                &params,
+                Gate::Consent,
                 vec!["sms".to_string()],
-                None,
-                sms_state.resource.clone(),
-                sms_state.via_par, // propagated from originating authorize request
+                state.is_secure_request(&headers),
+                now,
             );
             append_cookie(&mut response, &clear);
             response
@@ -766,6 +811,8 @@ mod tests {
             response_type: "code".to_string(),
             via_par: false,
             resource: None,
+            response_mode: None,
+            prompt: String::new(),
             device_user_code: None,
         }
     }
@@ -832,6 +879,8 @@ mod tests {
             response_type: "code".to_string(),
             via_par: false,
             resource: None,
+            response_mode: None,
+            prompt: String::new(),
             device_user_code: None,
         };
 
@@ -882,6 +931,8 @@ mod tests {
             response_type: "code".to_string(),
             via_par: false,
             resource: None,
+            response_mode: None,
+            prompt: String::new(),
             device_user_code: None,
         };
 

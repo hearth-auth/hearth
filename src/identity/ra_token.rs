@@ -60,6 +60,11 @@ pub struct OidcParams {
     /// originally-requested mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_mode: Option<String>,
+    /// OIDC `prompt` value of the original request (`none`, `consent`, or
+    /// empty). Preserved so the consent step that follows the required
+    /// actions applies the same prompt semantics as a direct request.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt: String,
     /// RFC 8707 resource indicator from a verified request object (JAR) or
     /// PAR entry. Preserved so the code issued on resume is bound to the
     /// audience the client asked for.
@@ -304,6 +309,7 @@ mod tests {
             state: Some("state-abc".to_string()),
             response_type: "code".to_string(),
             response_mode: None,
+            prompt: String::new(),
             resource: None,
             via_par: false,
         }

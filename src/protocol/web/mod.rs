@@ -53,6 +53,7 @@ pub mod account_consents;
 pub mod account_linked;
 pub mod admin;
 pub mod auth;
+mod authorize_gate;
 pub mod consent_delegations;
 pub mod federation;
 pub mod handlers;
