@@ -172,7 +172,7 @@ async fn sms_otp_correct_code_passes() {
     assert_eq!(code.len(), 6, "OTP must be 6 digits: {code}");
 
     h.identity()
-        .verify_sms_otp(&realm, &nonce, &code, HMAC_KEY, now)
+        .verify_sms_otp(&realm, &nonce, TEST_PHONE, &code, HMAC_KEY, now)
         .expect("verify_sms_otp with correct code");
 }
 
@@ -194,9 +194,39 @@ async fn sms_otp_wrong_code_fails() {
 
     let err = h
         .identity()
-        .verify_sms_otp(&realm, &nonce, "000000", HMAC_KEY, now)
+        .verify_sms_otp(&realm, &nonce, TEST_PHONE, "000000", HMAC_KEY, now)
         .expect_err("wrong code must fail");
 
+    assert!(
+        matches!(err, hearth::identity::IdentityError::InvalidSmsOtp),
+        "expected InvalidSmsOtp, got {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A code proves possession of the number it was sent to, and no other
+// ---------------------------------------------------------------------------
+
+/// The pending OTP record names no user, so the recipient binding is what
+/// stops a genuine nonce + code obtained for one phone from passing a
+/// challenge for another.
+#[tokio::test]
+async fn sms_otp_does_not_verify_for_a_different_phone() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_sms_realm(&h);
+    let sender = CapturingSmsSmsSender::new();
+    let now = now_unix_ts();
+
+    let nonce = h
+        .identity()
+        .issue_sms_otp(&realm, TEST_PHONE, HMAC_KEY, sender.as_ref(), now)
+        .expect("issue_sms_otp");
+    let code = sender.last_otp_code().expect("OTP sent");
+
+    let err = h
+        .identity()
+        .verify_sms_otp(&realm, &nonce, "+15555550999", &code, HMAC_KEY, now)
+        .expect_err("a code sent to TEST_PHONE must not verify for another number");
     assert!(
         matches!(err, hearth::identity::IdentityError::InvalidSmsOtp),
         "expected InvalidSmsOtp, got {err:?}"

@@ -123,6 +123,15 @@ pub struct AppState {
     ///
     /// Sourced from `onboarding.base_url`; falls back to the bind address.
     pub public_base_url: String,
+
+    /// The configured `sms.transport`. Together with [`Self::dev_mode`] it
+    /// decides whether SMS MFA can actually deliver a code, which the realm
+    /// config PATCH checks before enabling `sms` in `mfa_methods`.
+    ///
+    /// Defaults to [`crate::config::SmsTransport::Log`] — the fail-closed
+    /// choice: outside dev mode it cannot deliver, so `sms` is refused until
+    /// startup wires the real transport via [`Self::with_sms_transport`].
+    pub sms_transport: crate::config::SmsTransport,
 }
 
 impl AppState {
@@ -156,6 +165,7 @@ impl AppState {
             request_shaper: Arc::new(RequestShaper::new()),
             email: None,
             public_base_url: "http://localhost:8420".to_string(),
+            sms_transport: crate::config::SmsTransport::Log,
         }
     }
 
@@ -195,6 +205,7 @@ impl AppState {
             request_shaper: Arc::new(RequestShaper::new()),
             email: None,
             public_base_url: "http://localhost:8420".to_string(),
+            sms_transport: crate::config::SmsTransport::Log,
         }
     }
 
@@ -231,7 +242,15 @@ impl AppState {
             request_shaper: Arc::new(RequestShaper::new()),
             email: None,
             public_base_url: "http://localhost:8420".to_string(),
+            sms_transport: crate::config::SmsTransport::Log,
         }
+    }
+
+    /// Records the configured `sms.transport` (see [`Self::sms_transport`]).
+    #[must_use]
+    pub fn with_sms_transport(mut self, transport: crate::config::SmsTransport) -> Self {
+        self.sms_transport = transport;
+        self
     }
 
     /// Enables the Phase-A agent identity routes (`/v1/agents`, `/.well-known/agent.json`).

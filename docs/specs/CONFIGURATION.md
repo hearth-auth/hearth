@@ -459,12 +459,28 @@ email:
 ### `sms`
 
 Outbound SMS delivery for one-time passwords (OTPs). Required when SMS MFA is enabled in any
-realm. Defaults to the `log` transport, which writes OTP bodies to the structured log — use
-only in development.
+realm. Defaults to the `log` transport, which delivers nothing: under `--dev` it writes the
+full message (OTP included) to the structured log so a developer can read the code; outside
+`--dev` it logs only that a message was dropped, with the body redacted.
+
+Outside `--dev`, `sms` cannot be listed in `auth.mfa_methods` or any
+`realms.<name>.auth.mfa_methods` while `transport` is `log` — the config is refused at
+startup, and the admin API / admin console realm config `PATCH` answers `400` — because no
+code could ever be delivered. The same rule rejects unknown method names on every surface.
 
 > **Environment variable:** `HEARTH_SMS_OTP_HMAC_KEY` must be set when `transport` is not
-> `log` or when running outside `--dev` mode. Generate with `openssl rand -hex 32`. Must be
-> at least 32 characters. Set in the process environment only — never in `hearth.yaml`.
+> `log`. Generate with `openssl rand -hex 32`. Must be at least 32 characters. Set in the
+> process environment only — never in `hearth.yaml`. Under `--dev` with no key, Hearth
+> generates a random per-process key. Outside `--dev` with no key, SMS OTP fails closed: no
+> code is issued, and a user whose second factor is SMS cannot complete login until SMS is
+> configured. There is no fallback or dev key in production.
+>
+> **Email OTP key.** Email OTP codes are HMAC'd under a key derived from
+> `HEARTH_SMS_OTP_HMAC_KEY` when it is set (domain-separated, never the SMS key itself), and
+> otherwise from the process's random cookie secret. Either way the key is secret — never a
+> constant — so no dedicated email OTP variable is needed. Without `HEARTH_SMS_OTP_HMAC_KEY`
+> an email OTP verifies only on the process that issued it, the same scope as the login
+> cookies it completes; set the variable if your deployment routes one sign-in across nodes.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

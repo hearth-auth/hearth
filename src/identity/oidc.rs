@@ -916,6 +916,31 @@ impl ResponseMode {
     pub fn is_jarm(&self) -> bool {
         matches!(self, Self::QueryJwt | Self::FragmentJwt | Self::Jwt)
     }
+
+    /// The mode an authorization response — the code or an error — is
+    /// actually delivered in.
+    ///
+    /// The requested mode, `query` when none was requested. A client that
+    /// registered an `authorization_signed_response_alg` always gets JARM: a
+    /// plain requested mode is upgraded to `query.jwt` (JARM §4).
+    ///
+    /// Success and error responses both go through this one rule (OAuth
+    /// Multiple Response Types §2.1, JARM §2.3): a `fragment` request that
+    /// got its code in the fragment used to get its error in the query
+    /// string, and a `query.jwt` request an unsigned error.
+    pub fn effective(requested: Option<&ResponseMode>, client_requires_jarm: bool) -> Self {
+        let requested = requested.cloned().unwrap_or_default();
+        if client_requires_jarm && !requested.is_jarm() {
+            Self::QueryJwt
+        } else {
+            requested
+        }
+    }
+
+    /// Whether parameters travel in the fragment rather than the query.
+    pub fn uses_fragment(&self) -> bool {
+        matches!(self, Self::Fragment | Self::FragmentJwt)
+    }
 }
 
 impl std::str::FromStr for ResponseMode {
@@ -1028,6 +1053,17 @@ impl AuthorizationResponse {
             response_mode: ResponseMode::Query,
             redirect_uri,
         }
+    }
+
+    /// Sets the delivery mode of a plain (non-JARM) response: `query` or
+    /// `fragment`. A JARM mode is ignored here — it needs the signed JWT that
+    /// only [`Self::new_jarm`] carries.
+    #[must_use]
+    pub(crate) fn with_plain_response_mode(mut self, mode: ResponseMode) -> Self {
+        if !mode.is_jarm() {
+            self.response_mode = mode;
+        }
+        self
     }
 
     /// Creates a JARM authorization response with a signed JWT.
@@ -1424,6 +1460,11 @@ pub struct JarClaims {
     /// downgrading a signed response to plain `query` mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_mode: Option<String>,
+    /// OIDC `prompt` (RFC 9101 §4 — overrides the outer `prompt` query
+    /// param). `none` forbids any interactive step; `consent` forces the
+    /// consent prompt even when a recorded consent covers the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 // ===== Pushed Authorization Requests (RFC 9126) =====
@@ -1464,6 +1505,13 @@ pub struct PushedAuthorizationRequest {
     /// Passed as the outer fallback value; the JAR's `response_mode` claim
     /// takes precedence if the JAR is present (RFC 9101 §4).
     pub response_mode: Option<String>,
+    /// OIDC `prompt` (`none`, `consent`, or absent).
+    ///
+    /// Passed as the outer fallback value; the JAR's `prompt` claim takes
+    /// precedence if the JAR is present (RFC 9101 §4). A pushed request is
+    /// the only source of `prompt` for a `request_uri` authorization: the
+    /// authorize endpoint ignores a `prompt` beside `request_uri`.
+    pub prompt: Option<String>,
 }
 
 /// Response from a successful PAR push (RFC 9126 §2.2).
@@ -1508,6 +1556,12 @@ pub(crate) struct StoredPushedAuthorizationRequest {
     /// `response_mode` even after the JAR JWT has been consumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) response_mode: Option<String>,
+    /// OIDC `prompt` — the JAR's `prompt` claim, else the pushed value.
+    ///
+    /// The only source of `prompt` for a `request_uri` authorization
+    /// (RFC 9126 §4: parameters beside `request_uri` are ignored).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) prompt: Option<String>,
     /// When this entry was created.
     pub(crate) created_at: Timestamp,
     /// When this entry expires (created_at + 90 s).
@@ -1943,6 +1997,25 @@ pub fn fuzz_parse_token_exchange(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_response_mode_defaults_to_query_and_upgrades_for_jarm_clients() {
+        use ResponseMode::{Fragment, FragmentJwt, Jwt, Query, QueryJwt};
+        assert_eq!(ResponseMode::effective(None, false), Query);
+        assert_eq!(ResponseMode::effective(Some(&Fragment), false), Fragment);
+        assert_eq!(ResponseMode::effective(Some(&QueryJwt), false), QueryJwt);
+        // A client with a registered signing alg never gets a plain response.
+        assert_eq!(ResponseMode::effective(None, true), QueryJwt);
+        assert_eq!(ResponseMode::effective(Some(&Query), true), QueryJwt);
+        assert_eq!(ResponseMode::effective(Some(&Fragment), true), QueryJwt);
+        assert_eq!(
+            ResponseMode::effective(Some(&FragmentJwt), true),
+            FragmentJwt
+        );
+        assert_eq!(ResponseMode::effective(Some(&Jwt), true), Jwt);
+        assert!(Fragment.uses_fragment() && FragmentJwt.uses_fragment());
+        assert!(!Query.uses_fragment() && !QueryJwt.uses_fragment() && !Jwt.uses_fragment());
+    }
 
     #[test]
     fn oidc_config_default_values() {

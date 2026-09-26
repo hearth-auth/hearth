@@ -1402,6 +1402,9 @@ fn pending_authorization_ticket_is_single_use() {
         nonce: None,
         response_mode: None,
         authorization_signed_response_alg: None,
+        resource: None,
+        via_par: false,
+        amr_values: Vec::new(),
         created_at: now,
         expires_at: now.add_micros(600_000_000),
     };
@@ -1435,6 +1438,9 @@ fn pending_authorization_ticket_expires() {
         nonce: None,
         response_mode: None,
         authorization_signed_response_alg: None,
+        resource: None,
+        via_par: false,
+        amr_values: Vec::new(),
         created_at: now,
         expires_at: now.add_micros(600_000_000),
     };

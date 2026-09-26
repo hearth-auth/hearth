@@ -1775,12 +1775,45 @@ async fn admin_patch_realm_config(
     }
 
     // Optional fields: apply only when present in the JSON body.
-    if let Some(methods) = body["mfa_methods"].as_array() {
-        let strs: Vec<String> = methods
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect();
-        config.mfa_methods = if strs.is_empty() { None } else { Some(strs) };
+    match body.get("mfa_methods") {
+        // Absent or `null` leaves the list unchanged, as it always has.
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::Array(methods)) => {
+            // A non-string entry used to be silently dropped; refuse it so the
+            // stored list is exactly what the operator sent.
+            let mut strs: Vec<String> = Vec::with_capacity(methods.len());
+            for v in methods {
+                let Some(s) = v.as_str() else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "mfa_methods must be an array of strings"
+                        })),
+                    )
+                        .into_response();
+                };
+                strs.push(s.to_string());
+            }
+            // The same rule the YAML validator applies: known names only, and
+            // no `sms` on a transport that cannot deliver the code.
+            if let Err(reason) =
+                crate::config::check_mfa_methods(&strs, state.sms_transport, state.dev_mode)
+            {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": reason })),
+                )
+                    .into_response();
+            }
+            config.mfa_methods = if strs.is_empty() { None } else { Some(strs) };
+        }
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "mfa_methods must be an array of strings"})),
+            )
+                .into_response();
+        }
     }
     if let Some(v) = body["sms_otp_expiry_seconds"].as_u64() {
         config.sms_otp_expiry_seconds = Some(v);

@@ -168,6 +168,7 @@ fn par_request_uri_carries_128_bits() {
                     nonce: None,
                     request: None,
                     response_mode: None,
+                    prompt: None,
                 },
             )
             .expect("push_authorization_request");
@@ -210,6 +211,9 @@ fn consent_ticket_carries_128_bits() {
                     nonce: None,
                     response_mode: None,
                     authorization_signed_response_alg: None,
+                    resource: None,
+                    via_par: false,
+                    amr_values: Vec::new(),
                     created_at: now,
                     expires_at: Timestamp::from_micros(now.as_micros() + 600_000_000),
                 },

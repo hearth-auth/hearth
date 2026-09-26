@@ -73,23 +73,54 @@ provider sub-block holds provider-specific credentials.
 
 | Value | Description |
 |-------|-------------|
-| `log` | **Development only.** OTPs are written to the structured log and never delivered to a phone. Hearth emits a `WARN` at startup when this transport is active. |
+| `log` | **Development only.** Nothing is delivered to a phone. Under `--dev` the full message, OTP included, is written to the structured log so you can read the code; outside `--dev` only the fact that a message was dropped is logged, with the body redacted. Hearth emits a `WARN` at startup when this transport is active outside `--dev`. |
 | `twilio` | Twilio Programmable SMS REST API. |
 | `aws_sns` | AWS Simple Notification Service `Publish` API. |
 
 ### Production guard
 
-Using `transport: log` outside of `--dev` mode will drop all OTPs. Hearth guards against
-accidental misconfiguration at startup: when `transport: log` is active and the server is
-not running with `--dev`, startup emits a `WARN` and continues:
+Using `transport: log` outside of `--dev` mode delivers no OTPs, so Hearth refuses to let SMS
+MFA depend on it:
+
+- **Startup:** listing `sms` in `auth.mfa_methods` or in any `realms.<name>.auth.mfa_methods`
+  while `transport` is `log` is a configuration error outside `--dev` — the server does not
+  start. Unknown method names are refused the same way.
+- **Runtime:** the admin API (`PATCH /admin/realms/{id}/config`) and the admin console
+  (`PATCH /ui/admin/realms/{realm}/config`) answer `400` to an `mfa_methods` list that
+  contains `sms` while the transport is `log`, or that contains an unknown method name.
+- **Log hygiene:** the `log` transport redacts the message body outside `--dev`, so OTPs
+  never reach your log pipeline.
+
+With `transport: log` and no SMS MFA configured, startup emits a `WARN` and continues:
 
 ```
-WARN hearth::sms: sms.transport = log is active outside dev mode — no real SMS messages will be sent
+sms.transport = log is active outside dev mode — no real SMS messages will be sent, SMS MFA cannot be enabled, and SMS OTP challenges fail closed
 ```
 
 There are no `production_guard` or `fail_fast` config keys — the guard is always active and
 cannot be silenced via configuration. To prevent this warning in production, set `transport`
 to `twilio` or `awssns`.
+
+### Fail-closed behaviour without a key
+
+There is no fallback HMAC key. If `HEARTH_SMS_OTP_HMAC_KEY` is not loaded (only possible
+with the `log` transport, since a real transport refuses to start without it), every SMS
+OTP surface fails closed: no code is issued, no submitted code verifies, and a user whose
+second factor is SMS **cannot complete login** — the factor is never skipped. The same
+applies if the SMS transport itself is unavailable. Under `--dev`, Hearth generates a random
+per-process key so SMS MFA works out of the box.
+
+A code is bound to the phone number (or, for email OTP, the address) it was sent to: it
+verifies only for that recipient, so a code received on one phone cannot complete another
+user's challenge or verify a different number during enrolment. On the sign-in page, the
+factor being challenged and the code record it is checked against are held in a
+server-signed cookie tied to that one sign-in attempt; the browser submits only the digits.
+
+Every authorization path runs the SMS challenge before an authorization code is issued: a
+plain `/authorize`, a pushed request (PAR), a signed request object (JAR), and the
+resumption after required actions (for example a forced password update). A user who has
+just enrolled their phone through the `ENROLL_PHONE_OTP` required action is therefore sent a
+second code for the sign-in itself.
 
 ---
 

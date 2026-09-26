@@ -2,8 +2,9 @@
 //!
 //! Defines the [`SmsSender`] trait with concrete implementations:
 //!
-//! - [`LoggingSmsSender`] — writes SMS body to the `tracing` log at WARN
-//!   level. The default for local development.
+//! - [`LoggingSmsSender`] — logs a line at WARN instead of delivering. Only
+//!   the dev-mode sender includes the body (the OTP); the production one
+//!   redacts it. The default for local development.
 //! - [`TwilioSmsSender`] — delivers via the Twilio Messaging REST API.
 //! - [`SnsSmsSender`] — delivers via AWS SNS Transactional SMS with
 //!   Signature Version 4 authentication.

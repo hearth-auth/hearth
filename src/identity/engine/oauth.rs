@@ -649,16 +649,11 @@ impl EmbeddedIdentityEngine {
         // 10. JARM — if a JWT response mode was requested OR the client enforces JARM,
         //     sign the response. When the client has `authorization_signed_response_alg`
         //     set, any plain response_mode is upgraded to query.jwt (JARM §4).
-        let response_mode = if client.authorization_signed_response_alg().is_some() {
-            let requested = request.response_mode.clone().unwrap_or(ResponseMode::Query);
-            if requested.is_jarm() {
-                requested
-            } else {
-                ResponseMode::QueryJwt
-            }
-        } else {
-            request.response_mode.clone().unwrap_or(ResponseMode::Query)
-        };
+        //     The web layer's error redirects use the same rule.
+        let response_mode = ResponseMode::effective(
+            request.response_mode.as_ref(),
+            client.authorization_signed_response_alg().is_some(),
+        );
         if response_mode.is_jarm() {
             let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
             let now_secs = self.clock.now().as_micros() / 1_000_000;
@@ -696,6 +691,9 @@ impl EmbeddedIdentityEngine {
             ));
         }
 
+        // A plain mode is `query` or `fragment`. `fragment` is advertised in
+        // discovery and accepted above, but the response used to be built as
+        // `query` regardless, so the code always travelled in the query string.
         Ok(AuthorizationResponse::new(
             raw_code,
             request.state.clone(),
@@ -703,7 +701,8 @@ impl EmbeddedIdentityEngine {
             // 22.3: the JAR-effective, registration-validated URI — never the
             // caller's outer `redirect_uri`, which a JAR may have overridden.
             request.redirect_uri.clone(),
-        ))
+        )
+        .with_plain_response_mode(response_mode))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2505,6 +2504,7 @@ impl EmbeddedIdentityEngine {
             effective_code_challenge_method,
             effective_nonce,
             effective_response_mode,
+            effective_prompt,
         ) = if let Some(ref jar_jwt) = request.request {
             let jar = self.verify_jar(realm_id, &request.client_id, jar_jwt)?;
             // JAR client_id claim must match the outer client_id.
@@ -2536,6 +2536,9 @@ impl EmbeddedIdentityEngine {
                 jar.nonce.or_else(|| request.nonce.clone()),
                 // JAR response_mode takes precedence over the outer param (RFC 9101 §4).
                 jar.response_mode.or_else(|| request.response_mode.clone()),
+                // So does its `prompt`. Dropping the claim here left a pushed
+                // request object's `prompt=none` showing the consent page.
+                jar.prompt.or_else(|| request.prompt.clone()),
             )
         } else {
             (
@@ -2548,6 +2551,7 @@ impl EmbeddedIdentityEngine {
                 request.code_challenge_method.clone(),
                 request.nonce.clone(),
                 request.response_mode.clone(),
+                request.prompt.clone(),
             )
         };
 
@@ -2618,6 +2622,7 @@ impl EmbeddedIdentityEngine {
             code_challenge_method: effective_code_challenge_method,
             nonce: effective_nonce,
             response_mode: effective_response_mode,
+            prompt: effective_prompt.filter(|p| !p.is_empty()),
             created_at: now,
             expires_at,
             used: false,

@@ -198,6 +198,7 @@ fn par_with_jar(client_id: hearth::core::ClientId, jar_jwt: String) -> PushedAut
         nonce: None,
         request: Some(jar_jwt),
         response_mode: None,
+        prompt: None,
     }
 }
 

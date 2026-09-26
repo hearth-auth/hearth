@@ -381,6 +381,9 @@ fn make_pending(realm_id: RealmId, engine: &dyn IdentityEngine) -> (String, Real
         nonce: None,
         response_mode: None,
         authorization_signed_response_alg: None,
+        resource: None,
+        via_par: false,
+        amr_values: Vec::new(),
         created_at: now,
         expires_at: now.add_micros(600_000_000),
     };
@@ -408,6 +411,9 @@ fn a34_pending_auth_carries_realm_id_serde_roundtrip() {
         nonce: None,
         response_mode: None,
         authorization_signed_response_alg: None,
+        resource: None,
+        via_par: false,
+        amr_values: Vec::new(),
         created_at: now,
         expires_at: now.add_micros(600_000_000),
     };

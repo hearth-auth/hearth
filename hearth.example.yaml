@@ -287,8 +287,12 @@ email:
 # Supported: log | twilio | awssns
 #
 # REQUIRED env var: HEARTH_SMS_OTP_HMAC_KEY
-#   Must be set in the environment (not here). Required when transport is not
-#   'log' or when running outside --dev mode. Generate with:
+#   Must be set in the environment (not here), at least 32 bytes. Startup fails
+#   without it when transport is not 'log'. There is no fallback key: under
+#   --dev with no key a random per-process key is generated; outside --dev with
+#   no key every SMS OTP fails closed (no code is issued, an SMS second factor
+#   cannot be passed). Outside --dev, 'sms' MFA cannot be enabled at all while
+#   transport is 'log'. Generate with:
 #     openssl rand -hex 32
 
 sms:

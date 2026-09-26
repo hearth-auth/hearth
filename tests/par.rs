@@ -99,6 +99,7 @@ fn par_request_with_pkce(client_id: hearth::core::ClientId) -> PushedAuthorizati
         nonce: None,
         request: None,
         response_mode: None,
+        prompt: None,
     }
 }
 
@@ -148,6 +149,7 @@ fn public_client_without_pkce_rejected() {
         nonce: None,
         request: None,
         response_mode: None,
+        prompt: None,
     };
 
     assert!(
@@ -178,6 +180,7 @@ fn non_code_response_type_rejected() {
         nonce: None,
         request: None,
         response_mode: None,
+        prompt: None,
     };
 
     assert!(
