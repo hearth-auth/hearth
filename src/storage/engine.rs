@@ -1962,6 +1962,16 @@ impl StorageEngine for EmbeddedStorageEngine {
             .with_label_values(&["scan"])
             .start_timer();
 
+        // The memtable FIRST, the SST list second. A flush registers its SST
+        // before it clears the map it parked, so a key leaving the memtable is
+        // in this snapshot or in any SST list loaded after it — never in
+        // neither. Loaded the other way round, a flush that completed while
+        // this scan read the SSTs left its keys in neither the stale SST list
+        // nor the emptied memtable, and the scan dropped them. Sessions are
+        // listed with a scan, so `revoke_all_user_sessions` skipped live ones
+        // (`a_scan_never_misses_a_key_a_concurrent_flush_moves`).
+        let memtable_entries = self.active_memtable.iter_realm(realm_id);
+
         // Merge results from memtable and all SST files.
         // Use a BTreeMap to deduplicate — memtable entries (newest) win.
         let mut merged: std::collections::BTreeMap<Vec<u8>, MemtableValue> =
@@ -1976,8 +1986,9 @@ impl StorageEngine for EmbeddedStorageEngine {
             }
         }
 
-        // Memtable entries (newest) overwrite SST entries
-        let memtable_entries = self.active_memtable.iter_realm(realm_id);
+        // Memtable entries (newest) overwrite SST entries. A key re-written
+        // and flushed after the snapshot above keeps its snapshot value: the
+        // value it had when this scan read the memtable.
         for (key, value) in memtable_entries {
             if key.as_slice() >= start && key.as_slice() < end {
                 merged.insert(key, value);
@@ -2018,6 +2029,13 @@ impl StorageEngine for EmbeddedStorageEngine {
             .with_label_values(&["scan_keys"])
             .start_timer();
 
+        // The memtable before the SST list, for the reason given in `scan`:
+        // read after it, a concurrent flush can hide keys from this scan
+        // (`a_key_scan_never_misses_a_key_a_concurrent_flush_moves`).
+        let memtable_keys = self
+            .active_memtable
+            .iter_realm_range_keys(realm_id, start, end);
+
         // BTreeMap<key, is_alive>: true = Data, false = Tombstone.
         // Memtable entries (newest) overwrite SST entries as we insert in
         // oldest-to-newest order.
@@ -2031,10 +2049,7 @@ impl StorageEngine for EmbeddedStorageEngine {
             }
         }
 
-        for (key, alive) in self
-            .active_memtable
-            .iter_realm_range_keys(realm_id, start, end)
-        {
+        for (key, alive) in memtable_keys {
             merged.insert(key, alive);
         }
 
@@ -2644,6 +2659,143 @@ mod tests {
             "{} acknowledged writes were lost during concurrent flushes (e.g. {:?})",
             lost.len(),
             &lost[..lost.len().min(5)]
+        );
+    }
+
+    /// Runs `scan` on three threads while the main thread writes a probe key
+    /// and flushes it, over and over, and counts the scans that came back
+    /// without a probe key acknowledged before they started.
+    ///
+    /// A flush parks the memtable's map, registers the SST it wrote, and only
+    /// then clears the parked slot, so a key moving out of the memtable is
+    /// always in the memtable or in the SST list. A reader sees it only if it
+    /// looks at the memtable *first*: one that snapshots the SST list first
+    /// and reads the memtable after a whole flush has gone by finds the key in
+    /// neither. Filler flushed to an SST in the scanned range makes every scan
+    /// spend long enough reading SSTs for a flush to land in between.
+    ///
+    /// Returns `(scans, misses)`.
+    fn scans_racing_flushes<S>(scan: S) -> (usize, usize)
+    where
+        S: Fn(&EmbeddedStorageEngine, &RealmId) -> Vec<Vec<u8>> + Copy + Send + 'static,
+    {
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+        const FLUSHES: u64 = 200;
+        const FILLER: u32 = 2_000;
+        const NONE_YET: u64 = u64::MAX;
+        fn probe(i: u64) -> Vec<u8> {
+            format!("k{i:05}").into_bytes()
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            wal_config: WalConfig {
+                max_size: 64 * 1024 * 1024,
+                sync_mode: SyncMode::None,
+            },
+            // Large enough that only the test's own `flush_memtable` calls flush.
+            memtable_config: MemtableConfig {
+                flush_threshold_bytes: 64 * 1024 * 1024,
+            },
+            tiered_config: TieredConfig::default(),
+            allow_missing_keks: false,
+            compaction: CompactionConfig::default(),
+            dev_mode: true,
+            block_cache_bytes: 4 * 1024 * 1024,
+        };
+        let engine = Arc::new(EmbeddedStorageEngine::open(config).expect("open"));
+        let realm = RealmId::generate();
+
+        for n in 0..FILLER {
+            engine
+                .put(&realm, format!("f{n:05}").as_bytes(), b"filler")
+                .expect("put filler");
+        }
+        engine.flush_memtable().expect("flush filler");
+
+        let newest = Arc::new(AtomicU64::new(NONE_YET));
+        let stop = Arc::new(AtomicBool::new(false));
+        let scans = Arc::new(AtomicUsize::new(0));
+        let misses = Arc::new(AtomicUsize::new(0));
+
+        let scanners: Vec<_> = (0..3)
+            .map(|_| {
+                let engine = Arc::clone(&engine);
+                let realm = realm.clone();
+                let newest = Arc::clone(&newest);
+                let stop = Arc::clone(&stop);
+                let scans = Arc::clone(&scans);
+                let misses = Arc::clone(&misses);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        // Every probe up to `i` was acknowledged before this
+                        // load, so the scan below must return all of them.
+                        let i = newest.load(Ordering::Acquire);
+                        if i == NONE_YET {
+                            std::hint::spin_loop();
+                            continue;
+                        }
+                        let found: HashSet<Vec<u8>> = scan(&engine, &realm).into_iter().collect();
+                        scans.fetch_add(1, Ordering::Relaxed);
+                        if (0..=i).any(|j| !found.contains(&probe(j))) {
+                            misses.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for i in 0..FLUSHES {
+            engine.put(&realm, &probe(i), b"probe").expect("put probe");
+            newest.store(i, Ordering::Release);
+            engine.flush_memtable().expect("flush");
+        }
+        stop.store(true, Ordering::Relaxed);
+        for s in scanners {
+            s.join().expect("scanner thread");
+        }
+
+        (
+            scans.load(Ordering::Relaxed),
+            misses.load(Ordering::Relaxed),
+        )
+    }
+
+    /// `revoke_all_user_sessions` finds the sessions it revokes with a scan
+    /// (`list_sessions_by_user`). A scan that drops the keys a concurrent
+    /// flush is moving skips live sessions, and their tokens keep validating
+    /// after a password change or a disable.
+    #[test]
+    fn a_scan_never_misses_a_key_a_concurrent_flush_moves() {
+        let (scans, misses) = scans_racing_flushes(|engine, realm| {
+            engine
+                .scan(realm, b"f", b"l")
+                .expect("scan")
+                .into_iter()
+                .map(|entry| entry.key)
+                .collect()
+        });
+        assert!(scans > 0, "no scan ran while the flushes did");
+        assert_eq!(
+            misses, 0,
+            "{misses} of {scans} scans missed a key a concurrent flush was moving to an SST"
+        );
+    }
+
+    /// The same guarantee for the key-only scan behind `count_prefix` and
+    /// `scan_prefix_paged`.
+    #[test]
+    fn a_key_scan_never_misses_a_key_a_concurrent_flush_moves() {
+        let (scans, misses) = scans_racing_flushes(|engine, realm| {
+            engine.scan_keys(realm, b"f", b"l").expect("scan_keys")
+        });
+        assert!(scans > 0, "no key scan ran while the flushes did");
+        assert_eq!(
+            misses, 0,
+            "{misses} of {scans} key scans missed a key a concurrent flush was moving to an SST"
         );
     }
 
