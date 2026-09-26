@@ -546,7 +546,12 @@ ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
 	@echo "==> auth-discard-check (HEA-1657)" && $(MAKE) auth-discard-check
 	@echo "==> rbac-storage-check (HEA-1781)" && $(MAKE) rbac-storage-check
 	@echo "==> check (clippy + fmt + nextest)" && $(MAKE) check
-	@echo "==> unsafe-check (Miri + ASan + heap check, §9.2)" && $(MAKE) unsafe-check
+	@echo "==> miri + asan (unsafe-check/, §9.2)" && $(MAKE) miri asan
+	@if [ "$$(uname -s)" = Linux ]; then \
+	  echo "==> heap-check (§9.2)" && $(MAKE) heap-check; \
+	else \
+	  echo "==> heap-check: SKIPPED on $$(uname -s) — glibc heap checking needs Linux; CI's quality job runs it"; \
+	fi
 	@echo "==> css-check"                && $(MAKE) css-check
 	@echo "==> proto-check"              && $(MAKE) proto-check
 	@echo "==> notice-check"             && $(MAKE) notice-check
