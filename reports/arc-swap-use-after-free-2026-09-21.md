@@ -273,6 +273,14 @@ parking the full one, so for one store a concurrent read found a written,
 acknowledged key in neither (6,447 misses in 3,000 flushes, measured). Parking
 first closed it; that fix is independent of the primitive.
 
+**Found in review.** The same class on the scan path: `scan` and `scan_keys`
+loaded the SST list before reading the memtable, so a flush that completed
+while a scan read the SSTs hid every key it moved — 370 of 1,031 scans missed
+an acknowledged key, measured. `list_sessions_by_user` is a scan, so
+`revoke_all_user_sessions` could skip a live session and leave its tokens
+valid. Reading the memtable first closed it (0 misses in 15 stress runs); like
+the park-order fix, it predates and is independent of the primitive.
+
 ### Measured
 
 The instrument is the one above, strengthened. On glibc 2.34 and later —
@@ -312,6 +320,19 @@ hot-tier test 0 in 10: its stale reads found freed memory still intact. With the
 preload and `MALLOC_PERTURB_` the hot-tier, block-cache and memtable
 (`a_key_is_never_missing_while_a_flush_moves_it`) tests each failed 10 in 10,
 which is why the runs above use both.
+
+### Kept running
+
+None of this is a manual procedure any more. `make heap-check` runs the recipe
+above, through `scripts/heap-check-runner.sh` (which preloads the
+`libc_malloc_debug.so` that matches the test binary's own libc, and refuses to
+run without one rather than check nothing), over the cells' test modules —
+three passes, in CI's `quality` job. The cell itself runs under Miri and
+AddressSanitizer from `unsafe-check/` (`make miri`, `make asan`; CI's
+`unsafe-code` job), as ARCHITECTURE.md §9.2 requires of all `unsafe` code.
+Against the grace-period mutant all three go red: Miri reports data races
+between a read and the deallocation, ASan heap-use-after-free, and heap
+checking crashes the hot-tier, block-cache and shard-map tests in every pass.
 
 The zero-allocation bench gates (`session_lookup` and `validate_token`, both
 0 allocations per warm call) and the latency gates (`storage_gate`,

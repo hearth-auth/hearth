@@ -128,6 +128,17 @@ Before opening a PR, make sure all Rust checks pass locally:
 make check   # clippy + fmt + nextest
 ```
 
+If the change touches `unsafe` code, `EpochCell` (`src/core/epoch_cell.rs`)
+or a cell built on it, also run:
+
+```sh
+make unsafe-check   # Miri + AddressSanitizer (unsafe-check/) + glibc heap checking
+```
+
+`make miri` and `make asan` run on the nightly `unsafe-check/rust-toolchain.toml`
+pins (rustup installs it on first use); `make heap-check` needs glibc 2.34 or
+later. CI runs all three (`docs/specs/ARCHITECTURE.md` §9.2).
+
 See [`CLAUDE.md`](CLAUDE.md) and [`docs/specs/`](docs/specs/) for the
 architecture, testing, and implementation-order rules every change
 must follow.

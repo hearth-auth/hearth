@@ -382,6 +382,9 @@ Each layer validates what it is responsible for. **Each layer MUST validate its 
   - `src/core/epoch_cell.rs` — the `Arc` raw-pointer round trip and pinned dereference behind `EpochCell`, the hot path's epoch-reclaimed atomic `Arc` (task 26.5). The grace period itself is `crossbeam-epoch`'s; the cell adds four small blocks, each with its `// SAFETY:` argument
   - Performance-critical data structures in the RBAC engine (if profiling shows crate abstractions are insufficient; this is unlikely given RBAC runs off the hot path)
 - All `unsafe` code MUST be covered by Miri tests where feasible, and by address sanitizer runs in CI.
+  - Hearth cannot be built for Miri (`ring`, `aws-lc-sys` and `zstd-sys` are C), so `unsafe-check/` compiles each source file that holds `unsafe` on its own, with its unit tests, against the dependency releases Hearth ships. `make miri` runs those tests under Miri (Tree Borrows, several scheduler seeds) and `make asan` under AddressSanitizer; CI runs both in the `unsafe-code` job, on the nightly `unsafe-check/rust-toolchain.toml` pins.
+  - The cells built on `EpochCell` (hot tier, block cache, memtable, identity caches) run their concurrency tests under glibc heap checking: `make heap-check`, a step of CI's `quality` job.
+  - `tests/unsafe_check_harness.rs` fails when a file in `src/` gains `unsafe` that `unsafe-check/` does not compile, unless the file is listed there with the reason Miri cannot run it. The one such file is `src/storage/fs.rs`, whose `memmap2::Mmap::map` call Miri cannot model; its soundness rests on the data directory's files not being truncated under a mapping.
 - New `unsafe` blocks require explicit reviewer approval.
 
 ---
