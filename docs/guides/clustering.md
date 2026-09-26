@@ -324,9 +324,14 @@ systemctl stop hearth
 
 > **This is a step-down, not a targeted transfer.** openraft 0.9.25 — the
 > version Hearth pins — has no API for handing leadership to a *chosen* peer;
-> `Trigger::transfer_leader` arrived in 0.10. `target_node_id` is therefore a
-> preference the server cannot honour, and `exact_target` will normally be
-> `false`. Read `new_leader_id` to find out who actually took over.
+> `Trigger::transfer_leader` arrived in 0.10. A request body that names a
+> `target_node_id` is therefore **refused with `422`** and nothing changes —
+> the server will not step down and then report success for a handover it did
+> not perform. Send no body (or `{}`) and read `new_leader_id` to find out
+> which voter won the election. Any other field in the body is refused with
+> `400`, so a misspelled target (`targetNodeId`, `target`) is never silently
+> dropped. `exact_target` is **deprecated** and always `false`; it stays in
+> the response for 1.x clients and will be removed in 2.0.
 
 > **It is not instantaneous, and it is not free.** The endpoint works by
 > letting the followers' leader leases expire, so the cluster has **no leader**

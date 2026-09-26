@@ -519,14 +519,16 @@ To upgrade a Raft cluster (3 or 5 nodes) with minimal service interruption:
    for an election to time out, hand off leadership gracefully first:
 
    ```bash
-   curl -fsS -X POST -H "Authorization: Bearer <admin-token>" \
+   curl -fsS -X POST -H "Authorization: Bearer <system-admin-token>" \
+     -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000" \
      http://10.0.0.1:8420/admin/cluster/transfer-leadership
+   # → { "new_leader_id": 2, "exact_target": false }
    ```
 
-   The request returns `409` if the target node is not the current leader. `target_node_id` may be
-   supplied in the JSON body, but it is accepted for forward-compatibility only — the underlying Raft
-   library has no targeted-transfer API, so the election winner is not guaranteed to match it. Check
-   `exact_target` in the response to see whether the winner matched your request.
+   The request returns `409` if the node you sent it to is not the current leader. Do **not** send a
+   `target_node_id`: the underlying Raft library has no targeted-transfer API, so a body naming one
+   is refused with `422` and leadership does not move. The response's `new_leader_id` reports which
+   voter won the election; `exact_target` is deprecated and always `false`.
 
    **Expect a brief write outage:** writes fail with `NoLeader` for up to one election timeout
    (~1.5–3 s) during the step-down window. Once another node reports `"role": "leader"`, upgrade the

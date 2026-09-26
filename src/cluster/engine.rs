@@ -439,10 +439,10 @@ impl ClusterEngine {
     /// `external_request` hands out an immutable `&RaftState`. A targeted
     /// `Trigger::transfer_leader` arrived in openraft 0.10.
     ///
-    /// So the caller names a preferred target and this method cannot honour
-    /// it. `POST /admin/cluster/transfer-leadership` reports which node
-    /// actually won in `new_leader_id`, and whether that was the requested one
-    /// in `exact_target`.
+    /// So this method takes no target. `POST /admin/cluster/transfer-leadership`
+    /// refuses a body naming `target_node_id` with 422 rather than stepping
+    /// down anyway and reporting success (task 26.60), and reports the node
+    /// that actually won in `new_leader_id`.
     ///
     /// ## How the step-down is performed, and why it used to do nothing
     ///
