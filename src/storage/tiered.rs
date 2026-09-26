@@ -1008,7 +1008,8 @@ mod tests {
     /// This is the shape of the `arc-swap` fault (task 26.1). Run several
     /// copies at once with glibc's heap checking on (`MALLOC_CHECK_=3` with
     /// `libc_malloc_debug.so` preloaded, plus `MALLOC_PERTURB_=165`): with the
-    /// cell's grace period removed, that fails 10 runs in 10.
+    /// cell's grace period removed, that fails 10 runs in 10. `make heap-check`
+    /// runs it that way (CI: the `quality` job).
     #[test]
     fn concurrent_reads_see_only_values_written_for_their_key() {
         const KEYS: usize = 32;

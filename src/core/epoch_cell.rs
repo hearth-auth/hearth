@@ -476,7 +476,8 @@ mod tests {
     /// Scales a stress test's iteration count down under Miri, which
     /// interprets every memory access: there the point is checking the
     /// `unsafe` blocks against the interleavings Miri schedules, not volume.
-    /// Run with `MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"` —
+    /// `make miri` runs these tests that way, from `unsafe-check/` (CI: the
+    /// `unsafe-code` job), with `-Zmiri-tree-borrows -Zmiri-ignore-leaks` —
     /// `crossbeam-epoch`'s intrusive list trips Stacked Borrows inside the
     /// crate, and its global collector never frees its own bags at exit.
     const fn stress(n: u64) -> u64 {
@@ -852,7 +853,9 @@ mod tests {
     /// `libc_malloc_debug.so` preloaded (glibc 2.34+ ignores the variable
     /// without it) and `MALLOC_PERTURB_=165` — so a use-after-free aborts or
     /// reads garbage rather than intact stale memory; see
-    /// `reports/arc-swap-use-after-free-2026-09-21.md`.
+    /// `reports/arc-swap-use-after-free-2026-09-21.md`. `make heap-check` does
+    /// exactly that (CI: the `quality` job), and `make asan` runs it under
+    /// AddressSanitizer.
     #[test]
     fn concurrent_readers_never_observe_a_torn_or_freed_value() {
         const WRITERS: u64 = 2;

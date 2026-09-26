@@ -103,6 +103,11 @@ jobs:
               - 'build.rs'
               # HEA-1862: a PR that only weakens the ROPC gate must still run it.
               - 'scripts/check-ropc-ban.sh'
+              # ARCHITECTURE.md §9.2: the Miri / AddressSanitizer harness and
+              # the heap-check runner gate `unsafe-code` and `quality`, so a PR
+              # that only edits them must still run them.
+              - 'unsafe-check/**'
+              - 'scripts/heap-check-runner.sh'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
@@ -559,7 +564,9 @@ jobs:
     # passing — allowing a PR to merge with zero quality checks run.
     if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 30, plus headroom for `make heap-check` (three passes of ~95 tests, no
+    # new build: `make check` has built the binary).
+    timeout-minutes: 35
     env:
       # `nextest --workspace` links 307 test binaries. Measured on one of them:
       # 429 MB, of which 388 MB (90%) is debug sections. At that size the set
@@ -627,6 +634,18 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
         run: make check
+
+      # ARCHITECTURE.md §9.2, the hearth-side half of the `unsafe-code` job
+      # below: EpochCell's tests and those of every cell built on it — hot
+      # tier, block cache, memtable, flush-vs-read, identity caches — under
+      # glibc heap checking, three passes. It runs here because `make check`
+      # has just built the test binary it needs. `make heap-check` passes
+      # `--retries 0` itself: the `ci` profile's retries would turn a heap
+      # error that fires one run in three into a pass. `!cancelled()`: a red
+      # test suite above must not also hide this verdict.
+      - name: make heap-check (EpochCell's consumers under glibc heap checking)
+        if: ${{ !cancelled() }}
+        run: make heap-check
 
       - name: make css-check (rebuild Tailwind and fail if app.css drifts)
         run: make css-check
@@ -1381,6 +1400,62 @@ jobs:
       - name: cargo check (MSRV)
         run: cargo check --workspace --locked
 
+  # ── Unsafe code: Miri + AddressSanitizer (ARCHITECTURE.md §9.2) ────────────
+  #
+  # §9.2: "All unsafe code MUST be covered by Miri tests where feasible, and by
+  # address sanitizer runs in CI." The unsafe blocks are EpochCell's
+  # (src/core/epoch_cell.rs), the hot path's epoch-reclaimed atomic Arc that
+  # replaced arc-swap after arc-swap corrupted the heap (task 26.1). Before
+  # this job neither tool ran anywhere in CI: Miri had been run once, by hand,
+  # from a scratch crate that was never committed.
+  #
+  # hearth cannot be built for Miri (ring, aws-lc-sys and zstd-sys are C), so
+  # unsafe-check/ compiles each file holding `unsafe` on its own, with its unit
+  # tests, on the nightly its rust-toolchain.toml pins — the only place the pin
+  # is written. `make miri` runs those tests under Miri with Tree Borrows,
+  # across four scheduler seeds; `make asan` runs them natively under
+  # AddressSanitizer, twenty passes. Both were seen red: with the grace period
+  # removed from EpochCell, Miri reports data races between reads and the
+  # deallocation, and ASan heap-use-after-free. tests/unsafe_check_harness.rs
+  # (in `quality`) fails if a file gains `unsafe` the harness does not compile.
+  #
+  # The hearth-side half — the cells built on EpochCell under glibc heap
+  # checking — is `make heap-check`, a step of `quality`, which has already
+  # built the test binary it needs.
+  unsafe-code:
+    name: unsafe-code (Miri + AddressSanitizer)
+    needs: filter
+    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Miri dominates: ~630 CPU-seconds for four seeds, about three minutes on
+    # a four-core runner. ASan takes seconds.
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # With no argument, rustup installs the toolchain rust-toolchain.toml
+      # names — nightly, miri and rust-src — so the pin lives in one file.
+      - name: Install the pinned nightly (unsafe-check/rust-toolchain.toml)
+        working-directory: unsafe-check
+        run: rustup toolchain install
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        with:
+          tool: cargo-nextest
+
+      - name: make miri (Tree Borrows, four scheduler seeds)
+        run: make miri
+
+      # `!cancelled()`: a Miri failure must not also hide the ASan verdict.
+      - name: make asan (AddressSanitizer + LeakSanitizer, twenty passes)
+        if: ${{ !cancelled() }}
+        run: make asan
+
   # ── Required-summary gate (HEA-693) ──────────────────────────────────────────
   #
   # Branch protection requires ONLY this job for the CI workflow. It always runs
@@ -1474,7 +1549,7 @@ jobs:
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, proto-freshness, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-kotlin, sdk-go, sdk-typescript, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, cargo-deny, msrv, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
+    needs: [filter, quality, proto-freshness, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-kotlin, sdk-go, sdk-typescript, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, cargo-deny, msrv, unsafe-code, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -1498,20 +1573,21 @@ jobs:
           CLUSTER_CHAOS: ${{ needs.cluster-chaos.result }}
           CARGO_DENY: ${{ needs.cargo-deny.result }}
           MSRV: ${{ needs.msrv.result }}
+          UNSAFE_CODE: ${{ needs.unsafe-code.result }}
           COMMIT_LINT: ${{ needs.commit-lint.result }}
           PROTO_GOVERNANCE: ${{ needs.proto-governance.result }}
           SDK_SMOKE: ${{ needs.sdk-smoke.result }}
           SECURITY: ${{ needs.security.result }}
           LOADTEST_SMOKE: ${{ needs.loadtest-smoke.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-kotlin=$SDK_KOTLIN sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS cargo-deny=$CARGO_DENY msrv=$MSRV commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
+          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-kotlin=$SDK_KOTLIN sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS cargo-deny=$CARGO_DENY msrv=$MSRV unsafe-code=$UNSAFE_CODE commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
           # ALLOWLIST, not a denylist (production-readiness task 24.4). This
           # loop used to fail only on "failure" or "cancelled". That is
           # fail-open by construction: any result GitHub adds, and any empty
           # string from an expression that did not evaluate, would have been
           # read as "fine". `success` and `skipped` are the only two results
           # that may pass; everything else — including "" — blocks the merge.
-          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_KOTLIN" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$CARGO_DENY" "$MSRV" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
+          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_KOTLIN" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$CARGO_DENY" "$MSRV" "$UNSAFE_CODE" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
             case "$result" in
               success|skipped) ;;
               *)

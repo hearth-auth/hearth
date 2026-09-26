@@ -1,0 +1,9 @@
+# The nightly `make miri` and `make asan` run on — Miri and -Zsanitizer exist
+# only there. Pinned rather than floating for the reason fuzz.yml pins its
+# nightly: a nightly regression must not turn a stable-channel PR red. It is
+# the same nightly as fuzz.yml; bump it deliberately, after `make miri asan`
+# passes on the candidate.
+[toolchain]
+channel = "nightly-2026-07-29"
+components = ["miri", "rust-src"]
+profile = "minimal"

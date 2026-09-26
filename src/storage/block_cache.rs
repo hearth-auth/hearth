@@ -259,7 +259,8 @@ mod tests {
     /// cached under the id they asked for. Run several copies at once with
     /// glibc's heap checking on (`MALLOC_CHECK_=3` with `libc_malloc_debug.so`
     /// preloaded, plus `MALLOC_PERTURB_=165`) and a use-after-free in the cell
-    /// aborts (task 26.1).
+    /// aborts (task 26.1). `make heap-check` runs it that way (CI: the
+    /// `quality` job).
     #[test]
     fn concurrent_hits_only_return_the_block_cached_under_their_id() {
         const IDS: usize = 24;

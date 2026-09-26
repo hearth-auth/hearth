@@ -1,0 +1,29 @@
+# hearth's `unsafe` code, compiled on its own so Miri and AddressSanitizer can
+# run its unit tests (docs/specs/ARCHITECTURE.md §9.2). See src/lib.rs.
+#
+#   make miri    the tests under Miri (tree borrows)
+#   make asan    the tests natively under AddressSanitizer
+#
+# CI runs both in the `unsafe-code` job of .github/workflows/ci.yml.
+
+[package]
+name = "hearth-unsafe-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+# Its own workspace, like fuzz/: hearth's `--workspace` commands never build
+# it, and it never needs the stable toolchain.
+[workspace]
+
+# The same requirements as hearth's Cargo.toml. Cargo.lock pins the same
+# releases as hearth's; tests/unsafe_check_harness.rs fails if they drift.
+[dependencies]
+crossbeam-epoch = "0.9"
+
+[dev-dependencies]
+proptest = "1"
