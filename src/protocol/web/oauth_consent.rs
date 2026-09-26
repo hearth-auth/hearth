@@ -767,7 +767,7 @@ pub async fn consent_submit(
     else {
         return handlers_common::bad_request("consent ticket invalid");
     };
-    if ticket_from_cookie != form.ticket {
+    if !cookie_ticket_matches(&ticket_from_cookie, &form.ticket) {
         return handlers_common::bad_request("consent ticket invalid");
     }
 
@@ -987,6 +987,15 @@ fn validate_ticket_cookie(secret: &CookieSecret, user_id: &UserId, value: &str) 
     } else {
         None
     }
+}
+
+/// Returns `true` when the ticket submitted with the consent form equals the
+/// one bound into the MAC-verified consent cookie.
+///
+/// Constant-time and length-blind ([`crate::core::ct_eq_secret_str`]); a
+/// plain `!=` would return at the first differing byte.
+fn cookie_ticket_matches(from_cookie: &str, submitted: &str) -> bool {
+    crate::core::ct_eq_secret_str(from_cookie, submitted)
 }
 
 /// Lightweight non-consuming peek at a pending authorization ticket.
@@ -1266,6 +1275,23 @@ mod tests {
             Some(ticket)
         );
         assert!(validate_ticket_cookie(&secret, &u2, raw).is_none());
+    }
+
+    #[test]
+    fn submitted_ticket_matching_the_cookie_is_accepted() {
+        assert!(cookie_ticket_matches("ticket-0123", "ticket-0123"));
+    }
+
+    #[test]
+    fn submitted_ticket_same_length_mismatch_is_rejected() {
+        assert!(!cookie_ticket_matches("ticket-0123", "ticket-0124"));
+    }
+
+    #[test]
+    fn submitted_ticket_different_length_is_rejected() {
+        assert!(!cookie_ticket_matches("ticket-0123", "ticket-012"));
+        assert!(!cookie_ticket_matches("ticket-0123", "ticket-01234"));
+        assert!(!cookie_ticket_matches("ticket-0123", ""));
     }
 
     #[test]

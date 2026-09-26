@@ -3596,8 +3596,7 @@ impl EmbeddedIdentityEngine {
         }
 
         // Verify the incoming refresh token matches the current hash
-        let incoming_hash = Self::sha256_hex(refresh_token.as_bytes());
-        if incoming_hash != family.current_refresh_hash {
+        if !Self::refresh_token_matches_hash(refresh_token, &family.current_refresh_hash) {
             // THEFT DETECTED — a previously-rotated token is being reused.
             family.revoked = true;
             let updated =
@@ -3967,6 +3966,22 @@ impl EmbeddedIdentityEngine {
     fn pkce_s256_challenge(verifier: &str) -> String {
         let digest = ring::digest::digest(&ring::digest::SHA256, verifier.as_bytes());
         URL_SAFE_NO_PAD.encode(digest.as_ref())
+    }
+
+    /// Returns `true` when `verifier` is the S256 pre-image of the stored
+    /// `challenge` (RFC 7636 §4.6).
+    ///
+    /// The comparison is constant-time and length-blind
+    /// ([`crate::core::ct_eq_secret_str`]): a plain `!=` would return at the
+    /// first differing byte of the challenge.
+    fn pkce_s256_verifier_matches(verifier: &str, challenge: &str) -> bool {
+        crate::core::ct_eq_secret_str(&Self::pkce_s256_challenge(verifier), challenge)
+    }
+
+    /// Returns `true` when `refresh_token` hashes to the family's stored
+    /// `current_refresh_hash`, compared in constant time.
+    fn refresh_token_matches_hash(refresh_token: &str, stored_hash: &str) -> bool {
+        crate::core::ct_eq_secret_str(&Self::sha256_hex(refresh_token.as_bytes()), stored_hash)
     }
 
     /// Persists a session to storage and keeps the in-process cache consistent.
@@ -17301,6 +17316,9 @@ mod tests {
 
     /// Hot-path epoch reconciliation: debounced storage reads, bounded staleness.
     mod epoch_sync_debounce;
+
+    /// PKCE challenge and refresh-token hash compare in constant time.
+    mod secret_compare;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.

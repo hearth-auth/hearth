@@ -346,6 +346,16 @@ struct ClientData {
     origin: String,
 }
 
+/// Returns `true` when the base64url `challenge` echoed in `clientDataJSON`
+/// encodes exactly the `expected` challenge bytes the server issued.
+///
+/// Compared in constant time and length-blind via
+/// [`crate::core::ct_eq_secret_str`]; a plain `!=` returns at the first
+/// differing byte.
+fn client_challenge_matches(received: &str, expected: &[u8]) -> bool {
+    crate::core::ct_eq_secret_str(received, &URL_SAFE_NO_PAD.encode(expected))
+}
+
 /// Parses the `clientDataJSON` from a `WebAuthn` response.
 fn parse_client_data_json(raw: &[u8]) -> Result<ClientData, IdentityError> {
     #[derive(Deserialize)]
@@ -872,9 +882,8 @@ pub(crate) fn complete_registration(
         });
     }
 
-    // Verify challenge matches
-    let expected_challenge = URL_SAFE_NO_PAD.encode(&pending.challenge);
-    if client_data.challenge != expected_challenge {
+    // Verify challenge matches (constant-time)
+    if !client_challenge_matches(&client_data.challenge, &pending.challenge) {
         return Err(IdentityError::WebAuthnRegistrationFailed {
             reason: "challenge mismatch".to_string(),
         });
@@ -1056,9 +1065,8 @@ pub(crate) fn complete_authentication(
         });
     }
 
-    // Verify challenge
-    let expected_challenge = URL_SAFE_NO_PAD.encode(&pending.challenge);
-    if client_data.challenge != expected_challenge {
+    // Verify challenge (constant-time)
+    if !client_challenge_matches(&client_data.challenge, &pending.challenge) {
         return Err(IdentityError::InvalidAssertion {
             reason: "challenge mismatch".to_string(),
         });
@@ -1679,6 +1687,133 @@ mod tests {
         assert_eq!(info.credential_id(), helper.credential_id);
         assert_eq!(info.algorithm(), COSE_ALG_ES256);
         assert_eq!(stored.algorithm, COSE_ALG_ES256);
+    }
+
+    // ====================================================================
+    // Challenge comparison: constant-time, equality semantics preserved
+    // ====================================================================
+
+    #[test]
+    fn client_challenge_match_is_accepted() {
+        let challenge = generate_challenge().expect("generate");
+        let encoded = URL_SAFE_NO_PAD.encode(&challenge);
+        assert!(client_challenge_matches(&encoded, &challenge));
+    }
+
+    #[test]
+    fn client_challenge_same_length_mismatch_is_rejected() {
+        let challenge = generate_challenge().expect("generate");
+        let mut other = challenge.clone();
+        other[CHALLENGE_SIZE - 1] ^= 0x01;
+        let encoded = URL_SAFE_NO_PAD.encode(&other);
+        assert_eq!(encoded.len(), URL_SAFE_NO_PAD.encode(&challenge).len());
+        assert!(!client_challenge_matches(&encoded, &challenge));
+    }
+
+    #[test]
+    fn client_challenge_different_length_is_rejected() {
+        let challenge = generate_challenge().expect("generate");
+        let encoded = URL_SAFE_NO_PAD.encode(&challenge);
+        assert!(!client_challenge_matches(
+            &encoded[..encoded.len() - 1],
+            &challenge
+        ));
+        assert!(!client_challenge_matches(
+            &format!("{encoded}A"),
+            &challenge
+        ));
+        assert!(!client_challenge_matches("", &challenge));
+    }
+
+    /// A registration response signed over a *different* challenge — first the
+    /// same length, then shorter — is refused with the challenge-mismatch error.
+    #[test]
+    fn registration_rejects_a_mismatched_challenge_of_any_length() {
+        let helper = WebAuthnTestHelper::new("example.com");
+        let challenge = generate_challenge().expect("generate");
+        let origin = "https://example.com";
+        let pending = PendingWebAuthnChallenge {
+            challenge: challenge.clone(),
+            rp_id: "example.com".to_string(),
+            user_id: Some(UserId::generate()),
+            realm_id: test_realm(),
+            ceremony_type: CeremonyType::Registration,
+            created_at: 1_000_000,
+        };
+
+        let mut same_len = challenge.clone();
+        same_len[0] ^= 0x80;
+        let shorter = challenge[..CHALLENGE_SIZE - 1].to_vec();
+        for wrong in [same_len, shorter] {
+            let (cdj, att) = helper.build_registration_response(&wrong, origin);
+            let err = complete_registration(&pending, &cdj, &att, origin, 1_000_000, None)
+                .expect_err("a mismatched challenge must be refused");
+            assert!(
+                matches!(
+                    &err,
+                    IdentityError::WebAuthnRegistrationFailed { reason }
+                        if reason == "challenge mismatch"
+                ),
+                "unexpected error: {err:?}"
+            );
+        }
+    }
+
+    /// The same for an assertion: a same-length and a shorter wrong challenge
+    /// are both refused as a challenge mismatch.
+    #[test]
+    fn authentication_rejects_a_mismatched_challenge_of_any_length() {
+        let helper = WebAuthnTestHelper::new("example.com");
+        let origin = "https://example.com";
+        let user_id = UserId::generate();
+        let reg_challenge = generate_challenge().expect("generate");
+        let reg_pending = PendingWebAuthnChallenge {
+            challenge: reg_challenge.clone(),
+            rp_id: "example.com".to_string(),
+            user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
+            ceremony_type: CeremonyType::Registration,
+            created_at: 1_000_000,
+        };
+        let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
+        let (_info, stored) =
+            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
+                .expect("registration");
+
+        let auth_challenge = generate_challenge().expect("generate");
+        let auth_pending = PendingWebAuthnChallenge {
+            challenge: auth_challenge.clone(),
+            rp_id: "example.com".to_string(),
+            user_id: Some(user_id),
+            realm_id: test_realm(),
+            ceremony_type: CeremonyType::Authentication,
+            created_at: 2_000_000,
+        };
+
+        let mut same_len = auth_challenge.clone();
+        same_len[CHALLENGE_SIZE - 1] ^= 0x01;
+        let shorter = auth_challenge[..CHALLENGE_SIZE - 1].to_vec();
+        for wrong in [same_len, shorter] {
+            let (cdj, auth_data, sig, _handle) =
+                helper.build_authentication_response(&wrong, origin, 1, None);
+            let err = complete_authentication(
+                &auth_pending,
+                &stored,
+                &cdj,
+                &auth_data,
+                &sig,
+                None,
+                origin,
+            )
+            .expect_err("a mismatched challenge must be refused");
+            assert!(
+                matches!(
+                    &err,
+                    IdentityError::InvalidAssertion { reason } if reason == "challenge mismatch"
+                ),
+                "unexpected error: {err:?}"
+            );
+        }
     }
 
     // ====================================================================

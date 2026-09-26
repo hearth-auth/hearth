@@ -806,9 +806,9 @@ impl EmbeddedIdentityEngine {
                     reason: "code_verifier is required when code_challenge was used".to_string(),
                 })?;
 
-            // Compute S256: BASE64URL(SHA256(code_verifier))
-            let computed_challenge = Self::pkce_s256_challenge(verifier);
-            if computed_challenge != *challenge {
+            // Compute S256: BASE64URL(SHA256(code_verifier)) and compare in
+            // constant time.
+            if !Self::pkce_s256_verifier_matches(verifier, challenge) {
                 return Err(IdentityError::InvalidGrant {
                     reason: "PKCE code_verifier does not match code_challenge".to_string(),
                 });
