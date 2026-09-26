@@ -797,9 +797,7 @@ impl EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?
             {
                 if let Ok(client) = serde_json::from_slice::<OAuthClient>(&client_bytes) {
-                    if client.assertion_public_key().is_some()
-                        && client.client_secret_hash().is_none()
-                    {
+                    if client.requires_client_assertion() {
                         return Err(IdentityError::InvalidClientAssertion {
                             reason: "client_assertion is required for private_key_jwt clients"
                                 .to_string(),
@@ -1772,20 +1770,33 @@ impl EmbeddedIdentityEngine {
             })?;
 
         // JTI replay protection — each JTI may only be used once per realm.
+        //
+        // The marker stores the instant after which the assertion can no
+        // longer verify anywhere (`exp` + clock skew, 8-byte LE i64 Unix
+        // seconds) so `cleanup::sweep_client_assertion_jtis` can reclaim it,
+        // exactly like the JAR, DPoP and nonce sentinels. This runs once per
+        // assertion-authenticated request at `/token`, `/introspect` and
+        // `/revoke`; a marker with no expiry leaked one row per request for
+        // the life of the realm. `exp` is already capped at
+        // `MAX_ASSERTION_LIFETIME_SECS` above, so no marker outlives
+        // now + 5 min + skew.
+        //
+        // `put_if_absent` is atomic (Raft-routed in cluster mode), so two
+        // concurrent presentations of one assertion cannot both pass. Any
+        // existing marker refuses — including one past its expiry that the
+        // sweep has not reached yet, which only ever refuses a *new*
+        // assertion reusing an old `jti`.
         let jti_key = keys::encode_client_assertion_jti(jti);
-        if self
+        let marker_expires_at = claims.exp.saturating_add(CLOCK_SKEW_SECS);
+        let fresh = self
             .storage
-            .get(realm_id, &jti_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
+            .put_if_absent(realm_id, &jti_key, &marker_expires_at.to_le_bytes())
+            .map_err(Self::storage_err)?;
+        if !fresh {
             return Err(IdentityError::InvalidClientAssertion {
                 reason: "assertion jti has already been used (replay)".to_string(),
             });
         }
-        self.storage
-            .put(realm_id, &jti_key, b"1")
-            .map_err(Self::storage_err)?;
 
         Ok(())
     }
@@ -2389,7 +2400,22 @@ impl EmbeddedIdentityEngine {
                         ..Default::default()
                     },
                 )?;
-                let token_pair = self.issue_tokens(realm_id, user_id, session.id())?;
+                // The grant is issued TO the polling client: record it on the
+                // grant family, as the authorization-code grant does. Minting
+                // with the default (clientless) context left the family with
+                // no owner, so RFC 7009 ownership resolved to no client and
+                // the device client's own `/revoke` answered 200 while its
+                // refresh token and session stayed live. It also skipped the
+                // client's claim profile and the refresh-time client binding.
+                let token_pair = self.issue_tokens_with_context(
+                    realm_id,
+                    user_id,
+                    session.id(),
+                    &super::TokenIssuanceContext {
+                        client_id: Some(client_id.clone()),
+                        ..Default::default()
+                    },
+                )?;
 
                 // Issue ID token
                 // iss MUST match the discovery document's issuer (OIDC Core §2)
@@ -2674,6 +2700,63 @@ impl EmbeddedIdentityEngine {
         format!("sha256:{}", digest.get(..16).unwrap_or(digest.as_str()))
     }
 
+    /// Whether `claims` belong to a token issued to `client` (RFC 7009 §2.1).
+    ///
+    /// The issuing client is, in order:
+    /// 1. the outermost `act.sub` — an RFC 8693 exchanged (delegated) token is
+    ///    issued to the client that performed the exchange, which Hearth
+    ///    records as the current actor (RFC 8693 §4.1; the exchange enforces
+    ///    `act.sub` == the authenticated client). It inherits the subject
+    ///    token's `fid`, `sid` and `sub`, so reading those would hand it to
+    ///    the SUBJECT's client. `act.sub` is either `client_<uuid>` (from an
+    ///    `actor_token`) or the bare UUID; both parse as a `ClientId`, and
+    ///    anything else owns nothing;
+    /// 2. `azp` — set on ID tokens and any token bound to an authorized party;
+    /// 3. the grant family's `client_id` — every user access and refresh token
+    ///    minted by a grant carries its family id in `fid`;
+    /// 4. `sub` — for a sessionless `client_credentials` token, whose subject
+    ///    is the client itself.
+    ///
+    /// Audience membership deliberately does NOT count: a resource server
+    /// named in `aud` received the token, it was not issued it, and it must
+    /// not be able to end the user's session. A token no client was issued —
+    /// a Hearth first-party session token, or a family whose owning client is
+    /// unrecorded or already swept — belongs to no client and yields `false`
+    /// (fail closed).
+    fn token_issued_to_client(
+        &self,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+        client: &crate::core::ClientId,
+    ) -> Result<bool, IdentityError> {
+        if let Some(act) = claims.act.as_ref() {
+            return Ok(act.sub.parse::<crate::core::ClientId>().ok().as_ref() == Some(client));
+        }
+        let client_str = client.to_string();
+        if let Some(azp) = claims.azp.as_deref() {
+            return Ok(azp == client_str);
+        }
+        if let Some(ref fid) = claims.fid {
+            let family_key = keys::encode_grant_family(fid);
+            let Some(bytes) = self
+                .storage
+                .get(realm_id, &family_key)
+                .map_err(Self::storage_err)?
+            else {
+                return Ok(false);
+            };
+            let family: StoredGrantFamily =
+                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            return Ok(family.client_id.as_ref() == Some(client));
+        }
+        if claims.sid == "none" {
+            return Ok(claims.sub == client_str);
+        }
+        Ok(false)
+    }
+
     pub(super) fn revoke_token_inner(
         &self,
         realm_id: &RealmId,
@@ -2695,9 +2778,32 @@ impl EmbeddedIdentityEngine {
             return Ok(()); // Silent success per RFC 7009
         }
 
+        // RFC 7009 §2.1: the server "verifies whether the token was issued to
+        // the client making the revocation request". Without this, any
+        // authenticated client — and a public client authenticates on its
+        // `client_id` alone — could end the session or grant family behind
+        // any token it held: a resource server that legitimately received a
+        // user's token, or anyone holding a leaked one. A foreign token is a
+        // silent no-op (RFC 7009 §2.2), exactly like an invalid one.
+        if let Some(revoking) = request.revoking_client_id.as_ref() {
+            if !self.token_issued_to_client(realm_id, &claims, revoking)? {
+                tracing::debug!(
+                    realm_id = %realm_id,
+                    "revocation ignored: token was not issued to the revoking client"
+                );
+                return Ok(());
+            }
+        }
+
         match claims.token_type.as_str() {
+            // A delegated (RFC 8693 exchanged) token carries the subject
+            // token's `sid`, but it was issued to the exchanging client, not
+            // to the subject's. Ending that shared session would revoke the
+            // subject client's own tokens — the cross-client revocation the
+            // ownership check above exists to prevent — so it falls through
+            // to the JTI blocklist arm below and dies alone.
             "access" | "id_token" => {
-                if claims.sid != "none" {
+                if claims.sid != "none" && claims.act.is_none() {
                     // Session-bound token: revoke via session.
                     //
                     // The outcome is PROPAGATED, not discarded. RFC 7009 §2.2
@@ -2718,7 +2824,8 @@ impl EmbeddedIdentityEngine {
                         }
                     }
                 } else if let Some(ref jti) = claims.jti {
-                    // Sessionless token (e.g., client_credentials): revoke via JTI blocklist.
+                    // Sessionless token (e.g., client_credentials) or a
+                    // delegated token: revoke via JTI blocklist.
                     // Store the token's exp so the hot-path projection can self-evict expired entries.
                     // Propagated for the same reason as the session arm above:
                     // the cache insert below would otherwise mask a failed
@@ -3357,6 +3464,36 @@ impl EmbeddedIdentityEngine {
             return Ok(());
         }
         if !matched {
+            return Err(IdentityError::InvalidClientSecret);
+        }
+        Ok(())
+    }
+
+    /// Confidential-only twin of [`Self::authenticate_client_inner`] for the
+    /// introspection endpoint (RFC 7662 §2.1, task 26.43).
+    ///
+    /// Keeps the 22.25 cost rule — hashing work is a function of whether the
+    /// caller presented a secret, never of what the lookup found — and differs
+    /// only in the decision: a client with no stored hash (public, or
+    /// `private_key_jwt`-only) is refused rather than accepted, AFTER the one
+    /// verification a presented secret always costs.
+    pub(super) fn authenticate_confidential_client_inner(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        client_secret: Option<&str>,
+    ) -> Result<(), IdentityError> {
+        let client = self.get_client(realm_id, client_id)?;
+        // No secret: refuse on every arm without hashing. A public client has
+        // nothing else to prove, so it cannot pass here.
+        let Some(secret) = client_secret else {
+            return Err(IdentityError::InvalidClientSecret);
+        };
+        let stored_hash = client.as_ref().and_then(OAuthClient::client_secret_hash);
+        let matched = self.verify_presented_client_secret(realm_id, stored_hash, secret)?;
+        // `matched` is false whenever there is no stored hash (the dummy never
+        // matches), so an unknown or public client is refused here too.
+        if stored_hash.is_none() || !matched {
             return Err(IdentityError::InvalidClientSecret);
         }
         Ok(())

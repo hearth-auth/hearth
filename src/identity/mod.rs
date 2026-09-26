@@ -1389,6 +1389,28 @@ pub trait IdentityEngine: Send + Sync {
         client_secret: Option<&str>,
     ) -> Result<(), IdentityError>;
 
+    /// Authenticates a caller that MUST be a confidential client — the
+    /// token-introspection endpoint (RFC 7662 §2.1, task 26.43).
+    ///
+    /// Unlike [`authenticate_client`](Self::authenticate_client), a public
+    /// client is refused: its `client_id` is public by construction, so
+    /// accepting it alone would let anyone read token metadata. Only a client
+    /// with a stored secret hash that `client_secret` matches is accepted.
+    /// `private_key_jwt` clients authenticate through
+    /// [`verify_client_assertion`](Self::verify_client_assertion) instead.
+    ///
+    /// Returns `Err(IdentityError::InvalidClientSecret)` for every failure
+    /// (unknown, public, missing or wrong secret). The work done depends only
+    /// on the caller's input: a presented secret costs exactly one
+    /// verification on every arm, and no secret costs none, so response time
+    /// does not reveal whether a client exists or which type it is.
+    fn authenticate_confidential_client(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        client_secret: Option<&str>,
+    ) -> Result<(), IdentityError>;
+
     /// Updates an existing OAuth client's fields.
     ///
     /// Only non-`None` fields in the request are applied.

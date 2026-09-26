@@ -65,6 +65,7 @@ async fn revoke_audit_record_never_contains_the_raw_token() {
             &TokenRevocationRequest {
                 token: access_token.clone(),
                 token_type_hint: Some("access_token".to_string()),
+                revoking_client_id: None,
             },
         )
         .expect("revoke");
@@ -149,6 +150,7 @@ async fn revoke_audit_reference_is_stable_and_opaque() {
                 &TokenRevocationRequest {
                     token: access_token.clone(),
                     token_type_hint: None,
+                    revoking_client_id: None,
                 },
             )
             .expect("revoke");

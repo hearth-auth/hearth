@@ -307,6 +307,7 @@ async fn alg_none_on_revoke_is_silent_noop() {
             &TokenRevocationRequest {
                 token: forged,
                 token_type_hint: None,
+                revoking_client_id: None,
             },
         )
         .expect("revoke of alg:none token must silently succeed (RFC 7009)");
@@ -689,6 +690,7 @@ async fn cross_realm_revoke_is_silent_noop() {
             &TokenRevocationRequest {
                 token: pair.access_token().to_string(),
                 token_type_hint: None,
+                revoking_client_id: None,
             },
         )
         .expect("cross-realm revoke must silently succeed (RFC 7009)");
@@ -739,6 +741,7 @@ async fn revoked_session_token_introspects_inactive() {
             &TokenRevocationRequest {
                 token: pair.access_token().to_string(),
                 token_type_hint: Some("access_token".to_string()),
+                revoking_client_id: None,
             },
         )
         .expect("revoke");

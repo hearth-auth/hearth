@@ -381,11 +381,24 @@ class HearthClient:
         setting on the issuing client.  Callers in introspection mode MUST compare this
         against their configured expected mode and reject on mismatch.
 
+        Introspection serves CONFIDENTIAL clients only: Hearth answers a public
+        client (``client_id`` alone) with ``401 invalid_client``, so
+        ``client_secret`` is required and a missing one is refused before any
+        request is sent.
+
+        :raises ConfigurationError: when ``client_id`` or ``client_secret`` is missing.
         :raises HearthError: on non-200 HTTP responses.
         """
-        body: Dict[str, Any] = {"token": access_token, "client_id": client_id}
-        if client_secret is not None:
-            body["client_secret"] = client_secret
+        if not client_id or not client_secret:
+            raise ConfigurationError(
+                "introspection requires a confidential client's client_id and client_secret",
+                field="client_secret",
+            )
+        body: Dict[str, Any] = {
+            "token": access_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
         if token_type_hint is not None:
             body["token_type_hint"] = token_type_hint
         resp = self._http.post(

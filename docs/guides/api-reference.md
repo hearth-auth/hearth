@@ -364,6 +364,29 @@ and `client_secret`) before processing the request. A missing, wrong, or unrecog
 secret on any of these paths returns `401 invalid_client` — the same RFC 6749-registered
 code returned by the `authorization_code` and `refresh_token` arms.
 
+`POST /introspect` (and `POST /realms/<realm-name>/introspect`) serves **confidential
+clients only** (RFC 7662 §2.1). Authenticate with `client_secret_basic`,
+`client_secret_post`, or `private_key_jwt` (`client_id` + `client_assertion_type` +
+`client_assertion`). A public client — one registered without a secret — receives
+`401 invalid_client` even though its `client_id` is valid, because client IDs are
+public. Register a confidential client for each resource server that introspects.
+`POST /revoke` continues to accept public clients by `client_id` (RFC 7009 §2.1). A
+confidential client authenticates with its secret, or — for a `private_key_jwt` client
+such as a FAPI 2.0 client — with `client_assertion_type` + `client_assertion`; such a
+client presenting only its `client_id` receives `401 invalid_client`. `/revoke` revokes
+only a token **issued to the calling client**: for a token-exchange token, the client that
+performed the exchange (its `act.sub`); otherwise the client in the token's `azp`, the client
+that owns its grant family (access and refresh tokens from the `authorization_code` and `device_code`
+grants), or — for a `client_credentials` or `jwt-bearer` token — the client itself. Any
+other token, including a Hearth first-party session token issued to no OAuth client
+(step-up-MFA and magic-link grants, console logins), is left untouched and the
+endpoint still answers `200` (RFC 7009 §2.2), so the response reveals nothing about the
+token. Revoking a token-exchange token blocklists that token alone; the subject's
+session stays live. Being named in a token's `aud` does not make a resource server its owner. To end
+a session that no client owns, use the admin session API (`DELETE /admin/sessions/{id}`).
+Discovery lists the accepted methods in `introspection_endpoint_auth_methods_supported`
+and `revocation_endpoint_auth_methods_supported`.
+
 ### Realm-scoped token endpoint
 
 The realm-scoped endpoint (`POST /realms/<realm-name>/token`) enforces the same rules:

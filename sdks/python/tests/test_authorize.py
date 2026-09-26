@@ -16,7 +16,7 @@ import pytest
 from hearth.client import HearthClient
 
 from .signing import install_test_key, sign_jwt, unsigned_jwt
-from hearth.errors import AuthorizationModeMismatchError, HearthError
+from hearth.errors import AuthorizationModeMismatchError, ConfigurationError, HearthError
 from hearth.types import (
     AccessTokenAuthorizationMode,
     CheckPermissionResponse,
@@ -132,8 +132,20 @@ class TestIntrospect:
             return_value=httpx.Response(200, json={"active": False})
         )
         c = self._client()
-        result = c.introspect("tok", client_id="cid")
+        result = c.introspect("tok", client_id="cid", client_secret="sec")
         assert result.active is False
+
+    def test_requires_client_secret(self, respx_mock):
+        # Hearth's introspection endpoint serves confidential clients only
+        # (task 26.43): a public client_id alone gets 401 invalid_client, so the
+        # SDK refuses a missing secret before sending anything.
+        route = respx_mock.post("http://localhost:8420/realms/realm-1/introspect").mock(
+            return_value=httpx.Response(401, json={"error": "invalid_client"})
+        )
+        c = self._client()
+        with pytest.raises(ConfigurationError):
+            c.introspect("tok", client_id="cid")
+        assert not route.called
 
     def test_raises_on_server_error(self, respx_mock):
         respx_mock.post("http://localhost:8420/realms/realm-1/introspect").mock(
@@ -141,7 +153,7 @@ class TestIntrospect:
         )
         c = self._client()
         with pytest.raises(HearthError):
-            c.introspect("tok", client_id="cid")
+            c.introspect("tok", client_id="cid", client_secret="sec")
 
 
 # ---------------------------------------------------------------------------

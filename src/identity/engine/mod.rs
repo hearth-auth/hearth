@@ -5092,6 +5092,18 @@ impl EmbeddedIdentityEngine {
             device_authorization_endpoint: Some(format!("{issuer}/device_authorization")),
             revocation_endpoint: Some(format!("{issuer}/revoke")),
             introspection_endpoint: Some(format!("{issuer}/introspect")),
+            revocation_endpoint_auth_methods_supported: vec![
+                "none".to_string(),
+                "client_secret_basic".to_string(),
+                "client_secret_post".to_string(),
+                "private_key_jwt".to_string(),
+            ],
+            // Task 26.43: confidential clients only — never `none`.
+            introspection_endpoint_auth_methods_supported: vec![
+                "client_secret_basic".to_string(),
+                "client_secret_post".to_string(),
+                "private_key_jwt".to_string(),
+            ],
             resource_indicators_supported: true,
             authorization_response_iss_parameter_supported: true,
             end_session_endpoint: Some(format!("{issuer}/end_session")),
@@ -11183,6 +11195,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.authenticate_client_inner(realm_id, client_id, client_secret)
     }
 
+    fn authenticate_confidential_client(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        client_secret: Option<&str>,
+    ) -> Result<(), IdentityError> {
+        self.authenticate_confidential_client_inner(realm_id, client_id, client_secret)
+    }
+
     fn update_client(
         &self,
         realm_id: &RealmId,
@@ -16910,6 +16931,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             fid: subject_claims.fid.clone(),
             scope: Some(effective_scope.clone()),
             nonce: None,
+            // No `azp`: the RFC 7662 audience gate reads `azp` to narrow who
+            // may introspect, and a resource server receiving this delegated
+            // token must keep introspecting it exactly as it would the
+            // subject token. The client it was issued to is recorded instead
+            // by `act.sub` (the exchanging client — enforced above), which is
+            // what RFC 7009 §2.1 revocation ownership reads for it.
             azp: None,
             cnf: request
                 .dpop_jkt
@@ -17472,6 +17499,8 @@ mod tests {
 
     /// PKCE challenge and refresh-token hash compare in constant time.
     mod secret_compare;
+    /// `private_key_jwt` assertion-JTI replay markers carry an expiry and are swept.
+    mod client_assertion_jti;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.
@@ -24292,6 +24321,7 @@ mod tests {
                 &TokenRevocationRequest {
                     token: forged_token,
                     token_type_hint: Some("access_token".to_string()),
+                    revoking_client_id: None,
                 },
             )
             .expect("forged revoke should silently succeed per RFC 7009");

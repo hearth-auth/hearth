@@ -646,6 +646,19 @@ impl OAuthClient {
         self.assertion_public_key.as_deref()
     }
 
+    /// Returns whether this client authenticates ONLY with a `private_key_jwt`
+    /// assertion (RFC 7523 §2.2): it has an assertion key and no secret, as a
+    /// FAPI 2.0 client must.
+    ///
+    /// Such a client is confidential even though [`Self::is_confidential`]
+    /// (which reads the secret hash) says otherwise, so a surface that accepts
+    /// a secretless client on its `client_id` alone MUST refuse it unless it
+    /// presented a verified assertion — otherwise anyone who knows its public
+    /// identifier can act as it.
+    pub fn requires_client_assertion(&self) -> bool {
+        self.assertion_public_key.is_some() && self.client_secret_hash.is_none()
+    }
+
     /// Sets the assertion public key.  `None` clears it, disabling the
     /// `jwt-bearer` grant for this client.
     pub(crate) fn set_assertion_public_key(&mut self, key: Option<String>) {
@@ -1303,6 +1316,16 @@ pub struct OidcDiscoveryDocument {
     /// URL of the token introspection endpoint (RFC 7662).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub introspection_endpoint: Option<String>,
+    /// Client authentication methods the revocation endpoint accepts
+    /// (RFC 8414 §2). Includes `none`: RFC 7009 §2.1 lets public clients
+    /// revoke.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revocation_endpoint_auth_methods_supported: Vec<String>,
+    /// Client authentication methods the introspection endpoint accepts
+    /// (RFC 8414 §2). Never includes `none`: introspection serves confidential
+    /// clients only (RFC 7662 §2.1, task 26.43).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub introspection_endpoint_auth_methods_supported: Vec<String>,
     /// Whether RFC 8707 resource indicators are supported.
     #[serde(default)]
     pub resource_indicators_supported: bool,
@@ -1719,12 +1742,23 @@ pub(crate) struct StoredGrantFamily {
 // ===== Token Revocation (RFC 7009) =====
 
 /// Request to revoke an OAuth 2.0 token (RFC 7009).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TokenRevocationRequest {
     /// The token to revoke (access or refresh).
     pub token: String,
     /// Optional hint about the token type.
     pub token_type_hint: Option<String>,
+    /// The client that authenticated for this revocation call.
+    ///
+    /// RFC 7009 §2.1: the server "verifies whether the token was issued to the
+    /// client making the revocation request". When `Some`, the engine revokes
+    /// only a token issued to this client — its `azp`, its grant family's
+    /// client, or (for a `client_credentials` token) its `sub` — and treats any
+    /// other token, including one issued to no client at all, as a silent
+    /// no-op (RFC 7009 §2.2). Every wire surface (`/revoke`, its realm twin,
+    /// gRPC `Revoke`) MUST set it. `None` is reserved for trusted in-process
+    /// callers that have already authorized the revocation themselves.
+    pub revoking_client_id: Option<crate::core::ClientId>,
 }
 
 // ===== Token Introspection (RFC 7662) =====
@@ -2117,6 +2151,8 @@ mod tests {
             ),
             revocation_endpoint: Some("https://hearth.local/revoke".to_string()),
             introspection_endpoint: Some("https://hearth.local/introspect".to_string()),
+            revocation_endpoint_auth_methods_supported: vec![],
+            introspection_endpoint_auth_methods_supported: vec![],
             resource_indicators_supported: true,
             authorization_response_iss_parameter_supported: true,
             end_session_endpoint: Some("https://hearth.local/end_session".to_string()),

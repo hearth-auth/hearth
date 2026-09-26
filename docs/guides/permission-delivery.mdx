@@ -156,6 +156,8 @@ if (!claims.hasPermission("docs.edit")) {
 
 The JWT carries only identity claims (`sub`, `tid`, etc.). Resource servers call `POST /realms/{realm}/introspect` with the bearer token to get the live RBAC claim set.
 
+The resource server must authenticate as a **confidential client** — `client_secret_basic`, `client_secret_post`, or `private_key_jwt`. Hearth refuses a public client (one registered without a secret) with `401 invalid_client`, because a `client_id` on its own is public information. Every SDK below therefore takes a client secret for introspection.
+
 **Introspection call:**
 
 <Tabs groupId="lang">

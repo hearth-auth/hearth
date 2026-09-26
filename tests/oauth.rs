@@ -134,6 +134,7 @@ async fn client_credentials_full_flow() {
             &TokenRevocationRequest {
                 token: token_resp.access_token().to_string(),
                 token_type_hint: Some("access_token".to_string()),
+                revoking_client_id: None,
             },
         )
         .expect("revoke token");

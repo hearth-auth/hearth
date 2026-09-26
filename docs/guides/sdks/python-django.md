@@ -109,7 +109,7 @@ Any request whose token lacks `app.access` receives `403 Forbidden`. Requests wi
 | `HEARTH_MODE` | `str` | `"embedded"` | Authorization mode: `"embedded"`, `"introspection"`, or `"decision"`. |
 | `HEARTH_PERMISSION` | `str` | — | When set, every request must carry a token with this permission. |
 | `HEARTH_CLIENT_ID` | `str` | `""` | Required for `mode="introspection"`. |
-| `HEARTH_CLIENT_SECRET` | `str` | `""` | Optional client secret for introspection. |
+| `HEARTH_CLIENT_SECRET` | `str` | `""` | Required for `mode="introspection"` — introspection serves confidential clients only. |
 | `HEARTH_ORGANIZATION_ID` | `str` | — | Org scope for decision/introspection checks. |
 | `HEARTH_RESOURCE` | `str` | — | RFC 8707 resource indicator. |
 
@@ -123,13 +123,14 @@ The `HEARTH_MODE` / `mode=` parameter is always explicit — the adapter never a
 | `"decision"` | Live per-request `POST /oauth/authorize`. Fail-closed on errors. | When post-issuance role changes must take effect immediately |
 | `"introspection"` | `POST /realms/{id}/introspect` (RFC 7662). Echoes a `mode` field that is validated. | Stateless resource servers delegating trust to the authorization server |
 
-Introspection mode requires `HEARTH_CLIENT_ID`:
+Introspection mode requires `HEARTH_CLIENT_ID` and `HEARTH_CLIENT_SECRET` — Hearth answers a
+public client (no secret) with `401 invalid_client`, so every request would be denied:
 
 ```python
 # settings.py
-HEARTH_MODE      = "introspection"
-HEARTH_CLIENT_ID = "<resource-server-client-id>"
-# HEARTH_CLIENT_SECRET = "<secret>"  # optional
+HEARTH_MODE          = "introspection"
+HEARTH_CLIENT_ID     = "<resource-server-client-id>"
+HEARTH_CLIENT_SECRET = os.environ["HEARTH_CLIENT_SECRET"]
 ```
 
 ## Required-action tokens
