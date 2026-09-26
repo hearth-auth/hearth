@@ -41,7 +41,7 @@ cd examples/full-stack-demo
 ```
 
 The script:
-1. Builds Hearth from source (`cargo build --release`).
+1. Builds Hearth from source (`cargo build --release --features dev-endpoints` — the bootstrap in step 3 is opt-in).
 2. Starts Hearth on **http://localhost:8420** with the `demo` realm pre-wired.
 3. Bootstraps the system and obtains an admin token.
 4. Seeds three demo users with their roles.

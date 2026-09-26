@@ -22,7 +22,7 @@ HEARTH_BIN="$TARGET_DIR/debug/hearth"
 
 # Build if needed
 echo "Building hearth..." >&2
-cargo build --bin hearth --manifest-path "$PROJECT_ROOT/Cargo.toml" 2>&1 >/dev/null
+cargo build --bin hearth --features dev-endpoints --manifest-path "$PROJECT_ROOT/Cargo.toml" 2>&1 >/dev/null
 
 # Find a free port or use the provided one
 PORT="${1:-0}"

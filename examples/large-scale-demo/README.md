@@ -17,7 +17,7 @@ make seed-large
 That runs:
 
 ```bash
-HEARTH_DEV_DATA_DIR=./data/demo cargo run --release -- serve --dev \
+HEARTH_DEV_DATA_DIR=./data/demo cargo run --release --features dev-endpoints -- serve --dev \
     --config examples/large-scale-demo/hearth.yaml
 ```
 

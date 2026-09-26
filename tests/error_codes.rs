@@ -3,6 +3,10 @@
 //! Verifies that key error paths in the REST API return the correct `error_code`
 //! string in the JSON response body, and that 5xx errors produce `null`.
 
+// Every test here obtains its admin token from `POST /admin/bootstrap`, which
+// exists only with the `dev-endpoints` cargo feature (not a default).
+#![cfg(feature = "dev-endpoints")]
+
 mod common;
 
 use std::sync::Arc;

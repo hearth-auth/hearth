@@ -626,13 +626,14 @@ pub fn router_with(state: Arc<AppState>, extra: Router) -> Router {
     // Dev-only endpoints. Three independent gates, because each closes a
     // different hole (audit §4.7#2, task 20.1):
     //
-    // 1. **Compile time** — the `dev-endpoints` cargo feature. It is on by
-    //    default so `make dev`, `cargo nextest` and the Playwright suite are
-    //    unaffected; the shipped container image builds with
-    //    `--no-default-features`, so these handlers are not in the production
-    //    binary at all. A runtime boolean alone left the code, the
-    //    hard-coded `admin@hearth.test` password and the seeding logic
-    //    compiled into every release.
+    // 1. **Compile time** — the `dev-endpoints` cargo feature. It is NOT a
+    //    default feature, so a plain `cargo build --release`, `cargo install`,
+    //    the release binaries and the container image carry none of these
+    //    handlers; `make dev`, `make test`, bacon and CI opt in with
+    //    `--features dev-endpoints`. A runtime boolean alone left the code,
+    //    the hard-coded `admin@hearth.test` password and the seeding logic
+    //    compiled into every release, and an opt-OUT default left them in any
+    //    build whose author did not know to pass `--no-default-features`.
     // 2. **Run time** — `state.dev_mode`, unchanged, so the routes are absent
     //    from the table in a non-dev process and cannot be fingerprinted.
     // 3. **Per request** — `dev_loopback_only`. `main.rs` refuses a non-

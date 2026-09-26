@@ -50,7 +50,8 @@ jobs:
         run: echo "PROTOC=$(which protoc)" >> "$GITHUB_ENV"
 
       - name: Build Hearth (release)
-        run: cargo build --release
+        # `dev-endpoints` is opt-in: the SDK smokes call `POST /admin/bootstrap`.
+        run: cargo build --release --features dev-endpoints
 
       - name: Upload binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

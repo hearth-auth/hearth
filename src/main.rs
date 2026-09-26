@@ -991,6 +991,11 @@ async fn run_serve(
              DO NOT expose this server on a non-loopback address."
         );
     }
+    if let Some(notice) =
+        dev_endpoints_missing_notice(config.dev_mode, cfg!(feature = "dev-endpoints"))
+    {
+        warn!("{notice}");
+    }
 
     // Canary: verify the embedded admin UI CSS contains the Hearth theme layer.
     // Catches a silent regression where a Tailwind build sheds every `bg-ht-*`
@@ -3156,6 +3161,22 @@ fn print_startup_panel(
     for line in build_startup_panel(addr, dev_mode, setup_token, mailcatcher, stats) {
         tracing::info!("{line}");
     }
+}
+
+/// The operator-facing notice for `serve --dev` on a binary compiled without
+/// the `dev-endpoints` cargo feature, or `None` when there is nothing to say.
+///
+/// `dev-endpoints` is not a default feature, so a plain `cargo build` produces
+/// a binary whose `--dev` mode has no `/admin/bootstrap` or `/dev/seed-*`
+/// routes. Without this notice the first sign is a bare `404` from the
+/// bootstrap call every dev recipe starts with.
+fn dev_endpoints_missing_notice(dev_mode: bool, compiled_in: bool) -> Option<&'static str> {
+    (dev_mode && !compiled_in).then_some(
+        "--dev is active but this binary was built WITHOUT the `dev-endpoints` cargo \
+         feature: POST /admin/bootstrap and the /dev/seed-* routes are NOT available and \
+         answer 404. Rebuild with `cargo build --features dev-endpoints` (or run \
+         `make dev`) to get them; otherwise create the first admin through /ui/setup.",
+    )
 }
 
 // Builds the logo + consolidated startup info panel as ordered display lines.
@@ -5462,6 +5483,30 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 mod tests {
     use super::*;
     use hearth::config::{Config, EmailTransport};
+
+    // ── `serve --dev` on a binary built without `dev-endpoints` ───────────
+
+    /// `--dev` on a binary without the `dev-endpoints` feature has no
+    /// `/admin/bootstrap`: the operator must be told so, and how to fix it,
+    /// instead of discovering it as a bare `404`.
+    #[test]
+    fn dev_mode_without_dev_endpoints_feature_names_the_fix() {
+        let notice = dev_endpoints_missing_notice(true, false)
+            .expect("--dev without the feature must produce a notice");
+        assert!(notice.contains("/admin/bootstrap"), "{notice}");
+        assert!(notice.contains("--features dev-endpoints"), "{notice}");
+    }
+
+    #[test]
+    fn dev_mode_with_dev_endpoints_feature_is_silent() {
+        assert_eq!(dev_endpoints_missing_notice(true, true), None);
+    }
+
+    #[test]
+    fn production_mode_never_mentions_dev_endpoints() {
+        assert_eq!(dev_endpoints_missing_notice(false, false), None);
+        assert_eq!(dev_endpoints_missing_notice(false, true), None);
+    }
 
     // ── An empty backup must not report success (task 26.26) ──────────────
 

@@ -2182,6 +2182,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "dev-endpoints")]
     #[test]
     fn issuance_plane_mints_over_production_client_credentials_grant() {
         // HEA-2003: the issuance plane must hit the production POST /token grant,

@@ -50,7 +50,7 @@ rather leave Hearth running so you can `grpcurl` against it, start it
 manually:
 
 ```bash
-cargo run --release -- serve --dev --config examples/grpc-admin-flow/hearth.yaml
+cargo run --release --features dev-endpoints -- serve --dev --config examples/grpc-admin-flow/hearth.yaml
 ```
 
 In another terminal:

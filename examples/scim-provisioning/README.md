@@ -43,7 +43,7 @@ cd examples/scim-provisioning
 
 The script will:
 
-1. `cargo build --release --bin hearth` (slow on first run, instant after).
+1. `cargo build --release --features dev-endpoints --bin hearth` (slow on first run, instant after).
 2. Wipe any previous demo data under `./data/scim-provisioning/`.
 3. Start `hearth serve --dev --config ./hearth.yaml` on `http://127.0.0.1:8422` in the background; logs go to `.hearth.log`.
 4. Wait for `/health` to respond.
@@ -72,7 +72,7 @@ Deliberate omissions that match the deferred-hardening list for
 
 ## Troubleshooting
 
-- **`bootstrap failed (404)`** — the `--dev` flag is missing. `run.sh` sets it; if you're running `demo.mjs` by hand, boot Hearth with `hearth serve --dev --config hearth.yaml` first.
+- **`bootstrap failed (404)`** — either the `--dev` flag is missing or the binary was built without the opt-in `dev-endpoints` cargo feature (the startup log then warns that bootstrap is unavailable). `run.sh` handles both; if you're running `demo.mjs` by hand, build with `cargo build --release --features dev-endpoints --bin hearth` and boot it with `hearth serve --dev --config hearth.yaml` first.
 - **`cargo build` fails** — check `rustc --version`; Hearth tracks stable.
 - **`timed out waiting for http://127.0.0.1:8422/health`** — `.hearth.log` has the reason. The most common cause is a prior Hearth instance left running on the same port.
 - **Port already in use** — edit `hearth.yaml` (`server.port`) and `demo.mjs` (`HTTP` constant) in lockstep.

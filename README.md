@@ -111,7 +111,7 @@ docker run --rm --network=host ghcr.io/hearth-auth/hearth:v1.6.10 serve --dev
 curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 ```
 
-> **Mac / Windows Docker Desktop:** `--network=host` does not map to the host loopback on Docker Desktop. Use the Docker Compose stack (`deploy/docker-compose.yml`) for a cross-platform setup, or run from source (`cargo run -- serve --dev`).
+> **Mac / Windows Docker Desktop:** `--network=host` does not map to the host loopback on Docker Desktop. Use the Docker Compose stack (`deploy/docker-compose.yml`) for a cross-platform setup, or run from source (`cargo run --features dev-endpoints -- serve --dev`).
 
 ### Helm OCI chart (signed)
 
@@ -139,7 +139,7 @@ For signature and SLSA provenance verification of binaries, see [docs/guides/ver
 ## Try it in 30 seconds
 
 ```bash
-cargo build --release
+cargo build --release --features dev-endpoints   # bootstrap is opt-in, never in a default build
 ./target/release/hearth serve --dev          # in-memory store, binds 127.0.0.1:8420
 curl -fsS http://127.0.0.1:8420/readyz       # → {"status":"ready","storage":"ok"}
 curl -X POST http://127.0.0.1:8420/admin/bootstrap | jq .
@@ -337,6 +337,12 @@ The Rust suite, the seven SDK suites and the SDK conformance check are all in th
 cargo build --release
 # Binary: target/release/hearth
 ```
+
+That is a production build. The dev-only surface — `POST /admin/bootstrap`, the `/dev/seed-*`
+routes and the hard-coded dev admin password — is behind the `dev-endpoints` cargo feature,
+which is **not** on by default. To use the bootstrap flow below, build with
+`cargo build --release --features dev-endpoints` (or just run `make dev`). `serve --dev` on a
+featureless binary still starts, and logs that bootstrap is unavailable.
 
 ### 2. Run in dev mode
 
@@ -602,9 +608,9 @@ For the full token list and design rationale see [`docs/specs/THEME.md`](docs/sp
 Run directly with Cargo — no Docker required:
 
 ```bash
-make dev          # cargo run -- serve --dev
+make dev          # cargo run --features dev-endpoints -- serve --dev
 # or
-cargo run -- serve --dev
+cargo run --features dev-endpoints -- serve --dev
 ```
 
 `--dev` binds to `http://127.0.0.1:8420` and auto-enables the built-in **mailcatcher** email transport. `make dev` keeps its store in `./data/dev`, so data survives restarts; `make dev-reset` wipes it. Every outbound email (verification links, password resets, setup notifications) is captured in-process and visible in a browser UI at **http://127.0.0.1:8420/dev/mail** — no external mail server or Docker needed.
@@ -667,7 +673,7 @@ Time to first token: under 30 minutes from a clean clone.
 
 ```bash
 make dev
-# or: cargo run -- serve --dev
+# or: cargo run --features dev-endpoints -- serve --dev
 ```
 
 Binds to `http://127.0.0.1:8420` with in-memory storage.

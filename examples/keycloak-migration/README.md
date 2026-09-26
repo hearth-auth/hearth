@@ -13,7 +13,7 @@ One-command end-to-end walkthrough of `hearth migrate keycloak`.
 
 ## What `./run.sh` does
 
-1. **Builds** the `hearth` binary (`cargo build --release`).
+1. **Builds** the `hearth` binary (`cargo build --release --features dev-endpoints`).
 2. **Creates** a throwaway temp data dir (`mktemp -d`), deleted on exit.
 3. **Migrates** `sample-export.json` into that dir via `hearth migrate keycloak`.
 4. **Boots** `hearth serve --dev` pointing at the migrated store (`HEARTH_DEV_DATA_DIR`).

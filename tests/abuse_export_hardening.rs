@@ -12,6 +12,7 @@
 
 mod common;
 
+#[cfg(feature = "dev-endpoints")]
 use hearth::audit::AuditAction;
 use hearth::protocol::admin_auth::{
     ExportRateLimitOutcome, ExportRateLimiter, EXPORT_RATE_LIMIT, EXPORT_RATE_WINDOW_MICROS,
@@ -23,6 +24,7 @@ use hearth::protocol::admin_auth::{
 
 /// Returns an admin bearer token and the system realm ID from the bootstrap
 /// endpoint. Panics on any failure.
+#[cfg(feature = "dev-endpoints")]
 async fn bootstrap(base: &str) -> (String, String) {
     let client = reqwest::Client::new();
     let resp = client
@@ -44,6 +46,7 @@ async fn bootstrap(base: &str) -> (String, String) {
 }
 
 /// `GET /admin/backup` with the given bearer token. Returns the status code.
+#[cfg(feature = "dev-endpoints")]
 async fn call_backup(base: &str, realm_id: &str, token: &str) -> u16 {
     let client = reqwest::Client::new();
     client
@@ -165,6 +168,7 @@ fn canonical_bytes_is_stable_across_signature_values() {
 
 /// Bootstrap admin has `hearth.admin` AND `hearth.export` (seeded in realm.admin role).
 /// The backup endpoint should succeed (200) when both are present.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn backup_endpoint_allows_admin_with_export_capability() {
     #[allow(unused_unsafe)]
@@ -216,6 +220,7 @@ fn permission_set_without_hearth_export_fails_capability_check() {
 ///
 /// This test calls the backup endpoint `EXPORT_RATE_LIMIT + 1` times and
 /// asserts the last call returns 429 Too Many Requests.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn backup_endpoint_rate_limits_after_quota() {
     #[allow(unused_unsafe)]
@@ -248,6 +253,7 @@ async fn backup_endpoint_rate_limits_after_quota() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Every call to the backup endpoint emits a `RealmExportWatermarked` audit event.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn backup_endpoint_emits_watermark_audit_event() {
     #[allow(unused_unsafe)]

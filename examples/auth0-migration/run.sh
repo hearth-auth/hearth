@@ -61,7 +61,7 @@ trap cleanup EXIT
 # ── Build ──────────────────────────────────────────────────────────────────────
 
 echo "▸ building hearth (release)"
-(cd "$REPO_ROOT" && cargo build --release --bin hearth --quiet)
+(cd "$REPO_ROOT" && cargo build --release --features dev-endpoints --bin hearth --quiet)
 
 # ── Migrate ───────────────────────────────────────────────────────────────────
 

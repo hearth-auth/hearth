@@ -34,7 +34,7 @@ All webhook admin endpoints require:
 - `Authorization: Bearer <token>` — a valid JWT with the `hearth.admin` permission.
 - `X-Realm-ID: <realm-id>` — the realm whose webhooks you are managing.
 
-Bootstrap the admin token with `POST /admin/bootstrap` (dev-only) or issue one via the OIDC token endpoint. Rate limit: 100 requests/minute per admin user.
+Bootstrap the admin token with `POST /admin/bootstrap` (dev-only: `serve --dev` on a binary built with the opt-in `dev-endpoints` cargo feature) or issue one via the OIDC token endpoint. Rate limit: 100 requests/minute per admin user.
 
 ---
 

@@ -283,6 +283,41 @@ fn cli_realm_create_generates_uuid() {
     );
 }
 
+// === `serve --dev` on a binary built without the `dev-endpoints` feature ===
+
+/// `dev-endpoints` is not a default feature, so `cargo build` yields a binary
+/// whose `--dev` mode has no `/admin/bootstrap`. The server must say so at
+/// startup and name the fix, rather than leaving the operator to discover a
+/// bare `404` from the first step of every dev recipe.
+#[cfg(not(feature = "dev-endpoints"))]
+#[test]
+fn serve_dev_without_dev_endpoints_feature_says_bootstrap_is_unavailable() {
+    let port = find_available_port();
+    let mut child = Command::new(hearth_bin())
+        .args(["serve", "--dev", "--port", &port.to_string()])
+        .env("RUST_LOG", "info")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn hearth server");
+    let up = wait_for_server(port, Duration::from_secs(20));
+    // Kill before asserting so a failed assertion never leaks the server.
+    let _ = child.kill();
+    let output = child.wait_with_output().expect("collect server output");
+    assert!(up, "server should accept TCP connections within 20s");
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        logs.contains("WITHOUT the `dev-endpoints` cargo feature")
+            && logs.contains("--features dev-endpoints"),
+        "startup logs must say /admin/bootstrap is unavailable and how to get it; got:\n{logs}"
+    );
+}
+
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn cli_app_create_against_running_server() {
     let port = find_available_port();

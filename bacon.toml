@@ -1,15 +1,24 @@
+# `dev-endpoints` (`/admin/bootstrap`, `/dev/seed-*`) is not a default cargo
+# feature, and a large part of the suite drives the server through it, so the
+# TDD jobs opt in explicitly. `clippy-prod` lints the featureless build that a
+# plain `cargo build --release` ships.
+
 [jobs.test]
-command = ["cargo", "nextest", "run"]
+command = ["cargo", "nextest", "run", "--features", "dev-endpoints"]
 watch = ["src", "tests"]
 
 [jobs.test-unit]
-command = ["cargo", "nextest", "run", "--lib"]
+command = ["cargo", "nextest", "run", "--lib", "--features", "dev-endpoints"]
 watch = ["src"]
 
 [jobs.clippy]
+command = ["cargo", "clippy", "--all-targets", "--features", "dev-endpoints", "--", "-D", "warnings"]
+watch = ["src", "tests", "benches"]
+
+[jobs.clippy-prod]
 command = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
 watch = ["src", "tests", "benches"]
 
 [jobs.check]
-command = ["cargo", "check", "--all-targets"]
+command = ["cargo", "check", "--all-targets", "--features", "dev-endpoints"]
 watch = ["src", "tests", "benches"]

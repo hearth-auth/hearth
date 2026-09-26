@@ -7,7 +7,7 @@ Hearth runs fully in-process — no external services required.
 **Cargo-only path (recommended for day-to-day development):**
 
 ```sh
-make dev   # cargo run -- serve --dev
+make dev   # cargo run --features dev-endpoints -- serve --dev
 ```
 
 `--dev` mode:

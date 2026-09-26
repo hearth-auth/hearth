@@ -86,7 +86,7 @@ On **both** hosts (or build once and `scp` the binary + a seed handle):
 ```bash
 export PROTOC=$(which protoc)
 cargo build --release --example http_saturation      # host B (generator)
-cargo build --release                                # host A (hearth) + seeder
+cargo build --release --features dev-endpoints      # host A (hearth) + seeder; phase 3A needs /admin/bootstrap + /dev/seed-*
 ```
 
 ## 3. Host A — seed over loopback, then serve on the private interface

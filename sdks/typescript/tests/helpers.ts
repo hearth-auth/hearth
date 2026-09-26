@@ -30,7 +30,7 @@ function hearthBinPath(): string {
  */
 export function ensureBinary(): void {
   if (existsSync(hearthBinPath())) return;
-  execSync("cargo build", { cwd: PROJECT_ROOT, stdio: "pipe" });
+  execSync("cargo build --features dev-endpoints", { cwd: PROJECT_ROOT, stdio: "pipe" });
 }
 
 /** Find a free port by briefly binding to port 0. */

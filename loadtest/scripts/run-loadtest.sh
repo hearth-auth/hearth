@@ -127,7 +127,7 @@ trap cleanup EXIT INT TERM
 
 # ── 1. Build the release binaries ────────────────────────────────────────────
 echo "==> Building release hearth + loadtest binaries"
-cargo build --release --manifest-path "${REPO_ROOT}/Cargo.toml"
+cargo build --release --features dev-endpoints --manifest-path "${REPO_ROOT}/Cargo.toml"
 cargo build --release --manifest-path "${LOADTEST_DIR}/Cargo.toml"
 
 HEARTH_BIN="$(cargo metadata --format-version 1 --no-deps \

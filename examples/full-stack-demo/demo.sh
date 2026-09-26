@@ -96,11 +96,11 @@ CONFIG="$_cfg_tmp"
 # ── Build ─────────────────────────────────────────────────────────────────────
 
 echo "▸ building hearth (release)…"
-(cd "$REPO_ROOT" && cargo build --release --bin hearth --quiet)
+(cd "$REPO_ROOT" && cargo build --release --features dev-endpoints --bin hearth --quiet)
 if [[ ! -f "$HEARTH_BIN" ]]; then
   echo "✗ binary not found at $HEARTH_BIN" >&2
   echo "  CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-<unset, expected $REPO_ROOT/target>}" >&2
-  echo "  Run 'cargo build --release --bin hearth' in $REPO_ROOT" >&2
+  echo "  Run 'cargo build --release --features dev-endpoints --bin hearth' in $REPO_ROOT" >&2
   exit 1
 fi
 echo "  ✓ build complete"

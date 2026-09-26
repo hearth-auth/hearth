@@ -9,7 +9,7 @@
 #
 # Run it exactly like `make seed-large`, but with this config:
 #
-#   cargo run --release -- serve --dev \
+#   cargo run --release --features dev-endpoints -- serve --dev \
 #       --config examples/large-scale-demo/hearth-tier-miss.yaml
 #
 # `--dev` now honors `storage.data_dir` below (HEA-1805), so cold-tier SSTs
