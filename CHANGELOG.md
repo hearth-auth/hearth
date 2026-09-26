@@ -6,13 +6,142 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+<!-- GA software-blocker fixes (branch fix/ga-software-blockers). -->
+
+### Security
+- **Heap corruption on the hot path fixed** — token validation, session lookup and storage reads no
+  longer use `arc-swap` 1.9.2, which corrupted the heap under concurrent `load` + `rcu` (3 crashes in
+  150 loaded runs under `MALLOC_CHECK_=3`). They now use `core::EpochCell`, an epoch-reclaimed cell with
+  a `crossbeam-epoch` collector of its own; 17,400 loaded runs under heap checking showed 0 errors. The
+  only hot-path allocation left is amortised collector bookkeeping while cells are written, at most one
+  per 1,024 reads on a thread. `arc-swap` is removed and banned in `deny.toml` (task 26.5).
+- **Revoking all of a user's sessions could miss one during a memtable flush** — `scan`/`scan_keys`
+  read the SST list before the memtable, so a flush that completed mid-scan hid the keys it moved and
+  `revoke_all_user_sessions` could leave a live session's tokens valid. Scans now read the memtable
+  first (task 26.5).
+- **SMS MFA fails closed.**
+  - `PATCH /admin/realms/{id}/config` and the admin console refuse (`400`) to enable `sms` in
+    `mfa_methods` while `sms.transport` is `log` outside `--dev`, and refuse unknown MFA method names —
+    the same rule startup validation applies, which now also covers the global `auth.mfa_methods`.
+  - The `log` SMS transport no longer writes the message body (the OTP) to the log outside `--dev`.
+  - SMS OTPs are no longer keyed with an all-zero HMAC key when `HEARTH_SMS_OTP_HMAC_KEY` is unset:
+    outside `--dev` SMS OTP issue and verify are refused. The email-OTP key no longer falls back to a
+    public constant in production.
+  - A user whose enrolled SMS or email-OTP factor cannot be delivered is sent to the OTP challenge,
+    which fails, instead of getting a session on the password alone.
+- **MFA OTP submit no longer trusts the client** — the MFA challenge took the OTP nonce and factor
+  from the submitted form, so a user could choose the factor or nonce. Both now come from server-side
+  state bound to the login.
+- **Every browser `/ui/oauth/authorize` branch runs the same gates.** Signed request objects (JAR),
+  pushed requests (PAR), and the resumes after a required action or the SMS challenge used to issue a
+  code without the SMS MFA step (JAR), without the consent screen (all four) and ignoring `prompt`.
+  All branches now run required actions → SMS MFA → consent/`prompt` → issue. Third-party clients using
+  JAR or PAR now see the consent screen. A JAR's own `prompt` and `response_mode` claims take
+  precedence over the query string (RFC 9101 §4).
+- **SMS MFA and required actions now gate device approval** (`POST /ui/device`, RFC 8628).
+- **Stricter JAR on `/ui/oauth/authorize`** — a request object is refused with `400` before any MFA
+  step when its `response_type` is not `code`, its `state` is empty, its `redirect_uri` is not
+  registered, or it has no S256 PKCE.
+- **Required actions and MFA-enrolment requirements fail closed** — a storage or RBAC error while
+  reading the user, realm, client `mfa_required`, role assignments or enrolled factors used to read
+  as "nothing required". The request is now refused.
+- **Token introspection is for confidential clients only** — `POST /introspect`,
+  `/realms/{realm}/introspect` and gRPC `Introspect` require `client_secret_basic`,
+  `client_secret_post` or `private_key_jwt`. A public client or a wrong secret gets
+  `401 invalid_client`. Discovery no longer lists `none` for introspection (task 26.43). **Breaking**
+  for any public client that called `/introspect`.
+- **Revocation only affects the caller's own tokens (RFC 7009 §2.1)** — `POST /revoke`, its realm twin
+  and gRPC `Revoke` revoke a token only when it was issued to the authenticated client; any other token
+  is left untouched and the endpoint still answers `200`. A `private_key_jwt` client must present its
+  `client_assertion` at `/revoke`. Discovery now lists `private_key_jwt` for revocation (task 26.43).
+- **`private_key_jwt` replay markers expire** — each assertion used at `/token`, `/introspect` or
+  `/revoke` left a marker that was never removed, so storage grew without limit. Markers now expire at
+  the assertion's `exp` plus clock skew and the cleanup sweep deletes them. Checking and recording a
+  `jti` is now one atomic step, so two concurrent copies of one assertion cannot both be accepted.
+- **Backup restore is fail-closed on unauthenticated archives.** Outside dev mode a restore needs a
+  manifest signature that verifies against `security.backup.verify_key`. With no key configured,
+  `POST /admin/backup/restore` refuses with `400`, and `hearth backup restore` refuses unless
+  `--allow-unsigned` is passed. A configured key is authoritative. `--skip-verify` is refused whenever
+  a verify key is configured (the signature covers only the manifest, members only by checksum).
+  Restore, `backup sign` and `POST /admin/backup/restore` read the archive through one private,
+  unlinked copy, so the bytes imported are the bytes verified; restore needs free `$TMPDIR` space equal
+  to the compressed archive. **Breaking** for operators who restore unsigned archives.
+- **`dev-endpoints` is no longer a default cargo feature** — a plain `cargo build --release` or
+  `cargo install` no longer includes `POST /admin/bootstrap`, `/dev/seed-*`, `/dev/probe-user` or the
+  hard-coded dev admin password. Build with `--features dev-endpoints` (or `make dev`) for local
+  development. `hearth serve --dev` on a binary without the feature logs how to rebuild.
+- **Constant-time secret comparisons** — the PKCE `code_verifier` check, WebAuthn/passkey challenges,
+  refresh-token reuse detection, federation confirm-link and consent tickets, the Basic-vs-body
+  `client_secret` agreement check and audit-log HMAC chain verification now compare in constant time.
+
+### Added
+- **Per-client RS256 ID tokens (OIDC interop, task 26.55)** — a client can set
+  `id_token_signed_response_alg` to `RS256` or `EdDSA` on Dynamic Client Registration, admin REST,
+  gRPC (new field on `RegisterClientRequest`, `UpdateClientRequest`, `OAuthClient`), the admin console
+  and `hearth.yaml` (`applications.<slug>.id_token_signed_response_alg`). It defaults to `RS256` on
+  Dynamic Client Registration (OpenID Connect Registration §2) and to `EdDSA` everywhere else;
+  existing clients keep `EdDSA`. **Only ID tokens change**: access, refresh, logout and all other
+  tokens stay Ed25519, and neither Hearth nor the SDKs accept an RS256 token as an access token.
+  - An RSA-3072 realm key is created the first time a client in the realm selects RS256. It is sealed
+    under the KEK, published in the realm JWKS, rotated with the realm signing key under the same
+    grace window, and carried by backup/restore.
+  - Discovery advertises `id_token_signing_alg_values_supported: ["RS256", "EdDSA"]`.
+  - RS256 is refused under FAPI 2.0 (a `fapi2` client or a realm with a `fapi_profile`).
+- `hearth backup keygen`, `hearth backup sign`, `hearth backup create --sign-key`, and
+  `hearth backup restore --verify-key` / `--allow-unsigned`; `hearth backup inspect` shows whether an
+  archive is signed.
+- `POST /realms/{realm}/as/par` accepts `prompt`.
+
+### Changed
+- **`POST /admin/cluster/transfer-leadership` refuses what it cannot do (task 26.60)** — a body naming
+  `target_node_id` gets `422` and leadership does not move (openraft 0.9.25 cannot hand leadership to
+  a chosen node; before, the server stepped down anyway and answered `200`). Any other body field gets
+  `400`. Send no body, or `{}`, for a plain step-down.
+- **`prompt=none` never shows UI** (OIDC Core §3.1.2.1) — a silent request that needs a required
+  action gets `error=interaction_required`; on a realm that requires the SMS factor it gets
+  `error=login_required` and no text is sent.
+- Authorization error redirects (`consent_required`, `login_required`, `access_denied`, request
+  errors) use the request's `response_mode`, including a signed JARM `response` for `*.jwt` modes.
+- The Rust SDK adds `HearthClient::register_client_with_token`; the token-less `register_client` is
+  deprecated.
+
+### Deprecated
+- The `exact_target` field of the `POST /admin/cluster/transfer-leadership` `200` response is always
+  `false`. It stays for 1.x clients and will be removed in 2.0; read `new_leader_id` instead.
+
+### Removed
+- **Email reputation `domain_has_no_mx` flag** — the built-in adapter never performed a DNS/MX lookup,
+  so the flag was always `false`. It is removed from `EmailReputationVerdict`, and the docs now say no
+  MX lookup is performed. Registration behaviour does not change.
+
+### Fixed
+- **SDK client registration authenticates (Rust, Python, PHP)** — Rust and Python sent `POST /clients`
+  with no `Authorization` header and with `name` instead of `client_name`. PHP's `registerClient`
+  accepts an RFC 7591 initial access token. Rust and Python `AdminClient` create/update now send the
+  server's wire shape (`client_name`, proto enum names), so `update_client` really renames.
+- The RFC 8707 `resource`, the PAR origin, the proved `amr` and `response_mode` are no longer dropped
+  on the JAR, PAR, SMS-challenge and consent paths. `response_mode=fragment` now returns the code in
+  the fragment.
+- PAR requests honour `prompt`.
+- Device-grant (RFC 8628) tokens are attributed to the polling client. Revoking an RFC 8693
+  exchanged token no longer ends the subject's session.
+- A read racing a memtable flush could briefly miss an acknowledged key; a flush now parks the full
+  memtable before it installs the empty one.
+- Compaction releases the deleted SST files it merged instead of keeping them mapped until the next
+  flush.
+- Backup manifest signatures verify reliably (the checksum map serialized in a random order).
+  `POST /admin/backup/restore` signature refusals return the documented `error` codes.
+- The OpenAPI entry for `POST /admin/cluster/transfer-leadership` lists its real responses.
+
+<!-- End of GA software-blocker fixes. -->
+
 ### Fixed
 - **The Go and TypeScript SDKs can authenticate client registration and authorization** — `POST /clients`
   and `POST /authorize` are admin operations, and neither SDK ever sent an `Authorization` header, so both
   answered `401` for every caller. `registerClient` / `RegisterClient` and `authorize` / `Authorize` now
   take an optional access token (a trailing optional argument in TypeScript, a variadic one in Go, so no
-  existing caller breaks). **The other five SDKs have the same gap and are not fixed here** — the Python
-  SDK's own docstring says registration "requires admin/realm token" while sending none. Only Go and
+  existing caller breaks). The Rust, Python and PHP SDKs had the same gap; their fix is in the
+  GA software-blocker entries at the top of this section. Only Go and
   TypeScript run integration tests against a live server, which is why only they exposed it.
 - **The container image builds again** — `src/protocol/web/openapi.rs` embeds the vendored Swagger UI
   assets with `include_str!()`, and the Dockerfile never copied `vendor/` into the build stage, so
@@ -2127,9 +2256,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   kept out of production by a runtime boolean alone, so the handlers and the hard-coded
   `admin@hearth.test` password shipped in every binary, and the *embedded* path — a library consumer
   who builds the router and serves it themselves — had no bind-address constraint at all, unlike
-  `hearth serve --dev`. Three gates now apply: a new `dev-endpoints` cargo feature (on by default
-  for local development, **off** in the shipped container image, which builds with
-  `--no-default-features`), the existing `dev_mode` route-table check, and a per-request guard that
+  `hearth serve --dev`. Three gates now apply: a new `dev-endpoints` cargo feature (opt-in: it is
+  **not** a default feature, so a plain `cargo build` and the shipped container image both leave it
+  out; see the GA software-blocker entries at the top of this section), the existing `dev_mode` route-table check, and a per-request guard that
   answers `404` to any peer that is not loopback. The refusal is byte-identical to a production
   build's, so a scanner cannot tell the two apart.
 - **SAML signature discovery is bounded to a direct child (§25.6)** — `<ds:Signature>`

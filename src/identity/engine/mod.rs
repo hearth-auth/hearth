@@ -17509,10 +17509,10 @@ mod tests {
     /// Hot-path epoch reconciliation: debounced storage reads, bounded staleness.
     mod epoch_sync_debounce;
 
-    /// PKCE challenge and refresh-token hash compare in constant time.
-    mod secret_compare;
     /// `private_key_jwt` assertion-JTI replay markers carry an expiry and are swept.
     mod client_assertion_jti;
+    /// PKCE challenge and refresh-token hash compare in constant time.
+    mod secret_compare;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.

@@ -990,6 +990,9 @@ async fn revoking_an_rs256_id_token_ends_its_session() {
             &TokenRevocationRequest {
                 token: tokens.id_token().to_string(),
                 token_type_hint: None,
+                // As the `/revoke` wire surfaces do: the ID token was issued to
+                // `client`, so the RFC 7009 §2.1 ownership check must pass.
+                revoking_client_id: Some(client.clone()),
             },
         )
         .unwrap();
