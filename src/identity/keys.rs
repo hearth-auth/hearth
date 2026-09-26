@@ -994,9 +994,18 @@ pub(crate) fn encode_jwt_bearer_jti(jti: &str) -> Vec<u8> {
 ///
 /// Format: `oauth:ca-jti:{jti}`
 ///
-/// Used for RFC 7523 §2.2 `private_key_jwt` JTI replay prevention.
+/// Used for RFC 7523 §2.2 `private_key_jwt` JTI replay prevention. The value
+/// is an 8-byte little-endian `i64`: the Unix-seconds instant (assertion `exp`
+/// plus clock skew) after which the periodic cleanup sweep may reclaim it.
 pub(crate) fn encode_client_assertion_jti(jti: &str) -> Vec<u8> {
     format!("{CLIENT_ASSERTION_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all `private_key_jwt` assertion JTIs in a realm.
+///
+/// Used by the periodic cleanup sweep to reclaim expired replay markers.
+pub(crate) fn client_assertion_jti_scan_prefix() -> Vec<u8> {
+    CLIENT_ASSERTION_JTI_PREFIX.as_bytes().to_vec()
 }
 
 /// Encodes the storage key for a JAR (RFC 9101) signed request object JTI.

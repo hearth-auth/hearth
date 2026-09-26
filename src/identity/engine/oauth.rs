@@ -1750,20 +1750,33 @@ impl EmbeddedIdentityEngine {
             })?;
 
         // JTI replay protection — each JTI may only be used once per realm.
+        //
+        // The marker stores the instant after which the assertion can no
+        // longer verify anywhere (`exp` + clock skew, 8-byte LE i64 Unix
+        // seconds) so `cleanup::sweep_client_assertion_jtis` can reclaim it,
+        // exactly like the JAR, DPoP and nonce sentinels. This runs once per
+        // assertion-authenticated request at `/token`, `/introspect` and
+        // `/revoke`; a marker with no expiry leaked one row per request for
+        // the life of the realm. `exp` is already capped at
+        // `MAX_ASSERTION_LIFETIME_SECS` above, so no marker outlives
+        // now + 5 min + skew.
+        //
+        // `put_if_absent` is atomic (Raft-routed in cluster mode), so two
+        // concurrent presentations of one assertion cannot both pass. Any
+        // existing marker refuses — including one past its expiry that the
+        // sweep has not reached yet, which only ever refuses a *new*
+        // assertion reusing an old `jti`.
         let jti_key = keys::encode_client_assertion_jti(jti);
-        if self
+        let marker_expires_at = claims.exp.saturating_add(CLOCK_SKEW_SECS);
+        let fresh = self
             .storage
-            .get(realm_id, &jti_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
+            .put_if_absent(realm_id, &jti_key, &marker_expires_at.to_le_bytes())
+            .map_err(Self::storage_err)?;
+        if !fresh {
             return Err(IdentityError::InvalidClientAssertion {
                 reason: "assertion jti has already been used (replay)".to_string(),
             });
         }
-        self.storage
-            .put(realm_id, &jti_key, b"1")
-            .map_err(Self::storage_err)?;
 
         Ok(())
     }
