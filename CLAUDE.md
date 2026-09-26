@@ -239,7 +239,7 @@ Six modules with strict downward dependency flow:
 Hot path = `validate_token()`, `lookup_session()`, `lookup_user()` when data is in hot tier. Authorization is NOT on the hot path (permissions are embedded in the JWT at issue time).
 
 Hot path code MUST obey ALL of:
-1. **Zero heap allocations** — no `Box::new`, `Vec::new`, `String::from`, `format!()`, `to_string()`.
+1. **Zero heap allocations** — no `Box::new`, `Vec::new`, `String::from`, `format!()`, `to_string()`. One exception: `EpochCell`'s epoch-collector bookkeeping while cells are being written (at most 1 allocation per 1,024 loads per thread; see `docs/specs/ARCHITECTURE.md` §3.2). No other allocation, amortised or not.
 2. **No syscalls for reads** — serve from memory-mapped structures or in-process data.
 3. **No locks on read path** — no mutexes, no `RwLock` write locks. Use epoch-based reclamation.
 4. **No yielding** — MUST NOT `.await` on I/O. Complete synchronously.
@@ -293,7 +293,7 @@ Avoid false-confidence anti-patterns (vacuous `is_ok()`/`is_err()` asserts, zero
 
 ## Security
 
-- **Signing**: Ed25519 only. No HS256, no `alg:none`.
+- **Signing**: Ed25519 for everything Hearth issues and validates. RS256 is permitted only for ID tokens, when a client requests it via `id_token_signed_response_alg` (OIDC Core interop). No HS256, no `alg:none`.
 - **Password hashing**: Argon2id, OWASP parameters. Off hot path.
 - **Crypto**: `ring` or `RustCrypto`. No hand-rolled crypto. Constant-time secret comparisons.
 - **Input validation**: Each layer validates its own invariants. Must not assume upstream validated.
