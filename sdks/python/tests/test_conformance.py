@@ -291,7 +291,7 @@ class TestAdminClients:
     def test_list_clients(self, respx_mock):
         respx_mock.get("http://localhost:8420/admin/applications").mock(
             return_value=httpx.Response(200, json={"items": [
-                {"id": "c1", "name": "My App", "redirect_uris": [], "trust_level": "confidential"}
+                {"client_id": "c1", "client_name": "My App", "redirect_uris": []}
             ], "next_cursor": None})
         )
         result = self._admin().list_clients()
@@ -301,7 +301,7 @@ class TestAdminClients:
     def test_get_client(self, respx_mock):
         respx_mock.get("http://localhost:8420/admin/applications/c1").mock(
             return_value=httpx.Response(200, json={
-                "id": "c1", "name": "My App", "redirect_uris": [], "trust_level": "confidential"
+                "client_id": "c1", "client_name": "My App", "redirect_uris": []
             })
         )
         result = self._admin().get_client("c1")
@@ -311,11 +311,12 @@ class TestAdminClients:
         from hearth.types import CreateClientRequest
         respx_mock.post("http://localhost:8420/admin/applications").mock(
             return_value=httpx.Response(201, json={
-                "id": "c2", "name": "New App", "redirect_uris": ["https://app/cb"],
-                "trust_level": "public"
+                "client_id": "c2", "client_name": "New App", "redirect_uris": ["https://app/cb"],
             })
         )
-        req = CreateClientRequest(name="New App", redirect_uris=["https://app/cb"], trust_level="public")
+        req = CreateClientRequest(
+            name="New App", redirect_uris=["https://app/cb"], trust_level="third_party"
+        )
         result = self._admin().create_client(req)
         assert result.id == "c2"
 
@@ -323,7 +324,7 @@ class TestAdminClients:
         from hearth.types import UpdateClientRequest
         respx_mock.patch("http://localhost:8420/admin/applications/c1").mock(
             return_value=httpx.Response(200, json={
-                "id": "c1", "name": "Updated App", "redirect_uris": [], "trust_level": "confidential"
+                "client_id": "c1", "client_name": "Updated App", "redirect_uris": []
             })
         )
         req = UpdateClientRequest(name="Updated App")
@@ -494,8 +495,7 @@ class TestAdminMutationVerbs:
             "http://localhost:8420/admin/applications/c1"
         ).mock(
             return_value=httpx.Response(200, json={
-                "id": "c1", "name": "Updated", "redirect_uris": [],
-                "trust_level": "confidential",
+                "client_id": "c1", "client_name": "Updated", "redirect_uris": [],
             })
         )
         self._admin().update_client("c1", UpdateClientRequest(name="Updated"))

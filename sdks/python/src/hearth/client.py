@@ -221,14 +221,30 @@ class HearthClient:
             raise HearthError(resp.status_code, resp.text)
         return TokenResponse(**resp.json())
 
-    def register_client(self, req: RegisterClientRequest) -> OAuthClient:
-        """Register a new OAuth client (requires admin/realm token)."""
+    def register_client(
+        self, req: RegisterClientRequest, access_token: Optional[str] = None
+    ) -> OAuthClient:
+        """Register a new OAuth client via the admin ``POST /clients`` endpoint.
+
+        This is an admin operation: the bearer token (``access_token``, or the
+        one this client was constructed with) must carry
+        ``hearth.clients.admin`` (or ``hearth.admin``) in this client's realm.
+
+        Raises:
+            HearthError: 401 without any token (no request is sent), or the
+                server's status on any non-2xx response.
+        """
+        token = access_token or self._token
+        if not token:
+            raise HearthError(401, "no access token provided")
         resp = self._http.post(
-            f"{self._base}/clients", json=req.model_dump(exclude_none=True)
+            f"{self._base}/clients",
+            json=req.model_dump(exclude_none=True, by_alias=True),
+            headers={"Authorization": f"Bearer {token}"},
         )
-        if resp.status_code != 200:
+        if resp.status_code not in (200, 201):
             raise HearthError(resp.status_code, resp.text)
-        return OAuthClient(**resp.json())
+        return OAuthClient.model_validate(resp.json())
 
     # ------------------------------------------------------------------
     # Protected endpoints

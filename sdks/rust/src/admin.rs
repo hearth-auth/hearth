@@ -475,4 +475,108 @@ mod tests {
         assert_eq!(json["permissions"][0], "docs.write");
         assert!(json.get("description").is_none());
     }
+
+    // ── /admin/applications wire shape ──────────────────────────────────
+    //
+    // `POST /admin/applications` deserializes the proto `RegisterClientRequest`:
+    // the name key is `client_name` (an unknown `name` is a 422) and both enums
+    // take their proto names (`embedded` / `first_party` are a 422).
+    // `PATCH /admin/applications/{id}` reads `client_name` but ignores unknown
+    // keys, so `name` answers 200 and renames nothing; its enums are
+    // snake_case strings. Every client route answers with the proto
+    // `OAuthClient` (`client_id` / `client_name`, enum names upper-case).
+
+    #[test]
+    fn create_client_request_uses_the_proto_wire_shape() {
+        let req = CreateClientRequest {
+            name: "My App".into(),
+            redirect_uris: vec!["https://app.example.com/cb".into()],
+            trust_level: Some("first_party".into()),
+            access_token_authorization: AccessTokenAuthorization::Introspection,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "client_name": "My App",
+                "redirect_uris": ["https://app.example.com/cb"],
+                "trust_level": "CLIENT_TRUST_LEVEL_FIRST_PARTY",
+                "access_token_authorization": "INTROSPECTION",
+            })
+        );
+    }
+
+    #[test]
+    fn create_client_request_default_mode_is_the_proto_name() {
+        let req = CreateClientRequest {
+            name: "My App".into(),
+            redirect_uris: vec![],
+            trust_level: Some("third_party".into()),
+            access_token_authorization: AccessTokenAuthorization::Embedded,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["access_token_authorization"], "EMBEDDED");
+        assert_eq!(json["trust_level"], "CLIENT_TRUST_LEVEL_THIRD_PARTY");
+    }
+
+    #[test]
+    fn register_client_request_trust_level_is_the_proto_name() {
+        // `POST /clients` takes the same proto body as `POST /admin/applications`.
+        let req = RegisterClientRequest {
+            name: "My App".into(),
+            redirect_uris: vec![],
+            trust_level: Some("first_party".into()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["trust_level"], "CLIENT_TRUST_LEVEL_FIRST_PARTY");
+
+        // A value the SDK has no mapping for is sent unchanged, so the server
+        // rejects it rather than the SDK silently picking a trust level.
+        let req = RegisterClientRequest {
+            trust_level: Some("CLIENT_TRUST_LEVEL_THIRD_PARTY".into()),
+            ..req
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["trust_level"], "CLIENT_TRUST_LEVEL_THIRD_PARTY");
+    }
+
+    #[test]
+    fn update_client_request_sends_client_name() {
+        let req = UpdateClientRequest {
+            name: Some("Renamed".into()),
+            trust_level: Some("first_party".into()),
+            access_token_authorization: Some(AccessTokenAuthorization::Decision),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "client_name": "Renamed",
+                "trust_level": "first_party",
+                "access_token_authorization": "decision",
+            })
+        );
+    }
+
+    #[test]
+    fn oauth_client_parses_the_server_response() {
+        // Verbatim shape of a live `GET /admin/applications/{id}` answer.
+        let body = r#"{"access_token_authorization":"DECISION","client_id":"c-1","client_name":"My App","created_at":1790194176035537,"grant_types":["authorization_code"],"redirect_uris":["https://x/cb"]}"#;
+        let client: OAuthClient = serde_json::from_str(body).unwrap();
+        assert_eq!(client.id, "c-1");
+        assert_eq!(client.name, "My App");
+        assert_eq!(
+            client.access_token_authorization,
+            AccessTokenAuthorization::Decision
+        );
+
+        // `EMBEDDED` is proto3's zero value, so the server omits it.
+        let body = r#"{"client_id":"c-2","client_name":"B","redirect_uris":[]}"#;
+        let client: OAuthClient = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            client.access_token_authorization,
+            AccessTokenAuthorization::Embedded
+        );
+    }
 }
