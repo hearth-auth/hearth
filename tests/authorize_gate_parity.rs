@@ -11,7 +11,10 @@
 //! got a plain query-string redirect.
 //!
 //! And the required-action intercept read a user-lookup *error* as "no
-//! required actions", so a storage fault skipped a forced password change.
+//! required actions", so a storage fault skipped a forced password change —
+//! one call deeper, a client or RBAC lookup error skipped the MFA enrolment a
+//! client or role mandates. A `prompt=none` request was redirected into the
+//! required-action and SMS interstitials instead of being refused.
 //!
 //! Each branch is driven through the public web router.
 
@@ -1203,6 +1206,163 @@ async fn required_action_resume_on_a_par_request_keeps_the_response_mode() {
 }
 
 // ===========================================================================
+// prompt=none never reaches an interstitial
+//
+// OIDC Core §3.1.2.1: with `prompt=none` the server MUST NOT display any
+// authentication or consent UI. The gate sequence honoured it only at the
+// consent gate; the required-action intercept and the SMS challenge ran
+// first and suspended the flow into an interactive page — and the SMS gate
+// texted the user a code on every silent renew.
+// ===========================================================================
+
+/// A silent refusal: back to the client with `error`, no code, no
+/// interstitial cookie.
+fn assert_silent_refusal(resp: &Response<Body>, error: &str, state: &str, what: &str) {
+    let loc = location(resp);
+    assert!(
+        loc.starts_with(REDIRECT),
+        "{what}: prompt=none must redirect back to the client, never to an interstitial; \
+         got {loc} ({})",
+        resp.status()
+    );
+    assert_eq!(
+        redirect_param(&loc, "error", false).as_deref(),
+        Some(error),
+        "{what}: got {loc}"
+    );
+    assert_eq!(
+        redirect_param(&loc, "state", false).as_deref(),
+        Some(state),
+        "{what}: got {loc}"
+    );
+    assert!(
+        redirect_param(&loc, "code", false).is_none(),
+        "{what}: no code; got {loc}"
+    );
+    assert!(
+        cookie_pair(resp, "hearth_ra_session").is_none(),
+        "{what}: no required-action session may be started"
+    );
+    assert!(
+        cookie_pair(resp, "hearth_ui_sms_mfa").is_none(),
+        "{what}: no SMS challenge may be started"
+    );
+}
+
+fn sms_sent(rig: &Rig) -> usize {
+    #[allow(clippy::unwrap_used)]
+    rig.sms.messages.lock().unwrap().len()
+}
+
+#[tokio::test]
+async fn plain_prompt_none_with_a_pending_required_action_is_interaction_required() {
+    let rig = rig(false).await;
+    require_password_update(&rig);
+    let client = register(&rig, false, None);
+    let resp = get(
+        &rig,
+        &plain_uri(&client, "&prompt=none"),
+        &session_cookie(&rig),
+    )
+    .await;
+    assert_silent_refusal(&resp, "interaction_required", "plain-state", "plain");
+}
+
+#[tokio::test]
+async fn jar_prompt_none_with_a_pending_required_action_is_interaction_required() {
+    let rig = rig(false).await;
+    require_password_update(&rig);
+    let (client, pair) = jar_client(&rig, false);
+    let uri = jar_uri(
+        &rig,
+        &client,
+        &pair,
+        &serde_json::json!({ "prompt": "none" }),
+        "",
+    );
+    let resp = get(&rig, &uri, &session_cookie(&rig)).await;
+    assert_silent_refusal(&resp, "interaction_required", "jar-state", "JAR");
+}
+
+#[tokio::test]
+async fn par_prompt_none_with_a_pending_required_action_is_interaction_required() {
+    let rig = rig(false).await;
+    require_password_update(&rig);
+    let client = register(&rig, false, None);
+    let mut request = par_request(&client);
+    request.prompt = Some("none".to_string());
+    let resp = get(&rig, &push(&rig, &request), &session_cookie(&rig)).await;
+    assert_silent_refusal(&resp, "interaction_required", "par-state", "PAR");
+}
+
+#[tokio::test]
+async fn plain_prompt_none_on_an_sms_realm_is_login_required_and_sends_no_text() {
+    let rig = rig(true).await;
+    let client = register(&rig, false, None);
+    let resp = get(
+        &rig,
+        &plain_uri(&client, "&prompt=none"),
+        &session_cookie(&rig),
+    )
+    .await;
+    assert_silent_refusal(&resp, "login_required", "plain-state", "plain SMS");
+    assert_eq!(sms_sent(&rig), 0, "a silent request must not text the user");
+}
+
+#[tokio::test]
+async fn jar_prompt_none_on_an_sms_realm_is_login_required_and_sends_no_text() {
+    let rig = rig(true).await;
+    let (client, pair) = jar_client(&rig, false);
+    let uri = jar_uri(
+        &rig,
+        &client,
+        &pair,
+        &serde_json::json!({ "prompt": "none" }),
+        "",
+    );
+    let resp = get(&rig, &uri, &session_cookie(&rig)).await;
+    assert_silent_refusal(&resp, "login_required", "jar-state", "JAR SMS");
+    assert_eq!(sms_sent(&rig), 0, "a silent request must not text the user");
+}
+
+#[tokio::test]
+async fn par_prompt_none_on_an_sms_realm_is_login_required_and_sends_no_text() {
+    let rig = rig(true).await;
+    let client = register(&rig, false, None);
+    let mut request = par_request(&client);
+    request.prompt = Some("none".to_string());
+    let resp = get(&rig, &push(&rig, &request), &session_cookie(&rig)).await;
+    assert_silent_refusal(&resp, "login_required", "par-state", "PAR SMS");
+    assert_eq!(sms_sent(&rig), 0, "a silent request must not text the user");
+}
+
+/// The silent refusal travels in the request's response mode like any other
+/// authorization error.
+#[tokio::test]
+async fn prompt_none_interstitial_refusal_uses_the_fragment_response_mode() {
+    let rig = rig(false).await;
+    require_password_update(&rig);
+    let client = register(&rig, false, None);
+    let resp = get(
+        &rig,
+        &plain_uri(&client, "&prompt=none&response_mode=fragment"),
+        &session_cookie(&rig),
+    )
+    .await;
+    assert_fragment_error(&location(&resp), "interaction_required", "plain-state");
+}
+
+/// Control: the same SMS-realm request without `prompt=none` is challenged.
+#[tokio::test]
+async fn interactive_request_on_an_sms_realm_is_still_challenged() {
+    let rig = rig(true).await;
+    let client = register(&rig, false, None);
+    let resp = get(&rig, &plain_uri(&client, ""), &session_cookie(&rig)).await;
+    assert_eq!(location(&resp), "/ui/sms-challenge");
+    assert_eq!(sms_sent(&rig), 1);
+}
+
+// ===========================================================================
 // Required-action lookup errors fail closed
 // ===========================================================================
 
@@ -1223,10 +1383,49 @@ struct UserReadFault {
     arm_on_client_read: Arc<AtomicBool>,
     /// Fails realm-record reads instead, independently of `armed`.
     realm_armed: Arc<AtomicBool>,
+    /// A one-shot fault: once `one_shot` holds a key prefix, the first user
+    /// read after an OAuth client read (the required-action intercept's own
+    /// user lookup, after the authorize branch loaded the client) makes the
+    /// next `get` or `scan` under that prefix fail — exactly once, so a later
+    /// read of the same record (the consent gate's) succeeds.
+    one_shot: Arc<Mutex<Option<Vec<u8>>>>,
+    client_seen: AtomicBool,
+    one_shot_live: AtomicBool,
+    one_shot_fired: Arc<AtomicBool>,
+}
+
+impl UserReadFault {
+    /// Tracks the arming sequence and reports whether a read of `key`
+    /// must fail now.
+    fn one_shot_fault(&self, key: &[u8]) -> bool {
+        #[allow(clippy::unwrap_used)]
+        let target = self.one_shot.lock().unwrap().clone();
+        let Some(target) = target else {
+            return false;
+        };
+        if self.one_shot_fired.load(Ordering::SeqCst) {
+            return false;
+        }
+        if self.one_shot_live.load(Ordering::SeqCst) && key.starts_with(&target) {
+            self.one_shot_fired.store(true, Ordering::SeqCst);
+            return true;
+        }
+        if key.starts_with(OAUTH_CLIENT_PREFIX) {
+            self.client_seen.store(true, Ordering::SeqCst);
+        } else if key.starts_with(USER_ID_PREFIX) && self.client_seen.load(Ordering::SeqCst) {
+            self.one_shot_live.store(true, Ordering::SeqCst);
+        }
+        false
+    }
 }
 
 impl StorageEngine for UserReadFault {
     fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        if self.one_shot_fault(key) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected one-shot read fault",
+            )));
+        }
         if key.starts_with(OAUTH_CLIENT_PREFIX) && self.arm_on_client_read.load(Ordering::SeqCst) {
             self.armed.store(true, Ordering::SeqCst);
         }
@@ -1257,6 +1456,11 @@ impl StorageEngine for UserReadFault {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<ScanEntry>, StorageError> {
+        if self.one_shot_fault(start) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected one-shot scan fault",
+            )));
+        }
         self.inner.scan(realm_id, start, end)
     }
 
@@ -1283,9 +1487,17 @@ struct FaultRig {
     armed: Arc<AtomicBool>,
     arm_on_client_read: Arc<AtomicBool>,
     realm_armed: Arc<AtomicBool>,
+    rbac: Arc<dyn RbacEngine>,
+    one_shot: Arc<Mutex<Option<Vec<u8>>>>,
+    one_shot_fired: Arc<AtomicBool>,
 }
 
 fn fault_rig() -> FaultRig {
+    fault_rig_with(None, vec![RequiredAction::UpdatePassword])
+}
+
+/// The fault rig with a realm `config` and the user's stored `pending` actions.
+fn fault_rig_with(config: Option<RealmConfig>, pending: Vec<RequiredAction>) -> FaultRig {
     let temp = tempfile::tempdir().expect("tempdir");
     let inner = Arc::new(
         EmbeddedStorageEngine::open(StorageConfig::dev(temp.path().join("data")))
@@ -1294,11 +1506,17 @@ fn fault_rig() -> FaultRig {
     let armed = Arc::new(AtomicBool::new(false));
     let arm_on_client_read = Arc::new(AtomicBool::new(false));
     let realm_armed = Arc::new(AtomicBool::new(false));
+    let one_shot = Arc::new(Mutex::new(None));
+    let one_shot_fired = Arc::new(AtomicBool::new(false));
     let storage: Arc<dyn StorageEngine> = Arc::new(UserReadFault {
         inner,
         armed: Arc::clone(&armed),
         arm_on_client_read: Arc::clone(&arm_on_client_read),
         realm_armed: Arc::clone(&realm_armed),
+        one_shot: Arc::clone(&one_shot),
+        client_seen: AtomicBool::new(false),
+        one_shot_live: AtomicBool::new(false),
+        one_shot_fired: Arc::clone(&one_shot_fired),
     });
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let rbac: Arc<dyn RbacEngine> = Arc::new(EmbeddedRbacEngine::new(
@@ -1325,7 +1543,7 @@ fn fault_rig() -> FaultRig {
     let realm = identity
         .create_realm(&CreateRealmRequest {
             name: format!("gate-fault-{}", uuid::Uuid::new_v4()),
-            config: None,
+            config,
         })
         .expect("realm");
     let user = identity
@@ -1346,14 +1564,14 @@ fn fault_rig() -> FaultRig {
             user.id(),
             &UpdateUserRequest {
                 status: Some(UserStatus::Active),
-                required_actions: Some(vec![RequiredAction::UpdatePassword]),
+                required_actions: Some(pending),
                 ..Default::default()
             },
         )
-        .expect("activate with a pending action");
+        .expect("activate with the pending actions");
     let state = web_state(
         Arc::clone(&identity),
-        rbac,
+        Arc::clone(&rbac),
         audit,
         temp.path().join("onboarding"),
     )
@@ -1368,7 +1586,193 @@ fn fault_rig() -> FaultRig {
         armed,
         arm_on_client_read,
         realm_armed,
+        rbac,
+        one_shot,
+        one_shot_fired,
     }
+}
+
+/// A signed UI session cookie (plus the CSRF cookie) for the fault rig's user.
+fn fault_session_cookie(rig: &FaultRig) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let session = rig
+        .identity
+        .create_session(&rig.realm_id, &rig.user_id, &SessionContext::default())
+        .expect("session");
+    let mut mac = <Hmac<Sha256>>::new_from_slice(&COOKIE_SECRET).expect("key");
+    mac.update(session.id().as_uuid().as_bytes());
+    mac.update(b"|");
+    mac.update(rig.realm_id.as_uuid().as_bytes());
+    let tag = data_encoding::BASE64URL_NOPAD.encode(&mac.finalize().into_bytes());
+    format!(
+        "hearth_ui_session={}.{}.{tag}; hearth_ui_csrf={CSRF}",
+        session.id().as_uuid(),
+        rig.realm_id.as_uuid(),
+    )
+}
+
+async fn fault_get(rig: &FaultRig, uri: &str, cookies: &str) -> Response<Body> {
+    rig.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, cookies)
+                .body(Body::empty())
+                .expect("build GET"),
+        )
+        .await
+        .expect("GET")
+}
+
+/// A first-party client (no consent), optionally requiring MFA.
+fn fault_client(rig: &FaultRig, mfa_required: bool) -> OAuthClient {
+    rig.identity
+        .register_client(
+            &rig.realm_id,
+            &RegisterClientRequest {
+                client_name: "Fault MFA app".to_string(),
+                redirect_uris: vec![REDIRECT.to_string()],
+                require_consent: false,
+                grant_types: vec!["authorization_code".to_string()],
+                mfa_required: mfa_required.then_some(true),
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
+                ..Default::default()
+            },
+        )
+        .expect("client")
+}
+
+// ===========================================================================
+// The MFA-enrolment requirement fails closed too
+//
+// `inject_enroll_mfa_if_needed` read a client or RBAC lookup error as "MFA
+// not required": EnrollMfa was skipped and — with the consent gate's own
+// client read succeeding — the code was issued without the enrolment the
+// client or the user's role mandates.
+// ===========================================================================
+
+const RBAC_USER_ASSIGNMENT_PREFIX: &[u8] = b"rba:assign:user:";
+
+/// A realm whose `admin` role mandates MFA, and a user holding it with no
+/// enrolled factor.
+fn role_mfa_rig() -> FaultRig {
+    let rig = fault_rig_with(
+        Some(RealmConfig {
+            mfa_required_roles: Some(vec!["gate-admin".to_string()]),
+            ..RealmConfig::default()
+        }),
+        Vec::new(),
+    );
+    let role = rig
+        .rbac
+        .create_role(
+            &rig.realm_id,
+            &hearth::rbac::CreateRoleRequest {
+                name: "gate-admin".to_string(),
+                description: None,
+                permissions: vec![hearth::rbac::Permission::new("docs.read").expect("perm")],
+                parent_roles: vec![],
+                scope_kind: hearth::rbac::RoleScopeKind::Realm,
+                allow_reserved_permissions: false,
+            },
+        )
+        .expect("role");
+    rig.rbac
+        .assign_role(
+            &rig.realm_id,
+            &hearth::rbac::AssignRoleRequest {
+                subject: hearth::rbac::Subject::User(rig.user_id.clone()),
+                role_id: role.id.clone(),
+                scope: hearth::rbac::Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign");
+    rig
+}
+
+/// Control: a client with `mfa_required` routes an unenrolled user to
+/// enrolment.
+#[tokio::test]
+async fn client_mfa_requirement_routes_to_enrolment() {
+    let rig = fault_rig_with(None, Vec::new());
+    let client = fault_client(&rig, true);
+    let resp = fault_get(&rig, &plain_uri(&client, ""), &fault_session_cookie(&rig)).await;
+    assert_eq!(
+        location(&resp),
+        "/required-action/enroll-mfa",
+        "status {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn authorize_fails_closed_when_the_client_mfa_lookup_errors() {
+    let rig = fault_rig_with(None, Vec::new());
+    let client = fault_client(&rig, true);
+    let cookies = fault_session_cookie(&rig);
+    #[allow(clippy::unwrap_used)]
+    {
+        *rig.one_shot.lock().unwrap() = Some(OAUTH_CLIENT_PREFIX.to_vec());
+    }
+    let resp = fault_get(&rig, &plain_uri(&client, ""), &cookies).await;
+    assert!(
+        rig.one_shot_fired.load(Ordering::SeqCst),
+        "rig sanity: the one-shot client-read fault must have fired"
+    );
+    let loc = location(&resp);
+    assert!(
+        !loc.starts_with(REDIRECT),
+        "a client lookup error must not skip the client's MFA requirement; got {loc}"
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "got {loc}"
+    );
+}
+
+/// Control: a role in `mfa_required_roles` routes an unenrolled user to
+/// enrolment.
+#[tokio::test]
+async fn role_mfa_requirement_routes_to_enrolment() {
+    let rig = role_mfa_rig();
+    let client = fault_client(&rig, false);
+    let resp = fault_get(&rig, &plain_uri(&client, ""), &fault_session_cookie(&rig)).await;
+    assert_eq!(
+        location(&resp),
+        "/required-action/enroll-mfa",
+        "status {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn authorize_fails_closed_when_the_role_mfa_lookup_errors() {
+    let rig = role_mfa_rig();
+    let client = fault_client(&rig, false);
+    let cookies = fault_session_cookie(&rig);
+    #[allow(clippy::unwrap_used)]
+    {
+        *rig.one_shot.lock().unwrap() = Some(RBAC_USER_ASSIGNMENT_PREFIX.to_vec());
+    }
+    let resp = fault_get(&rig, &plain_uri(&client, ""), &cookies).await;
+    assert!(
+        rig.one_shot_fired.load(Ordering::SeqCst),
+        "rig sanity: the one-shot RBAC-read fault must have fired"
+    );
+    let loc = location(&resp);
+    assert!(
+        !loc.starts_with(REDIRECT),
+        "an RBAC lookup error must not skip the role's MFA requirement; got {loc}"
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "got {loc}"
+    );
 }
 
 /// The OIDC intercept: a user-lookup error must not read as "no required
@@ -1428,7 +1832,11 @@ async fn authorize_fails_closed_when_the_required_action_lookup_errors() {
         !loc.starts_with(REDIRECT),
         "a user-lookup error must not issue a code past a pending action; got {loc}"
     );
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "got {loc}"
+    );
 }
 
 /// The browser-login intercept: same rule.

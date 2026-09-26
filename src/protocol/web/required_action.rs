@@ -42,7 +42,7 @@ use crate::identity::RequiredAction;
 use crate::identity::{CleartextPassword, SessionContext, UpdateUserRequest};
 use crate::protocol::web::auth::{issue_auth_cookies, IssuedCookies};
 
-use super::authorize_gate::{run_authorize_gates, AuthorizeParams, Gate};
+use super::authorize_gate::{refuse_if_silent, run_authorize_gates, AuthorizeParams, Gate};
 use super::handlers::append_cookie;
 use super::handlers_common;
 use super::templates::render;
@@ -137,6 +137,10 @@ fn action_label(action: &str) -> &'static str {
 /// change or enrolment. A user that does not exist has no stored actions
 /// (`None`); the code exchange refuses a missing user (`UserNotFound`).
 ///
+/// A `prompt=none` request with pending actions is answered
+/// `interaction_required` (OIDC Core §3.1.2.1) instead of being redirected
+/// into an action page.
+///
 /// The parameters are embedded in the signed RA session JWT so the flow can
 /// be resumed by [`resume_oidc_flow`] once all actions are complete.
 pub(super) fn required_action_intercept(
@@ -155,6 +159,17 @@ pub(super) fn required_action_intercept(
     };
     if actions.is_empty() {
         return None;
+    }
+    // `prompt=none`: the actions need the user, and no UI may be shown.
+    if let Some(refusal) = refuse_if_silent(
+        state,
+        realm,
+        user_id,
+        params,
+        "interaction_required",
+        "user interaction required",
+    ) {
+        return Some(refusal);
     }
 
     // Sort by canonical priority so execution order is deterministic regardless
@@ -245,6 +260,7 @@ fn pending_required_actions(
     );
     // Dynamic injection: TOTP/MFA enrollment if the client (OIDC only) or a
     // role requires it.
+    // An unknown requirement refuses, like the lookups above.
     inject_enroll_mfa_if_needed(
         state,
         realm,
@@ -252,7 +268,8 @@ fn pending_required_actions(
         realm_config.as_ref(),
         client_id,
         &mut actions,
-    );
+    )
+    .map_err(|()| handlers_common::server_error())?;
     Ok(Some(actions))
 }
 
@@ -713,6 +730,13 @@ const fn enroll_mfa_needed(realm_requires_passkey: bool, has_passkeys: bool) -> 
 /// passkey, or if `EnrollMfa` is already in the pending actions list.
 /// Does NOT persist the injected action — it is re-evaluated on every
 /// authorize request because the condition is external (client config / roles).
+///
+/// `Err(())` when a lookup the decision depends on fails (the factor list,
+/// the client record, the user's role assignments or a role): the
+/// requirement is then unknown and the caller refuses. Each of these used to
+/// read an error as "no requirement", so a transient client-store or RBAC
+/// fault issued the code without the enrolment the client or the user's
+/// role mandates. A client or role that does not exist imposes nothing.
 fn inject_enroll_mfa_if_needed(
     state: &Arc<WebState>,
     realm: &RealmId,
@@ -720,17 +744,28 @@ fn inject_enroll_mfa_if_needed(
     realm_config: Option<&crate::identity::RealmConfig>,
     client_id_str: Option<&str>,
     actions: &mut Vec<RequiredAction>,
-) {
+) -> Result<(), ()> {
     if actions.contains(&RequiredAction::EnrollMfa) {
-        return;
+        return Ok(());
     }
+    let refuse = |what: &str, e: &dyn std::fmt::Display| {
+        tracing::warn!(
+            error = %e,
+            realm_id = %realm.as_uuid(),
+            lookup = what,
+            "required actions: MFA-requirement lookup failed; refusing"
+        );
+    };
 
     // User with TOTP or passkeys already satisfies any MFA requirement.
-    let has_totp = state.identity.mfa_enabled(realm, user_id).unwrap_or(false);
+    let has_totp = state
+        .identity
+        .mfa_enabled(realm, user_id)
+        .map_err(|e| refuse("totp", &e))?;
     let has_passkeys = !state
         .identity
         .list_webauthn_credentials(realm, user_id)
-        .unwrap_or_default()
+        .map_err(|e| refuse("passkeys", &e))?
         .is_empty();
 
     // §4.18#9: `realms.<name>.auth.webauthn_required` was dead code — the
@@ -743,45 +778,54 @@ fn inject_enroll_mfa_if_needed(
         .unwrap_or(false);
     if enroll_mfa_needed(realm_requires_passkey, has_passkeys) {
         actions.push(RequiredAction::EnrollMfa);
-        return;
+        return Ok(());
     }
 
     if has_totp || has_passkeys {
-        return;
+        return Ok(());
     }
 
     // Per-client requirement.
-    let client_requires_mfa = client_id_str
+    let client_requires_mfa = match client_id_str
         .and_then(|cid| uuid::Uuid::parse_str(cid).ok())
         .map(ClientId::new)
-        .and_then(|cid| state.identity.get_client(realm, &cid).ok().flatten())
-        .and_then(|c| c.mfa_required())
-        .unwrap_or(false);
+    {
+        Some(cid) => state
+            .identity
+            .get_client(realm, &cid)
+            .map_err(|e| refuse("client", &e))?
+            .and_then(|c| c.mfa_required())
+            .unwrap_or(false),
+        None => false,
+    };
 
     // Per-role requirement: any role the user holds that appears in
     // `realm.config.mfa_required_roles` triggers enforcement.
-    let role_requires_mfa = (|| -> Option<bool> {
-        let required_roles = realm_config?.mfa_required_roles.clone()?;
-        if required_roles.is_empty() {
-            return Some(false);
-        }
-        let assignments = state.rbac.list_user_assignments(realm, user_id).ok()?;
-        let hit = assignments.iter().any(|a| {
-            state
+    let required_roles = realm_config
+        .and_then(|c| c.mfa_required_roles.as_deref())
+        .unwrap_or_default();
+    let mut role_requires_mfa = false;
+    if !client_requires_mfa && !required_roles.is_empty() {
+        let assignments = state
+            .rbac
+            .list_user_assignments(realm, user_id)
+            .map_err(|e| refuse("role assignments", &e))?;
+        for assignment in &assignments {
+            let role = state
                 .rbac
-                .get_role(realm, &a.role_id)
-                .ok()
-                .flatten()
-                .map(|r| required_roles.iter().any(|req| req == &r.name))
-                .unwrap_or(false)
-        });
-        Some(hit)
-    })()
-    .unwrap_or(false);
+                .get_role(realm, &assignment.role_id)
+                .map_err(|e| refuse("role", &e))?;
+            if role.is_some_and(|r| required_roles.iter().any(|req| req == &r.name)) {
+                role_requires_mfa = true;
+                break;
+            }
+        }
+    }
 
     if client_requires_mfa || role_requires_mfa {
         actions.push(RequiredAction::EnrollMfa);
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -426,6 +426,21 @@ fn sms_gate(
         .masked_phone_number()
         .unwrap_or_else(|| "****".to_string());
 
+    // `prompt=none`: proving the factor needs the user, and no UI may be
+    // shown — refuse before a code is sent (OIDC Core §3.1.2.1).
+    if let SmsResume::Authorize { params } = &resume {
+        if let Some(refusal) = super::authorize_gate::refuse_if_silent(
+            state,
+            realm,
+            user_id,
+            params,
+            "login_required",
+            "the SMS factor must be proved interactively",
+        ) {
+            return Some(refusal);
+        }
+    }
+
     // 3. SMS sender and HMAC key must be configured. Either missing means the
     //    factor cannot be challenged, so the authorization is refused. These
     //    branches used to `return None` — "no challenge needed" — so the code

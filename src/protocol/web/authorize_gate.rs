@@ -22,6 +22,14 @@
 //! An interstitial that suspends the flow stores the parameters and, when it
 //! completes, re-enters here at the [`Gate`] after its own — so no branch can
 //! skip a later gate by returning early.
+//!
+//! `prompt=none` (OIDC Core §3.1.2.1) forbids any UI, so every gate that
+//! would suspend the flow asks [`refuse_if_silent`] first and, for a silent
+//! request, answers the client with an error instead: `interaction_required`
+//! for a pending required action, `login_required` for the SMS factor,
+//! `consent_required` for consent. The first two gates used to redirect a
+//! silent request into their interactive page — and the SMS gate texted the
+//! user a code on every silent renew.
 
 use std::sync::Arc;
 
@@ -185,6 +193,62 @@ pub(super) fn run_authorize_gates(
         }
     }
     consent_gate(state, realm, user_id, params, amr_values, secure, now)
+}
+
+/// `Some(error redirect)` when `params` is a `prompt=none` request, which a
+/// gate about to show UI must return instead (OIDC Core §3.1.2.1); `None`
+/// for an interactive request, which the gate may suspend.
+///
+/// `error` is the OIDC error the gate's interaction maps to
+/// (`interaction_required`, `login_required`). The refusal travels in the
+/// request's response mode like any other authorization error, and counts
+/// as a silent-auth probe (A-37) like the consent gate's own outcomes.
+pub(super) fn refuse_if_silent(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    params: &AuthorizeParams,
+    error: &str,
+    description: &str,
+) -> Option<Response> {
+    if params.prompt != "none" {
+        return None;
+    }
+    let client = match state.identity.get_client(realm, &params.client_id) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Some(handlers_common::bad_request("unknown client")),
+        Err(e) => {
+            tracing::warn!(error = %e, "authorize: get_client failed refusing a silent request");
+            return Some(handlers_common::server_error());
+        }
+    };
+    let error_return = ErrorReturn {
+        client_id: &params.client_id,
+        redirect_uri: &params.redirect_uri,
+        state: &params.state,
+        response_mode: params.response_mode.as_ref(),
+        jarm_alg: client.authorization_signed_response_alg(),
+    };
+    let client_id_str = params.client_id.to_string();
+    if let Err(crate::identity::IdentityError::SilentAuthRateLimited) = state
+        .identity
+        .check_silent_auth_probe(realm, user_id, &client_id_str, error)
+    {
+        return Some(authorization_error_redirect(
+            state,
+            realm,
+            &error_return,
+            "login_required",
+            "silent auth rate limit exceeded",
+        ));
+    }
+    Some(authorization_error_redirect(
+        state,
+        realm,
+        &error_return,
+        error,
+        description,
+    ))
 }
 
 /// Consent + OIDC `prompt` handling (OIDC Core §3.1.2.1), then issuance.
