@@ -2034,13 +2034,29 @@ security:
     verify_key: "<base64url-encoded 32-byte Ed25519 public key>"
 ```
 
-Behaviour:
+Behaviour (`crate::backup::check_restore_signature`, shared by the HTTP route
+and `hearth backup restore`):
 - **Key configured, signature present and valid** → restore proceeds.
-- **Key configured, signature absent or invalid** → `400 Bad Request` (fail-closed).
-- **Key not configured** → signature field is ignored (backwards-compatible).
+- **Key configured, signature absent or invalid** → refused (`400 Bad Request`
+  over HTTP with `error` = `missing_manifest_signature` or
+  `invalid_manifest_signature`, exit `2` on the CLI). Nothing overrides a
+  configured key, and the CLI refuses `--skip-verify` alongside one: the
+  signature covers only the manifest, and members are authenticated solely by
+  the manifest checksums that flag would skip.
+- **Key not configured** → refused outside dev mode (`error` =
+  `backup_verify_key_not_configured` over HTTP). The HTTP route has no
+  override; the CLI accepts `--allow-unsigned` as an explicit operator opt-in.
+  A `--dev` server restores with a warning.
 
-The signing tool signs `manifest.canonical_bytes()` with the operator's private
-key and writes the result to `detached_signature_b64` before creating the archive.
+Both restore paths read the archive through one private, unlinked copy, so the
+bytes imported are the bytes whose signature and checksums were verified — the
+input path is never reopened between the check and the import.
+
+Signing: `hearth backup create --sign-key <key.pem>` or `hearth backup sign`
+signs `manifest.canonical_bytes()` with the operator's Ed25519 private key
+(`hearth backup keygen` generates one) and writes the base64url result to
+`detached_signature_b64`. `checksums` is an ordered map so the canonical bytes
+are identical for signer and verifier.
 
 #### A-30.4 Per-export audit watermark
 

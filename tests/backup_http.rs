@@ -16,7 +16,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hearth::audit::{AuditAction, AuditQuery};
-use hearth::backup::BackupArchive;
+use hearth::backup::{BackupArchive, BackupSigningKey};
 use hearth::core::RealmId;
 use hearth::identity::{CreateUserRequest, SessionContext};
 use hearth::protocol::http::{router, AppState, BACKUP_RESTORE_BODY_LIMIT};
@@ -25,9 +25,54 @@ use tower::ServiceExt as _;
 
 // ===== helpers =====
 
+/// Test-only Ed25519 backup signing key (PKCS#8 v1, as `openssl genpkey
+/// -algorithm ed25519` writes it). Its public half is [`TEST_VERIFY_KEY_B64`].
+const TEST_SIGNING_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIBJga6BJyucFOXunA+oAB3JEXBR0Q+ZWepPJ0QZdsprJ
+-----END PRIVATE KEY-----
+";
+const TEST_VERIFY_KEY_B64: &str = "5settUVm3ZDqg9RWtbbLjmbA1RK2KOvVu_PmihsFk-8";
+
+fn test_signing_key() -> BackupSigningKey {
+    BackupSigningKey::from_pem(TEST_SIGNING_KEY_PEM).expect("test signing key")
+}
+
+fn test_verify_key() -> [u8; 32] {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    URL_SAFE_NO_PAD
+        .decode(TEST_VERIFY_KEY_B64)
+        .expect("base64url")
+        .try_into()
+        .expect("32 bytes")
+}
+
+/// A production-mode app (not dev) with `security.backup.verify_key` set to
+/// [`TEST_VERIFY_KEY_B64`] — the configuration restore requires outside dev
+/// mode.
 async fn build_app(h: &common::TestHarness) -> axum::Router {
-    let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
-    router(state)
+    build_app_with(h, Some(test_verify_key()), false)
+}
+
+fn build_app_with(
+    h: &common::TestHarness,
+    verify_key: Option<[u8; 32]>,
+    dev_mode: bool,
+) -> axum::Router {
+    let state = if dev_mode {
+        AppState::new_dev(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+    } else {
+        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+    };
+    router(Arc::new(state.with_backup_verify_key(verify_key)))
+}
+
+/// Signs archive bytes with `key`, as `hearth backup sign` would.
+fn sign_bytes(archive: &[u8], key: &BackupSigningKey) -> Vec<u8> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("a.hearth-backup");
+    std::fs::write(&path, archive).expect("write");
+    hearth::backup::sign_archive(&path, &path, key).expect("sign");
+    std::fs::read(&path).expect("read")
 }
 
 async fn make_admin_token(h: &common::TestHarness, realm: &RealmId) -> String {
@@ -522,8 +567,25 @@ fn set_master_key() {
 /// A hand-built archive therefore cannot reach the restore path at all, so any
 /// test of restore behaviour must start from an archive the exporter produced.
 ///
+/// The archive is signed with [`test_signing_key`], so it verifies against the
+/// key [`build_app`] configures. Use [`export_unsigned_archive`] for the raw
+/// export.
+///
 /// The caller MUST have called [`set_master_key`] before building the harness.
 async fn export_archive(harness: &common::TestHarness, realm: &RealmId, token: &str) -> Vec<u8> {
+    sign_bytes(
+        &export_unsigned_archive(harness, realm, token).await,
+        &test_signing_key(),
+    )
+}
+
+/// Exports an archive through `POST /admin/backup` exactly as the server
+/// produced it: the server holds no signing key, so it is unsigned.
+async fn export_unsigned_archive(
+    harness: &common::TestHarness,
+    realm: &RealmId,
+    token: &str,
+) -> Vec<u8> {
     let app = build_app(harness).await;
     let resp = app
         .oneshot(
@@ -1096,4 +1158,132 @@ async fn backup_restore_refuses_an_archive_that_fails_verification() {
         body.contains("integrity") && body.contains("users.ndjson"),
         "the refusal must say what is wrong and name the missing member; got: {body}"
     );
+}
+
+// ===== A-30: restore refuses archives it cannot authenticate =====
+//
+// An archive is encrypted and checksummed, but the checksums sit in the
+// manifest an attacker would rewrite and the passphrase is shared by every
+// operator who can restore. The detached manifest signature is the only proof
+// of origin, and the restore used to skip it whenever
+// `security.backup.verify_key` was unset — the default. Outside dev mode a
+// restore now requires a key and a valid signature.
+
+async fn dry_run_restore(
+    app: axum::Router,
+    realm: &RealmId,
+    token: &str,
+    archive: &[u8],
+) -> (StatusCode, String) {
+    let (ct, body_bytes) = multipart_body(archive);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup/restore?dry_run=true")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("content-type", ct)
+                .body(Body::from(body_bytes))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    let status = resp.status();
+    (
+        status,
+        String::from_utf8_lossy(&resp_bytes(resp).await).into_owned(),
+    )
+}
+
+#[tokio::test]
+async fn restore_without_a_verify_key_is_refused_outside_dev_mode() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = make_admin_token(&h, &realm).await;
+    let archive = export_archive(&h, &realm, &token).await;
+
+    // Control: the same archive restores once a key is configured.
+    let (ok, body) = dry_run_restore(build_app(&h).await, &realm, &token, &archive).await;
+    assert_eq!(ok, StatusCode::OK, "control must restore; got {body}");
+
+    let (status, body) =
+        dry_run_restore(build_app_with(&h, None, false), &realm, &token, &archive).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "no verify key in production must refuse; got {body}"
+    );
+    assert!(
+        body.contains("security.backup.verify_key"),
+        "the refusal must say how to configure the key; got {body}"
+    );
+    assert!(
+        body.contains("backup_verify_key_not_configured"),
+        "the refusal must carry a stable machine-readable code; got {body}"
+    );
+}
+
+#[tokio::test]
+async fn restore_without_a_verify_key_is_allowed_in_dev_mode() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = make_admin_token(&h, &realm).await;
+    let archive = export_unsigned_archive(&h, &realm, &token).await;
+
+    let (status, body) =
+        dry_run_restore(build_app_with(&h, None, true), &realm, &token, &archive).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "dev mode keeps unsigned restores; got {body}"
+    );
+}
+
+#[tokio::test]
+async fn unsigned_archive_is_refused_when_a_verify_key_is_configured() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = make_admin_token(&h, &realm).await;
+    let archive = export_unsigned_archive(&h, &realm, &token).await;
+
+    // Dev mode does not relax a configured key.
+    for dev in [false, true] {
+        let (status, body) = dry_run_restore(
+            build_app_with(&h, Some(test_verify_key()), dev),
+            &realm,
+            &token,
+            &archive,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "dev={dev}: {body}");
+        assert!(body.contains("unsigned"), "dev={dev}: {body}");
+        // The documented contract token (CHANGELOG, HEA-1206) survives.
+        assert!(
+            body.contains("missing_manifest_signature"),
+            "dev={dev}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn archive_signed_by_another_key_is_refused() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = make_admin_token(&h, &realm).await;
+    let (other, _pem) = BackupSigningKey::generate().expect("generate");
+    let archive = sign_bytes(&export_unsigned_archive(&h, &realm, &token).await, &other);
+
+    let (status, body) = dry_run_restore(build_app(&h).await, &realm, &token, &archive).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("signature is invalid"), "{body}");
+    assert!(body.contains("invalid_manifest_signature"), "{body}");
 }

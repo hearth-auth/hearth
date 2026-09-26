@@ -10,7 +10,6 @@ use crate::protocol::admin_auth::{
     ExportRateLimitOutcome, RateLimitOutcome, TokenRateLimitOutcome, TokenRateLimiter,
 };
 use crate::rbac::RbacError;
-use base64::Engine as _;
 
 use super::state::AppState;
 
@@ -468,63 +467,6 @@ pub(crate) fn emit_export_watermark(
             metadata: Some(metadata),
         },
     );
-}
-
-/// Verifies a detached Ed25519 signature on a backup manifest (A-30).
-///
-/// `public_key_bytes` must be the 32-byte raw Ed25519 public key.
-/// `manifest` must carry a `detached_signature_b64` field; the signature
-/// is verified against `manifest.canonical_bytes()`.
-///
-/// Returns `Err` with a 400 body when:
-/// - the signature field is absent
-/// - the signature is not valid base64url
-/// - the Ed25519 verification fails
-pub(crate) fn verify_manifest_signature(
-    manifest: &crate::backup::BackupManifest,
-    public_key_bytes: &[u8; 32],
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    use ring::signature::{UnparsedPublicKey, ED25519};
-
-    let sig_b64 = manifest.detached_signature_b64.as_deref().ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "missing_manifest_signature",
-                "error_description": "restore archive must carry a detached_signature_b64 when backup_verify_key is configured"
-            })),
-        )
-    })?;
-
-    let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(sig_b64)
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "invalid_manifest_signature",
-                    "error_description": "detached_signature_b64 is not valid base64url"
-                })),
-            )
-        })?;
-
-    let canonical = manifest.canonical_bytes().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "failed to serialize manifest for signature verification"})),
-        )
-    })?;
-
-    let pk = UnparsedPublicKey::new(&ED25519, public_key_bytes.as_slice());
-    pk.verify(&canonical, &sig_bytes).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "invalid_manifest_signature",
-                "error_description": "manifest signature verification failed; archive may be tampered or signed with the wrong key"
-            })),
-        )
-    })
 }
 
 /// Checks the per-`(realm, client)` token endpoint rate limit.

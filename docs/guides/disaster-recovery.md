@@ -123,6 +123,7 @@ This usually indicates one of:
 
    hearth backup restore \
      --input /backups/latest.hearth-backup \
+     --config /etc/hearth/hearth.yaml \
      --data-dir /var/lib/hearth/data-restored
 
    # Cut over only after the restore reports success.
@@ -157,7 +158,14 @@ This usually indicates one of:
    ```bash
    hearth backup create --data-dir /var/lib/hearth/data --output /tmp/post-recovery.hearth-backup
    hearth backup verify --input /tmp/post-recovery.hearth-backup
+   rm /tmp/post-recovery.hearth-backup
    ```
+
+   This archive is a checksum scan, not a restore point: it is unsigned, so
+   `hearth backup restore` refuses it outside dev mode. If you want a
+   post-recovery restore point, take a signed one into your backup directory
+   (`hearth backup create --sign-key /etc/hearth/backup-signing.pem --output
+   /backups/…`) — see [Signed archives](./backup.md#signed-archives).
 
 ---
 
@@ -468,6 +476,9 @@ rejoined empty.
    # the highest user/credential counts.
    ```
 
+   These archives are unsigned and only for `inspect`; restore refuses them.
+   The restorable copies are the signed backups in step 3.
+
    Sessions are **not** in the manifest, so this comparison cannot tell you
    which side served more logins — only which side holds more durable
    records. `hearth backup create` takes an exclusive lock on the data
@@ -479,10 +490,17 @@ rejoined empty.
    hearth backup create \
      --data-dir /var/lib/hearth/data \
      --include-audit \
+     --sign-key /etc/hearth/backup-signing.pem \
      --output /backups/divergence-$(hostname)-$(date +%s).hearth-backup
    ```
 
-   These backups are evidence — store them off-cluster.
+   These backups are evidence — store them off-cluster. Sign them as they are
+   taken: restore refuses an unsigned archive outside dev mode, and if you
+   later need to restore a losing node's data you should not have to fetch the
+   private signing key in the middle of an incident. If that key lives only on
+   a separate backup host, omit `--sign-key` here and run `hearth backup sign`
+   on each archive there before step 5 wipes anything
+   ([Signed archives](./backup.md#signed-archives)).
 
 4. **Bootstrap the authoritative node alone.** Edit its `hearth.yaml` to
    list only itself in `cluster.peers`, start it, and confirm it elects
@@ -676,13 +694,23 @@ post-restore validation checklist appropriate for an incident.
    mkdir -p /var/lib/hearth/data
    hearth backup restore \
      --input /backups/latest.hearth-backup \
+     --config /etc/hearth/hearth.yaml \
      --data-dir /var/lib/hearth/data
    ```
 
    Exit code `0` means every record imported cleanly. Exit `1` means
    partial success — read the report carefully; some realms/users may be
-   missing. Exit `2` means the archive is unreadable; try the previous
-   backup.
+   missing. Exit `2` means the archive is unreadable or was refused; try the
+   previous backup.
+
+   Restore authenticates the archive first: its manifest signature must verify
+   against `security.backup.verify_key` (read from `--config`, or pass
+   `--verify-key`). An unsigned archive, a bad signature, or no configured key
+   is refused before anything is written — see
+   [Signed archives](./backup.md#signed-archives). In an incident, do **not**
+   reach for `--allow-unsigned` to get past a refusal: an archive that fails
+   authentication may be the attacker's. Use it only for an archive whose
+   origin you have established out of band.
 
 3. **Verify signing-key continuity.** Hearth's restore preserves the
    per-realm Ed25519 signing key (HEA-745). A token issued before backup
@@ -821,6 +849,7 @@ Run this drill quarterly. An untested backup is not a backup.
    ```bash
    hearth backup restore \
      --input /backups/latest.hearth-backup \
+     --config /etc/hearth/hearth.yaml \
      --data-dir "$DRILL_DIR" \
      | tee /tmp/restore-report.txt
    echo "exit: $?"
