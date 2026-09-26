@@ -2198,6 +2198,7 @@ async fn par_resource_reaches_the_access_token_audience() {
                 nonce: None,
                 request: None,
                 response_mode: None,
+                prompt: None,
             },
         )
         .expect("push");

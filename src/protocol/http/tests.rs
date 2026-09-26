@@ -1014,6 +1014,69 @@ async fn par_jar_accepted_under_fapi_advanced() {
     );
 }
 
+/// The PAR endpoint accepts `prompt` and stores it with the pushed request.
+///
+/// A pushed request had no `prompt` field, so a `request_uri` authorization
+/// could never ask for `prompt=none` (silent authentication) or
+/// `prompt=consent` — and PAR is the only way in on a FAPI 2.0 realm.
+#[tokio::test]
+async fn par_endpoint_stores_the_pushed_prompt() {
+    use crate::identity::{CreateRealmRequest, RegisterClientRequest};
+
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state(temp_dir.path());
+    let realm = state
+        .identity
+        .create_realm(&CreateRealmRequest {
+            name: format!("par-prompt-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm");
+    let client = state
+        .identity
+        .register_client(
+            realm.id(),
+            &RegisterClientRequest {
+                client_name: "PAR prompt client".to_string(),
+                redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                grant_types: vec!["authorization_code".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let body = format!(
+        "client_id={}&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcallback&scope=openid\
+         &state=par-state&response_type=code\
+         &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
+         &code_challenge_method=S256&prompt=none",
+        client.client_id().as_uuid()
+    );
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/realms/{}/as/par", realm.name()))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(axum::body::Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(resp.into_body(), 4_096)
+        .await
+        .expect("body bytes");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let request_uri = json["request_uri"].as_str().expect("request_uri");
+
+    let stored = state
+        .identity
+        .consume_par(realm.id(), request_uri)
+        .expect("consume the pushed request");
+    assert_eq!(stored.prompt.as_deref(), Some("none"));
+}
+
 /// PAR without a JAR JWT is rejected under FAPI Advanced.
 ///
 /// Counterpart to `par_jar_accepted_under_fapi_advanced`: confirms the

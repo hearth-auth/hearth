@@ -306,41 +306,52 @@ fn plain_params(
         return Err(handlers_common::bad_request("invalid redirect_uri"));
     }
 
-    let Some(code_challenge_method) = parse_method(&q.code_challenge_method) else {
-        return Err(jarm_aware_error_redirect(
+    // The response mode is read first: every later error goes back in the
+    // mode the request asked for. An unsupported mode is itself reported in
+    // the default mode.
+    let Some(response_mode) = parse_response_mode(q.response_mode.as_deref()) else {
+        return Err(authorization_error_redirect(
             state,
             realm,
-            &client_id.to_string(),
-            &q.redirect_uri,
+            &ErrorReturn {
+                client_id,
+                redirect_uri: &q.redirect_uri,
+                state: &q.state,
+                response_mode: None,
+                jarm_alg: client.authorization_signed_response_alg(),
+            },
+            "invalid_request",
+            "unsupported_response_mode",
+        ));
+    };
+    let error_return = ErrorReturn {
+        client_id,
+        redirect_uri: &q.redirect_uri,
+        state: &q.state,
+        response_mode: response_mode.as_ref(),
+        jarm_alg: client.authorization_signed_response_alg(),
+    };
+
+    let Some(code_challenge_method) = parse_method(&q.code_challenge_method) else {
+        return Err(authorization_error_redirect(
+            state,
+            realm,
+            &error_return,
             "invalid_request",
             "unsupported code_challenge_method",
-            &q.state,
-            client.authorization_signed_response_alg(),
         ));
     };
 
     // Public clients MUST supply PKCE S256 (RFC 9700 / HEA-501 F-01).
     if !client.is_confidential() && q.code_challenge.is_empty() {
-        return Err(jarm_aware_error_redirect(
+        return Err(authorization_error_redirect(
             state,
             realm,
-            &client_id.to_string(),
-            &q.redirect_uri,
+            &error_return,
             "invalid_request",
             "public clients must use PKCE with code_challenge_method=S256",
-            &q.state,
-            client.authorization_signed_response_alg(),
         ));
     }
-
-    let Some(response_mode) = parse_response_mode(q.response_mode.as_deref()) else {
-        return Err(redirect_with_oauth_error(
-            &q.redirect_uri,
-            "invalid_request",
-            "unsupported_response_mode",
-            &q.state,
-        ));
-    };
 
     Ok(AuthorizeParams {
         client_id: client_id.clone(),
@@ -361,8 +372,10 @@ fn plain_params(
 /// The PAR (RFC 9126) branch: consume the stored entry.
 ///
 /// Everything comes from the stored request — including its
-/// `response_mode`, which this branch used to drop. The stored entry has no
-/// `prompt`, and outer query parameters other than `client_id` are ignored.
+/// `response_mode` and `prompt`, which this branch used to drop. Outer query
+/// parameters other than `client_id` are ignored (RFC 9126 §4): a `prompt`
+/// beside `request_uri` can neither strip a pushed `prompt=consent` nor add
+/// a `prompt=none` the client never pushed.
 fn par_params(
     state: &Arc<WebState>,
     realm: &RealmId,
@@ -408,7 +421,7 @@ fn par_params(
         code_challenge: stored.code_challenge,
         code_challenge_method: stored.code_challenge_method,
         nonce: stored.nonce,
-        prompt: String::new(),
+        prompt: stored.prompt.unwrap_or_default(),
         response_mode,
         resource: stored.resource,
         via_par: true,
@@ -650,15 +663,18 @@ pub async fn consent_submit(
             let method = parse_method(pending.code_challenge_method.as_deref().unwrap_or(""));
             let response_mode = parse_response_mode(pending.response_mode.as_deref());
             let (Some(code_challenge_method), Some(response_mode)) = (method, response_mode) else {
-                let mut err_response = jarm_aware_error_redirect(
+                let mut err_response = authorization_error_redirect(
                     &state,
                     &session.realm_id,
-                    &pending.client_id.to_string(),
-                    &pending.redirect_uri,
+                    &ErrorReturn {
+                        client_id: &pending.client_id,
+                        redirect_uri: &pending.redirect_uri,
+                        state: &pending.state,
+                        response_mode: None,
+                        jarm_alg: pending.authorization_signed_response_alg.as_deref(),
+                    },
                     "invalid_request",
                     "unsupported_response_mode",
-                    &pending.state,
-                    pending.authorization_signed_response_alg.as_deref(),
                 );
                 append_cookie(&mut err_response, &clear_cookie);
                 return err_response;
@@ -701,15 +717,22 @@ pub async fn consent_submit(
                 &pending.requested_scopes,
                 "self",
             );
-            let mut response = jarm_aware_error_redirect(
+            // The denial goes back in the request's response mode, like the
+            // code would have. The pending record is ours; a mode that no
+            // longer parses falls back to the default.
+            let response_mode = parse_response_mode(pending.response_mode.as_deref()).flatten();
+            let mut response = authorization_error_redirect(
                 &state,
                 &session.realm_id,
-                &pending.client_id.to_string(),
-                &pending.redirect_uri,
+                &ErrorReturn {
+                    client_id: &pending.client_id,
+                    redirect_uri: &pending.redirect_uri,
+                    state: &pending.state,
+                    response_mode: response_mode.as_ref(),
+                    jarm_alg: pending.authorization_signed_response_alg.as_deref(),
+                },
                 "access_denied",
                 "user denied authorization",
-                &pending.state,
-                pending.authorization_signed_response_alg.as_deref(),
             );
             append_cookie(&mut response, &clear_cookie);
             response
@@ -964,50 +987,72 @@ pub(super) fn build_authorization_redirect(
     }
 }
 
-/// Builds an OAuth error redirect, JWT-wrapping it when the client requires JARM (§4.3).
+/// Where an authorization error response goes, and in which mode.
 ///
-/// When `jarm_alg` is `Some`, signs a `JarmErrorClaims` JWT with the realm key and
-/// redirects as `?response=<jwt>`. Falls back to plain query params on signing failure.
-pub(super) fn jarm_aware_error_redirect(
+/// Only ever built from a redirect URI already confirmed against the
+/// client's registration (RFC 6749 §4.1.2.1).
+pub(super) struct ErrorReturn<'a> {
+    /// The client the error is for (the `aud` of a JARM error).
+    pub client_id: &'a ClientId,
+    /// The registration-checked redirect URI.
+    pub redirect_uri: &'a str,
+    /// The request's `state`, echoed back.
+    pub state: &'a str,
+    /// The request's `response_mode` (`None` = default).
+    pub response_mode: Option<&'a ResponseMode>,
+    /// The client's registered `authorization_signed_response_alg`.
+    pub jarm_alg: Option<&'a str>,
+}
+
+/// Redirects an authorization error to the client in the mode its code
+/// would have been delivered in ([`ResponseMode::effective`]): `fragment`
+/// errors travel in the fragment, JARM errors as a signed `response` JWT in
+/// the query (`query.jwt`, `jwt`) or the fragment (`fragment.jwt`).
+///
+/// OAuth Multiple Response Types §2.1 and JARM §2.3 make the response mode
+/// govern error responses too. This used to put every error in the query
+/// string, signed only when the client had a registered signing alg — so a
+/// `fragment` request got its code in the fragment but `consent_required`
+/// in the query, and a `query.jwt` request got an unsigned error.
+///
+/// If signing a JARM error fails, the error is sent unsigned, in the same
+/// place (it carries no code).
+pub(super) fn authorization_error_redirect(
     state: &Arc<WebState>,
     realm: &RealmId,
-    client_id: &str,
-    redirect_uri: &str,
+    to: &ErrorReturn<'_>,
     error: &str,
     description: &str,
-    state_param: &str,
-    jarm_alg: Option<&str>,
 ) -> Response {
-    if jarm_alg.is_some() {
-        match state
-            .identity
-            .sign_jarm_error_jwt(realm, client_id, error, description, state_param)
-        {
+    let mode = ResponseMode::effective(to.response_mode, to.jarm_alg.is_some());
+    let place: fn(&str, &[(&str, &str)]) -> String = if mode.uses_fragment() {
+        append_fragment
+    } else {
+        append_query
+    };
+    if mode.is_jarm() {
+        match state.identity.sign_jarm_error_jwt(
+            realm,
+            &to.client_id.to_string(),
+            error,
+            description,
+            to.state,
+        ) {
             Ok(jwt) => {
-                let location = append_query(redirect_uri, &[("response", &jwt)]);
-                return axum::response::Redirect::to(&location).into_response();
+                let location = place(to.redirect_uri, &[("response", &jwt)]);
+                return Redirect::to(&location).into_response();
             }
             Err(e) => {
                 tracing::warn!(error = %e, "sign_jarm_error_jwt failed, falling back to plain redirect");
             }
         }
     }
-    redirect_with_oauth_error(redirect_uri, error, description, state_param)
-}
-
-/// Builds a redirect URI with OAuth error parameters (RFC 6749 §4.1.2.1).
-pub(super) fn redirect_with_oauth_error(
-    redirect_uri: &str,
-    error: &str,
-    description: &str,
-    state: &str,
-) -> Response {
-    let location = append_query(
-        redirect_uri,
+    let location = place(
+        to.redirect_uri,
         &[
             ("error", error),
             ("error_description", description),
-            ("state", state),
+            ("state", to.state),
         ],
     );
     Redirect::to(&location).into_response()

@@ -141,6 +141,7 @@ fn par_with_pkce(client_id: &ClientId) -> PushedAuthorizationRequest {
         nonce: Some("fapi-nonce".to_string()),
         request: None,
         response_mode: None,
+        prompt: None,
     }
 }
 
@@ -158,6 +159,7 @@ fn par_without_pkce(client_id: &ClientId) -> PushedAuthorizationRequest {
         nonce: None,
         request: None,
         response_mode: None,
+        prompt: None,
     }
 }
 
@@ -408,6 +410,7 @@ async fn fapi_a02_authorize_without_jarm_client_rejected() {
         nonce: Some("adv-nonce".to_string()),
         request: Some(jar),
         response_mode: None,
+        prompt: None,
     };
 
     // PAR itself is gate-free for JAR presence — the JARM check fires in authorize.
@@ -550,6 +553,7 @@ async fn fapi_a04_valid_advanced_request_accepted() {
         nonce: Some("adv-full-nonce".to_string()),
         request: Some(jar),
         response_mode: None,
+        prompt: None,
     };
 
     let _par_resp = env
@@ -644,6 +648,7 @@ async fn fapi_a06_par_pkce_only_in_jar_accepted() {
         nonce: Some("a06-nonce".to_string()),
         request: Some(jar),
         response_mode: None,
+        prompt: None,
     };
 
     // Before the fix this returned FapiViolation("FAPI 2.0 Baseline requires PKCE").
@@ -721,6 +726,7 @@ async fn fapi_a07_realm_advanced_enforces_dpop_for_standard_profile_client() {
         nonce: Some("a07-nonce".to_string()),
         request: Some(jar),
         response_mode: None,
+        prompt: None,
     };
     env.harness
         .identity()
@@ -907,6 +913,7 @@ async fn fapi_b06_realm_baseline_enforces_dpop_for_standard_profile_client() {
         nonce: Some("b06-nonce".to_string()),
         request: None,
         response_mode: None,
+        prompt: None,
     };
     env.harness
         .identity()
@@ -1378,6 +1385,7 @@ async fn fapi_b11_realm_baseline_enforces_dpop_on_refresh_for_standard_profile_c
         nonce: Some("b11-nonce".to_string()),
         request: None,
         response_mode: None,
+        prompt: None,
     };
     env.harness
         .identity()

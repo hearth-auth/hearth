@@ -55,7 +55,7 @@ use super::authorize_gate::{
 };
 use super::handlers::append_cookie;
 use super::handlers_common;
-use super::oauth_consent::{append_query, redirect_with_oauth_error, AuthorizeQuery};
+use super::oauth_consent::AuthorizeQuery;
 use super::templates::render;
 use super::WebState;
 
@@ -768,21 +768,6 @@ fn emit_audit(
     }) {
         tracing::warn!(error = %e, "sms_challenge: audit append failed");
     }
-}
-
-#[allow(dead_code)]
-fn optional_query_build(base: &str, params: &[(&str, &str)]) -> String {
-    append_query(base, params)
-}
-
-#[allow(dead_code)]
-fn build_oauth_error_redirect(
-    redirect_uri: &str,
-    error: &str,
-    description: &str,
-    state_param: &str,
-) -> Response {
-    redirect_with_oauth_error(redirect_uri, error, description, state_param)
 }
 
 #[cfg(test)]

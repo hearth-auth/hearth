@@ -356,6 +356,16 @@ async fn approve_consent(
     cookies: &str,
     authorize_resp: &Response<Body>,
 ) -> Response<Body> {
+    decide_consent(rig, cookies, authorize_resp, "approve").await
+}
+
+/// Submits `decision` for the pending consent ticket in `authorize_resp`.
+async fn decide_consent(
+    rig: &Rig,
+    cookies: &str,
+    authorize_resp: &Response<Body>,
+    decision: &str,
+) -> Response<Body> {
     let ticket_pair =
         cookie_pair(authorize_resp, "hearth_ui_oauth_ticket").expect("consent ticket cookie");
     let ticket = ticket_pair
@@ -367,9 +377,21 @@ async fn approve_consent(
         rig,
         "/ui/oauth/consent",
         &format!("{cookies}; {ticket_pair}"),
-        format!("ticket={ticket}&decision=approve&scope=openid&_csrf={CSRF}"),
+        format!("ticket={ticket}&decision={decision}&scope=openid&_csrf={CSRF}"),
     )
     .await
+}
+
+/// The claims of a JWT, unverified (the signature is the engine's concern;
+/// these tests only check which values travelled where).
+fn jwt_claims(jwt: &str) -> serde_json::Value {
+    let payload = jwt.split('.').nth(1).expect("JWT payload");
+    serde_json::from_slice(
+        &data_encoding::BASE64URL_NOPAD
+            .decode(payload.as_bytes())
+            .expect("base64url payload"),
+    )
+    .expect("claims json")
 }
 
 /// Exchanges `code` and returns the access token's `aud`.
@@ -450,6 +472,20 @@ fn jar_uri(
     overrides: &serde_json::Value,
     outer: &str,
 ) -> String {
+    format!(
+        "/ui/oauth/authorize?client_id={}&request={}{outer}",
+        client.client_id().as_uuid(),
+        jar_jwt(rig, client, pair, overrides)
+    )
+}
+
+/// A request object signed by `pair`, with `overrides` merged into its claims.
+fn jar_jwt(
+    rig: &Rig,
+    client: &OAuthClient,
+    pair: &ring::signature::Ed25519KeyPair,
+    overrides: &serde_json::Value,
+) -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
 
@@ -486,9 +522,38 @@ fn jar_uri(
     let c = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims"));
     let input = format!("{h}.{c}");
     let sig = URL_SAFE_NO_PAD.encode(pair.sign(input.as_bytes()).as_ref());
+    format!("{input}.{sig}")
+}
+
+/// A pushed authorization request with the rig's defaults and no prompt,
+/// response mode, resource or request object.
+fn par_request(client: &OAuthClient) -> hearth::identity::PushedAuthorizationRequest {
+    hearth::identity::PushedAuthorizationRequest {
+        client_id: client.client_id().clone(),
+        redirect_uri: REDIRECT.to_string(),
+        scope: "openid".to_string(),
+        state: "par-state".to_string(),
+        resource: None,
+        response_type: "code".to_string(),
+        code_challenge: Some(pkce_challenge()),
+        code_challenge_method: Some(hearth::identity::CodeChallengeMethod::S256),
+        nonce: None,
+        request: None,
+        response_mode: None,
+        prompt: None,
+    }
+}
+
+/// Pushes `request` and returns the `request_uri` authorize URI.
+fn push(rig: &Rig, request: &hearth::identity::PushedAuthorizationRequest) -> String {
+    let pushed = rig
+        .identity
+        .push_authorization_request(&rig.realm_id, request)
+        .expect("push");
     format!(
-        "/ui/oauth/authorize?client_id={}&request={input}.{sig}{outer}",
-        client.client_id().as_uuid()
+        "/ui/oauth/authorize?client_id={}&request_uri={}",
+        request.client_id.as_uuid(),
+        form_urlencoded::byte_serialize(pushed.request_uri.as_bytes()).collect::<String>()
     )
 }
 
@@ -499,30 +564,10 @@ fn par_uri(
     response_mode: Option<&str>,
     resource: Option<&str>,
 ) -> String {
-    let pushed = rig
-        .identity
-        .push_authorization_request(
-            &rig.realm_id,
-            &hearth::identity::PushedAuthorizationRequest {
-                client_id: client.client_id().clone(),
-                redirect_uri: REDIRECT.to_string(),
-                scope: "openid".to_string(),
-                state: "par-state".to_string(),
-                resource: resource.map(str::to_string),
-                response_type: "code".to_string(),
-                code_challenge: Some(pkce_challenge()),
-                code_challenge_method: Some(hearth::identity::CodeChallengeMethod::S256),
-                nonce: None,
-                request: None,
-                response_mode: response_mode.map(str::to_string),
-            },
-        )
-        .expect("push");
-    format!(
-        "/ui/oauth/authorize?client_id={}&request_uri={}",
-        client.client_id().as_uuid(),
-        form_urlencoded::byte_serialize(pushed.request_uri.as_bytes()).collect::<String>()
-    )
+    let mut request = par_request(client);
+    request.response_mode = response_mode.map(str::to_string);
+    request.resource = resource.map(str::to_string);
+    push(rig, &request)
 }
 
 /// Completes the pending UPDATE_PASSWORD action started by `authorize_resp`.
@@ -759,6 +804,128 @@ async fn par_consent_approval_keeps_the_pushed_response_mode_and_resource() {
     assert!(aud.iter().any(|a| a == RESOURCE), "aud = {aud:?}");
 }
 
+// ---------------------------------------------------------------------------
+// PAR: `prompt` is pushed like every other parameter
+//
+// A pushed request had no way to carry `prompt`: the PAR endpoint had no
+// field for it, the stored entry had none, a JAR pushed through PAR lost its
+// `prompt` claim, and the authorize branch hard-coded it empty. On a FAPI 2.0
+// realm, where PAR is mandatory, `prompt` could never take effect.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn par_authorize_with_prompt_none_and_no_consent_returns_consent_required() {
+    let rig = rig(false).await;
+    let client = register(&rig, true, None);
+    let mut request = par_request(&client);
+    request.prompt = Some("none".to_string());
+    let resp = get(&rig, &push(&rig, &request), &session_cookie(&rig)).await;
+    let loc = location(&resp);
+    assert!(
+        loc.starts_with(REDIRECT),
+        "a pushed prompt=none must redirect back, never show the consent page; got {loc}"
+    );
+    assert_eq!(
+        redirect_param(&loc, "error", false).as_deref(),
+        Some("consent_required"),
+        "got {loc}"
+    );
+    assert_eq!(
+        redirect_param(&loc, "state", false).as_deref(),
+        Some("par-state")
+    );
+    assert!(redirect_param(&loc, "code", false).is_none(), "got {loc}");
+}
+
+#[tokio::test]
+async fn par_authorize_with_prompt_consent_reprompts_despite_a_recorded_consent() {
+    let rig = rig(false).await;
+    let client = register(&rig, true, None);
+    grant_consent(&rig, &client);
+    let mut request = par_request(&client);
+    request.prompt = Some("consent".to_string());
+    let resp = get(&rig, &push(&rig, &request), &session_cookie(&rig)).await;
+    assert_consent_prompt(&resp, "PAR prompt=consent");
+}
+
+/// Control: without a pushed prompt a recorded consent lets the request through.
+#[tokio::test]
+async fn par_authorize_with_a_recorded_consent_issues_the_code() {
+    let rig = rig(false).await;
+    let client = register(&rig, true, None);
+    grant_consent(&rig, &client);
+    let resp = get(
+        &rig,
+        &push(&rig, &par_request(&client)),
+        &session_cookie(&rig),
+    )
+    .await;
+    let loc = location(&resp);
+    assert!(redirect_param(&loc, "code", false).is_some(), "got {loc}");
+}
+
+/// A request object pushed through PAR keeps its `prompt` claim.
+#[tokio::test]
+async fn par_pushed_request_object_prompt_none_is_honoured() {
+    let rig = rig(false).await;
+    let (client, pair) = jar_client(&rig, true);
+    let mut request = par_request(&client);
+    request.request = Some(jar_jwt(
+        &rig,
+        &client,
+        &pair,
+        &serde_json::json!({ "prompt": "none" }),
+    ));
+    let resp = get(&rig, &push(&rig, &request), &session_cookie(&rig)).await;
+    let loc = location(&resp);
+    assert_eq!(
+        redirect_param(&loc, "error", false).as_deref(),
+        Some("consent_required"),
+        "the pushed request object's prompt=none must never show UI; got {loc}"
+    );
+    assert_eq!(
+        redirect_param(&loc, "state", false).as_deref(),
+        Some("jar-state")
+    );
+}
+
+/// RFC 9101 §4: the request object's `prompt` claim wins over the pushed
+/// outer value.
+#[tokio::test]
+async fn par_pushed_request_object_prompt_wins_over_the_outer_prompt() {
+    let rig = rig(false).await;
+    let (client, pair) = jar_client(&rig, true);
+    grant_consent(&rig, &client);
+    let mut request = par_request(&client);
+    request.prompt = Some("consent".to_string());
+    request.request = Some(jar_jwt(
+        &rig,
+        &client,
+        &pair,
+        &serde_json::json!({ "prompt": "none" }),
+    ));
+    let resp = get(&rig, &push(&rig, &request), &session_cookie(&rig)).await;
+    let loc = location(&resp);
+    assert!(
+        redirect_param(&loc, "code", false).is_some(),
+        "prompt=none (claim) over prompt=consent (outer) with a recorded consent issues \
+         the code silently; got {loc} ({})",
+        resp.status()
+    );
+}
+
+/// RFC 9126 §4: only the pushed values count — a `prompt` added to the
+/// authorize query next to `request_uri` is ignored, so it cannot strip a
+/// pushed `prompt=consent` or add a `prompt=none` the client never pushed.
+#[tokio::test]
+async fn par_authorize_ignores_a_prompt_on_the_authorize_query() {
+    let rig = rig(false).await;
+    let client = register(&rig, true, None);
+    let uri = format!("{}&prompt=none", push(&rig, &par_request(&client)));
+    let resp = get(&rig, &uri, &session_cookie(&rig)).await;
+    assert_consent_prompt(&resp, "PAR with an outer prompt=none");
+}
+
 /// The engine itself must honour a plain `fragment` response mode: discovery
 /// advertises it, but the code response always came back as `query`.
 #[tokio::test]
@@ -791,6 +958,144 @@ async fn engine_authorize_honours_the_fragment_response_mode() {
         resp.response_mode(),
         &hearth::identity::ResponseMode::Fragment
     );
+}
+
+// ===========================================================================
+// Error responses use the request's response mode
+//
+// OAuth Multiple Response Types §2.1 and JARM §2.3: the response mode governs
+// the error response too. Errors used to go to the query string, unsigned
+// unless the client had a registered signing alg, whatever mode was asked for
+// — so a silent-auth SPA using `fragment` got its code in the fragment but
+// `consent_required` in the query, and a `query.jwt` request got an unsigned
+// error.
+// ===========================================================================
+
+/// The error must be in the fragment, not the query, and carry the state.
+fn assert_fragment_error(loc: &str, error: &str, state: &str) {
+    assert!(loc.starts_with(REDIRECT), "got {loc}");
+    assert_eq!(
+        redirect_param(loc, "error", true).as_deref(),
+        Some(error),
+        "the error must travel in the fragment; got {loc}"
+    );
+    assert_eq!(redirect_param(loc, "state", true).as_deref(), Some(state));
+    assert!(
+        redirect_param(loc, "error", false).is_none(),
+        "no error in the query string; got {loc}"
+    );
+}
+
+#[tokio::test]
+async fn plain_prompt_none_error_uses_the_fragment_response_mode() {
+    let rig = rig(false).await;
+    let client = register(&rig, true, None);
+    let uri = plain_uri(&client, "&prompt=none&response_mode=fragment");
+    let resp = get(&rig, &uri, &session_cookie(&rig)).await;
+    assert_fragment_error(&location(&resp), "consent_required", "plain-state");
+}
+
+#[tokio::test]
+async fn jar_prompt_none_error_uses_the_fragment_response_mode() {
+    let rig = rig(false).await;
+    let (client, pair) = jar_client(&rig, true);
+    let uri = jar_uri(
+        &rig,
+        &client,
+        &pair,
+        &serde_json::json!({ "prompt": "none", "response_mode": "fragment" }),
+        "",
+    );
+    let resp = get(&rig, &uri, &session_cookie(&rig)).await;
+    assert_fragment_error(&location(&resp), "consent_required", "jar-state");
+}
+
+#[tokio::test]
+async fn par_prompt_none_error_uses_the_fragment_response_mode() {
+    let rig = rig(false).await;
+    let client = register(&rig, true, None);
+    let mut request = par_request(&client);
+    request.prompt = Some("none".to_string());
+    request.response_mode = Some("fragment".to_string());
+    let resp = get(&rig, &push(&rig, &request), &session_cookie(&rig)).await;
+    assert_fragment_error(&location(&resp), "consent_required", "par-state");
+}
+
+#[tokio::test]
+async fn consent_denial_uses_the_fragment_response_mode() {
+    let rig = rig(false).await;
+    let client = register(&rig, true, None);
+    let uri = par_uri(&rig, &client, Some("fragment"), None);
+    let cookies = session_cookie(&rig);
+    let resp = get(&rig, &uri, &cookies).await;
+    assert_consent_prompt(&resp, "PAR fragment");
+    let resp = decide_consent(&rig, &cookies, &resp, "deny").await;
+    assert_fragment_error(&location(&resp), "access_denied", "par-state");
+}
+
+/// A request validation error on the plain branch, once the redirect URI is
+/// confirmed, also goes where the request asked.
+#[tokio::test]
+async fn plain_request_error_uses_the_fragment_response_mode() {
+    let rig = rig(false).await;
+    let client = register(&rig, false, None);
+    let uri = format!(
+        "/ui/oauth/authorize?client_id={}&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb\
+         &response_type=code&scope=openid&state=plain-state&code_challenge={}\
+         &code_challenge_method=plain&response_mode=fragment",
+        client.client_id().as_uuid(),
+        pkce_challenge()
+    );
+    let resp = get(&rig, &uri, &session_cookie(&rig)).await;
+    assert_fragment_error(&location(&resp), "invalid_request", "plain-state");
+}
+
+/// `query.jwt` asked by a client with no registered signing alg: the error
+/// is a signed `?response=` JWT, as the code would have been.
+#[tokio::test]
+async fn jar_prompt_none_error_uses_the_query_jwt_response_mode() {
+    let rig = rig(false).await;
+    let (client, pair) = jar_client(&rig, true);
+    assert!(client.authorization_signed_response_alg().is_none());
+    let uri = jar_uri(
+        &rig,
+        &client,
+        &pair,
+        &serde_json::json!({ "prompt": "none", "response_mode": "query.jwt" }),
+        "",
+    );
+    let resp = get(&rig, &uri, &session_cookie(&rig)).await;
+    let loc = location(&resp);
+    assert!(
+        redirect_param(&loc, "error", false).is_none(),
+        "a JARM request must not get a plain error; got {loc}"
+    );
+    let jwt = redirect_param(&loc, "response", false)
+        .unwrap_or_else(|| panic!("query.jwt must deliver ?response=<jwt>; got {loc}"));
+    let claims = jwt_claims(&jwt);
+    assert_eq!(claims["error"], "consent_required", "claims {claims}");
+    assert_eq!(claims["state"], "jar-state", "claims {claims}");
+}
+
+#[tokio::test]
+async fn par_prompt_none_error_uses_the_fragment_jwt_response_mode() {
+    let rig = rig(false).await;
+    let client = register(&rig, true, None);
+    let mut request = par_request(&client);
+    request.prompt = Some("none".to_string());
+    request.response_mode = Some("fragment.jwt".to_string());
+    let resp = get(&rig, &push(&rig, &request), &session_cookie(&rig)).await;
+    let loc = location(&resp);
+    assert!(
+        redirect_param(&loc, "response", false).is_none()
+            && redirect_param(&loc, "error", false).is_none(),
+        "nothing in the query string; got {loc}"
+    );
+    let jwt = redirect_param(&loc, "response", true)
+        .unwrap_or_else(|| panic!("fragment.jwt must deliver #response=<jwt>; got {loc}"));
+    let claims = jwt_claims(&jwt);
+    assert_eq!(claims["error"], "consent_required", "claims {claims}");
+    assert_eq!(claims["state"], "par-state", "claims {claims}");
 }
 
 // ===========================================================================

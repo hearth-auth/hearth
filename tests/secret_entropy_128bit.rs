@@ -168,6 +168,7 @@ fn par_request_uri_carries_128_bits() {
                     nonce: None,
                     request: None,
                     response_mode: None,
+                    prompt: None,
                 },
             )
             .expect("push_authorization_request");

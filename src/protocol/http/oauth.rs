@@ -1382,6 +1382,9 @@ struct HttpParRequest {
     /// Signed JAR JWT (RFC 9101) — required for FAPI Advanced.
     request: Option<String>,
     response_mode: Option<String>,
+    /// OIDC `prompt` (`none`, `consent`). The authorize endpoint ignores a
+    /// `prompt` beside `request_uri`, so it must be pushed here.
+    prompt: Option<String>,
 }
 
 fn default_response_type() -> String {
@@ -1456,6 +1459,7 @@ async fn par_handler(
         nonce: body.nonce,
         request: body.request,
         response_mode: body.response_mode,
+        prompt: body.prompt,
     };
 
     match state

@@ -37,7 +37,7 @@ use crate::identity::{
 use super::handlers::append_cookie;
 use super::handlers_common;
 use super::oauth_consent::{
-    build_authorization_redirect, issue_ticket_cookie, jarm_aware_error_redirect,
+    authorization_error_redirect, build_authorization_redirect, issue_ticket_cookie, ErrorReturn,
     CONSENT_TICKET_TTL_SECS,
 };
 use super::WebState;
@@ -213,6 +213,15 @@ fn consent_gate(
         }
     };
     let client_id_str = params.client_id.to_string();
+    // Errors go back the way the code would have: in the request's
+    // response mode, signed when that mode (or the client) calls for JARM.
+    let error_return = ErrorReturn {
+        client_id: &params.client_id,
+        redirect_uri: &params.redirect_uri,
+        state: &params.state,
+        response_mode: params.response_mode.as_ref(),
+        jarm_alg: client.authorization_signed_response_alg(),
+    };
 
     let requested_scopes = canonicalize_scopes(
         params
@@ -251,15 +260,12 @@ fn consent_gate(
             .identity
             .check_silent_auth_probe(realm, user_id, &client_id_str, outcome)
         {
-            return jarm_aware_error_redirect(
+            return authorization_error_redirect(
                 state,
                 realm,
-                &client_id_str,
-                &params.redirect_uri,
+                &error_return,
                 "login_required",
                 "silent auth rate limit exceeded",
-                &params.state,
-                client.authorization_signed_response_alg(),
             );
         }
     }
@@ -277,15 +283,12 @@ fn consent_gate(
     }
 
     if silent_only {
-        return jarm_aware_error_redirect(
+        return authorization_error_redirect(
             state,
             realm,
-            &client_id_str,
-            &params.redirect_uri,
+            &error_return,
             "consent_required",
             "user consent required",
-            &params.state,
-            client.authorization_signed_response_alg(),
         );
     }
 

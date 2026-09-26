@@ -25160,6 +25160,7 @@ mod tests {
             nonce: None,
             request: None,
             response_mode: None,
+            prompt: None,
         }
     }
 
