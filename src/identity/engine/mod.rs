@@ -4345,6 +4345,183 @@ impl EmbeddedIdentityEngine {
             .unwrap_or_else(|_| Arc::clone(&self.signing_key))
     }
 
+    /// Makes a change to a realm's stored key material visible: bumps the
+    /// persisted key epoch and evicts every key cache plus the memoized
+    /// token claims. Caller MUST hold `realm_ops_lock`.
+    fn publish_realm_key_change_locked(&self, realm_id: &RealmId) -> Result<(), IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        // Bump the rotation epoch *before* clearing the cache so a concurrent
+        // cache-miss fill that snapshotted the old epoch and read the outgoing
+        // key sees the change and discards its stale insert instead of
+        // resurrecting it past the `remove()` below (HEA-2096). Serialised by
+        // `realm_ops_lock`, so the read-then-write bump cannot lose an update.
+        //
+        // The epoch is also *persisted*, so it replicates with the key
+        // material and every other node can tell that its own cached key is
+        // stale. Read the stored value rather than the local one: on a node
+        // that has never rotated this realm the local counter is 0 and would
+        // hand back an epoch another node has already used (§4.15#6).
+        let next_epoch = self
+            .read_persisted_key_epoch(realm_id)
+            .max(self.realm_key_epoch.get(realm_id).unwrap_or(0))
+            .wrapping_add(1);
+        self.storage
+            .put(
+                &sys_realm,
+                &keys::encode_realm_key_epoch(realm_id),
+                &next_epoch.to_le_bytes(),
+            )
+            .map_err(Self::storage_err)?;
+        self.realm_key_epoch.insert(realm_id.clone(), next_epoch);
+
+        // Invalidate the active key cache so realm_jwks / token issuance pick up the new key.
+        self.realm_signing_keys.remove(realm_id);
+        // Invalidate the retiring-key cache so a just-retired key is picked up
+        // on the next validation (HEA-2090).
+        self.realm_retiring_keys.remove(realm_id);
+        // And the RS256 ID-token caches, for the same two reasons.
+        self.realm_id_token_rsa_keys.remove(realm_id);
+        self.realm_id_token_rsa_retiring_keys.remove(realm_id);
+        // Drop memoized claims: a token already validated under the outgoing key
+        // must be re-verified against the new key set, so an emergency rotation
+        // (grace 0) actually cuts it off instead of letting a warm cache entry
+        // carry it to its own `exp` (HEA-2093).
+        self.flush_token_claims_cache();
+        Ok(())
+    }
+
+    /// Whether the reserved system realm holds at least one user record.
+    ///
+    /// A system realm with no user is the state engine construction seeds
+    /// (`seed_system_realm_if_absent`): a record and a freshly generated key
+    /// that has signed nothing, because only a system-realm user can be issued
+    /// a system-realm token. A restore treats such a realm as absent.
+    fn system_realm_has_users(&self) -> Result<bool, IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        let prefix = keys::user_id_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(&sys_realm, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        Ok(!entries.is_empty())
+    }
+
+    /// Writes one imported user (and its credential) into `realm_id` with
+    /// `create_user`'s validation rules. Shared by `import_user` (tenant
+    /// realms) and `import_admin_user` (the system realm); the system-realm
+    /// guard lives in the callers.
+    fn import_user_record(
+        &self,
+        realm_id: &RealmId,
+        request: &ImportUserRequest,
+    ) -> Result<User, IdentityError> {
+        // 1. Validate and normalize input (same invariants as create_user)
+        let email = validation::validate_email(&request.email)?;
+        let first_name = validation::validate_name_part(&request.first_name, "First name")?;
+        let last_name = validation::validate_name_part(&request.last_name, "Last name")?;
+        let display_name = if request.display_name.trim().is_empty() {
+            let synthesized = format!("{} {}", first_name, last_name).trim().to_string();
+            if synthesized.is_empty() {
+                return Err(IdentityError::InvalidInput {
+                    reason: "Display name or first/last name is required".to_string(),
+                });
+            }
+            validation::validate_display_name(&synthesized)?
+        } else {
+            validation::validate_display_name(&request.display_name)?
+        };
+
+        // 2. Check email uniqueness
+        let email_key = keys::encode_user_email(&email);
+        if self
+            .storage
+            .get(realm_id, &email_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::DuplicateEmail);
+        }
+
+        // 3. Resolve user id — allow caller to preserve a foreign UUID,
+        //    but refuse to clobber an existing record at that id.
+        let user_id = request.id.clone().unwrap_or_else(UserId::generate);
+        let id_key = keys::encode_user_id(&user_id);
+        if self
+            .storage
+            .get(realm_id, &id_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::InvalidInput {
+                reason: "a user with this id already exists".to_string(),
+            });
+        }
+
+        let now = self.clock.now();
+        // Imports preserve the source state; required_actions are not inferred from realm defaults.
+        let mut user = User::new(
+            user_id.clone(),
+            email.clone(),
+            display_name,
+            first_name,
+            last_name,
+            request.status,
+            Vec::new(),
+            now,
+            now,
+        );
+
+        if !request.attributes.is_empty() {
+            Self::validate_user_attributes(&request.attributes)?;
+            user.set_attributes(request.attributes.clone());
+        }
+
+        let user_bytes = Self::serialize_user(&user)?;
+        let user_id_bytes = keys::encode_user_id_value(&user_id);
+
+        // 4. If a credential was supplied, derive the algorithm from the
+        //    PHC prefix and prepare the credential write as part of the
+        //    same atomic batch. Preserving the foreign hash verbatim lets
+        //    the user authenticate with their existing password; the next
+        //    successful verify will auto-upgrade to Argon2id.
+        let mut entries = Vec::with_capacity(3);
+        entries.push((email_key, user_id_bytes));
+        entries.push((id_key, user_bytes));
+
+        if let Some(raw) = &request.credential {
+            let algorithm = classify_phc_algorithm(&raw.phc_string).ok_or_else(|| {
+                IdentityError::InvalidInput {
+                    reason: "unrecognized password hash format".to_string(),
+                }
+            })?;
+            let created_at = raw.created_at_micros.unwrap_or_else(|| now.as_micros());
+            let stored = StoredCredential {
+                algorithm,
+                hash: raw.phc_string.clone(),
+                created_at,
+                pepper_version: None,
+            };
+            let cred_bytes = Self::serialize_credential(&stored)?;
+            let cred_key = keys::encode_credential_key(&user_id);
+            entries.push((cred_key, cred_bytes));
+        }
+
+        self.storage
+            .put_batch(realm_id, &entries)
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::UserCreated,
+            "user",
+            &user_id.as_uuid().to_string(),
+        )?;
+
+        Ok(user)
+    }
+
     /// Verifies a JWT signature against the realm-specific signing key, falling
     /// back to any non-expired retiring key from a recent rotation.
     ///
@@ -7251,43 +7428,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             revoking,
         )?;
 
-        // Bump the rotation epoch *before* clearing the cache so a concurrent
-        // cache-miss fill that snapshotted the old epoch and read the outgoing
-        // key sees the change and discards its stale insert instead of
-        // resurrecting it past the `remove()` below (HEA-2096). Serialised by
-        // `realm_ops_lock`, so the read-then-write bump cannot lose an update.
-        //
-        // The epoch is also *persisted*, so it replicates with the key
-        // material and every other node can tell that its own cached key is
-        // stale. Read the stored value rather than the local one: on a node
-        // that has never rotated this realm the local counter is 0 and would
-        // hand back an epoch another node has already used (§4.15#6).
-        let next_epoch = self
-            .read_persisted_key_epoch(realm_id)
-            .max(self.realm_key_epoch.get(realm_id).unwrap_or(0))
-            .wrapping_add(1);
-        self.storage
-            .put(
-                &sys_realm,
-                &keys::encode_realm_key_epoch(realm_id),
-                &next_epoch.to_le_bytes(),
-            )
-            .map_err(Self::storage_err)?;
-        self.realm_key_epoch.insert(realm_id.clone(), next_epoch);
-
-        // Invalidate the active key cache so realm_jwks / token issuance pick up the new key.
-        self.realm_signing_keys.remove(realm_id);
-        // Invalidate the retiring-key cache so the just-retired key is picked up
-        // on the next validation (HEA-2090).
-        self.realm_retiring_keys.remove(realm_id);
-        // And the RS256 ID-token caches, for the same two reasons.
-        self.realm_id_token_rsa_keys.remove(realm_id);
-        self.realm_id_token_rsa_retiring_keys.remove(realm_id);
-        // Drop memoized claims: a token already validated under the outgoing key
-        // must be re-verified against the new key set, so an emergency rotation
-        // (grace 0) actually cuts it off instead of letting a warm cache entry
-        // carry it to its own `exp` (HEA-2093).
-        self.flush_token_claims_cache();
+        self.publish_realm_key_change_locked(realm_id)?;
 
         let (rsa_old_kid, rsa_new_kid) = match &rsa_rotation {
             Some((old, new)) => (old.clone().unwrap_or_default(), new.clone()),
@@ -11709,115 +11850,72 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &ImportUserRequest,
     ) -> Result<User, IdentityError> {
+        // The system realm is reached only through `import_admin_user`, the
+        // restore twin of `create_admin_user`.
         if keys::is_system_realm(realm_id) {
             return Err(IdentityError::SystemRealmProtected {
                 operation: "import_user",
             });
         }
-        // 1. Validate and normalize input (same invariants as create_user)
-        let email = validation::validate_email(&request.email)?;
-        let first_name = validation::validate_name_part(&request.first_name, "First name")?;
-        let last_name = validation::validate_name_part(&request.last_name, "Last name")?;
-        let display_name = if request.display_name.trim().is_empty() {
-            let synthesized = format!("{} {}", first_name, last_name).trim().to_string();
-            if synthesized.is_empty() {
-                return Err(IdentityError::InvalidInput {
-                    reason: "Display name or first/last name is required".to_string(),
-                });
-            }
-            validation::validate_display_name(&synthesized)?
-        } else {
-            validation::validate_display_name(&request.display_name)?
-        };
+        self.import_user_record(realm_id, request)
+    }
 
-        // 2. Check email uniqueness
-        let email_key = keys::encode_user_email(&email);
-        if self
-            .storage
-            .get(realm_id, &email_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            return Err(IdentityError::DuplicateEmail);
+    fn import_admin_user(&self, request: &ImportUserRequest) -> Result<User, IdentityError> {
+        // Bypasses the `import_user` system-realm guard deliberately, exactly
+        // as `create_admin_user` bypasses `create_user`'s. Every validation
+        // rule is shared: both go through `import_user_record`.
+        self.import_user_record(&keys::system_realm_id(), request)
+    }
+
+    fn import_system_realm_signing_key(
+        &self,
+        pkcs8: &[u8],
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        // Refuse material that does not load before touching anything.
+        let archived = SigningKey::from_pkcs8(pkcs8)?;
+        let sys_realm = keys::system_realm_id();
+        let _ops_guard = self.realm_ops_lock.lock().expect("realm ops lock");
+
+        let current = self.get_or_load_realm_signing_key(&sys_realm)?;
+        if current.key_id() == archived.key_id() {
+            return Ok(ImportOutcome::Skipped);
+        }
+        // A system realm with no user holds only the key seeded at engine
+        // construction, which has signed nothing: it is replaced as if the
+        // realm were absent. A live one keeps its key unless the caller asked
+        // for an overwrite — the key every live operator token is signed with.
+        let pristine = !self.system_realm_has_users()?;
+        if !pristine && !overwrite {
+            return Ok(ImportOutcome::Skipped);
         }
 
-        // 3. Resolve user id — allow caller to preserve a foreign UUID,
-        //    but refuse to clobber an existing record at that id.
-        let user_id = request.id.clone().unwrap_or_else(UserId::generate);
-        let id_key = keys::encode_user_id(&user_id);
-        if self
-            .storage
-            .get(realm_id, &id_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            return Err(IdentityError::InvalidInput {
-                reason: "a user with this id already exists".to_string(),
-            });
-        }
-
-        let now = self.clock.now();
-        // Imports preserve the source state; required_actions are not inferred from realm defaults.
-        let mut user = User::new(
-            user_id.clone(),
-            email.clone(),
-            display_name,
-            first_name,
-            last_name,
-            request.status,
-            Vec::new(),
-            now,
-            now,
-        );
-
-        if !request.attributes.is_empty() {
-            Self::validate_user_attributes(&request.attributes)?;
-            user.set_attributes(request.attributes.clone());
-        }
-
-        let user_bytes = Self::serialize_user(&user)?;
-        let user_id_bytes = keys::encode_user_id_value(&user_id);
-
-        // 4. If a credential was supplied, derive the algorithm from the
-        //    PHC prefix and prepare the credential write as part of the
-        //    same atomic batch. Preserving the foreign hash verbatim lets
-        //    the user authenticate with their existing password; the next
-        //    successful verify will auto-upgrade to Argon2id.
-        let mut entries = Vec::with_capacity(3);
-        entries.push((email_key, user_id_bytes));
-        entries.push((id_key, user_bytes));
-
-        if let Some(raw) = &request.credential {
-            let algorithm = classify_phc_algorithm(&raw.phc_string).ok_or_else(|| {
-                IdentityError::InvalidInput {
-                    reason: "unrecognized password hash format".to_string(),
-                }
-            })?;
-            let created_at = raw.created_at_micros.unwrap_or_else(|| now.as_micros());
-            let stored = StoredCredential {
-                algorithm,
-                hash: raw.phc_string.clone(),
-                created_at,
-                pepper_version: None,
-            };
-            let cred_bytes = Self::serialize_credential(&stored)?;
-            let cred_key = keys::encode_credential_key(&user_id);
-            entries.push((cred_key, cred_bytes));
-        }
-
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        let plaintext = Zeroizing::new(archived.pkcs8_bytes().to_vec());
+        let stored = crate::identity::key_encryption::wrap_key(&plaintext, kek)?;
         self.storage
-            .put_batch(realm_id, &entries)
+            .put(
+                &sys_realm,
+                &keys::encode_realm_signing_key(&sys_realm),
+                &stored,
+            )
             .map_err(Self::storage_err)?;
-
-        self.record_audit(
-            realm_id,
-            None,
-            AuditAction::UserCreated,
-            "user",
-            &user_id.as_uuid().to_string(),
-        )?;
-
-        Ok(user)
+        self.publish_realm_key_change_locked(&sys_realm)?;
+        tracing::warn!(
+            new_kid = %archived.key_id(),
+            replaced_kid = %current.key_id(),
+            pristine,
+            "system realm signing key restored from a backup archive"
+        );
+        Ok(if pristine {
+            ImportOutcome::Created
+        } else {
+            ImportOutcome::Overwritten
+        })
     }
 
     #[allow(clippy::too_many_lines)]

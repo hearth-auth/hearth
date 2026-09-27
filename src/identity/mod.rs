@@ -2000,6 +2000,42 @@ pub trait IdentityEngine: Send + Sync {
         request: &ImportUserRequest,
     ) -> Result<User, IdentityError>;
 
+    /// Imports a user into the reserved system realm — the restore twin of
+    /// [`create_admin_user`](Self::create_admin_user).
+    ///
+    /// Applies exactly `import_user`'s validation; only the system-realm
+    /// guard is bypassed. This is the sole path by which a backup restore
+    /// writes an operator account. It performs no authorization: the caller
+    /// (the backup importer, driven by the CLI or by a system-realm HTTP
+    /// caller) is responsible for having established system-realm authority.
+    /// It does not grant any role; restored role assignments do.
+    fn import_admin_user(&self, request: &ImportUserRequest) -> Result<User, IdentityError>;
+
+    /// Installs a restored system-realm Ed25519 signing key, re-sealed under
+    /// **this** node's KEK.
+    ///
+    /// The system realm always exists — engine construction seeds it with a
+    /// fresh key — so its key cannot travel with an `import_realm` call the
+    /// way a tenant realm's does. Outcome:
+    ///
+    /// - [`ImportOutcome::Skipped`] when the archived key is already the
+    ///   active one, or when the system realm holds operator accounts and
+    ///   `overwrite` is `false`: a live system realm keeps the key its live
+    ///   tokens are signed with.
+    /// - [`ImportOutcome::Created`] when the system realm holds no user (the
+    ///   seeded state, whose key has signed nothing): the archived key
+    ///   replaces the seeded one, so tokens issued before the backup verify.
+    /// - [`ImportOutcome::Overwritten`] when `overwrite` replaced a live key.
+    ///   Tokens signed by the replaced key stop verifying at once.
+    ///
+    /// A replacement bumps the persisted key epoch and evicts every key cache,
+    /// as a rotation does. Material that does not load is refused.
+    fn import_system_realm_signing_key(
+        &self,
+        pkcs8: &[u8],
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
     /// Imports an OAuth 2.0 client: from an external system, a Hearth
     /// backup, or `hearth.yaml` reconciliation.
     ///

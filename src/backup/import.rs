@@ -649,7 +649,21 @@ impl BackupImporter {
             config: Some(realm.config().clone()),
         };
 
-        let restored_realm_id = if opts.dry_run {
+        let restored_realm_id = if realm_id.as_uuid().is_nil() {
+            // The system realm (operator-console accounts). It exists in every
+            // store — engine construction seeds it — so there is no realm
+            // record to create; its contents are imported into it below, with
+            // the same member importers and validation as any other realm.
+            // Only its signing key needs its own path. Reaching this point
+            // already required system-realm authority: a caller scoped to a
+            // tenant realm was refused by the `allowed_realm` check above.
+            self.restore_system_realm_key(
+                signing_key_pkcs8.as_ref().map(|z| z.as_slice()),
+                opts,
+                &mut report,
+            )?;
+            realm_id
+        } else if opts.dry_run {
             // A dry run reports what the real restore would do. An overwrite
             // over a live realm is refused (B3), so the dry run must refuse
             // too rather than report a success the restore would not deliver
@@ -1097,6 +1111,66 @@ impl BackupImporter {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
+    /// Restores the system realm's signing key, reported in `report.realms`
+    /// (the system realm's record is implicit, so its key IS its realm-level
+    /// outcome).
+    ///
+    /// The engine replaces the key only when the target's system realm holds
+    /// no operator account (the freshly seeded state of a rebuilt data
+    /// directory) or when `opts.mode` is `Overwrite`; otherwise the live key is
+    /// kept and the conflict reported. With no archived key (possible only
+    /// under `allow_missing_signing_key`, checked by the caller) the target's
+    /// key is kept.
+    fn restore_system_realm_key(
+        &self,
+        pkcs8: Option<&[u8]>,
+        opts: &ImportOptions,
+        report: &mut ImportReport,
+    ) -> Result<(), BackupError> {
+        let Some(pkcs8) = pkcs8 else {
+            report.realms.skipped += 1;
+            report.conflicts.push(Conflict {
+                entity_type: "realm".to_string(),
+                identifier: crate::identity::keys::SYSTEM_REALM_NAME.to_string(),
+                reason: "the archive carries no system signing key; the target's system \
+                         signing key was kept (allow_missing_signing_key)"
+                    .to_string(),
+            });
+            return Ok(());
+        };
+        if opts.dry_run {
+            report.realms.created += 1;
+            return Ok(());
+        }
+        match self
+            .identity
+            .import_system_realm_signing_key(pkcs8, opts.mode == RestoreMode::Overwrite)
+        {
+            Ok(ImportOutcome::Skipped) => {
+                report.realms.skipped += 1;
+                report.conflicts.push(Conflict {
+                    entity_type: "realm".to_string(),
+                    identifier: crate::identity::keys::SYSTEM_REALM_NAME.to_string(),
+                    reason: "the target's system signing key was kept: it is already the \
+                             archived key, or the system realm holds operator accounts \
+                             (restore in overwrite mode to replace it)"
+                        .to_string(),
+                });
+                Ok(())
+            }
+            Ok(outcome) => {
+                tally(&mut report.realms, outcome);
+                Ok(())
+            }
+            Err(e) => {
+                report.realms.errored += 1;
+                Err(BackupError::Engine(format!(
+                    "system realm signing key not restored: {e}"
+                )))
+            }
+        }
+    }
+
     fn import_realm_record(
         &self,
         req: &CreateRealmRequest,
@@ -1161,6 +1235,15 @@ impl BackupImporter {
         opts: &ImportOptions,
         report: &mut ImportReport,
     ) -> Result<(), BackupError> {
+        // Operator accounts go through `import_admin_user` — the only import
+        // path into the system realm, with `import_user`'s validation.
+        let import_one = |req: &ImportUserRequest| {
+            if realm_id.as_uuid().is_nil() {
+                self.identity.import_admin_user(req)
+            } else {
+                self.identity.import_user(realm_id, req)
+            }
+        };
         for line in ndjson.split(|&b| b == b'\n') {
             let line = trim_bytes(line);
             if line.is_empty() {
@@ -1186,7 +1269,7 @@ impl BackupImporter {
                 continue;
             }
 
-            match self.identity.import_user(realm_id, &req) {
+            match import_one(&req) {
                 Ok(_) => report.users.created += 1,
                 Err(IdentityError::DuplicateEmail) => {
                     match opts.mode {
@@ -1205,9 +1288,7 @@ impl BackupImporter {
                                     self.identity
                                         .delete_user(realm_id, existing.id())
                                         .map_err(identity_to_backup_err)?;
-                                    self.identity
-                                        .import_user(realm_id, &req)
-                                        .map_err(identity_to_backup_err)?;
+                                    import_one(&req).map_err(identity_to_backup_err)?;
                                     report.users.overwritten += 1;
                                 }
                                 Ok(None) => {
