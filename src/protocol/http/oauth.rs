@@ -1415,16 +1415,12 @@ async fn register_client_dynamic(
         Err(description) => return dcr_invalid_metadata(description),
     }
 
-    // Generate server-side random secret.
-    use base64::Engine as _;
-    use ring::rand::SecureRandom;
-    let rng = ring::rand::SystemRandom::new();
-    let mut secret_bytes = [0u8; 32];
-    #[allow(clippy::unwrap_used)]
-    // INVARIANT: SystemRandom::fill fails only on catastrophic OS RNG failure.
-    rng.fill(&mut secret_bytes).unwrap();
-    let generated_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret_bytes);
-    request.client_secret = Some(generated_secret.clone());
+    // Generate a server-side random secret (256 CSPRNG bits). It travels as a
+    // `GeneratedClientSecret`, which is what lets the engine store it as a fast
+    // SHA-256 digest rather than an Argon2id hash.
+    let generated = crate::identity::GeneratedClientSecret::generate();
+    let generated_secret = generated.expose().to_string();
+    request.generated_client_secret = Some(generated);
 
     // Force ThirdParty trust and consent for DCR-registered clients.
     request.trust_level = crate::identity::ClientTrustLevel::ThirdParty;
@@ -3811,6 +3807,7 @@ async fn realm_register_client_dynamic(
         redirect_uris,
         cors_origins: Vec::new(),
         client_secret: None,
+        generated_client_secret: None,
         grant_types,
         require_consent: true,
         client_logo_url: None,

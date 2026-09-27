@@ -18912,12 +18912,19 @@ mod tests {
 
     // ----- 22.25: client-authentication timing parity (§4.25#3) -----
     //
-    // Measured by COUNTING Argon2 verifications, never by wall clock. The
-    // property is structural: how much hashing happens must depend only on
-    // whether the caller presented a secret, never on whether the client
-    // exists or what type it is.
+    // Measured by COUNTING verifications, never by wall clock. The property is
+    // structural: how much hashing happens must depend only on whether the
+    // caller presented a secret, never on whether the client exists or what
+    // type it is.
+    //
+    // 26.43 follow-up: a Hearth-GENERATED secret is stored as a SHA-256 digest,
+    // so the common arm is one fast verification and zero Argon2id runs, and
+    // the unknown / public arms must match THAT — an Argon2id dummy there
+    // would both reveal existence and keep the amplification on random ids.
 
-    /// Registers a confidential client (one with a stored secret hash).
+    /// Registers a confidential client whose secret the CALLER chose (the gRPC
+    /// shape). Unknown entropy, so it is stored as Argon2id — the same cost
+    /// class as a legacy pre-fast-hash secret.
     fn register_confidential_client(
         engine: &EmbeddedIdentityEngine,
         realm: &RealmId,
@@ -18939,37 +18946,82 @@ mod tests {
             .expect("register confidential client")
     }
 
-    /// Runs `f` and returns how many hash verifications it performed.
-    fn hashes_during(f: impl FnOnce()) -> u64 {
-        let before = credentials::hash_verification_count();
+    /// Registers a confidential client with a Hearth-generated secret — what
+    /// `POST /register`, the console, and secret rotation produce.
+    fn register_generated_client(
+        engine: &EmbeddedIdentityEngine,
+        realm: &RealmId,
+    ) -> (OAuthClient, crate::identity::GeneratedClientSecret) {
+        let secret = crate::identity::GeneratedClientSecret::generate();
+        let client = engine
+            .register_client(
+                realm,
+                &RegisterClientRequest {
+                    client_name: "Generated-Secret App".to_string(),
+                    redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                    generated_client_secret: Some(secret.clone()),
+                    grant_types: vec!["authorization_code".to_string()],
+                    ..Default::default()
+                },
+            )
+            .expect("register generated-secret client");
+        (client, secret)
+    }
+
+    /// Runs `f`, returning `(argon2_verifications, fast_verifications)`.
+    fn secret_work(f: impl FnOnce()) -> (u64, u64) {
+        let slow = credentials::hash_verification_count();
+        let fast = credentials::fast_secret_verification_count();
         f();
-        credentials::hash_verification_count() - before
+        (
+            credentials::hash_verification_count() - slow,
+            credentials::fast_secret_verification_count() - fast,
+        )
+    }
+
+    /// Reads a client's stored secret hash back out of storage.
+    fn stored_secret_hash(
+        engine: &EmbeddedIdentityEngine,
+        realm: &RealmId,
+        id: &ClientId,
+    ) -> String {
+        engine
+            .get_client(realm, id)
+            .expect("get client")
+            .expect("client exists")
+            .client_secret_hash()
+            .expect("confidential client has a hash")
+            .to_string()
     }
 
     /// The defect: an unknown `client_id` returned before any hashing while a
-    /// registered confidential client paid for one Argon2id verification, so
-    /// response time over an unauthenticated endpoint said whether the client
-    /// existed.
+    /// registered confidential client paid for a verification, so response
+    /// time over an unauthenticated endpoint said whether the client existed.
     #[test]
     fn unknown_and_registered_clients_hash_the_same_number_of_times() {
         let (_dir, engine, _clock) = setup_engine();
         let realm = create_test_realm(&engine);
-        let known = register_confidential_client(&engine, &realm, "the-real-secret");
+        let (known, _secret) = register_generated_client(&engine, &realm);
         let unknown = ClientId::generate();
 
-        let known_hashes = hashes_during(|| {
+        let known_work = secret_work(|| {
             let r = engine.authenticate_client(&realm, known.client_id(), Some("wrong-secret"));
             assert!(r.is_err(), "wrong secret must fail");
         });
-        let unknown_hashes = hashes_during(|| {
+        let unknown_work = secret_work(|| {
             let r = engine.authenticate_client(&realm, &unknown, Some("wrong-secret"));
             assert!(r.is_err(), "unknown client must fail");
         });
 
-        assert_eq!(known_hashes, 1, "a presented secret costs one verification");
         assert_eq!(
-            unknown_hashes, known_hashes,
-            "an unregistered client_id must cost the same hashing work as a              registered one, or response time enumerates clients"
+            known_work,
+            (0, 1),
+            "a presented secret costs one fast verification and no Argon2id"
+        );
+        assert_eq!(
+            unknown_work, known_work,
+            "an unregistered client_id must cost the same hashing work as a \
+             registered one, or response time enumerates clients"
         );
     }
 
@@ -18980,50 +19032,94 @@ mod tests {
         let (_dir, engine, _clock) = setup_engine();
         let realm = create_test_realm(&engine);
         let public = register_test_client(&engine, &realm); // client_secret: None
-        let confidential = register_confidential_client(&engine, &realm, "s3cret");
+        let (confidential, _secret) = register_generated_client(&engine, &realm);
 
-        let public_hashes = hashes_during(|| {
+        let public_work = secret_work(|| {
             drop(engine.authenticate_client(&realm, public.client_id(), Some("x")));
         });
-        let conf_hashes = hashes_during(|| {
+        let conf_work = secret_work(|| {
             drop(engine.authenticate_client(&realm, confidential.client_id(), Some("x")));
         });
 
         assert_eq!(
-            public_hashes, conf_hashes,
+            public_work, conf_work,
             "client type must not be readable from hashing work"
         );
-        assert_eq!(public_hashes, 1);
+        assert_eq!(public_work, (0, 1));
+    }
+
+    /// The introspection endpoint's confidential-only twin keeps the same
+    /// rule on every arm, and never spends Argon2id on a fast client.
+    #[test]
+    fn confidential_only_auth_does_equal_fast_work_on_every_arm() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let public = register_test_client(&engine, &realm);
+        let (conf, secret) = register_generated_client(&engine, &realm);
+        let unknown = ClientId::generate();
+
+        for (label, id, presented, ok) in [
+            ("right secret", conf.client_id(), secret.expose(), true),
+            ("wrong secret", conf.client_id(), "wrong", false),
+            ("public", public.client_id(), "x", false),
+            ("unknown", &unknown, "x", false),
+        ] {
+            let work = secret_work(|| {
+                let r = engine.authenticate_confidential_client(&realm, id, Some(presented));
+                assert_eq!(r.is_ok(), ok, "{label}: decision");
+            });
+            assert_eq!(work, (0, 1), "{label}: one fast verification, no Argon2id");
+        }
     }
 
     /// The other half of the rule: presenting no secret costs no hashing on
-    /// any arm, so the public-client token path stays off Argon2id.
+    /// any arm, so the public-client token path stays off every hash.
     #[test]
     fn omitting_the_secret_costs_no_hashing_on_any_arm() {
         let (_dir, engine, _clock) = setup_engine();
         let realm = create_test_realm(&engine);
         let public = register_test_client(&engine, &realm);
         let confidential = register_confidential_client(&engine, &realm, "s3cret");
+        let (generated, _secret) = register_generated_client(&engine, &realm);
         let unknown = ClientId::generate();
 
         for (label, id) in [
             ("public", public.client_id()),
-            ("confidential", confidential.client_id()),
+            ("confidential (argon2)", confidential.client_id()),
+            ("confidential (fast)", generated.client_id()),
             ("unknown", &unknown),
         ] {
-            let n = hashes_during(|| drop(engine.authenticate_client(&realm, id, None)));
-            assert_eq!(n, 0, "{label}: no secret presented must cost no hashing");
+            let n = secret_work(|| drop(engine.authenticate_client(&realm, id, None)));
+            assert_eq!(
+                n,
+                (0, 0),
+                "{label}: no secret presented must cost no hashing"
+            );
         }
     }
 
-    /// The dummy hash used on the no-stored-hash arms costs what the realm's
-    /// real client secrets cost — otherwise the parity is only in the count.
+    /// A caller-chosen (or pre-existing Argon2id) secret keeps verifying, on
+    /// the Argon2id path. That arm is slower than the fast arms — a known,
+    /// documented residual: we cannot prove such a secret is high-entropy, so
+    /// it cannot move to the fast hash, and cannot be silently re-hashed.
     #[test]
-    fn client_auth_dummy_hash_uses_the_realms_argon2_parameters() {
+    fn caller_chosen_and_legacy_argon2_secrets_still_authenticate() {
         let (_dir, engine, _clock) = setup_engine();
-        let tuned = realm_with_argon2(&engine, 2048, 3);
-        let (m, t, _p) = argon2_params_of(&engine.dummy_hash_for_realm(&tuned));
-        assert_eq!((m, t), (2048, 3));
+        let realm = create_test_realm(&engine);
+        let client = register_confidential_client(&engine, &realm, "correct-horse");
+        assert!(
+            stored_secret_hash(&engine, &realm, client.client_id()).starts_with("$argon2id$"),
+            "a caller-chosen secret must stay on Argon2id"
+        );
+
+        let work = secret_work(|| {
+            assert!(engine
+                .authenticate_client(&realm, client.client_id(), Some("correct-horse"))
+                .is_ok());
+        });
+        assert_eq!(work, (1, 0));
+        // Not re-hashed on success: provenance is unprovable from the hash.
+        assert!(stored_secret_hash(&engine, &realm, client.client_id()).starts_with("$argon2id$"));
     }
 
     /// Correct credentials still authenticate, and wrong ones still do not —
@@ -19033,12 +19129,20 @@ mod tests {
         let (_dir, engine, _clock) = setup_engine();
         let realm = create_test_realm(&engine);
         let client = register_confidential_client(&engine, &realm, "correct-horse");
+        let (fast, fast_secret) = register_generated_client(&engine, &realm);
         let public = register_test_client(&engine, &realm);
         let unknown = ClientId::generate();
 
         assert!(engine
             .authenticate_client(&realm, client.client_id(), Some("correct-horse"))
             .is_ok());
+        assert!(engine
+            .authenticate_client(&realm, fast.client_id(), Some(fast_secret.expose()))
+            .is_ok());
+        assert!(matches!(
+            engine.authenticate_client(&realm, fast.client_id(), Some("correct-horse")),
+            Err(IdentityError::InvalidClientSecret)
+        ));
         assert!(matches!(
             engine.authenticate_client(&realm, client.client_id(), Some("wrong")),
             Err(IdentityError::InvalidClientSecret)
@@ -19063,6 +19167,84 @@ mod tests {
         assert!(engine
             .authenticate_client(&realm, public.client_id(), Some("stray"))
             .is_ok());
+    }
+
+    // ----- 26.43 follow-up: fast hashing for Hearth-generated secrets -----
+
+    #[test]
+    fn a_generated_secret_is_stored_in_the_fast_format() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let (client, secret) = register_generated_client(&engine, &realm);
+        let stored = stored_secret_hash(&engine, &realm, client.client_id());
+        assert!(
+            stored.starts_with(credentials::FAST_CLIENT_SECRET_PREFIX),
+            "got {stored:?}"
+        );
+        assert!(!stored.contains(secret.expose()));
+    }
+
+    #[test]
+    fn a_caller_chosen_secret_is_stored_as_argon2id() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let client = register_confidential_client(&engine, &realm, "password1");
+        assert!(stored_secret_hash(&engine, &realm, client.client_id()).starts_with("$argon2id$"));
+    }
+
+    #[test]
+    fn registering_with_both_secret_kinds_is_refused() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let r = engine.register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "Ambiguous".to_string(),
+                redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                client_secret: Some("chosen".to_string()),
+                generated_client_secret: Some(crate::identity::GeneratedClientSecret::generate()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(r, Err(IdentityError::InvalidInput { .. })),
+            "got {r:?}"
+        );
+    }
+
+    /// Rotation moves a client onto the fast format — including one whose
+    /// previous secret was a legacy Argon2id hash — and the new secret carries
+    /// 256 bits.
+    #[test]
+    fn regenerating_a_secret_produces_the_fast_format() {
+        use base64::Engine as _;
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let client = register_confidential_client(&engine, &realm, "legacy-secret");
+
+        let fresh = engine
+            .regenerate_client_secret(&realm, client.client_id())
+            .expect("regenerate");
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&fresh)
+            .expect("base64url");
+        assert_eq!(raw.len(), 32, "a rotated secret must carry 256 bits");
+        assert!(stored_secret_hash(&engine, &realm, client.client_id())
+            .starts_with(credentials::FAST_CLIENT_SECRET_PREFIX));
+
+        let work = secret_work(|| {
+            assert!(engine
+                .authenticate_client(&realm, client.client_id(), Some(&fresh))
+                .is_ok());
+            assert!(engine
+                .authenticate_client(&realm, client.client_id(), Some("legacy-secret"))
+                .is_err());
+        });
+        assert_eq!(
+            work,
+            (0, 2),
+            "rotated clients authenticate on the fast path"
+        );
     }
 
     // ----- 22.24: magic-link redemption honours registration_policy -----

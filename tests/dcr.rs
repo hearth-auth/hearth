@@ -90,6 +90,65 @@ async fn dcr_creates_client_with_server_secret() {
     );
 }
 
+// ===== Scenario D1b: DCR secrets are Hearth-generated and fast-hashed =====
+
+/// A DCR secret is minted by Hearth (256 CSPRNG bits), so it is stored as a
+/// fast SHA-256 digest, not Argon2id — every authenticated introspection
+/// verifies it, and an Argon2id run per call was a throughput collapse and a
+/// CPU/memory amplification vector. A secret the caller tries to choose in the
+/// body is ignored.
+#[tokio::test]
+async fn dcr_secret_is_generated_and_stored_in_the_fast_format() {
+    use base64::Engine as _;
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: "dcr-fast-hash".to_string(),
+            config: Some(open_dcr_realm_config()),
+        })
+        .expect("create realm");
+    let realm_id = realm.id().as_uuid().to_string();
+
+    let mut body = dcr_body("Fast App", &["https://app.example.com/cb"]);
+    body["client_secret"] = serde_json::json!("caller-chosen-weak");
+    let resp = build_app(&h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/register")
+                .header("X-Realm-ID", &realm_id)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .expect("req"),
+        )
+        .await
+        .expect("resp");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body_bytes = to_bytes(resp.into_body(), 1024 * 1024).await.expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("json");
+    let secret = body["client_secret"].as_str().expect("secret").to_string();
+    assert_ne!(
+        secret, "caller-chosen-weak",
+        "a caller-chosen secret is ignored"
+    );
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&secret)
+        .expect("base64url secret");
+    assert_eq!(raw.len(), 32, "256 bits of entropy");
+
+    let client_id: uuid::Uuid = body["client_id"].as_str().unwrap().parse().unwrap();
+    let stored = h
+        .identity()
+        .get_client(realm.id(), &hearth::core::ClientId::new(client_id))
+        .expect("get")
+        .expect("exists");
+    let hash = stored.client_secret_hash().expect("confidential");
+    assert!(hash.starts_with("$hearth-sha256$v=1$"), "got {hash:?}");
+    assert!(!hash.contains(&secret));
+}
+
 // ===== Scenario D2: DCR rejected when disabled =====
 
 #[tokio::test]

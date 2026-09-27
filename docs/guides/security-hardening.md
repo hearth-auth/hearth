@@ -140,8 +140,23 @@ data key of every WAL segment and SST for every realm.
 
 ### OAuth client secrets
 
-OAuth client secrets are stored as Argon2id hashes, not plaintext. Treat them like passwords:
-- Generate at least 32 bytes of cryptographically random material.
+OAuth client secrets are never stored in plaintext. How they are hashed depends on who chose them:
+
+- **Hearth-generated** secrets (`POST /register`, the console's new-application form, *Regenerate
+  secret*) are 32 bytes from the OS CSPRNG and are stored as an unsalted SHA-256 digest
+  (`$hearth-sha256$v=1$…`). Against a 256-bit random preimage a single SHA-256 is already
+  infeasible to invert, so a slow KDF adds nothing — and it would make every authenticated
+  introspection cost a full Argon2id run. Verification is one SHA-256 plus a constant-time compare.
+- **Caller-chosen** secrets (gRPC `RegisterClient`/`CreateApplication`, `hearth.yaml`
+  `applications[].client_secret`, migration import) may be low-entropy, so they are stored as
+  Argon2id hashes, like passwords. Secrets stored before the SHA-256 format existed are Argon2id
+  too and keep verifying. They are never re-hashed automatically — Hearth cannot tell from the hash
+  whether the secret was random. Regenerate the secret to move a client onto the fast format.
+  Authenticating such a client is slower than authenticating any other, which reveals that the
+  client exists to anyone timing the endpoint; prefer Hearth-generated secrets.
+
+Treat client secrets like passwords:
+- If you must supply your own, generate at least 32 bytes of cryptographically random material.
 - Rotate them immediately if compromised (Hearth supports multiple active secrets per client
   for zero-downtime rotation).
 

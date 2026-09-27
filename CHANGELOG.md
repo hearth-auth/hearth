@@ -50,6 +50,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `client_secret_post` or `private_key_jwt`. A public client or a wrong secret gets
   `401 invalid_client`. Discovery no longer lists `none` for introspection (task 26.43). **Breaking**
   for any public client that called `/introspect`.
+- **Hearth-generated client secrets are no longer Argon2id-hashed** — every authenticated
+  introspection verified the client secret with Argon2id, so each call cost a full KDF run: a
+  throughput collapse and a CPU/memory amplification vector. A secret Hearth mints itself
+  (`POST /register`, the console's new-application form, *Regenerate secret*) is now 256 bits from
+  the OS CSPRNG, stored as `$hearth-sha256$v=1$<base64 SHA-256>` and checked with one SHA-256 and a
+  constant-time compare. A caller-chosen secret (gRPC `RegisterClient`/`CreateApplication`,
+  `hearth.yaml` `applications[].client_secret`, Auth0/Keycloak import) stays on Argon2id, and
+  existing Argon2id hashes keep verifying; regenerate a secret to move a client onto the fast format.
+  An unknown or public `client_id` presenting a secret now costs one SHA-256, not an Argon2id run.
+  The console's generated secret was a 122-bit UUID; it is now 256 bits (task 26.43 follow-up).
 - **Revocation only affects the caller's own tokens (RFC 7009 §2.1)** — `POST /revoke`, its realm twin
   and gRPC `Revoke` revoke a token only when it was issued to the authenticated client; any other token
   is left untouched and the endpoint still answers `200`. A `private_key_jwt` client must present its

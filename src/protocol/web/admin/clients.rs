@@ -400,11 +400,11 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         grant_types.push("authorization_code".to_string());
     }
 
-    let client_secret = if form.client_type == "confidential" {
-        Some(uuid::Uuid::new_v4().to_string())
-    } else {
-        None
-    };
+    // A confidential client's secret is minted here, by Hearth: 256 CSPRNG
+    // bits (it used to be a 122-bit UUID v4), carried as a
+    // `GeneratedClientSecret` so the engine stores it in the fast format.
+    let generated_client_secret =
+        (form.client_type == "confidential").then(crate::identity::GeneratedClientSecret::generate);
 
     let trust_level = if form.trust_level == "first_party" {
         ClientTrustLevel::FirstParty
@@ -440,7 +440,8 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
     RegisterClientRequest {
         client_name: form.client_name.clone(),
         redirect_uris,
-        client_secret,
+        client_secret: None,
+        generated_client_secret,
         grant_types,
         require_consent: form.require_consent == "1",
         client_logo_url,
@@ -473,15 +474,13 @@ pub async fn admin_app_create_submit(
     }
 
     let req = parse_app_create_form(&form);
-    let client_secret = req.client_secret.clone();
+    let confidential = req.generated_client_secret.is_some();
     let realm_name = target.0.name().to_string();
 
     match state.identity.register_client(target.id(), &req) {
         Ok(client) => {
             audit_app_event(&state, &session, &target.0, client.client_id(), "create");
-            let secret_param = client_secret
-                .map(|_s| format!("?secret_shown=1"))
-                .unwrap_or_default();
+            let secret_param = if confidential { "?secret_shown=1" } else { "" };
             Redirect::to(&format!(
                 "/ui/admin/realms/{}/applications/{}{}",
                 realm_name,
@@ -981,5 +980,25 @@ mod tests {
             changed_id_token_alg("HS256", None).as_deref(),
             Some("HS256")
         );
+    }
+
+    /// The console mints a confidential client's secret itself, so it must be
+    /// a [`crate::identity::GeneratedClientSecret`] — 256 CSPRNG bits, stored
+    /// as a fast SHA-256 digest — never a caller-chosen `client_secret` (which
+    /// the engine must store as Argon2id). The old code minted a UUID v4:
+    /// 122 bits, and on the Argon2id path.
+    #[test]
+    fn confidential_create_form_uses_a_generated_client_secret() {
+        let base = "client_name=Console+App&redirect_uris=https%3A%2F%2Fapp.example.com%2Fcb";
+        let conf = parse_app_create_form(&create_form(&format!("{base}&client_type=confidential")));
+        assert!(
+            conf.client_secret.is_none(),
+            "a console-minted secret must not travel as a caller-chosen one"
+        );
+        assert!(conf.generated_client_secret.is_some());
+
+        let public = parse_app_create_form(&create_form(&format!("{base}&client_type=public")));
+        assert!(public.client_secret.is_none());
+        assert!(public.generated_client_secret.is_none());
     }
 }

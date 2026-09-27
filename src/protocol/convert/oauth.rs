@@ -65,7 +65,9 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             client_name: r.client_name,
             redirect_uris: r.redirect_uris,
             cors_origins: Vec::new(),
+            // Caller-chosen over the wire: unknown entropy, so Argon2id.
             client_secret: r.client_secret,
+            generated_client_secret: None,
             grant_types: if r.grant_types.is_empty() {
                 vec!["authorization_code".to_string()]
             } else {

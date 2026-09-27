@@ -417,7 +417,7 @@ Creates a new OAuth client. Body fields:
 | `client_name` | ✅ | Human-readable name |
 | `redirect_uris` | — | Allowed redirect URIs (required for `authorization_code` clients) |
 | `grant_types` | — | Array: `authorization_code`, `client_credentials`, `refresh_token`, `device_code` |
-| `client_secret` | — | Client secret (omit for public clients). Argon2id-hashed before storage. |
+| `client_secret` | — | Ignored: this endpoint registers public clients and discards any supplied secret (HEA-1750). A confidential client gets a Hearth-generated secret from DCR (`POST /register`) or the console's *Regenerate secret*. |
 | `access_token_authorization` | — | Authorization mode: `"EMBEDDED"` (default), `"INTROSPECTION"`, `"DECISION"` |
 | `trust_level` | — | `"first_party"` or `"third_party"` (default). `first_party` clients receive full roles, permissions, and groups claims in issued JWTs. `third_party` clients receive a minimal claim set and trigger the OAuth consent screen. |
 

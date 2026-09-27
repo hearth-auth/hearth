@@ -174,10 +174,23 @@ impl EmbeddedIdentityEngine {
             request.grant_types.clone()
         };
 
-        let mut client = if let Some(ref secret) = request.client_secret {
-            // Confidential client — hash the secret with Argon2id
-            let secret_hash =
-                credentials::hash_raw_secret(secret.as_bytes(), &self.config.credential)?;
+        let secret_hash = match (&request.client_secret, &request.generated_client_secret) {
+            (Some(_), Some(_)) => {
+                return Err(IdentityError::InvalidInput {
+                    reason: "client_secret and generated_client_secret are mutually exclusive"
+                        .to_string(),
+                });
+            }
+            // A caller-chosen secret has unknown entropy: Argon2id.
+            (Some(secret), None) => Some(credentials::hash_raw_secret(
+                secret.as_bytes(),
+                &self.config.credential,
+            )?),
+            // A Hearth-generated secret carries 256 CSPRNG bits: fast SHA-256.
+            (None, Some(generated)) => Some(credentials::hash_generated_client_secret(generated)),
+            (None, None) => None,
+        };
+        let mut client = if let Some(secret_hash) = secret_hash {
             OAuthClient::new_confidential(
                 client_id.clone(),
                 client_name,
@@ -1430,14 +1443,10 @@ impl EmbeddedIdentityEngine {
                 .as_deref()
                 .ok_or(IdentityError::InvalidClientSecret)?;
             // 22.25 (audit 2026-08-28 §4.25#3): a presented secret costs one
-            // Argon2id verification whatever the client turns out to be. A
+            // verification whatever the client turns out to be. A
             // client with no stored hash used to return before hashing, so the
             // response time told the caller the client's type.
-            if !self.verify_presented_client_secret(
-                realm_id,
-                client.client_secret_hash(),
-                secret,
-            )? {
+            if !Self::verify_presented_client_secret(client.client_secret_hash(), secret)? {
                 return Err(IdentityError::InvalidClientSecret);
             }
         }
@@ -3335,7 +3344,7 @@ impl EmbeddedIdentityEngine {
             })
             .transpose()?;
         let stored_hash = existing.as_ref().and_then(OAuthClient::client_secret_hash);
-        let matched = self.verify_presented_client_secret(realm_id, stored_hash, client_secret)?;
+        let matched = Self::verify_presented_client_secret(stored_hash, client_secret)?;
         // Only now is the outcome decided — every arm has already paid for the
         // same single verification.
         let Some(client) = existing.as_ref() else {
@@ -3348,28 +3357,35 @@ impl EmbeddedIdentityEngine {
     }
 
     /// Verifies a **presented** client secret, doing the same amount of
-    /// Argon2id work whether or not `stored_hash` exists (22.25).
+    /// work whether or not `stored_hash` exists (22.25).
     ///
-    /// When the client is unknown, or is a public client with no stored
-    /// secret, the verification runs against a dummy hash minted from this
-    /// realm's own `CredentialConfig` — same algorithm, same cost parameters,
-    /// same wall-clock cost as a real one — and the answer is `false`.
+    /// A stored hash is verified by its format
+    /// ([`credentials::verify_client_secret`]): a Hearth-generated secret is
+    /// one SHA-256, a caller-chosen or legacy one is Argon2id. When the client
+    /// is unknown, or is a public client with no stored secret, the presented
+    /// secret costs one FAST verification against a dummy — the cost of the
+    /// common, generated-secret arm — and the answer is `false`.
+    ///
+    /// The dummy is deliberately not Argon2id (26.43 follow-up). Every
+    /// server-issued secret is now on the fast format, so an Argon2id dummy
+    /// would make an unknown `client_id` measurably SLOWER than a real one
+    /// (the existence oracle 22.25 closed, inverted) and let anyone burn an
+    /// Argon2id run per request with random client ids. The residual: a
+    /// client still holding an Argon2id hash (caller-chosen via gRPC,
+    /// `hearth.yaml`, a migration import, or created before this change) is
+    /// slower to verify than the other arms, which reveals that such a client
+    /// exists. Rotating its secret moves it onto the fast format.
     ///
     /// Callers must decide the outcome *after* this returns; returning early
     /// on a missing client or missing hash is exactly the bug this closes.
     pub(super) fn verify_presented_client_secret(
-        &self,
-        realm_id: &RealmId,
         stored_hash: Option<&str>,
         presented: &str,
     ) -> Result<bool, IdentityError> {
         match stored_hash {
-            Some(hash) => credentials::verify_raw_secret(presented.as_bytes(), hash),
+            Some(hash) => credentials::verify_client_secret(presented.as_bytes(), hash),
             None => {
-                let dummy = self.dummy_hash_for_realm(realm_id);
-                // Result discarded on purpose: the work is the point, and a
-                // dummy hash can never match a caller-supplied secret.
-                let _ = credentials::verify_raw_secret(presented.as_bytes(), &dummy)?;
+                credentials::verify_dummy_client_secret(presented.as_bytes());
                 Ok(false)
             }
         }
@@ -3444,13 +3460,13 @@ impl EmbeddedIdentityEngine {
         // never of what the lookup found:
         //
         //   * a secret was presented  → exactly one verification on every arm,
-        //     against the stored hash when there is one and against a
-        //     realm-parameterised dummy when there is not;
+        //     against the stored hash when there is one and against a fast
+        //     dummy when there is not (see `verify_presented_client_secret`);
         //   * no secret was presented → no verification on any arm.
         //
         // Costing the no-secret case nothing keeps the public-client token path
         // — the common browser flow, which legitimately authenticates by
-        // `client_id` alone — off the Argon2id path entirely.
+        // `client_id` alone — off every hash entirely.
         let client = self.get_client(realm_id, client_id)?;
 
         let Some(secret) = client_secret else {
@@ -3463,7 +3479,7 @@ impl EmbeddedIdentityEngine {
 
         let stored_hash = client.as_ref().and_then(OAuthClient::client_secret_hash);
         let is_public = client.is_some() && stored_hash.is_none();
-        let matched = self.verify_presented_client_secret(realm_id, stored_hash, secret)?;
+        let matched = Self::verify_presented_client_secret(stored_hash, secret)?;
         if is_public {
             // A stray secret on a public client is ignored, as before.
             return Ok(());
@@ -3495,7 +3511,7 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidClientSecret);
         };
         let stored_hash = client.as_ref().and_then(OAuthClient::client_secret_hash);
-        let matched = self.verify_presented_client_secret(realm_id, stored_hash, secret)?;
+        let matched = Self::verify_presented_client_secret(stored_hash, secret)?;
         // `matched` is false whenever there is no stored hash (the dummy never
         // matches), so an unknown or public client is refused here too.
         if stored_hash.is_none() || !matched {
@@ -3711,19 +3727,10 @@ impl EmbeddedIdentityEngine {
             });
         }
 
-        // Generate new random secret (32 bytes, base64url)
-        let rng = ring::rand::SystemRandom::new();
-        let mut secret_bytes = [0u8; 32];
-        rng.fill(&mut secret_bytes)
-            .map_err(|_| IdentityError::SigningError {
-                reason: "failed to generate random bytes for client secret".to_string(),
-            })?;
-        let plaintext_secret = URL_SAFE_NO_PAD.encode(secret_bytes);
-
-        // Hash with Argon2id
-        let secret_hash =
-            credentials::hash_raw_secret(plaintext_secret.as_bytes(), &self.config.credential)?;
-        client.set_client_secret_hash(secret_hash);
+        // A fresh 256-bit CSPRNG secret, stored in the fast format — rotation
+        // is also how a client with a legacy Argon2id hash moves onto it.
+        let secret = crate::identity::oidc::GeneratedClientSecret::generate();
+        client.set_client_secret_hash(credentials::hash_generated_client_secret(&secret));
 
         let updated_bytes =
             serde_json::to_vec(&client).map_err(|e| IdentityError::Serialization {
@@ -3741,7 +3748,7 @@ impl EmbeddedIdentityEngine {
             &client_id.as_uuid().to_string(),
         )?;
 
-        Ok(plaintext_secret)
+        Ok(secret.expose().to_string())
     }
 
     pub(super) fn delete_client_inner(

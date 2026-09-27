@@ -181,8 +181,22 @@ pub struct RegisterClientRequest {
     ///
     /// If provided, the secret is hashed with Argon2id and stored.
     /// The raw secret is returned once in the registration response
-    /// and never stored. If `None`, this is a public client.
+    /// and never stored. If `None` (and [`Self::generated_client_secret`] is
+    /// also `None`), this is a public client.
+    ///
+    /// This field is for a secret the **caller chose** — a gRPC
+    /// `RegisterClient`/`CreateApplication` body, a test fixture. Its entropy
+    /// is unknown, so it is always stored as an Argon2id hash. A secret Hearth
+    /// minted itself goes in [`Self::generated_client_secret`] instead. Setting
+    /// both is refused.
     pub client_secret: Option<String>,
+    /// A client secret Hearth minted itself ([`GeneratedClientSecret`]).
+    ///
+    /// Because it provably carries 256 bits from the OS CSPRNG, it is stored
+    /// as a fast SHA-256 digest rather than an Argon2id hash (task 26.43
+    /// follow-up), so authenticating the client costs one SHA-256 instead of
+    /// one Argon2id run. Mutually exclusive with [`Self::client_secret`].
+    pub generated_client_secret: Option<GeneratedClientSecret>,
     /// OAuth 2.0 grant types this client is allowed to use.
     ///
     /// Defaults to `["authorization_code"]` if not specified.
@@ -243,6 +257,7 @@ impl Default for RegisterClientRequest {
             redirect_uris: Vec::new(),
             cors_origins: Vec::new(),
             client_secret: None,
+            generated_client_secret: None,
             grant_types: Vec::new(),
             require_consent: true,
             client_logo_url: None,
@@ -263,6 +278,57 @@ impl Default for RegisterClientRequest {
             profile: ClientProfile::Standard,
             mfa_required: None,
         }
+    }
+}
+
+/// A client secret minted by Hearth itself: 32 bytes (256 bits) drawn from the
+/// operating-system CSPRNG, rendered as 43 characters of unpadded base64url.
+///
+/// The type is the proof of provenance. It has no public constructor other
+/// than [`Self::generate`], so a value of this type can only have come from the
+/// CSPRNG — never from a human, a request body, or a config file. That is what
+/// lets the engine store it as a fast, unsalted SHA-256 digest
+/// (`credentials::hash_generated_client_secret`) instead of an Argon2id hash:
+/// a slow KDF exists to protect LOW-entropy secrets from offline guessing, and
+/// against a 256-bit uniformly random preimage a single SHA-256 is already
+/// out of reach (2^256 work), with no salt needed because no two secrets
+/// collide. A caller-chosen secret has no such guarantee and stays on Argon2id
+/// ([`RegisterClientRequest::client_secret`]).
+///
+/// The plaintext is zeroed on drop and never appears in `Debug` output.
+#[derive(Clone)]
+pub struct GeneratedClientSecret(zeroize::Zeroizing<String>);
+
+impl GeneratedClientSecret {
+    /// Number of CSPRNG bytes behind every generated client secret (256 bits).
+    pub const ENTROPY_BYTES: usize = 32;
+
+    /// Mints a fresh secret from the OS CSPRNG.
+    ///
+    /// Panics only if the OS entropy source itself fails, which
+    /// [`rand_core::OsRng`] treats as unrecoverable — failing closed is the
+    /// right answer; a low-entropy client secret would be worse than aborting.
+    #[must_use]
+    pub fn generate() -> Self {
+        use base64::Engine as _;
+        use rand_core::RngCore as _;
+        let mut bytes = zeroize::Zeroizing::new([0u8; Self::ENTROPY_BYTES]);
+        rand_core::OsRng.fill_bytes(bytes.as_mut());
+        Self(zeroize::Zeroizing::new(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes.as_ref()),
+        ))
+    }
+
+    /// The plaintext secret, to hand to the client exactly once.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for GeneratedClientSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GeneratedClientSecret(<redacted>)")
     }
 }
 

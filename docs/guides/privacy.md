@@ -52,7 +52,7 @@ with the owning `RealmId`, except signing keys which live in the **system realm*
 
 | Category | Storage Key | Format | Notes |
 |----------|-------------|--------|-------|
-| OAuth client registration | `oauth:client:{client_uuid}` | JSON | `client_name`, `redirect_uris`, `client_secret_hash` (Argon2id; plaintext never stored), grant types, allowed scopes |
+| OAuth client registration | `oauth:client:{client_uuid}` | JSON | `client_name`, `redirect_uris`, `client_secret_hash` (SHA-256 for Hearth-generated secrets, Argon2id for caller-chosen ones; plaintext never stored), grant types, allowed scopes |
 | Authorization code | `oauth:code:{sha256_hex_of_code}` | JSON | Plaintext code never stored; key is SHA-256 of the code issued to the client |
 | Refresh token (grant family) | `oauth:family:{family_id}` | JSON | `current_refresh_hash` (SHA-256 of current token) + `session_id`; plaintext refresh token never stored |
 | OAuth consent | `oauth:consent:{user_uuid}:{client_uuid}` | JSON | Granted scopes; no raw credentials |
@@ -117,7 +117,8 @@ Stored as a SHA-256 hash chain under `audit:evt:{realm_uuid}:{seq}:{idx}` (see
 | Passwords | Argon2id, 19 MiB memory, 2 iterations, 1 parallelism | OWASP 2023 parameters; stored in PHC format |
 | Passwords (Bcrypt import) | Bcrypt (`$2y$`/`$2b$`) | Verify-only; upgraded to Argon2id on next `change_password` |
 | Passwords (Keycloak import) | PBKDF2-HMAC-SHA256 | Verify-only; upgraded to Argon2id on next `change_password` |
-| OAuth client secrets | Argon2id | Same parameters as passwords |
+| OAuth client secrets (Hearth-generated) | SHA-256 | 256-bit CSPRNG secret; stored as `$hearth-sha256$v=1$…`. Used by DCR (`POST /register`), the console, and secret regeneration |
+| OAuth client secrets (caller-chosen) | Argon2id | Same parameters as passwords. gRPC `RegisterClient`/`CreateApplication`, `hearth.yaml`, migration import, and any secret stored before the SHA-256 format existed |
 | TOTP recovery codes | Argon2id | Plaintext returned once at enrollment |
 | Refresh tokens | SHA-256 | Stored as `current_refresh_hash` inside grant family |
 | Authorization codes | SHA-256 | Key = `oauth:code:{sha256}` |
@@ -388,7 +389,7 @@ redact metadata.
 | WebAuthn public key | Yes | COSE JSON | `webauthn:cred:…` |
 | Session token (JWT) | **No** | — | JWT verified by signature + WAL counter |
 | Session record (IP, UA) | Yes | Plaintext JSON | `ses:id:…` |
-| OAuth client secret | Yes | Argon2id hash | `oauth:client:…` |
+| OAuth client secret | Yes | SHA-256 (Hearth-generated) or Argon2id (caller-chosen) hash | `oauth:client:…` |
 | OAuth bearer / refresh tokens | **No** | — | Only SHA-256 hash of refresh stored |
 | Auth codes, magic links, reset tokens | Yes (hash only) | SHA-256 | Key-addressed |
 | Device fingerprint (raw IP/UA) | **No** | — | Only HMAC-SHA256 stored |

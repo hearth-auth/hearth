@@ -786,6 +786,116 @@ pub(crate) fn verify_raw_secret(secret: &[u8], hash_str: &str) -> Result<bool, I
     Ok(Argon2::default().verify_password(secret, &parsed).is_ok())
 }
 
+/// Self-describing prefix of a fast client-secret hash.
+///
+/// # Format
+///
+/// `$hearth-sha256$v=1$<digest>`, where `<digest>` is the unpadded standard
+/// base64 (the PHC "B64" alphabet) of `SHA-256(secret)` — 43 characters. The
+/// shape follows the PHC string format (`$<id>$v=<version>$<hash>`), so it can
+/// never be mistaken for an Argon2id PHC string (`$argon2id$v=19$m=…`) or any
+/// other stored hash: detection is a prefix test on the algorithm id, and
+/// every stored value that does not carry this prefix is verified as before.
+///
+/// # Why unkeyed, unsalted SHA-256 is enough — for GENERATED secrets only
+///
+/// Only a [`GeneratedClientSecret`](crate::identity::oidc::GeneratedClientSecret)
+/// is ever hashed this way: 32 bytes (256 bits) from the OS CSPRNG. A slow,
+/// salted KDF exists to make guessing a LOW-entropy secret expensive; against
+/// a uniformly random 256-bit preimage, a single SHA-256 is already out of
+/// reach (2^256 work, 2^128 even under Grover), and a salt adds nothing because
+/// two generated secrets never collide. It is unkeyed deliberately: a keyed
+/// digest (HMAC with a server secret) would add a key that must be identical
+/// on every Raft node, survive backup/restore, and fail closed when missing —
+/// real operational risk bought for no security the entropy does not already
+/// provide. A caller-chosen secret has no entropy guarantee and stays on
+/// Argon2id ([`hash_raw_secret`]).
+pub(crate) const FAST_CLIENT_SECRET_PREFIX: &str = "$hearth-sha256$v=1$";
+
+/// A well-formed fast hash that no presented secret is expected to match; the
+/// unknown-client and public-client arms verify against it so that they cost
+/// exactly what the common (fast) arm costs.
+const DUMMY_FAST_CLIENT_SECRET_HASH: &str =
+    "$hearth-sha256$v=1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+/// Process-wide count of fast (SHA-256) client-secret verifications.
+///
+/// Instrumentation only, like [`HASH_VERIFICATIONS`]: timing-parity tests
+/// assert that every arm of client authentication performs the same
+/// `(Argon2id, fast)` work pair.
+static FAST_SECRET_VERIFICATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the number of fast client-secret verifications since start-up.
+///
+/// Only differences between two reads are meaningful.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn fast_secret_verification_count() -> u64 {
+    FAST_SECRET_VERIFICATIONS.load(Ordering::Relaxed)
+}
+
+/// Renders `SHA-256(secret)` in the fast client-secret format.
+fn fast_client_secret_digest(secret: &[u8]) -> String {
+    use sha2::Digest as _;
+    let digest = Sha256::digest(secret);
+    let mut out = String::with_capacity(FAST_CLIENT_SECRET_PREFIX.len() + 43);
+    out.push_str(FAST_CLIENT_SECRET_PREFIX);
+    STANDARD_NO_PAD.encode_string(digest, &mut out);
+    out
+}
+
+/// Hashes a Hearth-generated client secret into the fast storage format.
+///
+/// Takes the [`GeneratedClientSecret`](crate::identity::oidc::GeneratedClientSecret)
+/// type, not a string, so only a CSPRNG-minted secret can reach the fast hash;
+/// see [`FAST_CLIENT_SECRET_PREFIX`] for why that is sufficient.
+pub(crate) fn hash_generated_client_secret(
+    secret: &crate::identity::oidc::GeneratedClientSecret,
+) -> String {
+    fast_client_secret_digest(secret.expose().as_bytes())
+}
+
+/// Whether `stored` is a fast client-secret hash (as opposed to a PHC string).
+pub(crate) fn is_fast_client_secret_hash(stored: &str) -> bool {
+    stored.starts_with(FAST_CLIENT_SECRET_PREFIX)
+}
+
+/// Fast-format verification: one SHA-256 of the presented secret, then a
+/// length-blind constant-time comparison of the two encoded digests
+/// ([`crate::core::secrets::ct_eq_secret_str`]). A malformed stored value
+/// simply never matches.
+fn verify_fast_client_secret(secret: &[u8], stored: &str) -> bool {
+    FAST_SECRET_VERIFICATIONS.fetch_add(1, Ordering::Relaxed);
+    let presented = fast_client_secret_digest(secret);
+    crate::core::secrets::ct_eq_secret_str(&presented, stored)
+}
+
+/// Verifies a presented client secret against its stored hash, dispatching on
+/// the stored format.
+///
+/// - `$hearth-sha256$v=1$…` → one SHA-256 + constant-time compare (a secret
+///   Hearth generated);
+/// - anything else → [`verify_raw_secret`], i.e. Argon2id (a caller-chosen
+///   secret, or one stored before the fast format existed). Such a hash is
+///   never re-hashed on a successful verification: its provenance cannot be
+///   proven from the hash, so it might be low-entropy. Rotating the secret is
+///   what moves a client onto the fast format.
+pub(crate) fn verify_client_secret(secret: &[u8], stored: &str) -> Result<bool, IdentityError> {
+    if is_fast_client_secret_hash(stored) {
+        return Ok(verify_fast_client_secret(secret, stored));
+    }
+    verify_raw_secret(secret, stored)
+}
+
+/// The work a presented secret costs when there is no stored hash to check it
+/// against (unknown client, public client): exactly one fast verification,
+/// the cost of the common arm. It deliberately does NOT run Argon2id — that
+/// would make an unknown `client_id` slower than a known generated-secret
+/// client (an existence oracle) and let anyone spend server Argon2id time with
+/// random client ids.
+pub(crate) fn verify_dummy_client_secret(secret: &[u8]) {
+    let _ = verify_fast_client_secret(secret, DUMMY_FAST_CLIENT_SECRET_HASH);
+}
+
 /// Pre-computes a dummy hash for timing-oracle prevention.
 ///
 /// When `verify_password` is called for a nonexistent user, we verify
@@ -1702,5 +1812,126 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ===== Fast hashing for Hearth-generated client secrets (26.43 follow-up) =====
+    //
+    // Every authenticated introspection verifies a client secret. With every
+    // secret on Argon2id that made each call a full KDF run — a throughput
+    // collapse and a CPU/memory amplification vector. A secret Hearth minted
+    // itself carries 256 CSPRNG bits and is stored as a SHA-256 digest; a
+    // caller-chosen one stays on Argon2id.
+
+    use crate::identity::oidc::GeneratedClientSecret;
+
+    /// Runs `f`, returning `(argon2_verifications, fast_verifications)`.
+    fn secret_work(f: impl FnOnce()) -> (u64, u64) {
+        let slow = hash_verification_count();
+        let fast = fast_secret_verification_count();
+        f();
+        (
+            hash_verification_count() - slow,
+            fast_secret_verification_count() - fast,
+        )
+    }
+
+    #[test]
+    fn generated_client_secret_carries_256_bits_from_the_csprng() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let a = GeneratedClientSecret::generate();
+        let b = GeneratedClientSecret::generate();
+        let raw = URL_SAFE_NO_PAD
+            .decode(a.expose())
+            .expect("a generated secret is unpadded base64url");
+        assert_eq!(raw.len(), 32, "256 bits of entropy, not a UUID's 122");
+        assert_ne!(a.expose(), b.expose());
+        assert_eq!(
+            format!("{a:?}"),
+            "GeneratedClientSecret(<redacted>)",
+            "Debug must not reveal the plaintext"
+        );
+    }
+
+    #[test]
+    fn generated_secret_hash_is_self_describing_and_not_a_phc_argon2_string() {
+        let secret = GeneratedClientSecret::generate();
+        let stored = hash_generated_client_secret(&secret);
+        assert!(
+            stored.starts_with(FAST_CLIENT_SECRET_PREFIX),
+            "fast hash must carry the {FAST_CLIENT_SECRET_PREFIX} prefix, got {stored:?}"
+        );
+        assert!(is_fast_client_secret_hash(&stored));
+        assert!(
+            !stored.contains(secret.expose()),
+            "the stored form must not contain the plaintext"
+        );
+        let legacy = hash_raw_secret(b"caller-chosen", &test_config()).expect("argon2");
+        assert!(legacy.starts_with("$argon2id$"));
+        assert!(
+            !is_fast_client_secret_hash(&legacy),
+            "an Argon2id PHC string must never be mistaken for a fast hash"
+        );
+    }
+
+    #[test]
+    fn fast_hash_verifies_the_right_secret_with_no_argon2_work() {
+        let secret = GeneratedClientSecret::generate();
+        let stored = hash_generated_client_secret(&secret);
+
+        let (slow, fast) = secret_work(|| {
+            assert!(verify_client_secret(secret.expose().as_bytes(), &stored).expect("verify"));
+        });
+        assert_eq!(
+            (slow, fast),
+            (0, 1),
+            "one SHA-256 verification, no Argon2id"
+        );
+
+        let (slow, fast) = secret_work(|| {
+            assert!(!verify_client_secret(b"not-the-secret", &stored).expect("verify"));
+        });
+        assert_eq!(
+            (slow, fast),
+            (0, 1),
+            "a WRONG secret for a fast client must cost no Argon2id either — \
+             that is the amplification vector"
+        );
+    }
+
+    #[test]
+    fn legacy_argon2_client_secret_hashes_still_verify() {
+        let stored = hash_raw_secret(b"legacy-secret", &test_config()).expect("argon2");
+        let (slow, fast) = secret_work(|| {
+            assert!(verify_client_secret(b"legacy-secret", &stored).expect("verify"));
+            assert!(!verify_client_secret(b"wrong", &stored).expect("verify"));
+        });
+        assert_eq!((slow, fast), (2, 0), "legacy hashes are detected by format");
+    }
+
+    #[test]
+    fn dummy_client_secret_verification_costs_exactly_what_the_fast_arm_costs() {
+        let (slow, fast) = secret_work(|| verify_dummy_client_secret(b"anything"));
+        assert_eq!(
+            (slow, fast),
+            (0, 1),
+            "the unknown/public arms must do the fast arm's work — no more (Argon2id \
+             would reveal client existence and keep the amplification), no less"
+        );
+    }
+
+    #[test]
+    fn malformed_fast_hashes_fail_closed() {
+        let secret = GeneratedClientSecret::generate();
+        let stored = hash_generated_client_secret(&secret);
+        let truncated = &stored[..stored.len() - 4];
+        assert!(!verify_client_secret(secret.expose().as_bytes(), truncated).expect("verify"));
+        assert!(
+            !verify_client_secret(secret.expose().as_bytes(), FAST_CLIENT_SECRET_PREFIX)
+                .expect("verify")
+        );
+        // An unknown version is not silently treated as v1.
+        let v2 = stored.replacen("v=1", "v=2", 1);
+        assert!(!is_fast_client_secret_hash(&v2));
+        assert!(!verify_client_secret(secret.expose().as_bytes(), &v2).unwrap_or(false));
     }
 }

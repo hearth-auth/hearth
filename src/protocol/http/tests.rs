@@ -3162,21 +3162,31 @@ async fn api_json_does_not_gain_the_html_only_headers() {
 // circuits on an unknown or public client *before* reaching the engine — so
 // equalising the engine alone left the oracle wide open on `POST /token`.
 //
-// Measured by COUNTING Argon2id verifications, never by wall clock.
+// Measured by COUNTING verifications, never by wall clock. Since the 26.43
+// follow-up a Hearth-generated secret is a SHA-256 digest, so the work is a
+// pair: (Argon2id verifications, fast verifications).
 
 use crate::core::{ClientId, RealmId};
 
-/// Runs `f` and returns how many hash verifications it performed.
-fn hashes_during(f: impl FnOnce()) -> u64 {
-    let before = crate::identity::credentials::hash_verification_count();
+/// Runs `f` and returns `(argon2_verifications, fast_verifications)`.
+fn hashes_during(f: impl FnOnce()) -> (u64, u64) {
+    use crate::identity::credentials::{fast_secret_verification_count, hash_verification_count};
+    let slow = hash_verification_count();
+    let fast = fast_secret_verification_count();
     f();
-    crate::identity::credentials::hash_verification_count() - before
+    (
+        hash_verification_count() - slow,
+        fast_secret_verification_count() - fast,
+    )
 }
 
-/// Builds a state with one confidential and one public client in a fresh realm.
-/// Returns `(state, realm_id, confidential_client_id, public_client_id)`.
-fn client_auth_fixture(temp_dir: &std::path::Path) -> (Arc<AppState>, RealmId, ClientId, ClientId) {
-    use crate::identity::{CreateRealmRequest, RegisterClientRequest};
+/// Builds a state with one confidential (Hearth-generated secret) and one
+/// public client in a fresh realm. Returns
+/// `(state, realm_id, confidential_client_id, public_client_id, secret)`.
+fn client_auth_fixture(
+    temp_dir: &std::path::Path,
+) -> (Arc<AppState>, RealmId, ClientId, ClientId, String) {
+    use crate::identity::{CreateRealmRequest, GeneratedClientSecret, RegisterClientRequest};
 
     let state = test_state(temp_dir);
     let realm = state
@@ -3187,6 +3197,7 @@ fn client_auth_fixture(temp_dir: &std::path::Path) -> (Arc<AppState>, RealmId, C
         })
         .expect("create realm");
 
+    let secret = GeneratedClientSecret::generate();
     let confidential = state
         .identity
         .register_client(
@@ -3194,7 +3205,7 @@ fn client_auth_fixture(temp_dir: &std::path::Path) -> (Arc<AppState>, RealmId, C
             &RegisterClientRequest {
                 client_name: "Confidential".to_string(),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
-                client_secret: Some("the-real-secret".to_string()),
+                generated_client_secret: Some(secret.clone()),
                 grant_types: vec!["authorization_code".to_string()],
                 require_consent: false,
                 ..Default::default()
@@ -3219,7 +3230,13 @@ fn client_auth_fixture(temp_dir: &std::path::Path) -> (Arc<AppState>, RealmId, C
     let realm_id = realm.id().clone();
     let conf_id = confidential.client_id().clone();
     let pub_id = public.client_id().clone();
-    (state, realm_id, conf_id, pub_id)
+    (
+        state,
+        realm_id,
+        conf_id,
+        pub_id,
+        secret.expose().to_string(),
+    )
 }
 
 /// The defect: at the HTTP edge an unknown `client_id` returned before any
@@ -3228,7 +3245,7 @@ fn client_auth_fixture(temp_dir: &std::path::Path) -> (Arc<AppState>, RealmId, C
 #[test]
 fn http_client_auth_hashes_the_same_for_unknown_and_registered_clients() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let (state, realm_id, conf_id, _public) = client_auth_fixture(temp_dir.path());
+    let (state, realm_id, conf_id, _public, _secret) = client_auth_fixture(temp_dir.path());
     let headers = axum::http::HeaderMap::new();
     let unknown = ClientId::generate();
 
@@ -3253,8 +3270,9 @@ fn http_client_auth_hashes_the_same_for_unknown_and_registered_clients() {
     });
 
     assert_eq!(
-        known_hashes, 1,
-        "a presented secret must cost exactly one verification"
+        known_hashes,
+        (0, 1),
+        "a presented secret must cost exactly one fast verification and no Argon2id"
     );
     assert_eq!(
         unknown_hashes, known_hashes,
@@ -3268,7 +3286,7 @@ fn http_client_auth_hashes_the_same_for_unknown_and_registered_clients() {
 #[test]
 fn http_client_auth_hashes_the_same_for_public_and_confidential_clients() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let (state, realm_id, conf_id, pub_id) = client_auth_fixture(temp_dir.path());
+    let (state, realm_id, conf_id, pub_id, _secret) = client_auth_fixture(temp_dir.path());
     let headers = axum::http::HeaderMap::new();
 
     let public_hashes = hashes_during(|| {
@@ -3294,7 +3312,7 @@ fn http_client_auth_hashes_the_same_for_public_and_confidential_clients() {
         public_hashes, conf_hashes,
         "client type must not be readable from hashing work"
     );
-    assert_eq!(public_hashes, 1);
+    assert_eq!(public_hashes, (0, 1));
 }
 
 /// The other half of the rule, unchanged from the engine's: presenting no
@@ -3303,7 +3321,7 @@ fn http_client_auth_hashes_the_same_for_public_and_confidential_clients() {
 #[test]
 fn http_client_auth_without_a_secret_costs_no_hashing() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let (state, realm_id, conf_id, pub_id) = client_auth_fixture(temp_dir.path());
+    let (state, realm_id, conf_id, pub_id, _secret) = client_auth_fixture(temp_dir.path());
     let headers = axum::http::HeaderMap::new();
     let unknown = ClientId::generate();
 
@@ -3317,7 +3335,11 @@ fn http_client_auth_without_a_secret_costs_no_hashing() {
                 &state, &realm_id, &headers, &id, None,
             ));
         });
-        assert_eq!(n, 0, "{label}: no secret presented must cost no hashing");
+        assert_eq!(
+            n,
+            (0, 0),
+            "{label}: no secret presented must cost no hashing"
+        );
     }
 }
 
@@ -3325,7 +3347,7 @@ fn http_client_auth_without_a_secret_costs_no_hashing() {
 #[test]
 fn http_client_auth_still_accepts_the_right_secret_and_refuses_the_wrong_one() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let (state, realm_id, conf_id, pub_id) = client_auth_fixture(temp_dir.path());
+    let (state, realm_id, conf_id, pub_id, secret) = client_auth_fixture(temp_dir.path());
     let headers = axum::http::HeaderMap::new();
     let cid = conf_id.as_uuid().to_string();
 
@@ -3335,7 +3357,7 @@ fn http_client_auth_still_accepts_the_right_secret_and_refuses_the_wrong_one() {
             &realm_id,
             &headers,
             &cid,
-            Some("the-real-secret"),
+            Some(secret.as_str()),
         )
         .is_ok(),
         "the registered secret must still authenticate"

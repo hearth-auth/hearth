@@ -94,12 +94,13 @@ pub use oidc::{
     fuzz_parse_token_exchange, AccessTokenAuthorization, ApplicationStatus, AuthorizationRequest,
     AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientProfile,
     ClientTrustLevel, CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
-    DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus, IdTokenSigningAlg,
-    IntrospectionResponse, JarClaims, JwtBearerRequest, OAuthClient, OidcConfig,
-    OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse,
-    PushedAuthorizationRequest, PushedAuthorizationResponse, RefreshBindContext,
-    RegisterClientRequest, ResponseMode, StepUpMfaGrantRequest, TokenExchangeRequest,
-    TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest, UserInfoResponse,
+    DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
+    GeneratedClientSecret, IdTokenSigningAlg, IntrospectionResponse, JarClaims, JwtBearerRequest,
+    OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest,
+    PasswordGrantResponse, PushedAuthorizationRequest, PushedAuthorizationResponse,
+    RefreshBindContext, RegisterClientRequest, ResponseMode, StepUpMfaGrantRequest,
+    TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
+    UserInfoResponse,
 };
 pub use session_version::{SessionVersionStore, SvDeltaEntry, SvDeltaResponse, SvSnapshotResponse};
 pub use sms::{

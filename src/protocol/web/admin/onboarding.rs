@@ -339,6 +339,7 @@ pub async fn admin_onboarding_app_post(
         redirect_uris: vec![redirect_uri.clone()],
         cors_origins: Vec::new(),
         client_secret: None,
+        generated_client_secret: None,
         grant_types,
         require_consent: true,
         client_logo_url: None,
