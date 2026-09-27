@@ -4875,6 +4875,17 @@ fn run_backup_restore(
         tracing::info!("(dry-run: no data will be written)");
     }
 
+    // The system realm (nil UUID) holds every operator-console account. Say
+    // whether this restore brings it back: without it, nobody can sign in to
+    // `/ui/admin` on the restored store.
+    let system_realm_id = format!("realm_{}", uuid::Uuid::nil());
+    let system_slug = reader
+        .realms()
+        .iter()
+        .find(|r| r.realm_id == system_realm_id)
+        .map(|r| r.slug.clone())
+        .filter(|s| slugs.contains(s));
+
     let mut had_errors = false;
     for slug in &slugs {
         let report = importer.import_realm(slug, &reader, &opts)?;
@@ -4883,8 +4894,33 @@ fn run_backup_restore(
             had_errors = true;
         }
     }
+    report_system_realm_restore(system_slug.is_some(), dry_run);
     warn_unexported_families("This restore did NOT bring back");
     Ok(had_errors)
+}
+
+/// Tells the operator whether a restore brought the system realm — every
+/// operator-console account — back.
+fn report_system_realm_restore(restored: bool, dry_run: bool) {
+    if restored {
+        tracing::info!(
+            "System realm {}: the operator-console accounts in this archive sign in at \
+             /ui/admin/login with their original passwords and second factors. Sessions are not \
+             restored, so every operator signs in again.",
+            if dry_run {
+                "(dry run — nothing written)"
+            } else {
+                "restored"
+            }
+        );
+    } else {
+        tracing::warn!(
+            "This restore does not contain the system realm, so it brought back no \
+             operator-console account. If the target has none, restore the system realm from a \
+             full `hearth backup create` archive (or a `POST /admin/backup` made by a \
+             system-realm caller). See docs/guides/disaster-recovery.md."
+        );
+    }
 }
 
 /// Returns `true` when any entity bucket of `report` recorded a failed import.
