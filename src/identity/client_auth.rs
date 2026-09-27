@@ -143,29 +143,6 @@ pub async fn authenticate_confidential_client(
     .await
 }
 
-/// [`IdentityEngine::authenticate_oauth_client`] behind the async KDF gate.
-///
-/// # Errors
-///
-/// As [`IdentityEngine::authenticate_oauth_client`], plus
-/// [`IdentityError::KdfOverloaded`] when an Argon2id verification was shed.
-pub async fn authenticate_oauth_client(
-    engine: &Arc<dyn IdentityEngine>,
-    realm_id: &RealmId,
-    client_id: &ClientId,
-    client_secret: &str,
-) -> Result<(), IdentityError> {
-    let (realm, client, secret) = owned(realm_id, client_id, Some(client_secret));
-    with_client_secret_gate(engine, realm_id, client_id, true, move |e| {
-        e.authenticate_oauth_client(
-            &realm,
-            &client,
-            secret.as_deref().map_or("", |s| s.as_str()),
-        )
-    })
-    .await
-}
-
 /// [`IdentityEngine::client_credentials_token`] behind the async KDF gate.
 ///
 /// # Errors

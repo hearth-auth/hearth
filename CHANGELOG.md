@@ -116,7 +116,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   any secret stored before generated secrets moved to SHA-256) was verified with Argon2id directly
   on a request worker, outside the KDF gate that bounds password hashing. `hearth.yaml` client ids
   are computable, so an unauthenticated caller could force one Argon2id run per request at `/token`,
-  `/introspect`, `/revoke`, `/device_authorization`, their realm twins and gRPC. These verifications
+  `/as/par`, `/introspect`, `/revoke`, `/device_authorization`, their realm twins and gRPC. These verifications
   now take a permit from the same gate (`security.password.kdf.max_in_flight`), waiting for it
   asynchronously (no thread is held while waiting), and run on the blocking pool; when no permit frees
   within `max_queue_wait` the request gets `503` with `Retry-After` (`kdf_overloaded`, `error_code`

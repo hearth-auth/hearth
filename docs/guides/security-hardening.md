@@ -157,8 +157,8 @@ OAuth client secrets are never stored in plaintext. How they are hashed depends 
 
 **The remaining Argon2id cost is an amplification vector, bounded by the KDF gate.** Anyone who
 knows an Argon2id-hashed client's `client_id` can make the server run one Argon2id verification
-per request by presenting any secret at `/token`, `/introspect`, `/revoke` or `/device_authorization`
-(their `/realms/{realm}/…` twins, and the gRPC OAuth service). Client ids are not secret: they
+per request by presenting any secret at `/token`, `/as/par`, `/introspect`, `/revoke` or
+`/device_authorization` (their `/realms/{realm}/…` twins, and the gRPC OAuth service). Client ids are not secret: they
 travel in browser authorization requests, and a `hearth.yaml` application's id is a UUID v5 that
 anyone can compute from the realm and the application key. Every such verification therefore runs
 behind the same process-wide admission gate as password hashing
