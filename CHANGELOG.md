@@ -67,6 +67,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   (about 1 in 11 under 20 concurrent revokers). The same race could drop a DPoP key block or a realm
   status change. Local control writes and control-cache reloads are now ordered (task 26.43
   follow-up).
+- **Cluster: a control asserted on the leader could never bind on a follower** — the control epoch
+  that tells other nodes to reload their revocation list, DPoP blocklist, realm statuses and sessions
+  was bumped with a read followed by a write, so two concurrent bumps could write the same value or
+  move it backwards. A follower that had already reloaded at the higher value then ignored the later
+  control: a realm suspension, DPoP key block or session revocation stayed unenforced on that node
+  until its next restart. The bump is now one atomic increment (a new Raft command whose value is
+  computed at apply time). Upgrade every node together: a node on an older build cannot apply it.
 - **Revocation only affects the caller's own tokens (RFC 7009 §2.1)** — `POST /revoke`, its realm twin
   and gRPC `Revoke` revoke a token only when it was issued to the authenticated client; any other token
   is left untouched and the endpoint still answers `200`. A `private_key_jwt` client must present its

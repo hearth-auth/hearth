@@ -831,6 +831,33 @@ impl ClusterEngine {
             .map_err(ClusterError::Storage)
     }
 
+    /// Atomically increments the `u64` counter at `key` and returns the new
+    /// value.
+    ///
+    /// In cluster mode proposes `RaftCommand::IncrementU64`, whose successor
+    /// the state machine computes at apply time, so concurrent increments on
+    /// any node never collide or move the counter backwards.
+    pub async fn increment_u64(&self, realm_id: &RealmId, key: &[u8]) -> Result<u64, ClusterError> {
+        if self.raft.is_some() {
+            let resp = self
+                .propose_with_response(RaftCommand::IncrementU64 {
+                    leader_timestamp: Self::leader_timestamp_now(),
+                    realm: realm_id.clone(),
+                    key: key.to_vec(),
+                })
+                .await?;
+            return crate::storage::decode_u64_counter(Some(&resp.payload))
+                .map_err(ClusterError::Storage);
+        }
+        let inner = Arc::clone(&self.inner);
+        let realm_id = realm_id.clone();
+        let key = key.to_vec();
+        spawn_blocking(move || inner.increment_u64(&realm_id, &key))
+            .await
+            .map_err(|e| ClusterError::Raft(e.to_string()))?
+            .map_err(ClusterError::Storage)
+    }
+
     /// Enumerates all realm IDs present in the underlying storage engine.
     ///
     /// Delegates directly to [`EmbeddedStorageEngine::list_realms`] without
@@ -983,6 +1010,9 @@ fn check_clock_skew(payload: &[u8]) -> Option<u64> {
                     leader_timestamp, ..
                 }
                 | RaftCommand::PutIfAbsent {
+                    leader_timestamp, ..
+                }
+                | RaftCommand::IncrementU64 {
                     leader_timestamp, ..
                 } => *leader_timestamp,
             },
@@ -1200,6 +1230,21 @@ impl StorageEngine for ClusterStorageAdapter {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(async move { engine.put_if_absent(&realm_id, &key, &value).await })
+        })
+        .map_err(cluster_to_storage_err)
+    }
+
+    fn increment_u64(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+    ) -> Result<u64, crate::storage::StorageError> {
+        let engine = Arc::clone(&self.engine);
+        let realm_id = realm_id.clone();
+        let key = key.to_vec();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async move { engine.increment_u64(&realm_id, &key).await })
         })
         .map_err(cluster_to_storage_err)
     }

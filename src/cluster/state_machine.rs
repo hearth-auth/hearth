@@ -445,31 +445,75 @@ impl HearthStateMachine {
                 realm,
                 key,
                 value,
-            } => {
-                // State machine entries are applied sequentially — no concurrent
-                // apply can interleave between the get and the put here, so the
-                // check-and-write is atomically serialised by Raft ordering.
-                let (e_realm, e_key, e_value) = (realm.clone(), key.clone(), value.clone());
-                let success = spawn_blocking(move || {
-                    engine
-                        .put_if_absent(&e_realm, &e_key, &e_value)
-                        .map_err(to_write_err)
-                })
-                .await
-                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
-                if success {
-                    if let Some(obs) = self.observer.get() {
-                        obs.on_replicated_put(&realm, &key, &value);
-                    }
-                }
-                return Ok(HearthLogResponse {
-                    success,
-                    payload: Vec::new(),
-                });
-            }
+            } => return self.apply_put_if_absent(realm, key, value).await,
+
+            RaftCommand::IncrementU64 {
+                leader_timestamp: _,
+                realm,
+                key,
+            } => return self.apply_increment(realm, key).await,
         }
 
         Ok(HearthLogResponse::default())
+    }
+
+    /// Applies [`RaftCommand::PutIfAbsent`].
+    ///
+    /// State machine entries are applied sequentially — no concurrent apply
+    /// can interleave between the get and the put here, so the check-and-write
+    /// is atomically serialised by Raft ordering.
+    async fn apply_put_if_absent(
+        &mut self,
+        realm: RealmId,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Result<HearthLogResponse, StorageError<u64>> {
+        let engine = Arc::clone(&self.engine);
+        let (e_realm, e_key, e_value) = (realm.clone(), key.clone(), value.clone());
+        let success = spawn_blocking(move || {
+            engine
+                .put_if_absent(&e_realm, &e_key, &e_value)
+                .map_err(to_write_err)
+        })
+        .await
+        .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+        if success {
+            if let Some(obs) = self.observer.get() {
+                obs.on_replicated_put(&realm, &key, &value);
+            }
+        }
+        Ok(HearthLogResponse {
+            success,
+            payload: Vec::new(),
+        })
+    }
+
+    /// Applies [`RaftCommand::IncrementU64`], returning the new value as the
+    /// response payload.
+    ///
+    /// Entries apply one at a time, so the read-modify-write inside
+    /// `increment_u64` cannot interleave with another entry's: every node
+    /// computes the same successor, and no two proposals ever receive the same
+    /// value.
+    async fn apply_increment(
+        &mut self,
+        realm: RealmId,
+        key: Vec<u8>,
+    ) -> Result<HearthLogResponse, StorageError<u64>> {
+        let engine = Arc::clone(&self.engine);
+        let (e_realm, e_key) = (realm.clone(), key.clone());
+        let next =
+            spawn_blocking(move || engine.increment_u64(&e_realm, &e_key).map_err(to_write_err))
+                .await
+                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+        let value = next.to_le_bytes();
+        if let Some(obs) = self.observer.get() {
+            obs.on_replicated_put(&realm, &key, &value);
+        }
+        Ok(HearthLogResponse {
+            success: true,
+            payload: value.to_vec(),
+        })
     }
 }
 
@@ -695,6 +739,35 @@ mod tests {
 
         assert_eq!(sm.engine.get(&realm, b"new").unwrap(), Some(b"v2".to_vec()));
         assert_eq!(sm.engine.get(&realm, b"old").unwrap(), None);
+    }
+
+    /// `IncrementU64` computes the successor at apply time and returns it, so
+    /// two proposals of the same increment receive two distinct values.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn increment_command_returns_successive_values() {
+        let dir = tempdir().unwrap();
+        let mut sm = open_sm(dir.path().join("data").as_path());
+        let realm = make_realm();
+        let incr = |index: u64| Entry {
+            log_id: make_log_id(index),
+            payload: EntryPayload::Normal(RaftCommand::IncrementU64 {
+                leader_timestamp: 0,
+                realm: realm.clone(),
+                key: b"ctr".to_vec(),
+            }),
+        };
+
+        let responses = sm.apply([incr(1), incr(2)]).await.unwrap();
+        let values: Vec<u64> = responses
+            .iter()
+            .map(|r| crate::storage::decode_u64_counter(Some(&r.payload)).unwrap())
+            .collect();
+        assert_eq!(values, vec![1, 2]);
+        assert_eq!(
+            sm.engine.get(&realm, b"ctr").unwrap(),
+            Some(2_u64.to_le_bytes().to_vec())
+        );
     }
 
     #[tokio::test]

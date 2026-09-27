@@ -56,6 +56,24 @@ pub fn prefix_scan_end(prefix: &[u8]) -> Vec<u8> {
     end
 }
 
+/// Decodes a counter written by [`StorageEngine::increment_u64`]: an absent
+/// value is `0`, and anything but exactly eight little-endian bytes is an error.
+///
+/// # Errors
+///
+/// [`StorageError::DeserializationFailed`] when `raw` is present but not eight
+/// bytes long.
+pub fn decode_u64_counter(raw: Option<&[u8]>) -> Result<u64, StorageError> {
+    match raw {
+        None => Ok(0),
+        Some(bytes) => <[u8; 8]>::try_from(bytes)
+            .map(u64::from_le_bytes)
+            .map_err(|_| StorageError::DeserializationFailed {
+                reason: format!("u64 counter is {} bytes, expected 8", bytes.len()),
+            }),
+    }
+}
+
 /// Opaque handle returned by [`StorageEngine::enqueue_batch`].
 ///
 /// Pass to [`StorageEngine::await_batch_durable`] to block until all entries in
@@ -227,6 +245,42 @@ pub trait StorageEngine: Send + Sync {
         }
         self.put(realm_id, key, value)?;
         Ok(true)
+    }
+
+    /// Atomically increments the little-endian `u64` counter stored at `key`
+    /// and returns the new value. An absent key counts as `0`, so the first
+    /// increment returns `1`.
+    ///
+    /// Concurrent increments never lose one another and the stored value never
+    /// moves backwards: N increments move it by exactly N. A read-then-write by
+    /// the caller cannot promise that — two callers that read the same value
+    /// both write its successor, and a slow one can overwrite a faster one's
+    /// higher value (the control-epoch regression this exists for).
+    ///
+    /// In cluster mode [`ClusterStorageAdapter`](crate::cluster::ClusterStorageAdapter)
+    /// routes this through Raft as one command whose old + 1 is computed at
+    /// apply time, so the increment is atomic across nodes, not only within
+    /// one process.
+    ///
+    /// The default implementation serialises every increment in this process
+    /// behind one lock around a `get` + `put`, which is atomic for any
+    /// implementor whose storage this process alone writes. Implementors that
+    /// can do better (a single-key lock, a replicated command) override it.
+    ///
+    /// # Errors
+    ///
+    /// Any error from the underlying read or write, or
+    /// [`StorageError::DeserializationFailed`] when the stored value is not
+    /// exactly eight bytes — a corrupted counter is reported, never reset, so
+    /// it cannot silently restart below values already handed out.
+    fn increment_u64(&self, realm_id: &RealmId, key: &[u8]) -> Result<u64, StorageError> {
+        static DEFAULT_INCREMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = DEFAULT_INCREMENT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = decode_u64_counter(self.get(realm_id, key)?.as_deref())?.saturating_add(1);
+        self.put(realm_id, key, &next.to_le_bytes())?;
+        Ok(next)
     }
 
     /// Scans a range of keys returning only key bytes (no values).

@@ -77,6 +77,25 @@ pub enum RaftCommand {
         key: Vec<u8>,
         value: Vec<u8>,
     },
+    /// Atomically increment the little-endian `u64` counter at `key` (absent
+    /// counts as `0`) and return the new value in the response payload.
+    ///
+    /// The successor is computed by the state machine at apply time, not by
+    /// the proposer: Raft applies entries one at a time, so two concurrent
+    /// proposals always produce two distinct, increasing values. A proposer
+    /// that read the counter and proposed a `Put` of its successor could be
+    /// overtaken and move the counter backwards — the control-epoch defect
+    /// this exists to close.
+    ///
+    /// Added after `PutIfAbsent`, so a node running an older build cannot
+    /// decode it; as with `WriteBatch`, a mixed-version cluster is already
+    /// unsupported (membership changes need a full-cluster restart).
+    IncrementU64 {
+        /// Leader wall-clock timestamp (microseconds since UNIX epoch).
+        leader_timestamp: i64,
+        realm: RealmId,
+        key: Vec<u8>,
+    },
 }
 
 /// Openraft `D` type alias — keeps the `declare_raft_types!` binding stable.

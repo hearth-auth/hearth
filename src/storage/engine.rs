@@ -377,6 +377,9 @@ pub struct EmbeddedStorageEngine {
     /// as absent and both write. Holding this lock across the check-and-write
     /// closes that window (HEA-1767). This lock is used in both single-node and
     /// cluster mode — there is no Raft-mediated path for `put_if_absent`.
+    ///
+    /// [`increment_u64`](StorageEngine::increment_u64) takes it too, for the
+    /// same reason: its read and write must be one step.
     put_if_absent_lock: Mutex<()>,
     /// Monotonically increasing SST file counter.
     ///
@@ -1914,6 +1917,21 @@ impl StorageEngine for EmbeddedStorageEngine {
         Ok(true)
     }
 
+    /// Atomic single-node increment: the read and the write happen under
+    /// [`put_if_absent_lock`](Self::put_if_absent_lock), so concurrent callers
+    /// never both write the same successor (see the trait documentation).
+    fn increment_u64(&self, realm_id: &RealmId, key: &[u8]) -> Result<u64, StorageError> {
+        let Ok(_guard) = self.put_if_absent_lock.lock() else {
+            return Err(StorageError::Io(std::io::Error::other(
+                "increment_u64 mutex poisoned",
+            )));
+        };
+        let next =
+            super::decode_u64_counter(self.get(realm_id, key)?.as_deref())?.saturating_add(1);
+        self.put(realm_id, key, &next.to_le_bytes())?;
+        Ok(next)
+    }
+
     fn write_batch(
         &self,
         realm_id: &RealmId,
@@ -2426,6 +2444,64 @@ mod tests {
             engine.get(&realm, b"k").expect("read after release"),
             Some(b"after".to_vec()),
             "the previously-blocked write must land after the barrier is released"
+        );
+    }
+
+    /// `increment_u64` hands every concurrent caller a distinct value and
+    /// never loses an increment (the control-epoch bump depends on both).
+    #[test]
+    fn increment_u64_is_atomic_under_concurrency() {
+        use std::sync::{Arc, Barrier};
+
+        let (_dir, engine) = setup_engine();
+        let engine = Arc::new(engine);
+        let realm = RealmId::generate();
+
+        const THREADS: usize = 12;
+        const PER_THREAD: usize = 25;
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let engine = Arc::clone(&engine);
+                let barrier = Arc::clone(&barrier);
+                let realm = realm.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (0..PER_THREAD)
+                        .map(|_| engine.increment_u64(&realm, b"ctr").expect("increment"))
+                        .collect::<Vec<u64>>()
+                })
+            })
+            .collect();
+        let mut seen: Vec<u64> = handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("join"))
+            .collect();
+        seen.sort_unstable();
+        let expected: Vec<u64> = (1..=(THREADS * PER_THREAD) as u64).collect();
+        assert_eq!(
+            seen, expected,
+            "every increment must return a distinct successor"
+        );
+        assert_eq!(
+            engine.get(&realm, b"ctr").expect("get"),
+            Some(((THREADS * PER_THREAD) as u64).to_le_bytes().to_vec()),
+        );
+    }
+
+    /// A counter that is not eight bytes is reported, never restarted at 1.
+    #[test]
+    fn increment_u64_refuses_a_corrupted_counter() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine.put(&realm, b"ctr", b"xyz").expect("put");
+        assert!(matches!(
+            engine.increment_u64(&realm, b"ctr"),
+            Err(StorageError::DeserializationFailed { .. })
+        ));
+        assert_eq!(
+            engine.get(&realm, b"ctr").expect("get"),
+            Some(b"xyz".to_vec())
         );
     }
 

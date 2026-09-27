@@ -4688,27 +4688,26 @@ impl EmbeddedIdentityEngine {
 
     /// Increments the persisted control epoch and returns the new value, or
     /// `None` when the bump could not be persisted (best-effort, as below).
+    ///
+    /// One atomic [`StorageEngine::increment_u64`] — a Raft command whose
+    /// successor is computed at apply time in cluster mode. It used to be a
+    /// read followed by a write of the successor, so two concurrent bumps
+    /// could both write the same value, or a slow one could overwrite a faster
+    /// one's higher value and move the epoch backwards; a node that had already
+    /// reloaded at the higher value then ignored the later control entirely.
     fn persist_control_epoch_bump(&self) -> Option<u64> {
         let sys_realm = keys::system_realm_id();
         let key = keys::encode_control_epoch();
-        let next = match self.storage.get(&sys_realm, &key) {
-            Ok(Some(bytes)) => <[u8; 8]>::try_from(bytes.as_slice())
-                .map(u64::from_le_bytes)
-                .unwrap_or(0)
-                .saturating_add(1),
-            Ok(None) => 1,
+        match self.storage.increment_u64(&sys_realm, &key) {
+            // The caller records the value locally once it has applied the
+            // change to its own caches; otherwise this node would reload for
+            // no reason.
+            Ok(next) => Some(next),
             Err(err) => {
-                tracing::warn!(error = %err, "could not read the control epoch to bump it");
-                return None;
+                tracing::warn!(error = %err, "could not persist the control epoch bump");
+                None
             }
-        };
-        if let Err(err) = self.storage.put(&sys_realm, &key, &next.to_le_bytes()) {
-            tracing::warn!(error = %err, "could not persist the control epoch bump");
-            return None;
         }
-        // The caller records `next` locally once it has applied the change to
-        // its own caches; otherwise this node would reload for no reason.
-        Some(next)
     }
 
     /// Reconciles both cluster epochs, at most once per
@@ -17578,6 +17577,8 @@ mod tests {
 
     /// `private_key_jwt` assertion-JTI replay markers carry an expiry and are swept.
     mod client_assertion_jti;
+    /// The persisted control epoch is bumped atomically and never moves back.
+    mod control_epoch;
     /// Concurrent revocations survive a racing control-cache reload.
     mod revocation_reload_races;
     /// PKCE challenge and refresh-token hash compare in constant time.
