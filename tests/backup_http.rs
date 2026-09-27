@@ -1287,3 +1287,240 @@ async fn archive_signed_by_another_key_is_refused() {
     assert!(body.contains("signature is invalid"), "{body}");
     assert!(body.contains("invalid_manifest_signature"), "{body}");
 }
+
+// ===== The system realm over HTTP (operator-console recovery) =====
+//
+// `POST /admin/backup` enumerated realms through `list_realms`, which hides
+// the system realm, so no HTTP export ever carried an operator account. It now
+// does — for a system-realm caller only. A tenant-scoped caller never exports
+// it and can never restore it.
+
+fn system_realm() -> RealmId {
+    RealmId::new(uuid::Uuid::nil())
+}
+
+/// Creates an operator in the system realm (as first-run setup does) and
+/// returns a system-realm access token for it.
+fn make_system_token(h: &common::TestHarness, email: &str) -> String {
+    let sys = system_realm();
+    let user = h
+        .identity()
+        .create_admin_user(&CreateUserRequest {
+            email: email.to_string(),
+            display_name: "Operator".into(),
+            ..Default::default()
+        })
+        .expect("operator");
+    h.rbac().seed_realm(&sys).expect("seed system roles");
+    let role = h
+        .rbac()
+        .get_role_by_name(&sys, "realm.admin")
+        .expect("role")
+        .expect("seeded");
+    h.rbac()
+        .assign_role(
+            &sys,
+            &AssignRoleRequest {
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("grant realm.admin");
+    let session = h
+        .identity()
+        .create_session(&sys, user.id(), &SessionContext::default())
+        .expect("session");
+    h.identity()
+        .issue_tokens(&sys, user.id(), session.id())
+        .expect("tokens")
+        .access_token()
+        .to_string()
+}
+
+async fn post_backup(h: &common::TestHarness, uri: &str, token: &str, realm: &RealmId) -> Vec<u8> {
+    let resp = build_app(h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "export {uri} must succeed");
+    resp_bytes(resp).await
+}
+
+fn archive_realm_ids(bytes: &[u8]) -> Vec<String> {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    std::fs::write(tmp.path(), bytes).expect("write");
+    let reader = BackupArchive::open(tmp.path()).expect("open archive");
+    reader.realms().iter().map(|r| r.realm_id.clone()).collect()
+}
+
+fn nil_realm_id_string() -> String {
+    format!("realm_{}", uuid::Uuid::nil())
+}
+
+#[tokio::test]
+async fn a_system_realm_export_carries_the_system_realm_and_a_tenant_export_never_does() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let tenant = h.create_realm();
+    h.rbac().seed_realm(&tenant).expect("seed");
+    let tenant_token = make_admin_token(&h, &tenant).await;
+    let system_token = make_system_token(&h, "operator@hearth.test");
+
+    // Full export by a system-realm caller: every tenant AND the system realm.
+    let ids =
+        archive_realm_ids(&post_backup(&h, "/admin/backup", &system_token, &system_realm()).await);
+    assert!(
+        ids.contains(&nil_realm_id_string()),
+        "a system-realm caller's full export must carry the system realm: {ids:?}"
+    );
+    assert!(
+        ids.contains(&format!("realm_{}", tenant.as_uuid())),
+        "and every tenant realm: {ids:?}"
+    );
+
+    // Named explicitly.
+    let ids = archive_realm_ids(
+        &post_backup(
+            &h,
+            "/admin/backup?realm=system",
+            &system_token,
+            &system_realm(),
+        )
+        .await,
+    );
+    assert_eq!(
+        ids,
+        vec![nil_realm_id_string()],
+        "?realm=system exports the system realm only"
+    );
+
+    // A tenant-scoped caller: never the system realm, with or without naming it.
+    let ids = archive_realm_ids(&post_backup(&h, "/admin/backup", &tenant_token, &tenant).await);
+    assert!(
+        !ids.contains(&nil_realm_id_string()),
+        "a tenant export must never carry the system realm: {ids:?}"
+    );
+    let resp = build_app(&h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup?realm=system")
+                .header("Authorization", format!("Bearer {tenant_token}"))
+                .header("X-Realm-ID", tenant.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a tenant caller naming the system realm is refused"
+    );
+}
+
+async fn post_restore(
+    h: &common::TestHarness,
+    uri: &str,
+    token: &str,
+    realm: &RealmId,
+    archive: &[u8],
+) -> (StatusCode, serde_json::Value) {
+    let (ct, body) = multipart_body(archive);
+    let resp = build_app(h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("content-type", ct)
+                .body(Body::from(body))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    let status = resp.status();
+    (status, resp_json(resp).await)
+}
+
+#[tokio::test]
+async fn only_a_system_realm_caller_restores_the_system_realm_over_http() {
+    set_master_key();
+    // Source: an operator to recover, exported by a system-realm caller.
+    let src = common::TestHarness::embedded().await.expect("src");
+    let src_token = make_system_token(&src, "recovered@hearth.test");
+    let archive = sign_bytes(
+        &post_backup(
+            &src,
+            "/admin/backup?realm=system",
+            &src_token,
+            &system_realm(),
+        )
+        .await,
+        &test_signing_key(),
+    );
+
+    let dst = common::TestHarness::embedded().await.expect("dst");
+    let tenant = dst.create_realm();
+    dst.rbac().seed_realm(&tenant).expect("seed");
+    let tenant_token = make_admin_token(&dst, &tenant).await;
+
+    // A tenant-scoped caller — even in overwrite mode — is refused, and no
+    // system-realm principal is created.
+    for uri in [
+        "/admin/backup/restore",
+        "/admin/backup/restore?mode=overwrite",
+        "/admin/backup/restore?realm=system",
+    ] {
+        let (status, body) = post_restore(&dst, uri, &tenant_token, &tenant, &archive).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {body}");
+    }
+    assert!(
+        dst.identity()
+            .get_user_by_email(&system_realm(), "recovered@hearth.test")
+            .expect("lookup")
+            .is_none(),
+        "a tenant-scoped restore must never create a system-realm principal"
+    );
+
+    // A system-realm caller restores it.
+    let dst_token = make_system_token(&dst, "live@hearth.test");
+    let (status, body) = post_restore(
+        &dst,
+        "/admin/backup/restore",
+        &dst_token,
+        &system_realm(),
+        &archive,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "system-realm restore: {body}");
+    assert_eq!(body["counts"]["system"]["users"]["created"], 1, "{body}");
+    assert!(
+        dst.identity()
+            .get_user_by_email(&system_realm(), "recovered@hearth.test")
+            .expect("lookup")
+            .is_some(),
+        "the archived operator is restored"
+    );
+    assert!(
+        dst.identity()
+            .get_user_by_email(&system_realm(), "live@hearth.test")
+            .expect("lookup")
+            .is_some(),
+        "the live operator is untouched"
+    );
+}

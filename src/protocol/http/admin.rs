@@ -491,7 +491,8 @@ fn list_all_realm_ids(
 /// parameter was absent. A tenant admin could export a peer tenant in full
 /// (audit 2026-08-28 §3 B1, §4.1#1).
 ///
-/// * The **system realm** (nil UUID) may name any realm, and covers every realm
+/// * The **system realm** (nil UUID) may name any realm — `system` names the
+///   system realm itself — and covers every realm, the system realm included,
 ///   when no slug is given.
 /// * Every other caller covers its own realm only. A slug is compared against
 ///   the caller's own realm name, so a peer slug is `403` and this function
@@ -516,9 +517,27 @@ fn authorize_export_realms(
         return Ok(vec![auth_realm.clone()]);
     }
 
+    // A system-realm caller may also export the system realm itself — the
+    // home of every operator-console account. `list_realms` hides it and it
+    // has no name-index entry, so it is added explicitly: named as `system`,
+    // or appended (last) to a full export. Without it no HTTP export could
+    // restore operator access after a rebuild. The early return above means a
+    // tenant-scoped caller never reaches this, whatever it names.
+    let system_id = crate::identity::keys::system_realm_id();
     match requested_slug {
+        Some(slug) if slug == crate::identity::keys::SYSTEM_REALM_NAME => Ok(vec![system_id]),
         Some(slug) => Ok(vec![find_realm_id_by_slug(identity, slug)?]),
-        None => list_all_realm_ids(identity),
+        None => {
+            let mut ids = list_all_realm_ids(identity)?;
+            let seeded = identity
+                .get_realm(&system_id)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("get_realm: {e}")))?
+                .is_some();
+            if seeded && !ids.contains(&system_id) {
+                ids.push(system_id);
+            }
+            Ok(ids)
+        }
     }
 }
 
