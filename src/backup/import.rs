@@ -1411,8 +1411,12 @@ impl BackupImporter {
                         }
                         RestoreMode::Overwrite => {
                             // Delete by client_id then re-import. The record
-                            // was validated above, so the re-import can fail
-                            // only on storage — not on a rule that would have
+                            // was validated above — its fields, and for an
+                            // RS256 client that the realm's RSA key loads — so
+                            // the re-import can fail only on storage, or on
+                            // provisioning a realm RSA key that did not exist
+                            // yet (the restore imports the archived key before
+                            // any client), not on a rule that would have
                             // refused it before the live client was deleted.
                             if let Some(ref cid) = req.id {
                                 if let Ok(()) = self.identity.delete_client(realm_id, cid) {

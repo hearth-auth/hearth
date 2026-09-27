@@ -12048,7 +12048,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 operation: "import_client",
             });
         }
-        self.build_imported_client(request).map(|_| ())
+        let client = self.build_imported_client(request)?;
+        // An RS256 client needs the realm's RSA ID-token key, which
+        // `import_client` loads (or provisions). A stored key that does not
+        // unwrap or decode would fail there — after an overwrite restore has
+        // already deleted the live client — so it is loaded here, before
+        // anything is written or deleted. Read-only: a realm with no key yet
+        // is not provisioned by a validation (a dry run writes nothing).
+        if client.id_token_signed_response_alg() == crate::identity::oidc::IdTokenSigningAlg::Rs256
+        {
+            self.load_realm_id_token_rsa_key(realm_id)?;
+        }
+        Ok(())
     }
 
     fn import_client(
@@ -17737,6 +17748,8 @@ mod tests {
     mod control_reload;
     /// A FAPI 2.0 client is never public and always holds verifiable keys.
     mod fapi2_client_keys;
+    /// An RS256 client's realm key is checked before an overwrite deletes it.
+    mod import_client_rs256_key;
     /// Concurrent revocations survive a racing control-cache reload.
     mod revocation_reload_races;
     /// PKCE challenge and refresh-token hash compare in constant time.

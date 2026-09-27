@@ -2059,7 +2059,10 @@ pub trait IdentityEngine: Send + Sync {
     /// (so a record that would be refused never costs the live one) and in a
     /// dry run (so the report lists what the real restore would refuse).
     /// `import_client` builds its client with the same code, so the two can
-    /// never disagree.
+    /// never disagree. For an RS256 client it also loads the realm's RSA
+    /// ID-token key, so a stored key that will not unwrap or decode is refused
+    /// here rather than after an overwrite deleted the live client (a realm
+    /// with no key yet is not provisioned by the validation).
     fn validate_import_client(
         &self,
         realm_id: &RealmId,
