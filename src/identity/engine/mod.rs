@@ -5983,6 +5983,12 @@ impl EmbeddedIdentityEngine {
                 .delete(realm_id, &entry.key)
                 .map_err(Self::storage_err)?;
         }
+        if !session_entries.is_empty() {
+            // Every other node holds its own session cache, and a cache hit
+            // returns a live session without consulting storage: publish a
+            // control, as `revoke_session` does, so they drop theirs.
+            self.bump_control_epoch();
+        }
 
         // 6. Delete all organization memberships for this user
         let org_membership_prefix = keys::membership_by_user_prefix(user_id);

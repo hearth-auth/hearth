@@ -106,6 +106,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   rolling a node back needs its data directory restored from a pre-upgrade backup. A new-build node
   logs `peer cannot decode this node's Raft log` when it meets an older one. Single-node deployments
   are unaffected. See the upgrading guide, *Cluster upgrades*.
+- **Cluster: deleting a user ends its sessions on every node** — the delete removed the user's
+  sessions and evicted them from the serving node's cache only; another node that had one cached
+  kept accepting the deleted user's tokens (a cache hit never reads storage) until something else
+  asserted a control. Deleting a user with sessions now publishes a control like `POST /revoke` of a
+  session does, so every node drops its cached copies.
 - **Argon2id client-secret verification is admission-controlled** — a caller-chosen or legacy client
   secret (gRPC `RegisterClient`, `hearth.yaml` `applications[].client_secret`, migration import, or
   any secret stored before generated secrets moved to SHA-256) was verified with Argon2id directly

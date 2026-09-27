@@ -700,3 +700,42 @@ fn parked_local_epochs_stay_bounded_without_a_reloader() {
         plane.parked_local_epochs_for_test()
     );
 }
+
+/// Deleting a user removes its sessions, and every other node must stop
+/// accepting them. The delete removed the session rows and evicted them from
+/// the deleting node's cache only; it published no control, so a node that had
+/// the session cached kept validating the deleted user's tokens (a cache hit
+/// never consults storage) until something else moved the control epoch.
+#[test]
+fn deleting_a_user_on_another_node_ends_its_sessions_here() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = open_storage(&dir);
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let node = engine_over(&storage, &clock);
+    let other_node = engine_over(&storage, &clock);
+    let (realm, token) = seed_token(&node);
+    let claims = node.validate_token(&realm, &token).expect("warm the cache");
+    let user = UserId::new(
+        uuid::Uuid::parse_str(claims.sub.strip_prefix("user_").unwrap_or(&claims.sub))
+            .expect("user id in sub"),
+    );
+
+    other_node
+        .delete_user(&realm, &user)
+        .expect("delete the user");
+    clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
+
+    let deadline = Instant::now() + CONVERGE;
+    let mut still_valid = true;
+    while Instant::now() < deadline {
+        if node.validate_token(&realm, &token).is_err() {
+            still_valid = false;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !still_valid,
+        "a node that had the session cached kept accepting a deleted user's token"
+    );
+}
