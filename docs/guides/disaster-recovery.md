@@ -732,7 +732,38 @@ post-restore validation checklist appropriate for an incident.
    # They MUST match.
    ```
 
-4. **Run the test-restore drill checklist** (below) against the new
+4. **Confirm operator-console access.** The restore's last lines say whether
+   the archive carried the **system realm** — the realm that holds every
+   operator-console account:
+
+   - `System realm restored: …` — operators sign in at `/ui/admin/login` with
+     their original passwords and second factors (sessions are not restored,
+     so everyone signs in again). Into an empty data directory the system
+     realm's signing key is restored too, so system-realm tokens keep their
+     `kid`. Sign in once now: the cluster endpoints (`/admin/cluster/*`) and
+     every cross-realm operation need a system-realm token.
+   - `This restore does not contain the system realm …` — the archive brought
+     back no operator account, and a restored store holds realms, so the
+     first-run setup URL is not issued. Restore the system realm from another
+     archive **before** you start the server: an unfiltered
+     `hearth backup create` (it includes the system realm), or a
+     `POST /admin/backup` made by a system-realm caller on this release or
+     later. HTTP exports from v1.6.11 and earlier never carried it. A second
+     restore into the same data directory adds it:
+
+     ```bash
+     hearth backup restore \
+       --input /backups/system-realm.hearth-backup \
+       --config /etc/hearth/hearth.yaml \
+       --data-dir /var/lib/hearth/data
+     ```
+
+   Tenant realms' own admins keep working against `/admin` with their realm's
+   `X-Realm-ID` either way. See
+   [Restoring the system realm](./backup.md#restoring-the-system-realm) for the
+   skip / merge / overwrite rules and who may restore it.
+
+5. **Run the test-restore drill checklist** (below) against the new
    deployment to confirm functional parity, then cut over traffic.
 
 ---

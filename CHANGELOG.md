@@ -117,10 +117,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   to every node, and only then start the new cluster. Do not restore into a cluster that has
   already started: start-up creates every realm `hearth.yaml` declares with a new id and signing
   key, and the restore then skips each archived realm as a duplicate and leaves it empty under its
-  name. The rebuild does not bring back the system realm (operator-console accounts, system tokens
-  and grants, the system signing key — and this release cannot create a first console account on a
-  restored store), sessions (every user signs in again) or the revoked-token list (a revoked,
-  unexpired sessionless token validates again; rotate the realm's signing key if that matters).
+  name. The v1.6.11 HTTP export does not carry the system realm (operator-console accounts, system
+  tokens and grants, the system signing key), so export it separately, offline, with this
+  release's `hearth backup create --realm 00000000-0000-0000-0000-000000000000` after stopping the
+  nodes, and restore both archives. The rebuild does not bring back sessions (every user signs in
+  again) or the revoked-token list (a revoked, unexpired sessionless token validates again; rotate
+  the realm's signing key if that matters).
   See the upgrading guide, *Cluster upgrades* and *Upgrading a cluster whose Raft logs were
   purged*.
 - **Cluster: a node restarts after its Raft log was purged** — the state machine kept its applied
@@ -393,6 +395,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   MX lookup is performed. Registration behaviour does not change.
 
 ### Fixed
+- **Backup/restore brings back operator-console access** — `hearth backup restore` refused the
+  system realm (`operation not permitted on the system realm: import_realm`) and aborted, so an
+  unfiltered `hearth backup create` archive could not be restored without `--realm`, and a rebuilt
+  instance had no supported way back into `/ui/admin`. Restore now imports the system realm's
+  operator accounts (password hashes and second factors), roles, groups and role assignments, audit
+  log and signing key (with its retiring keys), with the same skip / merge / overwrite / dry-run
+  rules and validation as every other realm. Its signing key replaces the key of a system realm
+  that holds no operator (a fresh data directory), so pre-backup system tokens keep their `kid`;
+  a live system realm keeps its key unless `--mode overwrite`. The same
+  `--allow-missing-signing-key` rule applies. `POST /admin/backup` by a system-realm caller now
+  includes the system realm (appended to a full export, or alone with `?realm=system`); a
+  tenant-scoped caller never exports it and its restore of an archive carrying it is refused
+  (`403`) before anything is written. `hearth backup restore` ends by saying whether the archive
+  brought the system realm back. HTTP exports from v1.6.11 and earlier do not contain it.
 - `Authorization: Basic base64("<client_id>:")` (an empty password) now means "no secret" on every
   endpoint. A public client identifying itself this way could redeem its code at `/token` but was
   refused (`401`) at `/as/par` and `/revoke`, where the empty password read as a wrong secret.

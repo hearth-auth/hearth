@@ -131,6 +131,61 @@ under a DEK wrapped with Argon2id from that passphrase. Treat the archive and
 the passphrase as you would the data directory itself. If you want an archive
 without it, name a single realm with `--realm <name>`.
 
+**Which archives contain it:**
+
+| Export | System realm included? |
+|---|---|
+| `hearth backup create` (no `--realm`) | **Yes** |
+| `hearth backup create --realm <tenant>` | No |
+| `hearth backup create --realm 00000000-0000-0000-0000-000000000000` | Yes, alone |
+| `POST /admin/backup` by a **system-realm** caller (nil `X-Realm-ID`, `hearth.export`) | **Yes** — appended to a full export; `?realm=system` exports it alone |
+| `POST /admin/backup` by a tenant-scoped caller | **Never** — its own realm only; `?realm=system` is `403` |
+| `POST /admin/backup` from **v1.6.11 or earlier** | **No** — no HTTP export carried it before this release |
+
+`hearth backup inspect` lists the realms an archive carries; the system realm is
+the entry whose `realm_id` is `realm_00000000-0000-0000-0000-000000000000` (slug
+`system`).
+
+### Restoring the system realm
+
+`hearth backup restore` restores the system realm's contents — operator accounts
+with their password hashes and second factors, the system realm's roles, groups
+and role assignments (the `realm.admin` grant the console checks), its signing
+key and any retiring keys, and its audit log when the archive has one — into the
+target's system realm. Before this release it refused the system realm
+(`operation not permitted on the system realm: import_realm`) and aborted the
+whole restore.
+
+It follows the same rules as every other realm, with one difference that comes
+from the system realm always existing (engine construction seeds it, with a
+fresh signing key and no users, in every data directory):
+
+| Mode | Operator accounts and other records | System signing key |
+|---|---|---|
+| `skip` (default) / `merge` | Missing records are added; existing ones are kept (reported as conflicts) | Installed when the target's system realm **holds no user** — a fresh data directory, whose seeded key has signed nothing. Kept (reported as a conflict) when the target already has operators |
+| `overwrite` | Existing records are replaced by the archived ones | **Replaced**, even on a live instance. Every token signed by the replaced key stops verifying at once |
+| `--dry-run` | Counted, nothing written | Counted, nothing written |
+
+The system realm's record itself is not re-created; its contents are imported
+into the system realm that already exists. In the restore report the `realms`
+row of the `system` realm is the signing key's outcome.
+
+The fail-closed signing-key rule applies unchanged: an archive whose system realm
+carries no signing key is refused unless you pass `--allow-missing-signing-key`,
+in which case the accounts are restored and the target keeps the key it has.
+
+**Who may restore it.** The CLI (an operator with the data directory) and, over
+HTTP, a **system-realm caller** only. A tenant-scoped caller's
+`POST /admin/backup/restore` of an archive carrying the system realm is refused
+with `403` before anything is written, in every mode — a restore never lets a
+lower-privileged caller create or overwrite an operator account.
+
+**After the restore** operators sign in at `/ui/admin/login` with their original
+passwords and second factors. Sessions are not restored (see
+[What a backup does not carry](#what-a-backup-does-not-carry)), so everyone signs
+in again. `hearth backup restore` says at the end whether the archive brought the
+system realm back.
+
 ### Audit chain verification
 
 Restore re-signs every imported audit event under the **destination** realm's

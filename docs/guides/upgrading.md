@@ -560,16 +560,20 @@ cluster from a backup.
 
 **What the rebuild does not bring back.** Read this before you schedule the window:
 
-- **The system realm.** The HTTP export (`POST /admin/backup`) never includes it, so the rebuild
-  loses every **operator-console account**, every API token and grant issued in the system realm
-  (for example the system token used below), and the system realm's signing key. This release has
-  **no supported way to create the first operator-console account** on a restored store: the
-  setup URL is issued only while the store holds no realm, and a restored store holds them all. An
-  unfiltered `hearth backup create` of this release does include the system realm, but
-  `hearth backup restore` refuses to import it (`operation not permitted on the system realm:
-  import_realm`) and stops, so it is not a way around this. Tenant realms' own admins and API
-  tokens are restored and keep working against `/admin` with their realm's `X-Realm-ID`; the
-  cluster endpoints (`/admin/cluster/*`) need a system-realm token.
+- **The system realm — unless you export it separately.** It holds every **operator-console
+  account**, the grants and API tokens issued in the system realm (for example the system token
+  used below) and the system realm's signing key. This release restores it: `hearth backup
+  restore` imports the system realm from any archive that carries it, and operators then sign in
+  at `/ui/admin/login` with their original passwords and second factors (see the
+  [Backup guide](./backup.md#restoring-the-system-realm)). But the archive must carry it, and the
+  **v1.6.11 HTTP export in step 1 does not** — no `POST /admin/backup` before this release included
+  the system realm. Step 2 therefore takes it separately, offline, with this release's binary. A
+  CLI `hearth backup create` without `--realm`, and a `POST /admin/backup` made by a system-realm
+  caller **on this release**, both include it. Without it the rebuilt cluster has no
+  operator-console account and no supported way to create one (the setup URL is issued only while
+  the store holds no realm, and a restored store holds them all); tenant realms' own admins and
+  API tokens keep working against `/admin` with their realm's `X-Realm-ID`, but the cluster
+  endpoints (`/admin/cluster/*`) need a system-realm token.
 - **Sessions.** They are never exported. Every token bound to a session — every user's access and
   refresh token — stops validating, so **every user signs in again**.
 - **The revoked-token list.** It is excluded from backups. A token without a session (for example
@@ -607,7 +611,24 @@ cluster must share one value anyway: run the restore and the new cluster with th
    [Backup guide](./backup.md) for signing (the restore refuses an unsigned archive).
 2. **Stop every node** — one-way, see above. Keep each node's data directory (including `raft.db`)
    anyway, for investigation.
-3. **Install the new binary on every node.**
+3. **Install the new binary on every node, and export the system realm.** On the node that was
+   the leader in step 1 — stopped, so its data directory is not locked — export the system realm
+   with the **new** binary, the old cluster's `HEARTH_MASTER_KEY` and its `hearth.yaml` (for
+   `security.key_encryption_key`). Work on a copy so the original stays untouched:
+
+   ```bash
+   export HEARTH_MASTER_KEY=...   # the old cluster's value
+   cp -a /var/lib/hearth/data /var/lib/hearth/data-export-copy
+   hearth backup create \
+     --data-dir /var/lib/hearth/data-export-copy \
+     --config /etc/hearth/hearth.yaml \
+     --realm 00000000-0000-0000-0000-000000000000 \
+     --sign-key /etc/hearth/backup-signing.pem \
+     --output system-realm.hearth-backup
+   hearth backup inspect --input system-realm.hearth-backup   # lists one realm: `system`
+   ```
+
+   Skip this only if you accept rebuilding without operator-console access (see above).
 4. **Restore offline into one empty data directory**, on one node, with the new binary, the old
    cluster's `HEARTH_MASTER_KEY` in the environment and the new cluster's `hearth.yaml` (its
    `security.backup.verify_key` must match the key the archive was signed with):
@@ -619,10 +640,16 @@ cluster must share one value anyway: run the restore and the new cluster with th
      --input pre-upgrade.hearth-backup \
      --config /etc/hearth/hearth.yaml \
      --data-dir /var/lib/hearth/data-new
+   hearth backup restore \
+     --input system-realm.hearth-backup \
+     --config /etc/hearth/hearth.yaml \
+     --data-dir /var/lib/hearth/data-new
    ```
 
    Exit `0` means every record restored; read any conflicts and errors it prints before going
-   on. Do **not** start `hearth serve` on it yet.
+   on. The second restore ends with `System realm restored: …`; the first one warns that its
+   archive does not contain the system realm, which is expected here. Do **not** start
+   `hearth serve` on it yet.
 5. **Copy that directory to every node** before any node starts, to the path each node's
    `storage.data_dir` names (and point the restoring node's own `storage.data_dir` at it):
 
