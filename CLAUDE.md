@@ -29,6 +29,7 @@ make tailwind-install  # downloads Tailwind standalone CLI to ui/tailwindcss
 |---------|-------------|
 | `make check` | clippy + fmt + nextest — run before every PR |
 | `make test` | `cargo nextest run --workspace --features hearth/dev-endpoints` (PROTOC env var required) |
+| `make test-detached` | The full suite in one `--workspace` pass, detached from the caller — **agents MUST use this (or `scripts/run-detached.sh`) for any long run**; see "Long-running commands" below |
 | `make test-no-dev-endpoints` | Runs the tests that only compile WITHOUT `dev-endpoints` (the production feature set) — CI job `no-dev-endpoints` |
 | `make clippy` | `cargo clippy --all-targets -- -D warnings`, once without and once with `dev-endpoints` |
 | `make fmt` | `cargo fmt --check` |
@@ -268,6 +269,23 @@ Avoid false-confidence anti-patterns (vacuous `is_ok()`/`is_err()` asserts, zero
 
 - **Test runner**: `cargo nextest` only — never `cargo test`.
 - **Watch mode**: `bacon test` for TDD loop.
+- **Long-running commands (agents): run them detached.** Claude Code's background-task
+  monitor stops a *background* Bash command when the host's free memory is low, and it
+  counts reclaimable page cache (the cargo target dir) as used. It kills
+  `cargo nextest run --workspace` while tens of GB are still available. So:
+  - For the full suite, use `make test-detached`. For any other command that can run
+    longer than the 10-minute foreground limit (a `--workspace` build, clippy on
+    `--all-targets`, `make loadtest-smoke`, `make bench-gate`), use
+    `scripts/run-detached.sh run <name> -- <command>`.
+  - The command then belongs to the user's systemd manager, not to the Bash tool. If the
+    waiting call is stopped, the command keeps running: continue with
+    `scripts/run-detached.sh wait <id>` (the id is printed at start, the log path with
+    `scripts/run-detached.sh log <id>`).
+  - Do **NOT** start these as `run_in_background` Bash tasks, and do **NOT** work around
+    the monitor by splitting the suite into one cargo run per test binary. One
+    `--workspace` pass is much faster: nextest runs every binary's tests in parallel.
+  - Short, targeted runs (`--lib <filter>`, one `--test <name>`) stay in the foreground.
+  - Always pass `--no-fail-fast` to a full run (`make test-detached` does).
 - **No doctests — ever.** No `/// ```rust` fenced blocks in doc comments. Use `#[cfg(test)] mod tests` blocks or `tests/`. Runnable examples live under `examples/`.
 - **Property tests**: `proptest` (256 cases dev, 10k+ CI).
 - **Simulation**: real-thread crash-recovery tests (`hearth-simulation` crate) using `FaultFs` fault injection; no deterministic scheduler.

@@ -13,7 +13,7 @@ BUF := buf
 ## with `--workspace`.
 DEV_FEATURES ?= --features hearth/dev-endpoints
 
-.PHONY: setup build test test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
+.PHONY: setup build test test-detached test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -75,6 +75,13 @@ build: css
 ## Runnable documentation examples live under `examples/`.
 test:
 	PROTOC=$(PROTOC) cargo nextest run --workspace $(DEV_FEATURES) $(CARGO_FLAGS)
+
+## The full suite, detached from the caller (scripts/run-detached.sh): one
+## `--workspace` pass that Claude Code's background-task monitor cannot kill.
+## Blocks until the suite ends and exits with its code; if the waiting process
+## is killed, the suite keeps running — `scripts/run-detached.sh wait <id>`.
+test-detached:
+	scripts/run-detached.sh run test -- $(MAKE) test CARGO_FLAGS="--no-fail-fast $(CARGO_FLAGS)"
 
 ## Run the tests that only exist in a build WITHOUT `dev-endpoints` — the
 ## production feature set a plain `cargo build` / `cargo install` ships.
