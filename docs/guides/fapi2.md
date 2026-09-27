@@ -228,6 +228,8 @@ curl -s -X POST "$ISSUER/realms/$REALM/as/par" \
   -H "Content-Type: application/json" \
   -d "{
     \"client_id\": \"$CLIENT_ID\",
+    \"client_assertion_type\": \"urn:ietf:params:oauth:client-assertion-type:jwt-bearer\",
+    \"client_assertion\": \"$CLIENT_ASSERTION_JWT\",
     \"redirect_uri\": \"https://app.example.com/callback\",
     \"scope\": \"openid\",
     \"response_type\": \"code\",
@@ -237,6 +239,13 @@ curl -s -X POST "$ISSUER/realms/$REALM/as/par" \
     \"code_challenge_method\": \"S256\"
   }"
 ```
+
+The pushing client authenticates exactly as it does at the token endpoint (RFC 9126 §2): a
+FAPI 2.0 client with a fresh `private_key_jwt` assertion (§7 — single-use `jti`, `aud` = the
+realm issuer), a secret-bearing confidential client with `client_secret_basic` or
+`client_secret_post`. Only a public client may push on its `client_id` alone. A missing, wrong
+or replayed credential is `401 invalid_client`; the request object's `iss` and `client_id` must
+name the authenticated client.
 
 **Response (201 Created):**
 ```json
@@ -335,6 +344,8 @@ curl -s -X POST "$ISSUER/realms/$REALM/as/par" \
   -H "Content-Type: application/json" \
   -d "{
     \"client_id\": \"$CLIENT_ID\",
+    \"client_assertion_type\": \"urn:ietf:params:oauth:client-assertion-type:jwt-bearer\",
+    \"client_assertion\": \"$CLIENT_ASSERTION_JWT\",
     \"request\": \"$JAR_JWT\"
   }"
 ```
@@ -655,6 +666,7 @@ Hearth's internal test suite covers the conformance scenarios in `tests/fapi_con
 | `invalid_request_object: JAR signature verification failed` | 400 | JAR JWT signed with wrong key | Sign with the private key matching the registered JWKS |
 | `invalid_request: JAR client_id mismatch` | 400 | `client_id` in JAR ≠ `client_id` query param | Set both to the same prefixed client ID |
 | `invalid_request: request_uri expired or already consumed` | 400 | PAR `request_uri` older than 90 s or replayed | Push a fresh PAR request |
+| `invalid_client` at `/as/par` | 401 | The pushing client did not authenticate, or its assertion/secret failed | Authenticate as at the token endpoint — a fresh `private_key_jwt` assertion for a FAPI 2.0 client |
 
 ---
 

@@ -683,6 +683,33 @@ Discovery advertises both sets (RFC 8414 §2):
 }
 ```
 
+### 8.2 Pushed Authorization Requests — Client Authentication
+
+`POST /as/par` and `POST /realms/{realm}/as/par` MUST authenticate the pushing client with the
+method it uses at the token endpoint (RFC 9126 §2), by exactly one of the methods discovery lists
+in `token_endpoint_auth_methods_supported` (RFC 9126 §5):
+
+| Method | Accepted for |
+|--------|--------------|
+| `client_secret_basic` | a client with a stored secret; body `client_id` may be omitted (RFC 6749 §3.2.1) and, when present, must equal the Basic username (else `400 invalid_request`) |
+| `client_secret_post` | a client with a stored secret |
+| `private_key_jwt` | a client with an assertion key — same rules as the token endpoint (EdDSA, `iss`/`sub` = the body `client_id`, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min) |
+| `none` | a **public** client only: no stored secret and no assertion key |
+
+A confidential client with no credentials or a wrong one, a `private_key_jwt` client (every FAPI
+2.0 client) presenting only its `client_id` or a made-up secret, a public client presenting a
+secret it cannot hold, and an unknown client all receive `401 {"error":"invalid_client"}` with
+`WWW-Authenticate: Basic` (RFC 6749 §5.2). Combining an assertion with a secret is `400
+invalid_request` (RFC 6749 §2.3). The work follows the caller's input as at the token endpoint: a
+presented secret costs one verification on every arm, no secret costs none. An Argon2id secret
+whose verification the KDF admission gate sheds is `503` `kdf_overloaded` + `Retry-After`.
+
+The pushed request is stored under the **authenticated** client. A request object (RFC 9101) must
+then carry that client as `iss` and, when it has a `client_id` claim, as `client_id` too (RFC 9101
+§6.3); otherwise the push is `400`.
+FAPI adds no auth-method rule at PAR beyond the token endpoint's: a FAPI 2.0 client holds no
+secret (§2.2.1), so once it has an assertion key it can authenticate only with `private_key_jwt`.
+
 ---
 
 ## 9. Test Coverage
@@ -697,6 +724,7 @@ Discovery advertises both sets (RFC 8414 §2):
 | `tests/rfc9207_iss.rs` | `iss` in authorization responses per RFC 9207 |
 | `tests/oauth_form_encoding.rs` | Form + JSON content-type acceptance on token/revoke/introspect/PAR/device-authorization and their realm twins (HEA-2077) |
 | `tests/device_grant_client_auth.rs` | Confidential-client authentication on both device-grant endpoints and both realm twins (audit 2026-08-28 §4.19#4, §4.22#6) |
+| `tests/par_client_auth.rs` | RFC 9126 §2 client authentication at `/as/par` and its realm twin: confidential clients refused without or with wrong credentials, `client_secret_basic`/`client_secret_post`/`private_key_jwt` accepted, public client by `client_id` only and refused when presenting a secret, authenticated client bound to the body and request object, FAPI 2.0 client and FAPI realm, KDF-gate shed |
 | `tests/introspect_confidential_only.rs` | Introspection refuses public clients (HTTP, realm twin, gRPC); secret and `private_key_jwt` authentication; gRPC audience restriction; discovery auth-method metadata; public-client revocation still accepted (task 26.43) |
 | `tests/revoke_client_ownership.rs` | RFC 7009 §2.1 revocation ownership — a client revokes only tokens issued to it (`act.sub`, `azp`, grant family, `client_credentials` subject) on `/revoke`, the realm twin and gRPC `Revoke`; foreign and first-party tokens are a silent `200` no-op; device-grant tokens belong to the device client and exchanged tokens to the exchanging client, both minted through the real grant; `private_key_jwt` clients must present their assertion |
 | `tests/realm_token_exchange_client_auth.rs` | Token-exchange client auth enforcement + DPoP re-binding prevention on both endpoints (HEA-2024) |

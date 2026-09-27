@@ -1102,6 +1102,8 @@ async fn par_endpoint_stores_the_pushed_prompt() {
 /// field is absent.
 #[tokio::test]
 async fn par_without_jar_rejected_under_fapi_advanced() {
+    use base64::Engine as _;
+
     use crate::identity::{
         CreateRealmRequest, FapiProfile, RegisterClientRequest, UpdateRealmRequest,
     };
@@ -1163,6 +1165,16 @@ async fn par_without_jar_rejected_under_fapi_advanced() {
                 .method("POST")
                 .uri(format!("/realms/{}/as/par", realm_rec.name()))
                 .header("content-type", "application/json")
+                // The client is confidential: RFC 9126 §2 requires it to
+                // authenticate, so the refusal below is the FAPI gate's.
+                .header(
+                    "authorization",
+                    format!(
+                        "Basic {}",
+                        base64::engine::general_purpose::STANDARD
+                            .encode(format!("{}:secret", client.client_id().as_uuid()))
+                    ),
+                )
                 .body(axum::body::Body::from(body))
                 .expect("request"),
         )

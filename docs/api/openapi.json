@@ -2428,6 +2428,7 @@
     "/as/par": {
       "post": {
         "summary": "Pushed Authorization Request (RFC 9126)",
+        "description": "The client authenticates exactly as at the token endpoint (RFC 9126 \u00a72):\na confidential client with `client_secret_basic`, `client_secret_post`\nor `private_key_jwt` (`client_assertion_type` + `client_assertion`); a\npublic client identifies itself with `client_id` alone and may not\npresent a secret. Body `client_id` is optional under\n`client_secret_basic`.\n",
         "operationId": "pushedAuthorizationRequest",
         "tags": [
           "OAuth"
@@ -2445,6 +2446,15 @@
         "responses": {
           "201": {
             "description": "Request URI created"
+          },
+          "400": {
+            "description": "Invalid request \u2014 including Basic and body credentials naming different clients, an assertion combined with a secret, or a request object whose `iss`/`client_id` is not the authenticated client"
+          },
+          "401": {
+            "description": "`invalid_client` \u2014 missing, wrong or unverifiable client authentication (carries `WWW-Authenticate: Basic`)"
+          },
+          "503": {
+            "description": "`kdf_overloaded` \u2014 the client-secret verification was shed by the KDF admission gate; retry after `Retry-After` seconds"
           }
         }
       }

@@ -213,6 +213,13 @@ paths:
   /as/par:
     post:
       summary: Pushed Authorization Request (RFC 9126)
+      description: |
+        The client authenticates exactly as at the token endpoint (RFC 9126 §2):
+        a confidential client with `client_secret_basic`, `client_secret_post`
+        or `private_key_jwt` (`client_assertion_type` + `client_assertion`); a
+        public client identifies itself with `client_id` alone and may not
+        present a secret. Body `client_id` is optional under
+        `client_secret_basic`.
       operationId: pushedAuthorizationRequest
       tags: [OAuth]
       requestBody:
@@ -224,6 +231,20 @@ paths:
       responses:
         "201":
           description: Request URI created
+        "400":
+          description: >-
+            Invalid request — including Basic and body credentials naming
+            different clients, an assertion combined with a secret, or a
+            request object whose `iss`/`client_id` is not the authenticated
+            client
+        "401":
+          description: >-
+            `invalid_client` — missing, wrong or unverifiable client
+            authentication (carries `WWW-Authenticate: Basic`)
+        "503":
+          description: >-
+            `kdf_overloaded` — the client-secret verification was shed by the
+            KDF admission gate; retry after `Retry-After` seconds
 
   # ── Token endpoint (RFC 6749) ────────────────────────────────────────────
   /end_session:

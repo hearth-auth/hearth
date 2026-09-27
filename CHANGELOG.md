@@ -137,6 +137,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 - **Constant-time secret comparisons** — the PKCE `code_verifier` check, WebAuthn/passkey challenges,
   refresh-token reuse detection, federation confirm-link and consent tickets, the Basic-vs-body
   `client_secret` agreement check and audit-log HMAC chain verification now compare in constant time.
+- **Pushed Authorization Requests authenticate the client (RFC 9126 §2)** — `POST /as/par` and
+  `POST /realms/{realm}/as/par` accepted any `client_id` without authentication, so anyone could push
+  scopes, a `resource`, a redirect URI, a request object or a `prompt` in a confidential client's
+  name. The client now authenticates as at the token endpoint: `client_secret_basic` (body
+  `client_id` optional), `client_secret_post` or `private_key_jwt`. Only a public client may push on
+  its `client_id` alone, and a public client presenting a secret is refused. Failures are `401
+  invalid_client` with `WWW-Authenticate: Basic`; Basic and body credentials naming different clients,
+  or an assertion combined with a secret, are `400 invalid_request`; a request object must name the
+  authenticated client; a shed Argon2id secret check is `503` + `Retry-After`. **Breaking** for
+  confidential clients — including every FAPI 2.0 client with an assertion key — that push without
+  authenticating.
 
 ### Added
 - **Per-client RS256 ID tokens (OIDC interop, task 26.55)** — a client can set

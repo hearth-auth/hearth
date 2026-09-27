@@ -1660,9 +1660,25 @@ async fn authorize(
 }
 
 /// HTTP request body for a Pushed Authorization Request (RFC 9126).
-#[derive(Debug, serde::Deserialize)]
+///
+/// Carries the client authentication fields the token endpoint accepts
+/// (RFC 9126 §2: "the same method it uses at the token endpoint"). No `Debug`:
+/// the body holds a client secret or assertion.
+#[derive(serde::Deserialize)]
 struct HttpParRequest {
+    /// Optional for a `client_secret_basic` client, which may carry its
+    /// identity in the `Authorization` header alone (RFC 6749 §3.2.1).
+    #[serde(default)]
     client_id: String,
+    /// `client_secret_post` (RFC 6749 §2.3.1).
+    #[serde(default)]
+    client_secret: Option<String>,
+    /// `private_key_jwt` (RFC 7523 §2.2).
+    #[serde(default)]
+    client_assertion_type: Option<String>,
+    /// `private_key_jwt` (RFC 7523 §2.2).
+    #[serde(default)]
+    client_assertion: Option<String>,
     redirect_uri: String,
     #[serde(default)]
     scope: String,
@@ -1696,38 +1712,128 @@ async fn pushed_authorization_request(
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
-    par_handler(&state, &realm_id, body).await.into_response()
+    par_handler(&state, &realm_id, &headers, body)
+        .await
+        .into_response()
 }
 
 /// Push authorization parameters (RFC 9126) — realm-scoped via path.
 async fn realm_pushed_authorization_request(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
+    headers: HeaderMap,
     JsonOrForm(body): JsonOrForm<HttpParRequest>,
 ) -> impl IntoResponse {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,
     };
-    par_handler(&state, &realm_id, body).await.into_response()
+    par_handler(&state, &realm_id, &headers, body)
+        .await
+        .into_response()
+}
+
+/// Authenticates the client pushing an authorization request (RFC 9126 §2).
+///
+/// RFC 9126 §2: a confidential client "MUST authenticate itself using the same
+/// method it uses at the token endpoint"; a public client identifies itself
+/// with `client_id` alone. The endpoint accepts exactly the methods discovery
+/// advertises in `token_endpoint_auth_methods_supported` (RFC 9126 §5):
+///
+/// - `private_key_jwt` — [`verify_assertion_client`], the `/introspect` and
+///   `/revoke` rules: the assertion's `iss`/`sub` must be the body
+///   `client_id`, and combining it with a secret is `400 invalid_request`;
+/// - `client_secret_basic` / `client_secret_post` — reconciled by
+///   [`resolve_client_credentials`] (a Basic username naming a different
+///   client than the body is `400 invalid_request`), then verified by
+///   `authenticate_confidential_client`: a public or `private_key_jwt`-only
+///   client presenting a secret it cannot hold is refused, not waved through;
+/// - `none` — accepted only for a public client: no stored secret AND no
+///   assertion key (`OAuthClient::requires_client_assertion`).
+///
+/// Every refusal is the uniform `401 invalid_client` with `WWW-Authenticate:
+/// Basic` (RFC 6749 §5.2). The work follows the caller's input, never the
+/// lookup: a presented secret costs one verification on every arm (unknown,
+/// public, confidential — a dummy hash when none is stored), and no secret
+/// costs none, as at the token endpoint. An Argon2id verification the KDF gate
+/// sheds is `503` + `Retry-After`.
+fn verify_par_client(
+    state: &AppState,
+    realm_id: &RealmId,
+    headers: &HeaderMap,
+    body: &HttpParRequest,
+) -> Result<ClientId, Response> {
+    let assertion_type = body
+        .client_assertion_type
+        .as_deref()
+        .and_then(non_empty_credential);
+    let assertion = body
+        .client_assertion
+        .as_deref()
+        .and_then(non_empty_credential);
+    if assertion_type.is_some() || assertion.is_some() {
+        return verify_assertion_client(
+            state,
+            realm_id,
+            headers,
+            Some(body.client_id.as_str()),
+            body.client_secret.as_deref(),
+            assertion_type,
+            assertion,
+        );
+    }
+
+    let (raw_id, secret) = match resolve_client_credentials(
+        headers,
+        Some(body.client_id.as_str()),
+        body.client_secret.as_deref(),
+    )? {
+        (Some(id), secret) => (id, secret),
+        (None, _) => return Err(invalid_client_response()),
+    };
+    let client_id = raw_id
+        .parse::<uuid::Uuid>()
+        .map(ClientId::new)
+        .map_err(|_| invalid_client_response())?;
+
+    if let Some(secret) = secret {
+        return state
+            .identity
+            .authenticate_confidential_client(realm_id, &client_id, Some(&secret))
+            .map(|()| client_id)
+            .map_err(|e| match e {
+                crate::identity::IdentityError::KdfOverloaded { retry_after } => {
+                    kdf_shed_json_response(retry_after)
+                }
+                _ => invalid_client_response(),
+            });
+    }
+
+    // No credential: only a public client may push on its `client_id` alone.
+    match state.identity.get_client(realm_id, &client_id) {
+        Ok(Some(client)) if !client.is_confidential() && !client.requires_client_assertion() => {
+            Ok(client_id)
+        }
+        Ok(_) => Err(invalid_client_response()),
+        Err(e) => Err(identity_error_to_response(&e).into_response()),
+    }
 }
 
 async fn par_handler(
     state: &AppState,
     realm_id: &crate::core::RealmId,
+    headers: &HeaderMap,
     body: HttpParRequest,
 ) -> impl IntoResponse {
     use crate::identity::{CodeChallengeMethod, PushedAuthorizationRequest};
 
-    let client_id = match body.client_id.parse::<uuid::Uuid>() {
-        Ok(u) => crate::core::ClientId::new(u),
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid_client", "error_description": "invalid client_id"})),
-            )
-                .into_response();
-        }
+    // RFC 9126 §2: authenticate the client before anything is stored in its
+    // name. The pushed request carries the AUTHENTICATED identity, so the
+    // engine's request-object checks (`iss` and `client_id` must name the
+    // client, RFC 9101 §6.3) bind the request object to it too.
+    let client_id = match verify_par_client(state, realm_id, headers, &body) {
+        Ok(id) => id,
+        Err(resp) => return resp,
     };
 
     let code_challenge_method = match body.code_challenge_method.as_deref() {

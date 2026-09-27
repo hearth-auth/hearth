@@ -956,6 +956,9 @@ async fn fapi_b06_realm_baseline_enforces_dpop_for_standard_profile_client() {
 // call the domain layer APIs, but do not exercise whether the HTTP authorize
 // handler actually calls `consume_par` and sets `via_par = true`.
 
+/// The confidential client secret of the FAPI Baseline HTTP test client.
+const FAPI_HTTP_CLIENT_SECRET: &str = "test-secret";
+
 /// Start an in-process axum HTTP server backed by a FAPI Baseline realm.
 ///
 /// Returns `(base_url, realm_uuid_string, client_uuid_string, user_uuid_string,
@@ -1002,7 +1005,7 @@ async fn start_fapi_http_server() -> (
             &RegisterClientRequest {
                 client_name: "FAPI HTTP Test Client".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
-                client_secret: Some("test-secret".to_string()),
+                client_secret: Some(FAPI_HTTP_CLIENT_SECRET.to_string()),
                 grant_types: vec!["authorization_code".to_string()],
                 require_consent: false,
                 ..Default::default()
@@ -1093,6 +1096,8 @@ async fn fapi_b07_http_par_authorize_flow_succeeds() {
     let par_resp: serde_json::Value = http
         .post(format!("{base}/as/par"))
         .header("X-Realm-ID", &realm_uuid)
+        // The client is confidential: RFC 9126 §2 requires it to authenticate.
+        .basic_auth(&client_uuid, Some(FAPI_HTTP_CLIENT_SECRET))
         .json(&serde_json::json!({
             "client_id": client_uuid,
             "redirect_uri": REDIRECT_URI,
@@ -1202,6 +1207,8 @@ async fn fapi_b09_http_replay_request_uri_rejected() {
     let par_resp: serde_json::Value = http
         .post(format!("{base}/as/par"))
         .header("X-Realm-ID", &realm_uuid)
+        // The client is confidential: RFC 9126 §2 requires it to authenticate.
+        .basic_auth(&client_uuid, Some(FAPI_HTTP_CLIENT_SECRET))
         .json(&serde_json::json!({
             "client_id": client_uuid,
             "redirect_uri": REDIRECT_URI,
@@ -1284,6 +1291,8 @@ async fn fapi_b10_http_client_id_mismatch_rejected() {
     let par_resp: serde_json::Value = http
         .post(format!("{base}/as/par"))
         .header("X-Realm-ID", &realm_uuid)
+        // The client is confidential: RFC 9126 §2 requires it to authenticate.
+        .basic_auth(&client_uuid, Some(FAPI_HTTP_CLIENT_SECRET))
         .json(&serde_json::json!({
             "client_id": client_uuid,
             "redirect_uri": REDIRECT_URI,

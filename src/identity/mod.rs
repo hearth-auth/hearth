@@ -889,6 +889,12 @@ pub trait IdentityEngine: Send + Sync {
     /// Validates the client, redirect URI, and PKCE (required for public
     /// clients), then stores the parameters under a 90-second TTL.
     /// Returns a `request_uri` the client passes to `/authorize`.
+    ///
+    /// `request.client_id` is trusted as the pushing client: the caller MUST
+    /// have authenticated it first (RFC 9126 §2 — a confidential client with
+    /// the method it uses at the token endpoint, a public client by
+    /// `client_id`). A request object's `iss` and `client_id` are checked
+    /// against it here.
     fn push_authorization_request(
         &self,
         realm_id: &RealmId,
