@@ -1827,7 +1827,6 @@ impl EmbeddedIdentityEngine {
         client_id: &crate::core::ClientId,
         request_jwt: &str,
     ) -> Result<crate::identity::oidc::JarClaims, IdentityError> {
-        use crate::identity::federation::oidc as fed_oidc;
         use crate::identity::oidc::JarClaims;
 
         #[derive(serde::Deserialize)]
@@ -1886,182 +1885,16 @@ impl EmbeddedIdentityEngine {
             reason: "client has no registered jwks for JAR verification".to_string(),
         })?;
 
-        // 4. Parse the JWKS and select the matching key.
-        #[derive(serde::Deserialize)]
-        struct JwksContainer {
-            keys: Vec<fed_oidc::Jwk>,
-        }
-        let jwks: JwksContainer =
-            serde_json::from_str(jwks_json).map_err(|_| IdentityError::InvalidJar {
-                reason: "client jwks is not valid JSON".to_string(),
-            })?;
-
-        let kid = header.kid.as_deref();
-        let selected = if let Some(k) = kid {
-            jwks.keys.iter().find(|j| j.kid.as_deref() == Some(k))
-        } else if jwks.keys.len() == 1 {
-            jwks.keys.first()
-        } else {
-            None
-        }
-        .ok_or_else(|| IdentityError::InvalidJar {
-            reason: "no matching key found in client jwks".to_string(),
-        })?;
-
-        // 5. Verify signature based on key type.
-        match alg {
-            "EdDSA" => {
-                if selected.crv.as_deref() != Some("Ed25519") {
-                    return Err(IdentityError::InvalidJar {
-                        reason: "EdDSA JWK must have crv=Ed25519".to_string(),
-                    });
-                }
-                let x_b64 = selected
-                    .x
-                    .as_deref()
-                    .ok_or_else(|| IdentityError::InvalidJar {
-                        reason: "EdDSA JWK missing 'x' parameter".to_string(),
-                    })?;
-                let pk_bytes =
-                    URL_SAFE_NO_PAD
-                        .decode(x_b64)
-                        .map_err(|_| IdentityError::InvalidJar {
-                            reason: "EdDSA JWK 'x' is not valid base64url".to_string(),
-                        })?;
-                let signing_input = format!("{}.{}", parts[0], parts[1]);
-                let sig_bytes =
-                    URL_SAFE_NO_PAD
-                        .decode(parts[2])
-                        .map_err(|_| IdentityError::InvalidJar {
-                            reason: "invalid signature encoding".to_string(),
-                        })?;
-                let public_key =
-                    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &pk_bytes);
-                public_key
-                    .verify(signing_input.as_bytes(), &sig_bytes)
-                    .map_err(|_| IdentityError::InvalidJar {
-                        reason: "EdDSA signature verification failed".to_string(),
-                    })?;
-            }
-            "RS256" => {
-                fed_oidc::verify_rs256(request_jwt, selected).map_err(|_| {
-                    IdentityError::InvalidJar {
-                        reason: "RS256 signature verification failed".to_string(),
-                    }
-                })?;
-            }
-            "PS256" => {
-                if selected.kty != "RSA" {
-                    return Err(IdentityError::InvalidJar {
-                        reason: "PS256 requires an RSA key (kty=RSA)".to_string(),
-                    });
-                }
-                let n_b64 = selected
-                    .n
-                    .as_deref()
-                    .ok_or_else(|| IdentityError::InvalidJar {
-                        reason: "PS256 JWK missing 'n' parameter".to_string(),
-                    })?;
-                let e_b64 = selected
-                    .e
-                    .as_deref()
-                    .ok_or_else(|| IdentityError::InvalidJar {
-                        reason: "PS256 JWK missing 'e' parameter".to_string(),
-                    })?;
-                let n = URL_SAFE_NO_PAD
-                    .decode(n_b64)
-                    .map_err(|_| IdentityError::InvalidJar {
-                        reason: "PS256 JWK 'n' is not valid base64url".to_string(),
-                    })?;
-                let e = URL_SAFE_NO_PAD
-                    .decode(e_b64)
-                    .map_err(|_| IdentityError::InvalidJar {
-                        reason: "PS256 JWK 'e' is not valid base64url".to_string(),
-                    })?;
-                let signing_input = format!("{}.{}", parts[0], parts[1]);
-                let sig_bytes =
-                    URL_SAFE_NO_PAD
-                        .decode(parts[2])
-                        .map_err(|_| IdentityError::InvalidJar {
-                            reason: "invalid signature encoding".to_string(),
-                        })?;
-                let components = ring::signature::RsaPublicKeyComponents {
-                    n: n.as_slice(),
-                    e: e.as_slice(),
-                };
-                components
-                    .verify(
-                        &ring::signature::RSA_PSS_2048_8192_SHA256,
-                        signing_input.as_bytes(),
-                        &sig_bytes,
-                    )
-                    .map_err(|_| IdentityError::InvalidJar {
-                        reason: "PS256 signature verification failed".to_string(),
-                    })?;
-            }
-            "ES256" => {
-                if selected.kty != "EC" {
-                    return Err(IdentityError::InvalidJar {
-                        reason: "ES256 requires an EC key (kty=EC)".to_string(),
-                    });
-                }
-                if selected.crv.as_deref() != Some("P-256") {
-                    return Err(IdentityError::InvalidJar {
-                        reason: "ES256 JWK must have crv=P-256".to_string(),
-                    });
-                }
-                let x_b64 = selected
-                    .x
-                    .as_deref()
-                    .ok_or_else(|| IdentityError::InvalidJar {
-                        reason: "ES256 JWK missing 'x' parameter".to_string(),
-                    })?;
-                let y_b64 = selected
-                    .y
-                    .as_deref()
-                    .ok_or_else(|| IdentityError::InvalidJar {
-                        reason: "ES256 JWK missing 'y' parameter".to_string(),
-                    })?;
-                let x_bytes =
-                    URL_SAFE_NO_PAD
-                        .decode(x_b64)
-                        .map_err(|_| IdentityError::InvalidJar {
-                            reason: "ES256 JWK 'x' is not valid base64url".to_string(),
-                        })?;
-                let y_bytes =
-                    URL_SAFE_NO_PAD
-                        .decode(y_b64)
-                        .map_err(|_| IdentityError::InvalidJar {
-                            reason: "ES256 JWK 'y' is not valid base64url".to_string(),
-                        })?;
-                // ring expects uncompressed point: 0x04 || x || y
-                let mut pk_bytes = Vec::with_capacity(1 + x_bytes.len() + y_bytes.len());
-                pk_bytes.push(0x04);
-                pk_bytes.extend_from_slice(&x_bytes);
-                pk_bytes.extend_from_slice(&y_bytes);
-                let signing_input = format!("{}.{}", parts[0], parts[1]);
-                let sig_bytes =
-                    URL_SAFE_NO_PAD
-                        .decode(parts[2])
-                        .map_err(|_| IdentityError::InvalidJar {
-                            reason: "invalid signature encoding".to_string(),
-                        })?;
-                let public_key = ring::signature::UnparsedPublicKey::new(
-                    &ring::signature::ECDSA_P256_SHA256_FIXED,
-                    &pk_bytes,
-                );
-                public_key
-                    .verify(signing_input.as_bytes(), &sig_bytes)
-                    .map_err(|_| IdentityError::InvalidJar {
-                        reason: "ES256 signature verification failed".to_string(),
-                    })?;
-            }
-            _ => {
-                return Err(IdentityError::InvalidJar {
-                    reason: format!("unsupported JAR signing algorithm '{alg}'"),
-                })
-            }
-        }
+        // 4–5. Select the key by `kid` and verify the signature (shared with
+        // `private_key_jwt` assertions verified against the client's JWKS).
+        super::client_jwks::verify_with_client_jwks(
+            [parts[0], parts[1], parts[2]],
+            alg,
+            header.kid.as_deref(),
+            jwks_json,
+            super::client_jwks::JAR_ALGS,
+        )
+        .map_err(|reason| IdentityError::InvalidJar { reason })?;
 
         // 6. Decode claims.
         let claims_bytes =

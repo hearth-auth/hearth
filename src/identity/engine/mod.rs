@@ -327,6 +327,7 @@ use crate::storage::StorageEngine;
 
 mod advisory_lock;
 pub(super) mod approval;
+mod client_jwks;
 mod control;
 mod id_token_keys;
 pub(super) mod oauth;
