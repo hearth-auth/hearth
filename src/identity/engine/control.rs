@@ -53,6 +53,19 @@
 //! bring in. A reload records the persisted epoch it read *before* its scan,
 //! because any control bumped later may be missing from the scan and must
 //! cause another reload.
+//!
+//! # Owed bumps
+//!
+//! A control's durable row is written before its epoch bump, and the bump can
+//! fail on its own (in a cluster, a leader change between the two Raft
+//! proposals). Other nodes only learn of a control through the epoch, so a
+//! failed bump used to leave them enforcing the stale control until some
+//! unrelated control bumped it. The writer now records the bump as *owed*
+//! ([`ControlPlane::owe_bump`]) and the reloader retries it, with bounded
+//! backoff, until one succeeds. One successful bump pays every bump owed when
+//! it started: any later reload on another node rescans every control row, so
+//! one bump covers them all, and a bump that turns out to be extra only costs
+//! other nodes one reload. The validation path never looks at owed bumps.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -241,6 +254,9 @@ pub(super) struct ControlPlane {
     local_bumps: std::sync::atomic::AtomicUsize,
     /// The parked-epoch bound has been hit and reported.
     parked_overflow_reported: AtomicBool,
+    /// Controls whose epoch bump failed and has not been made up yet (see
+    /// "Owed bumps" in the module docs).
+    owed_bumps: AtomicU64,
     /// Taken only by control writers and the reloader — never by validation.
     journal: Mutex<Journal>,
     /// One reload at a time (the background thread and a snapshot install).
@@ -284,6 +300,7 @@ impl ControlPlane {
             shutdown: AtomicBool::new(false),
             local_bumps: std::sync::atomic::AtomicUsize::new(0),
             parked_overflow_reported: AtomicBool::new(false),
+            owed_bumps: AtomicU64::new(0),
             journal: Mutex::new(Journal::default()),
             reload_exclusive: Mutex::new(()),
             worker: OnceLock::new(),
@@ -361,6 +378,46 @@ impl ControlPlane {
     pub(super) fn begin_local_bump(&self) -> LocalBump<'_> {
         self.local_bumps.fetch_add(1, Ordering::AcqRel);
         LocalBump { plane: self }
+    }
+
+    /// Records that a control's epoch bump failed: the reloader retries it
+    /// until it succeeds, so other nodes still learn of the control.
+    pub(super) fn owe_bump(&self) {
+        let owed = self.owed_bumps.fetch_add(1, Ordering::AcqRel) + 1;
+        publish_owed(owed);
+        self.wake();
+    }
+
+    /// Controls whose epoch bump is still owed.
+    pub(super) fn owed_bumps(&self) -> u64 {
+        self.owed_bumps.load(Ordering::Acquire)
+    }
+
+    /// Makes up the owed bumps with one increment of the persisted epoch.
+    /// Only the reloader thread calls this.
+    ///
+    /// Pays only the bumps owed when it started: a control whose bump failed
+    /// while this increment was in flight may have written its row after the
+    /// increment was ordered, so it stays owed and gets a bump of its own.
+    fn pay_owed_bumps(&self) -> Result<(), crate::storage::StorageError> {
+        let owed = self.owed_bumps.load(Ordering::Acquire);
+        if owed == 0 {
+            return Ok(());
+        }
+        let next = self
+            .storage
+            .increment_u64(&keys::system_realm_id(), &keys::encode_control_epoch())?;
+        let left = self.owed_bumps.fetch_sub(owed, Ordering::AcqRel) - owed;
+        publish_owed(left);
+        // This node applied those controls already: record the epoch the bump
+        // produced so it does not reload for its own bump.
+        self.apply(None, Some(next));
+        tracing::info!(
+            paid = owed,
+            epoch = next,
+            "control epoch bump made up; other nodes now reload for the controls it was owed for"
+        );
+        Ok(())
     }
 
     /// Asks the reloader for a full reload whatever the epochs say.
@@ -756,17 +813,60 @@ impl ControlPlane {
         }
     }
 
+    /// Retries owed bumps when one is due. Returns when the next retry is due
+    /// if bumps are still owed.
+    fn retry_owed_bumps(
+        &self,
+        retry_at: &mut Option<Instant>,
+        backoff: &mut Duration,
+    ) -> Option<Instant> {
+        if self.owed_bumps() == 0 {
+            *retry_at = None;
+            *backoff = RETRY_MIN;
+            return None;
+        }
+        if retry_at.is_some_and(|at| Instant::now() < at) {
+            return *retry_at;
+        }
+        match self.pay_owed_bumps() {
+            Ok(()) => {
+                *backoff = RETRY_MIN;
+                *retry_at = None;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    owed = self.owed_bumps(),
+                    retry_in_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
+                    "could not make up an owed control epoch bump; other nodes do not yet \
+                     enforce the controls it is owed for"
+                );
+                *retry_at = Some(Instant::now() + *backoff);
+                *backoff = (*backoff * 2).min(RETRY_MAX);
+            }
+        }
+        // A bump owed during the attempt is retried on the next pass.
+        (self.owed_bumps() > 0).then(|| retry_at.unwrap_or_else(Instant::now))
+    }
+
     /// The background reloader's loop.
     fn run(self: Arc<Self>) {
         let _runtime = self.runtime.as_ref().map(tokio::runtime::Handle::enter);
         let mut last_start: Option<Instant> = None;
         let mut backoff = RETRY_MIN;
+        let mut bump_retry_at: Option<Instant> = None;
+        let mut bump_backoff = RETRY_MIN;
         loop {
             if self.shutdown.load(Ordering::Acquire) {
                 return;
             }
+            let bump_due = self.retry_owed_bumps(&mut bump_retry_at, &mut bump_backoff);
             if !self.reload_wanted() {
-                std::thread::park_timeout(IDLE_RECHECK);
+                let idle = bump_due.map_or(IDLE_RECHECK, |at| {
+                    at.saturating_duration_since(Instant::now())
+                        .min(IDLE_RECHECK)
+                });
+                std::thread::park_timeout(idle);
                 continue;
             }
             let mut not_before = Instant::now() + RELOAD_SETTLE;
@@ -872,6 +972,14 @@ pub(super) fn decode_revoked_jti_expiry(value: &[u8]) -> i64 {
 /// The revoked-JTI cache key: `{realm_uuid}:{jti}`.
 pub(super) fn revoked_jti_cache_key(realm: &RealmId, jti: &str) -> String {
     format!("{}:{}", realm.as_uuid(), jti)
+}
+
+/// Exports the owed-bump count (`hearth_control_epoch_bumps_owed`).
+fn publish_owed(owed: u64) {
+    #[allow(clippy::cast_precision_loss)] // a count of failed bumps: far below 2^52
+    crate::metrics::metrics()
+        .control_epoch_bumps_owed
+        .set(owed as f64);
 }
 
 /// One in-flight local control bump; see [`ControlPlane::begin_local_bump`].

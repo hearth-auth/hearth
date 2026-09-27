@@ -34,6 +34,8 @@ const CONVERGE: Duration = Duration::from_secs(10);
 struct FaultStorage {
     inner: Arc<dyn StorageEngine>,
     fail_scans: AtomicBool,
+    /// Refuse `increment_u64` (a control-epoch bump) while set.
+    fail_increments: AtomicBool,
     /// Scans refused while `fail_scans` was set.
     failed_scans: AtomicUsize,
     writes: AtomicUsize,
@@ -50,6 +52,7 @@ impl FaultStorage {
         Arc::new(Self {
             inner,
             fail_scans: AtomicBool::new(false),
+            fail_increments: AtomicBool::new(false),
             failed_scans: AtomicUsize::new(0),
             writes: AtomicUsize::new(0),
             on_increment: std::sync::Mutex::new(None),
@@ -124,6 +127,11 @@ impl StorageEngine for FaultStorage {
     }
 
     fn increment_u64(&self, realm_id: &RealmId, key: &[u8]) -> Result<u64, StorageError> {
+        if self.fail_increments.load(Ordering::SeqCst) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected increment failure (e.g. a leader change between two proposals)",
+            )));
+        }
         self.wrote();
         let next = self.inner.increment_u64(realm_id, key)?;
         let hook = self.on_increment.lock().expect("hook lock").clone();
@@ -767,5 +775,66 @@ fn a_failed_epoch_reread_after_a_reset_requeues_the_reset() {
     assert!(
         node.control.reset_reload_queued_for_test(),
         "a failed epoch re-read after a reset must queue another reset reload"
+    );
+}
+
+/// A control whose durable row committed but whose epoch bump failed (for
+/// example a leader change between the two Raft proposals) must still reach
+/// every other node. The bump used to be logged and counted and then
+/// forgotten: the admin call succeeded and other nodes enforced the stale
+/// control indefinitely — until some unrelated control bumped the epoch.
+/// The owed bump is now retried by the reloader until it succeeds.
+#[test]
+fn a_failed_epoch_bump_is_retried_until_other_nodes_bind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = open_storage(&dir);
+    let fault = FaultStorage::over(Arc::clone(&shared));
+    let faulty_storage = Arc::clone(&fault) as Arc<dyn StorageEngine>;
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+
+    let validator = engine_over(&shared, &clock);
+    let (realm, token) = seed_token(&validator);
+    let asserting_node = engine_over(&faulty_storage, &clock);
+    validator.validate_token(&realm, &token).expect("warm");
+
+    fault.fail_increments.store(true, Ordering::SeqCst);
+    suspend(&asserting_node, &realm);
+    assert_eq!(
+        asserting_node.control.owed_bumps(),
+        1,
+        "the failed bump must be recorded as owed"
+    );
+
+    // The failure window: the row is written, the epoch did not move, so the
+    // other node still accepts the token.
+    clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
+    validator
+        .validate_token(&realm, &token)
+        .expect("precondition: without the bump the other node has not reloaded");
+
+    // The fault clears (a new leader is elected); the owed bump must go out.
+    fault.fail_increments.store(false, Ordering::SeqCst);
+    let deadline = Instant::now() + CONVERGE;
+    let mut bound = false;
+    while Instant::now() < deadline {
+        clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
+        if matches!(
+            validator.validate_token(&realm, &token),
+            Err(IdentityError::RealmSuspended)
+        ) {
+            bound = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        bound,
+        "a suspension whose epoch bump failed never bound on another node after the fault \
+         cleared: the owed bump was not retried"
+    );
+    assert_eq!(
+        asserting_node.control.owed_bumps(),
+        0,
+        "a successful retry pays the owed bump"
     );
 }

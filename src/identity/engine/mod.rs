@@ -4588,11 +4588,11 @@ impl EmbeddedIdentityEngine {
     /// lives in a session cache that answers from memory; the three control
     /// caches go through [`Self::publish_control`] with their change.
     ///
-    /// Best-effort by design. A failure to bump must not fail the control
-    /// itself: the durable row that carries the decision is already written,
-    /// and refusing the revocation because its epoch bump failed would trade a
-    /// propagation delay for an outright denial of the control. The next
-    /// successful bump, or a restart, still converges every node.
+    /// A failure to bump must not fail the control itself: the durable row
+    /// that carries the decision is already written, and refusing the
+    /// revocation because its epoch bump failed would trade a propagation
+    /// delay for an outright denial of the control. The failed bump is owed
+    /// instead, and the control-cache reloader retries it until it succeeds.
     fn bump_control_epoch(&self) {
         self.publish_control(None);
     }
@@ -4614,6 +4614,11 @@ impl EmbeddedIdentityEngine {
         let _in_flight = self.control.begin_local_bump();
         let epoch = self.persist_control_epoch_bump();
         self.control.apply(op, epoch);
+        if epoch.is_none() {
+            // Other nodes learn of the control only through the epoch: the
+            // reloader retries the bump until it succeeds.
+            self.control.owe_bump();
+        }
     }
 
     /// Increments the persisted control epoch and returns the new value, or
@@ -4634,10 +4639,10 @@ impl EmbeddedIdentityEngine {
             // no reason.
             Ok(next) => Some(next),
             // Alertable, not silent (M5): the control is applied on this node
-            // regardless, but other nodes do not reload for it until the next
-            // successful bump — which reloads every control cache, so the gap
-            // closes then. In a cluster a corrupted epoch row is repaired by
-            // the state machine on the next increment.
+            // regardless, and the caller records the bump as owed; the
+            // control-cache reloader retries it until it succeeds, which makes
+            // every other node reload. In a cluster a corrupted epoch row is
+            // repaired by the state machine on the next increment.
             Err(err) => {
                 crate::metrics::metrics()
                     .control_epoch_bump_failures_total
@@ -4645,7 +4650,8 @@ impl EmbeddedIdentityEngine {
                 tracing::error!(
                     error = %err,
                     "could not persist the control epoch bump: other nodes will not reload \
-                     for this control until the next successful bump"
+                     for this control until the retried bump succeeds \
+                     (hearth_control_epoch_bumps_owed)"
                 );
                 None
             }

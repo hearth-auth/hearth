@@ -304,14 +304,19 @@ curl -s http://10.0.0.1:8420/admin/cluster/status \
 
 `role` is one of `"leader"`, `"follower"`, `"candidate"`, `"learner"`, or `"unknown"`. `is_healthy` reflects whether the peer appears in the leader's replication map.
 
-**Alert on `hearth_control_epoch_bump_failures_total`.** A control — a token or session
-revocation, a DPoP key block, a realm status change — is applied on the node that served it and
-announced to the others by bumping the replicated control epoch. When a bump cannot be persisted
-(for example while Raft has no leader) the control still binds on the serving node, but the other
-nodes do not reload for it until the next successful bump, which reloads every control cache. Each
-failed bump is logged at `ERROR` and counted in this Prometheus counter; any increase means other
-nodes may be enforcing stale controls until the next control is asserted. A control-epoch row that
-does not decode is repaired by the state machine on the next bump (every node the same way).
+**Alert on `hearth_control_epoch_bumps_owed` staying above 0.** A control — a token or session
+revocation, a DPoP key block, a realm status change, a user deletion — is applied on the node that
+served it and announced to the others by bumping the replicated control epoch. When a bump cannot
+be persisted (for example a leader change between the control's write and its bump, or while Raft
+has no leader) the control still binds on the serving node and the admin call still succeeds; the
+failed bump is logged at `ERROR`, counted in `hearth_control_epoch_bump_failures_total`, and
+recorded as **owed**. That node's control-cache reloader retries the owed bump with backoff (100 ms
+doubling to 5 s) until it succeeds; `hearth_control_epoch_bumps_owed` is the number of controls
+still waiting, and returns to 0 when the retry lands and every other node reloads. While it is
+above 0 the other nodes are enforcing stale controls. The owed count lives in memory: if the serving
+node stops before the retry succeeds, the other nodes catch up at the next control asserted
+anywhere. A control-epoch row that does not decode is repaired by the state machine on the next
+bump (every node the same way).
 
 ---
 

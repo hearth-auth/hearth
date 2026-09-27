@@ -123,7 +123,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   control propagation stopped for good with only a warning on each serving node. The state machine
   now repairs the row, identically on every node, to the incrementing entry's log index (above
   every value ever handed out) and the bump succeeds. A bump that cannot be persisted is logged at
-  `ERROR` and counted in the new `hearth_control_epoch_bump_failures_total` metric; alert on it.
+  `ERROR`, counted in the new `hearth_control_epoch_bump_failures_total` metric, and no longer
+  forgotten: the control's row was already written and the admin call succeeded, but other nodes
+  learn of a realm status change, DPoP key block or session deletion only through the epoch, so a
+  bump lost to (for example) a leader change between the two Raft proposals left them enforcing the
+  stale control indefinitely. The failed bump is now owed and the control-cache reloader retries it
+  with backoff (100 ms doubling to 5 s) until it succeeds; the new
+  `hearth_control_epoch_bumps_owed` gauge counts controls still waiting — alert on it staying
+  above 0.
 - **Cluster: deleting a user ends its sessions on every node** — the delete removed the user's
   sessions and evicted them from the serving node's cache only; another node that had one cached
   kept accepting the deleted user's tokens (a cache hit never reads storage) until something else
