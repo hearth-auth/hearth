@@ -403,6 +403,150 @@ async fn a_control_asserted_on_the_leader_binds_on_both_followers() {
     cluster.shutdown();
 }
 
+/// Revoking a sessionless token on the LEADER completes promptly, succeeds,
+/// and binds on both followers.
+///
+/// The Raft observer runs on the leader's own state machine too. It used to
+/// project a replicated `oauth:revjti:` row by calling the local revocation
+/// path, which bumps the control epoch — a storage write, so a Raft proposal
+/// made from inside the state machine's own apply, which then waited for that
+/// apply. On a real three-node cluster a normal put took 10.3 ms and a
+/// revoked-JTI put took 10.0 s (`write_timeout`) and then failed, after the
+/// revocation row had already committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn revoking_a_sessionless_token_on_the_leader_is_prompt_and_binds_on_both_followers() {
+    use hearth::identity::{
+        ClientCredentialsRequest, ClientTrustLevel, GeneratedClientSecret, RegisterClientRequest,
+        TokenRevocationRequest,
+    };
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let cluster = ThreeNodeCluster::build(&clock).await;
+    let leader = cluster.leader();
+
+    let realm_id = leader
+        .identity
+        .create_realm(&CreateRealmRequest {
+            name: "three-node-revjti".to_string(),
+            config: Some(RealmConfig::default()),
+        })
+        .unwrap()
+        .id()
+        .clone();
+    let secret = GeneratedClientSecret::generate();
+    let client_id = leader
+        .identity
+        .register_client(
+            &realm_id,
+            &RegisterClientRequest {
+                client_name: "M2M".to_string(),
+                generated_client_secret: Some(secret.clone()),
+                grant_types: vec!["client_credentials".to_string()],
+                trust_level: ClientTrustLevel::FirstParty,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .client_id()
+        .clone();
+    let token = leader
+        .identity
+        .client_credentials_token(
+            &realm_id,
+            &ClientCredentialsRequest {
+                client_id: client_id.clone(),
+                client_secret: Some(secret.expose().to_string()),
+                scope: None,
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .unwrap()
+        .access_token()
+        .to_string();
+    cluster.converge().await;
+    for node in cluster.followers() {
+        node.identity
+            .validate_token(&realm_id, &token)
+            .unwrap_or_else(|e| panic!("node {} rejected a valid token: {e:?}", node.id()));
+    }
+
+    let started = Instant::now();
+    let outcome = leader.identity.revoke_token(
+        &realm_id,
+        &TokenRevocationRequest {
+            token: token.clone(),
+            token_type_hint: Some("access_token".to_string()),
+            revoking_client_id: Some(client_id),
+        },
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        outcome.is_ok(),
+        "revoking on the leader failed after {elapsed:?}: {outcome:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "revoking a sessionless token on the leader took {elapsed:?}; the replicated-write \
+         observer must not write to storage from inside the state machine's apply"
+    );
+
+    cluster.converge().await;
+    for node in cluster.followers() {
+        assert!(
+            eventual_rejection(node, &realm_id, &token).await.is_some(),
+            "node {} still accepts a token the leader revoked",
+            node.id()
+        );
+    }
+
+    cluster.shutdown();
+}
+
+/// Real time a follower's background reloader gets to apply a control after
+/// replication has converged. The replicated epoch row signals the reloader
+/// from the state machine; the reload itself runs on the reloader thread,
+/// never on a validating one, so the bind is eventual.
+const RELOAD_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Validates `token` on `node` until it is rejected or [`RELOAD_DEADLINE`]
+/// passes; returns the rejection.
+async fn eventual_rejection(
+    node: &Node,
+    realm_id: &RealmId,
+    token: &str,
+) -> Option<hearth::identity::IdentityError> {
+    eventual_rejection_where(node, realm_id, token, |_| true).await
+}
+
+/// As [`eventual_rejection`], but keeps polling until the rejection is one
+/// `wanted` accepts — a follower can reject for an earlier reason (a missing
+/// session) before the reload that makes it reject for the asserted one.
+/// Returns the last rejection seen if none matched in time.
+async fn eventual_rejection_where(
+    node: &Node,
+    realm_id: &RealmId,
+    token: &str,
+    wanted: impl Fn(&hearth::identity::IdentityError) -> bool,
+) -> Option<hearth::identity::IdentityError> {
+    let deadline = Instant::now() + RELOAD_DEADLINE;
+    let mut last = None;
+    while Instant::now() < deadline {
+        if let Err(e) = node.identity.validate_token(realm_id, token) {
+            if wanted(&e) {
+                return Some(e);
+            }
+            last = Some(e);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    last
+}
+
 /// A realm with one user, one live session and the access token bound to it.
 struct SeededRealm {
     realm_id: RealmId,
@@ -480,10 +624,8 @@ async fn assert_session_revocation_binds(
     clock.advance(1_000_000);
 
     for node in cluster.followers() {
-        let err = node
-            .identity
-            .validate_token(&seeded.realm_id, &seeded.access_token)
-            .err()
+        let err = eventual_rejection(node, &seeded.realm_id, &seeded.access_token)
+            .await
             .unwrap_or_else(|| {
                 panic!(
                     "node {} still accepts a token whose session the leader revoked",
@@ -555,16 +697,16 @@ async fn assert_realm_suspension_binds(
     clock.advance(1_000_000);
 
     for node in cluster.followers() {
-        let err = node
-            .identity
-            .validate_token(&seeded.realm_id, &fresh_token)
-            .err()
-            .unwrap_or_else(|| {
-                panic!(
-                    "node {} still validates tokens for a realm the leader suspended",
-                    node.id()
-                )
-            });
+        let err = eventual_rejection_where(node, &seeded.realm_id, &fresh_token, |e| {
+            matches!(e, hearth::identity::IdentityError::RealmSuspended)
+        })
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "node {} still validates tokens for a realm the leader suspended",
+                node.id()
+            )
+        });
         // Exactly `RealmSuspended`, not merely "some error". Suspension also
         // revokes the realm's sessions, so a follower that never reloaded
         // `realm_status_cache` still rejects the token — with `InvalidToken`,

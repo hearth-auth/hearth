@@ -146,10 +146,14 @@ where
         });
     }
 
-    /// Atomically replaces the entire contents with `entries`, distributing
-    /// them across shards. Used to rebuild the projection at startup, where no
-    /// concurrent writers exist.
-    pub(crate) fn replace_all<I>(&self, entries: I)
+    /// Distributes `entries` into per-shard maps without publishing them.
+    ///
+    /// Together with [`Self::prepared_insert`], [`Self::prepared_remove`] and
+    /// [`Self::install`] this splits a rebuild into an expensive part that
+    /// needs no coordination (hashing every entry into its shard) and a cheap
+    /// part a caller can run under a lock that orders it against concurrent
+    /// writers: replaying their changes and swapping one pointer per shard.
+    pub(crate) fn prepare<I>(&self, entries: I) -> PreparedShards<K, V>
     where
         I: IntoIterator<Item = (K, V)>,
     {
@@ -158,10 +162,36 @@ where
             let idx = self.shard_index(&k);
             buckets[idx].insert(k, v);
         }
-        for (shard, bucket) in self.shards.iter().zip(buckets) {
+        PreparedShards { buckets }
+    }
+
+    /// Inserts into a [`PreparedShards`] built by this map.
+    pub(crate) fn prepared_insert(&self, prepared: &mut PreparedShards<K, V>, key: K, value: V) {
+        let idx = self.shard_index(&key);
+        prepared.buckets[idx].insert(key, value);
+    }
+
+    /// Removes from a [`PreparedShards`] built by this map.
+    pub(crate) fn prepared_remove<Q>(&self, prepared: &mut PreparedShards<K, V>, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let idx = self.shard_index(key);
+        prepared.buckets[idx].remove(key);
+    }
+
+    /// Publishes a [`PreparedShards`], one pointer store per shard.
+    pub(crate) fn install(&self, prepared: PreparedShards<K, V>) {
+        for (shard, bucket) in self.shards.iter().zip(prepared.buckets) {
             shard.store(Arc::new(bucket));
         }
     }
+}
+
+/// Shard contents built by [`ShardedEpochMap::prepare`] and not yet published.
+pub(crate) struct PreparedShards<K, V> {
+    buckets: Vec<HashMap<K, V>>,
 }
 
 impl<K, V> Default for ShardedEpochMap<K, V>
@@ -268,11 +298,16 @@ mod tests {
     }
 
     #[test]
-    fn replace_all_rebuilds_contents() {
+    fn prepare_and_install_rebuild_contents() {
         let map: ShardedEpochMap<String, i64> = ShardedEpochMap::new();
         map.insert("stale".to_string(), 9);
 
-        map.replace_all((0..50).map(|i| (format!("r:{i}"), i)));
+        let mut prepared = map.prepare((0..50).map(|i| (format!("r:{i}"), i)));
+        map.prepared_insert(&mut prepared, "late".to_string(), 99);
+        map.prepared_remove(&mut prepared, "r:49");
+        map.install(prepared);
+        assert_eq!(map.get("late"), Some(99));
+        assert!(!map.contains_key("r:49"));
 
         assert!(!map.contains_key("stale"));
         assert_eq!(map.get("r:25"), Some(25));

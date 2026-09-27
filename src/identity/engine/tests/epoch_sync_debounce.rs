@@ -261,11 +261,23 @@ fn a_control_asserted_on_another_node_binds_within_one_debounce_window() {
 
     clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
 
-    assert!(
-        matches!(
+    // Past the window the validator observes the moved epoch and signals its
+    // background reloader; the reload does not run on the validating thread,
+    // so the suspension binds a moment later rather than on this very call.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut bound = false;
+    while std::time::Instant::now() < deadline {
+        if matches!(
             validator.validate_token(&realm, &token),
             Err(IdentityError::RealmSuspended)
-        ),
+        ) {
+            bound = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        bound,
         "past the debounce window the validator still honoured a realm that \
          another node suspended"
     );

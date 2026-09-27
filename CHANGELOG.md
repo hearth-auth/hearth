@@ -64,9 +64,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   another request on the same node was still publishing a revocation reloaded the revoked-token list
   from storage and could overwrite a revocation that landed in between: `POST /revoke` answered `200`
   but the token kept introspecting and validating as active until the next reload or its expiry
-  (about 1 in 11 under 20 concurrent revokers). The same race could drop a DPoP key block or a realm
-  status change. Local control writes and control-cache reloads are now ordered (task 26.43
-  follow-up).
+  (about 1 in 11 under 20 concurrent revokers). The same race could drop a DPoP key block, a realm
+  status change, or (in a cluster) the expiry sweep's removal of a revocation. Control-cache reloads
+  now run on a background thread and replay every change applied during their scan before they swap
+  the caches in. Token validation no longer reloads inline or takes a lock when another node asserts
+  a control; it signals the reloader, and the control binds on that node within the existing 200 ms
+  bound plus one reload (task 26.43 follow-up).
+- **Cluster: revoking a sessionless token on the leader took 10 s and then failed** — every node's
+  Raft observer, the leader's included, projected a replicated revocation by re-running the local
+  revocation path, which bumped the control epoch: a Raft proposal made from inside the state
+  machine's own apply, which waited for itself until `write_timeout`. `POST /revoke` of a
+  `client_credentials` token and consent revocation answered an error after the revocation had already
+  committed (measured on three nodes: 10.0 s against 10.3 ms for a normal write). The observer now only
+  updates the in-memory blocklist.
+- **A failed control-cache reload no longer fails open** — a reload recorded the control epoch before
+  it re-read storage and ignored read errors, so one failed scan left that node enforcing stale
+  revocations, DPoP blocks and realm statuses until the next control was asserted. The epoch is now
+  recorded only after every cache reloaded, and a failed reload is retried with backoff.
+- **System-realm revocations and DPoP blocks survive a restart** — the start-up and cluster reloads
+  skipped the system realm, so a revoked system-realm token (for example the console's or the
+  bootstrap system token) and a DPoP key blocked there became valid again after a restart or the first
+  reload.
 - **Cluster: a control asserted on the leader could never bind on a follower** — the control epoch
   that tells other nodes to reload their revocation list, DPoP blocklist, realm statuses and sessions
   was bumped with a read followed by a write, so two concurrent bumps could write the same value or

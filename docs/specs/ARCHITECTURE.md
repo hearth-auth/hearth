@@ -122,6 +122,8 @@ Hot path code MUST obey all of the following:
 - Write path code (WAL append, memtable insert) is NOT hot path and has different constraints (see [Section 6.1](#61-write-path-invariants)).
 - RBAC resolution (role/group/assignment traversal during `resolve_permissions`) is NOT hot path — it runs at token issuance. Its performance budget is enforced by benchmarks, not by allocation rules.
 - Cold path reads MUST NOT degrade hot path performance. Cold-tier promotion MUST NOT lock or invalidate hot-tier data structures.
+- Control-cache reloads are NOT hot path. The revoked-JTI blocklist, the DPoP blocklist and realm statuses are rebuilt from storage when the replicated control epoch moves (a control asserted on another node). The rebuild runs on a dedicated reloader thread (`src/identity/engine/control.rs`); the validation path only compares the epoch — at most one debounced storage read per `EPOCH_SYNC_INTERVAL_MICROS` — and, when it moved, signals that thread with an atomic store and an `unpark`. In cluster mode the replicated epoch row signals it from the Raft observer. Control writers and the reloader order their cache changes under a lock that covers in-memory work only and that validation MUST NOT take. The consequence is bounded staleness on the nodes that did not serve the control, never a blocked validation.
+- Raft observers (`ReplicatedWriteObserver`) run on the state machine's apply path on every node, the leader included. They MUST NOT write to storage: a write is a Raft proposal, and a proposal made from inside an apply waits for that apply.
 
 ### 3.4 Benchmark Enforcement
 

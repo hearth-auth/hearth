@@ -327,6 +327,7 @@ use crate::storage::StorageEngine;
 
 mod advisory_lock;
 pub(super) mod approval;
+mod control;
 mod id_token_keys;
 pub(super) mod oauth;
 mod sharded_cache;
@@ -620,39 +621,23 @@ pub struct EmbeddedIdentityEngine {
     /// reloads the freshly-rotated key. No lock and no cost on the cache-hit
     /// hot path — only cache misses read the epoch.
     realm_key_epoch: Arc<ShardedEpochMap<RealmId, u64>>,
-    /// Highest cluster control epoch this process has observed.
+    /// Keeps the control caches (`realm_status_cache`, `revoked_jti_cache`,
+    /// `blocked_dpop_jkt_cache`) coherent with storage.
     ///
-    /// Three caches decide a control question authoritatively on the
-    /// validation path — `realm_status_cache`, `revoked_jti_cache` and
-    /// `blocked_dpop_jkt_cache` — and each is written only by the node that
-    /// served the mutating request. A kill-switch thrown on one node therefore
-    /// did not bind on any other until that node restarted, while its own
-    /// storage already held the row that said so (audit 2026-08-28 §4.1
-    /// objection, §4.16#5, §4.19#12; enumerated in
-    /// `reports/follower-bypass-enumeration-2026-09-21.md`).
-    ///
-    /// The epoch row replicates with the rows it describes, so observing it
-    /// needs no new transport. See [`Self::sync_control_epoch`].
-    control_epoch: AtomicU64,
-    /// Orders this node's control-cache writes against a control-cache reload.
-    ///
-    /// A local control write persists its row, bumps the persisted epoch, and
-    /// only then applies itself to the cache and records the epoch locally
-    /// ([`Self::publish_control`]). A validation that reads the persisted
-    /// epoch inside that window sees it ahead of the local one and reloads
-    /// the caches from storage with a `replace_all`. Without this lock a
-    /// second write whose row landed after the reload's scan but whose cache
-    /// insert landed before its replace was silently dropped: under 16
-    /// concurrent revokers about one revocation in forty stayed
-    /// `active:true` (task 26.43 follow-up,
-    /// `tests/revocation_reload_races.rs`). Holding it across the reload's
-    /// scan-and-replace, and across each write's cache mutation, means every
-    /// write is either in the scan or applied after the replace.
-    ///
-    /// Held only for in-memory work and the reload's local scan — never across
-    /// a storage write — and never on the validation fast path, which takes it
-    /// only when the persisted epoch has moved.
-    control_cache_lock: Mutex<()>,
+    /// Each of those caches decides a control authoritatively on the
+    /// validation path and is written directly only by the node that served
+    /// the mutating request. A kill-switch thrown on one node therefore did
+    /// not bind on any other until that node restarted, while its own storage
+    /// already held the row that said so (audit 2026-08-28 §4.1 objection,
+    /// §4.16#5, §4.19#12; `reports/follower-bypass-enumeration-2026-09-21.md`).
+    /// Every control write now bumps a replicated control epoch, and a node
+    /// whose caches trail it reloads them on a background thread. Validation
+    /// only compares epochs and signals that thread; it never takes a lock or
+    /// waits for a reload. See [`control`] for the ordering argument.
+    control: Arc<control::ControlPlane>,
+    /// The background reloader, joined when the engine drops so no thread
+    /// outlives the storage handle it reads.
+    control_worker: Option<std::thread::JoinHandle<()>>,
     /// Micros timestamp before which the hot path skips epoch reconciliation.
     ///
     /// Reconciling both epochs costs two storage reads, and the validation hot
@@ -835,7 +820,7 @@ pub struct EmbeddedIdentityEngine {
     /// Key: `(RealmId, SessionId)`. Value: `Arc<Session>`.
     /// Hot-path readers call `load()` — one epoch-pinned load, no lock, no I/O.
     /// Writers use `rcu()` on `persist_session`. Bounded to [`SESSION_CACHE_MAX`].
-    session_cache: EpochCell<HashMap<(RealmId, SessionId), Arc<Session>>>,
+    session_cache: Arc<control::SessionCache>,
     /// In-process token claims cache for the `validate_token` hot path (S12-F2).
     ///
     /// Key: SHA-256(`token_bytes`) as `[u8; 32]`. Value: `Arc<TokenClaims>`.
@@ -843,7 +828,7 @@ pub struct EmbeddedIdentityEngine {
     /// access token. Hot-path readers call `load()`. Bounded to
     /// `config.token.claims_cache_max`; a full cache evicts expired then
     /// soonest-to-expire entries rather than refusing inserts (HEA-1990).
-    token_claims_cache: EpochCell<HashMap<[u8; 32], Arc<TokenClaims>>>,
+    token_claims_cache: Arc<control::ClaimsCache>,
     /// Monotonic generation counter guarding [`Self::token_claims_cache`]
     /// against a flush-vs-in-flight-verify TOCTOU (HEA-2097).
     ///
@@ -858,7 +843,7 @@ pub struct EmbeddedIdentityEngine {
     /// to revoke it. No hot-path cost: only cache misses read the counter, and
     /// the cache-hit read path is untouched. This is the claims-cache twin of
     /// the `realm_key_epoch` guard on the signing-key cache.
-    token_claims_cache_gen: AtomicU64,
+    token_claims_cache_gen: Arc<AtomicU64>,
     /// Per-realm DPoP nonce HMAC secrets (AGENT_AUTH.md §13.2).
     ///
     /// Lazily populated: first call for a realm loads or generates the secret
@@ -875,7 +860,7 @@ pub struct EmbeddedIdentityEngine {
     /// Updated by `block_dpop_jkt` / `unblock_dpop_jkt`; each write `rcu()`s a
     /// single shard. Modelled as a set via `V = ()`.
     /// Hot-path readers call `contains_key()` — one epoch-pinned load, no lock, no syscall.
-    blocked_dpop_jkt_cache: ShardedEpochMap<String, ()>,
+    blocked_dpop_jkt_cache: Arc<ShardedEpochMap<String, ()>>,
     /// Hot-path JTI revocation projection (§10.5).
     ///
     /// Key: `"{realm_uuid}:{jti}"`. Value: expiry (Unix seconds); `i64::MAX`
@@ -889,7 +874,7 @@ pub struct EmbeddedIdentityEngine {
     /// Expired entries remain until the next per-shard eviction sweep; an
     /// expired token is rejected by the `exp` claim check before we reach this
     /// cache, so stale entries are harmless.
-    revoked_jti_cache: ShardedEpochMap<String, i64>,
+    revoked_jti_cache: Arc<ShardedEpochMap<String, i64>>,
     // INVARIANT: guard released before method returns; no .await in scope.
     agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor,
     /// Per-code-hash advisory lock for single-use enforcement of authorization codes.
@@ -943,9 +928,17 @@ impl std::fmt::Debug for EmbeddedIdentityEngine {
 /// machine (audit 2026-08-28 §4.16#5).
 ///
 /// On a follower, a sessionless-token revocation arrives only as a raw
-/// `oauth:revjti:` storage write. These callbacks keep the hot-path
-/// revoked-JTI projection coherent with such writes; the node's own API
-/// handlers update the projection synchronously and never pass through here.
+/// `oauth:revjti:` storage write, and a control asserted on another node only
+/// as a new control-epoch row. These callbacks project the first into the
+/// revoked-JTI cache and hand the second to the control-cache reloader.
+///
+/// They run on the state machine's apply path on EVERY node — the leader's own
+/// writes come back through here too — so they MUST NOT write to storage: a
+/// write is a Raft proposal, and a proposal made from inside an apply waits for
+/// that same apply (on the leader, a self-deadlock until `write_timeout`; a
+/// revocation took 10 s and then failed after its row had committed). Nothing
+/// here writes, proposes, or waits on I/O; the only lock taken is the control
+/// journal's, which is held for in-memory work alone.
 impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
     fn on_replicated_put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) {
         // The RBAC decision cache is invalidated by a per-realm generation
@@ -961,17 +954,28 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
         // the identity engine is this node's single observer and the audit
         // engine decides whether it cares about the key.
         self.audit.on_replicated_row(realm_id, key);
+        // The replicated control epoch: another node (or, on the leader, this
+        // one) asserted a control. The reloader decides whether this node's
+        // caches already reflect it.
+        if keys::is_system_realm(realm_id) && key == keys::encode_control_epoch().as_slice() {
+            match crate::storage::decode_u64_counter(Some(value)) {
+                Ok(epoch) => self.control.signal(epoch),
+                Err(err) => tracing::warn!(error = %err, "replicated control epoch is corrupted"),
+            }
+            return;
+        }
         let prefix = keys::revoked_jti_scan_prefix();
         if let Some(jti_bytes) = key.strip_prefix(prefix.as_slice()) {
             let jti = String::from_utf8_lossy(jti_bytes);
-            // Same two storage-value formats `populate_revoked_jti_cache`
-            // accepts: 8-byte LE i64 expiry, or legacy `b"1"` (no expiry).
-            let exp: i64 = if value.len() == 8 {
-                i64::from_le_bytes(value.try_into().unwrap_or([0xff_u8; 8]))
-            } else {
-                i64::MAX
-            };
-            self.insert_revoked_jti_cache(realm_id, &jti, exp);
+            // Cache projection only: no epoch bump (see the impl docs). The
+            // node that served the revocation bumped the epoch itself.
+            self.control.apply(
+                Some(control::ControlOp::RevokeJti {
+                    key: control::revoked_jti_cache_key(realm_id, &jti),
+                    exp: control::decode_revoked_jti_expiry(value),
+                }),
+                None,
+            );
         }
     }
 
@@ -983,20 +987,40 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
         let prefix = keys::revoked_jti_scan_prefix();
         if let Some(jti_bytes) = key.strip_prefix(prefix.as_slice()) {
             let jti = String::from_utf8_lossy(jti_bytes);
-            let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
-            self.revoked_jti_cache.remove(cache_key.as_str());
+            // Through the control plane like every other cache change, so a
+            // reload that scanned before this delete cannot resurrect it.
+            self.control.apply(
+                Some(control::ControlOp::ForgetJti {
+                    key: control::revoked_jti_cache_key(realm_id, &jti),
+                }),
+                None,
+            );
         }
     }
 
     fn on_replicated_reset(&self) {
         self.rbac.on_replicated_snapshot();
         self.audit.on_replicated_snapshot();
-        let _reload = self.lock_control_caches();
-        if let Err(e) = self.populate_revoked_jti_cache() {
+        // The whole key-space was replaced: rebuild every control cache. This
+        // runs on the blocking pool (see the state machine), so reloading
+        // inline is fine; on failure the background reloader keeps retrying.
+        if let Err(e) = self.control.reload() {
             tracing::error!(
                 error = %e,
-                "failed to rebuild the revoked-JTI projection after snapshot install"
+                "failed to rebuild the control caches after snapshot install; retrying"
             );
+            self.control.request_full_reload();
+        }
+    }
+}
+
+impl Drop for EmbeddedIdentityEngine {
+    fn drop(&mut self) {
+        // Stop and join the reloader so it never outlives this engine's
+        // storage handle (a restart in the same process reopens the store).
+        self.control.shutdown();
+        if let Some(worker) = self.control_worker.take() {
+            let _ = worker.join();
         }
     }
 }
@@ -1283,7 +1307,10 @@ impl EmbeddedIdentityEngine {
             Arc::clone(&storage),
             Arc::clone(&clock),
         ));
-        let engine = Self {
+        let caches = control::ControlCaches::new();
+        let control =
+            control::ControlPlane::new(Arc::clone(&storage), Arc::clone(&clock), caches.clone());
+        let mut engine = Self {
             storage,
             clock,
             config,
@@ -1297,10 +1324,10 @@ impl EmbeddedIdentityEngine {
             realm_id_token_rsa_keys: Arc::new(ShardedEpochMap::new()),
             realm_id_token_rsa_retiring_keys: Arc::new(ShardedEpochMap::new()),
             realm_key_epoch: Arc::new(ShardedEpochMap::new()),
-            control_epoch: AtomicU64::new(0),
-            control_cache_lock: Mutex::new(()),
+            control: Arc::clone(&control),
+            control_worker: None,
             epoch_sync_after: AtomicI64::new(0),
-            realm_status_cache: Arc::new(EpochCell::from_pointee(HashMap::new())),
+            realm_status_cache: Arc::clone(&caches.realm_status),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
@@ -1348,12 +1375,12 @@ impl EmbeddedIdentityEngine {
             ),
             device_fp,
             sv_store,
-            session_cache: EpochCell::from_pointee(HashMap::new()),
-            token_claims_cache: EpochCell::from_pointee(HashMap::new()),
-            token_claims_cache_gen: AtomicU64::new(0),
+            session_cache: Arc::clone(&caches.sessions),
+            token_claims_cache: Arc::clone(&caches.claims),
+            token_claims_cache_gen: Arc::clone(&caches.claims_gen),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
-            blocked_dpop_jkt_cache: ShardedEpochMap::new(),
-            revoked_jti_cache: ShardedEpochMap::new(),
+            blocked_dpop_jkt_cache: Arc::clone(&caches.blocked_jkt),
+            revoked_jti_cache: Arc::clone(&caches.revoked_jti),
             // INVARIANT: guard released before method returns; no .await in scope.
             agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
                 crate::abuse::agent_monitor::AgentRateConfig::default(),
@@ -1362,9 +1389,8 @@ impl EmbeddedIdentityEngine {
         engine.purge_legacy_oidc_rsa_keys();
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
-        engine.populate_realm_status_cache()?;
-        engine.populate_revoked_jti_cache()?;
-        engine.populate_blocked_dpop_jkt_cache()?;
+        engine.control.reload()?;
+        engine.control_worker = engine.control.start();
         Ok(engine)
     }
 
@@ -1635,179 +1661,30 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Scans storage for all non-system realms and populates the lock-free
-    /// `realm_status_cache` used by the `validate_token` hot path.
-    ///
-    /// Called once at startup after seeding. Realms created or updated after
-    /// this point are tracked via the individual CRUD cache updates.
-    fn populate_realm_status_cache(&self) -> Result<(), IdentityError> {
-        let sys_realm = keys::system_realm_id();
-        let realm_prefix = keys::realm_id_scan_prefix();
-        let realm_end = keys::prefix_end(&realm_prefix);
-        let entries = self
-            .storage
-            .scan(&sys_realm, &realm_prefix, &realm_end)
-            .map_err(Self::storage_err)?;
-
-        let mut map = HashMap::new();
-        for entry in &entries {
-            // Fail-closed: a corrupted realm record must hard-error rather than
-            // silently skipping, which would leave the realm absent from the
-            // cache and allow validate_token to pass the status check fail-open.
-            let realm = serde_json::from_slice::<Realm>(&entry.value).map_err(|e| {
-                tracing::error!(
-                    key = ?entry.key,
-                    err = %e,
-                    "realm deserialization failed during status cache population \
-                     — refusing to start with an incomplete cache"
-                );
-                IdentityError::Internal {
-                    reason: format!("realm status cache population failed: {e}"),
-                }
-            })?;
-            if !keys::is_system_realm(realm.id()) {
-                map.insert(realm.id().clone(), realm.status());
-            }
-        }
-        self.realm_status_cache.store(Arc::new(map));
-        Ok(())
-    }
-
-    /// Scans all realm namespaces for `oauth:revjti:*` keys and loads
-    /// non-expired entries into `revoked_jti_cache`.
-    ///
-    /// Called once at startup.  Handles two storage-value formats:
-    /// - 8-byte little-endian `i64` expiry (current format)
-    /// - Any other length (legacy `b"1"` format): mapped to `i64::MAX`
-    ///   so the entry is never self-evicted (the `exp` claim check catches it).
-    fn populate_revoked_jti_cache(&self) -> Result<(), IdentityError> {
-        let sys_realm = keys::system_realm_id();
-        let realm_prefix = keys::realm_id_scan_prefix();
-        let realm_end = keys::prefix_end(&realm_prefix);
-        let realm_entries = self
-            .storage
-            .scan(&sys_realm, &realm_prefix, &realm_end)
-            .map_err(Self::storage_err)?;
-
-        let now_secs = self.clock.now().as_micros() / 1_000_000;
-        let jti_prefix = keys::revoked_jti_scan_prefix();
-        let jti_end = keys::prefix_end(&jti_prefix);
-
-        let mut map: HashMap<String, i64> = HashMap::new();
-
-        for realm_entry in &realm_entries {
-            let Ok(realm) =
-                serde_json::from_slice::<crate::identity::types::Realm>(&realm_entry.value)
-            else {
-                continue;
-            };
-            if keys::is_system_realm(realm.id()) {
-                continue;
-            }
-            let jti_entries = self
-                .storage
-                .scan(realm.id(), &jti_prefix, &jti_end)
-                .map_err(Self::storage_err)?;
-
-            for entry in jti_entries {
-                let exp: i64 = if entry.value.len() == 8 {
-                    // Current format: LE i64 expiry.
-                    i64::from_le_bytes(entry.value[..8].try_into().unwrap_or([0xff_u8; 8]))
-                } else {
-                    // Legacy b"1" format: no expiry stored; never self-evict.
-                    i64::MAX
-                };
-                // Skip entries that are already expired.
-                if exp != i64::MAX && now_secs >= exp {
-                    continue;
-                }
-                let jti_key = String::from_utf8_lossy(&entry.key);
-                // Strip the `oauth:revjti:` prefix to get the raw JTI string.
-                let jti = jti_key.strip_prefix("oauth:revjti:").unwrap_or(&jti_key);
-                let cache_key = format!("{}:{}", realm.id().as_uuid(), jti);
-                map.insert(cache_key, exp);
-            }
-        }
-
-        self.revoked_jti_cache.replace_all(map);
-        Ok(())
-    }
-
-    /// Scans all realm namespaces for `agt:dpop:block:jkt:*` keys and loads
-    /// their thumbprints into `blocked_dpop_jkt_cache`.
-    ///
-    /// Called once at startup. The blocklist has no expiry — entries are
-    /// admin-managed via `block_dpop_jkt` / `unblock_dpop_jkt`.
-    fn populate_blocked_dpop_jkt_cache(&self) -> Result<(), IdentityError> {
-        let sys_realm = keys::system_realm_id();
-        let realm_prefix = keys::realm_id_scan_prefix();
-        let realm_end = keys::prefix_end(&realm_prefix);
-        let realm_entries = self
-            .storage
-            .scan(&sys_realm, &realm_prefix, &realm_end)
-            .map_err(Self::storage_err)?;
-
-        let jkt_prefix = keys::blocked_dpop_jkt_scan_prefix();
-        let jkt_end = keys::prefix_end(&jkt_prefix);
-
-        let mut set = std::collections::HashSet::new();
-
-        for realm_entry in &realm_entries {
-            let Ok(realm) =
-                serde_json::from_slice::<crate::identity::types::Realm>(&realm_entry.value)
-            else {
-                continue;
-            };
-            if keys::is_system_realm(realm.id()) {
-                continue;
-            }
-            let entries = self
-                .storage
-                .scan(realm.id(), &jkt_prefix, &jkt_end)
-                .map_err(Self::storage_err)?;
-
-            for entry in entries {
-                let raw = String::from_utf8_lossy(&entry.key);
-                let jkt = raw
-                    .strip_prefix("agt:dpop:block:jkt:")
-                    .unwrap_or(&raw)
-                    .to_string();
-                set.insert(jkt);
-            }
-        }
-
-        self.blocked_dpop_jkt_cache
-            .replace_all(set.into_iter().map(|jkt| (jkt, ())));
-        Ok(())
-    }
-
-    /// Adds `(realm, jti, exp)` entry to `revoked_jti_cache` via RCU.
-    ///
-    /// Also evicts any entries whose expiry has already passed to bound
-    /// cache memory.  Called from every revocation write site.
-    /// Inserts a revoked identifier into the local blocklist cache AND bumps
-    /// the cluster control epoch, so every other node reloads its own.
+    /// Revokes `(realm, jti)` in this node's blocklist and bumps the cluster
+    /// control epoch, so every other node reloads its own. The caller has
+    /// already written the durable `oauth:revjti:` row.
     ///
     /// `is_token_jti_revoked` reads only this cache — no storage fallback — so
     /// without the bump a token revoked here stayed valid on every other node
     /// until it restarted (task 24.6, audit §4.16#5).
+    ///
+    /// For LOCAL revocations only. A replicated row is projected by the Raft
+    /// observer with [`control::ControlPlane::apply`] and no bump: the bump is
+    /// a storage write, which on a cluster leader is a Raft proposal made from
+    /// inside the state machine's own apply, and waits for itself.
     fn insert_revoked_jti_cache(&self, realm_id: &RealmId, jti: &str, exp_secs: i64) {
-        let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
-        let now_secs = self.clock.now().as_micros() / 1_000_000;
-        self.publish_control(|| {
-            // Evict expired entries in the target shard while we hold the clone.
-            self.revoked_jti_cache
-                .insert_retaining(cache_key, exp_secs, |_, &exp| {
-                    exp == i64::MAX || now_secs < exp
-                });
-        });
+        self.publish_control(Some(control::ControlOp::RevokeJti {
+            key: control::revoked_jti_cache_key(realm_id, jti),
+            exp: exp_secs,
+        }));
     }
 
     /// Adds a DPoP JWK thumbprint to the server-side blocklist (§10.4).
     ///
     /// Writes the thumbprint to persistent storage and updates the hot-path
-    /// in-memory projection via `rcu()`. After this call, every access token
-    /// whose `cnf.jkt` matches `jkt` will be rejected at `validate_token` time.
+    /// in-memory projection. After this call, every access token whose
+    /// `cnf.jkt` matches `jkt` will be rejected at `validate_token` time.
     pub(super) fn block_dpop_jkt_inner(
         &self,
         realm_id: &RealmId,
@@ -1818,7 +1695,7 @@ impl EmbeddedIdentityEngine {
             .put(realm_id, &key, b"")
             .map_err(Self::storage_err)?;
         // Every other node's blocklist is a separate cache (task 24.6).
-        self.publish_control(|| self.blocked_dpop_jkt_cache.insert(jkt.to_string(), ()));
+        self.publish_control(Some(control::ControlOp::BlockJkt(jkt.to_string())));
         Ok(())
     }
 
@@ -1836,7 +1713,7 @@ impl EmbeddedIdentityEngine {
         self.storage
             .delete(realm_id, &key)
             .map_err(Self::storage_err)?;
-        self.publish_control(|| self.blocked_dpop_jkt_cache.remove(jkt));
+        self.publish_control(Some(control::ControlOp::UnblockJkt(jkt.to_string())));
         Ok(())
     }
 
@@ -1857,7 +1734,10 @@ impl EmbeddedIdentityEngine {
             Arc::clone(&storage),
             Arc::clone(&clock),
         ));
-        let engine = Self {
+        let caches = control::ControlCaches::new();
+        let control =
+            control::ControlPlane::new(Arc::clone(&storage), Arc::clone(&clock), caches.clone());
+        let mut engine = Self {
             storage,
             clock,
             config,
@@ -1871,10 +1751,10 @@ impl EmbeddedIdentityEngine {
             realm_id_token_rsa_keys: Arc::new(ShardedEpochMap::new()),
             realm_id_token_rsa_retiring_keys: Arc::new(ShardedEpochMap::new()),
             realm_key_epoch: Arc::new(ShardedEpochMap::new()),
-            control_epoch: AtomicU64::new(0),
-            control_cache_lock: Mutex::new(()),
+            control: Arc::clone(&control),
+            control_worker: None,
             epoch_sync_after: AtomicI64::new(0),
-            realm_status_cache: Arc::new(EpochCell::from_pointee(HashMap::new())),
+            realm_status_cache: Arc::clone(&caches.realm_status),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
@@ -1922,12 +1802,12 @@ impl EmbeddedIdentityEngine {
             ),
             device_fp,
             sv_store,
-            session_cache: EpochCell::from_pointee(HashMap::new()),
-            token_claims_cache: EpochCell::from_pointee(HashMap::new()),
-            token_claims_cache_gen: AtomicU64::new(0),
+            session_cache: Arc::clone(&caches.sessions),
+            token_claims_cache: Arc::clone(&caches.claims),
+            token_claims_cache_gen: Arc::clone(&caches.claims_gen),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
-            blocked_dpop_jkt_cache: ShardedEpochMap::new(),
-            revoked_jti_cache: ShardedEpochMap::new(),
+            blocked_dpop_jkt_cache: Arc::clone(&caches.blocked_jkt),
+            revoked_jti_cache: Arc::clone(&caches.revoked_jti),
             // INVARIANT: guard released before method returns; no .await in scope.
             agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
                 crate::abuse::agent_monitor::AgentRateConfig::default(),
@@ -1943,15 +1823,11 @@ impl EmbeddedIdentityEngine {
         if let Err(e) = engine.restore_attempt_trackers_from_wal() {
             tracing::warn!(error = %e, "with_signing_key: restore_attempt_trackers_from_wal failed");
         }
-        if let Err(e) = engine.populate_realm_status_cache() {
-            tracing::warn!(error = %e, "with_signing_key: populate_realm_status_cache failed");
+        if let Err(e) = engine.control.reload() {
+            tracing::warn!(error = %e, "with_signing_key: loading the control caches failed");
+            engine.control.request_full_reload();
         }
-        if let Err(e) = engine.populate_revoked_jti_cache() {
-            tracing::warn!(error = %e, "with_signing_key: populate_revoked_jti_cache failed");
-        }
-        if let Err(e) = engine.populate_blocked_dpop_jkt_cache() {
-            tracing::warn!(error = %e, "with_signing_key: populate_blocked_dpop_jkt_cache failed");
-        }
+        engine.control_worker = engine.control.start();
         engine
     }
 
@@ -4643,12 +4519,12 @@ impl EmbeddedIdentityEngine {
     ///
     /// Returns `0` for a realm that has never been rotated, matching the
     /// in-memory default so the two are directly comparable.
-    /// Bumps the cluster control epoch so every other node reloads the three
-    /// authoritative control caches on its next validation.
+    /// Bumps the cluster control epoch so every other node reloads its
+    /// control caches (and drops its session and token-claims caches).
     ///
-    /// Called by realm suspend/archive, token revocation, and DPoP key
-    /// blocking — the three mutations whose enforcement lives in a cache that
-    /// answers "allow" on a miss.
+    /// Used directly by session revocation, whose enforcement on other nodes
+    /// lives in a session cache that answers from memory; the three control
+    /// caches go through [`Self::publish_control`] with their change.
     ///
     /// Best-effort by design. A failure to bump must not fail the control
     /// itself: the durable row that carries the decision is already written,
@@ -4656,34 +4532,21 @@ impl EmbeddedIdentityEngine {
     /// propagation delay for an outright denial of the control. The next
     /// successful bump, or a restart, still converges every node.
     fn bump_control_epoch(&self) {
-        self.publish_control(|| {});
-    }
-
-    /// Takes [`Self::control_cache_lock`]. Poisoning is ignored: the guarded
-    /// state is the caches themselves, which every holder leaves consistent.
-    fn lock_control_caches(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.control_cache_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.publish_control(None);
     }
 
     /// Publishes a control whose durable row the caller has already written:
-    /// bumps the persisted control epoch, then applies `apply` to this node's
-    /// control caches and records the new epoch locally, both under
-    /// [`Self::control_cache_lock`] so that a concurrent reload cannot
-    /// overwrite the cache change (see the field's documentation).
+    /// bumps the persisted control epoch, then applies `op` to this node's
+    /// control caches and records the epoch its own bump produced.
     ///
-    /// The storage write happens before the lock is taken, so the lock is
-    /// never held across I/O that could wait on replication.
-    fn publish_control<R>(&self, apply: impl FnOnce() -> R) -> R {
-        let next = self.persist_control_epoch_bump();
-        let _guard = self.lock_control_caches();
-        let out = apply();
-        if let Some(next) = next {
-            // `fetch_max`: two local writers may finish out of order.
-            self.control_epoch.fetch_max(next, Ordering::AcqRel);
-        }
-        out
+    /// The bump comes first so that a node which sees the new epoch and
+    /// reloads finds the row. The cache change goes through
+    /// [`control::ControlPlane::apply`], which orders it against a concurrent
+    /// reload so the reload cannot overwrite it. No lock is held across the
+    /// storage write.
+    fn publish_control(&self, op: Option<control::ControlOp>) {
+        let epoch = self.persist_control_epoch_bump();
+        self.control.apply(op, epoch);
     }
 
     /// Increments the persisted control epoch and returns the new value, or
@@ -4752,67 +4615,37 @@ impl EmbeddedIdentityEngine {
         self.sync_realm_key_epoch(realm_id);
     }
 
-    /// Reloads the three authoritative control caches when another node has
-    /// asserted a control.
+    /// Signals the control-cache reloader when the persisted control epoch is
+    /// ahead of the one this node's caches reflect — that is, when another
+    /// node has asserted a control.
     ///
-    /// Runs alongside [`Self::sync_realm_key_epoch`] on the validation path.
-    /// The common case is one small storage read that finds the epoch
-    /// unchanged and returns.
+    /// Runs alongside [`Self::sync_realm_key_epoch`] on the validation path,
+    /// so it does nothing that path forbids beyond the one debounced storage
+    /// read: no lock, no reload. [`control::ControlPlane::signal`] is an
+    /// atomic compare and, when the epoch moved, a `fetch_max` and an
+    /// `unpark`; the reload itself runs on the reloader thread, so the
+    /// validation that noticed does not wait for it. In cluster mode the
+    /// replicated epoch row signals the reloader directly (see the
+    /// `ReplicatedWriteObserver` impl), so this is the fallback, not the
+    /// usual trigger.
     ///
     /// The reload is a full repopulate rather than an incremental one. Realm
     /// statuses and blocked thumbprints are bounded by realm and blocklist
     /// size; revoked identifiers are not, so a revocation elsewhere costs this
-    /// node one blocklist scan. That is the right trade: revocations are rare
-    /// relative to validations, and the alternative — a storage read per
-    /// validation — is forbidden on this path.
+    /// node one blocklist scan — coalesced, at most one per
+    /// `control::RELOAD_MIN_SPACING`.
     fn sync_control_epoch(&self) {
         let sys_realm = keys::system_realm_id();
         let key = keys::encode_control_epoch();
-        let persisted = match self.storage.get(&sys_realm, &key) {
-            Ok(Some(bytes)) => <[u8; 8]>::try_from(bytes.as_slice())
-                .map(u64::from_le_bytes)
-                .unwrap_or(0),
-            Ok(None) => 0,
-            Err(err) => {
-                // Fail soft, exactly as the key epoch does: a transient
-                // storage error must not take down token validation.
-                tracing::warn!(error = %err, "could not read the control epoch");
-                return;
-            }
-        };
-        if persisted <= self.control_epoch.load(Ordering::Acquire) {
-            return;
+        match self.storage.get(&sys_realm, &key) {
+            Ok(raw) => match crate::storage::decode_u64_counter(raw.as_deref()) {
+                Ok(persisted) => self.control.signal(persisted),
+                Err(err) => tracing::warn!(error = %err, "the control epoch row is corrupted"),
+            },
+            // Fail soft, exactly as the key epoch does: a transient storage
+            // error must not take down token validation.
+            Err(err) => tracing::warn!(error = %err, "could not read the control epoch"),
         }
-        // Scan-and-replace under the control-cache lock, so no local control
-        // write can land between this reload's scan and its replace and be
-        // overwritten (see `control_cache_lock`). Re-check under the lock: a
-        // local writer finishing its publish, or another reloader, may have
-        // caught the local epoch up while this thread waited.
-        let _reload = self.lock_control_caches();
-        if persisted <= self.control_epoch.load(Ordering::Acquire) {
-            return;
-        }
-        // Store first so a concurrent validation does not repeat the reload.
-        self.control_epoch.fetch_max(persisted, Ordering::AcqRel);
-        if let Err(err) = self.populate_realm_status_cache() {
-            tracing::warn!(error = %err, "control epoch moved but the realm status cache did not reload");
-        }
-        if let Err(err) = self.populate_revoked_jti_cache() {
-            tracing::warn!(error = %err, "control epoch moved but the revoked-JTI cache did not reload");
-        }
-        if let Err(err) = self.populate_blocked_dpop_jkt_cache() {
-            tracing::warn!(error = %err, "control epoch moved but the DPoP blocklist did not reload");
-        }
-        // `lookup_session` returns a cached live session WITHOUT consulting
-        // storage, so a session revoked on another node stays live here until
-        // the entry is dropped. Revocation is the only thing that enforces a
-        // disable, because access tokens embed their claims at issue time.
-        self.session_cache.store(Arc::new(HashMap::new()));
-        self.flush_token_claims_cache();
-        tracing::info!(
-            epoch = persisted,
-            "a control was asserted on another node; local control caches reloaded"
-        );
     }
 
     fn read_persisted_key_epoch(&self, realm_id: &RealmId) -> u64 {
@@ -6409,13 +6242,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             // A status change decided here binds on every node only via the
             // control epoch: `realm_status_cache` answers "active" on a miss
             // and is written by the serving node alone (task 24.6).
-            self.publish_control(|| {
-                self.realm_status_cache.rcu(|current| {
-                    let mut new_map = HashMap::clone(current);
-                    new_map.insert(id.clone(), RealmStatus::Active);
-                    new_map
-                });
-            });
+            self.publish_control(Some(control::ControlOp::SetRealmStatus(
+                id,
+                RealmStatus::Active,
+            )));
         }
 
         self.record_audit(
@@ -6576,13 +6406,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             // A status change decided here binds on every node only via the
             // control epoch: `realm_status_cache` answers "active" on a miss
             // and is written by the serving node alone (task 24.6).
-            self.publish_control(|| {
-                self.realm_status_cache.rcu(|current| {
-                    let mut new_map = HashMap::clone(current);
-                    new_map.insert(id.clone(), status);
-                    new_map
-                });
-            });
+            self.publish_control(Some(control::ControlOp::SetRealmStatus(id, status)));
         }
 
         self.record_audit(
@@ -6675,13 +6499,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 // A status change decided here binds on every node only via the
                 // control epoch: `realm_status_cache` answers "active" on a miss
                 // and is written by the serving node alone (task 24.6).
-                self.publish_control(|| {
-                    self.realm_status_cache.rcu(|current| {
-                        let mut new_map = HashMap::clone(current);
-                        new_map.insert(id.clone(), RealmStatus::DeletingInProgress);
-                        new_map
-                    });
-                });
+                self.publish_control(Some(control::ControlOp::SetRealmStatus(
+                    id,
+                    RealmStatus::DeletingInProgress,
+                )));
             }
         }
 
@@ -6725,7 +6546,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 let retiring_keys = self.realm_retiring_keys.clone();
                 let rsa_id_token_keys = self.realm_id_token_rsa_keys.clone();
                 let rsa_id_token_retiring_keys = self.realm_id_token_rsa_retiring_keys.clone();
-                let status_cache = self.realm_status_cache.clone();
+                let control = Arc::clone(&self.control);
                 let existing_realm_bg = existing_realm.clone();
 
                 handle.spawn(async move {
@@ -6777,11 +6598,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     retiring_keys.remove(&realm_id_bg);
                     rsa_id_token_keys.remove(&realm_id_bg);
                     rsa_id_token_retiring_keys.remove(&realm_id_bg);
-                    status_cache.rcu(|current| {
-                        let mut new_map = HashMap::clone(current);
-                        new_map.remove(&realm_id_bg);
-                        new_map
-                    });
+                    // Through the control plane, so a concurrent reload
+                    // cannot overwrite the removal.
+                    control.apply(
+                        Some(control::ControlOp::ForgetRealmStatus(realm_id_bg.clone())),
+                        None,
+                    );
 
                     tracing::info!(
                         realm_id = %realm_id_bg.as_uuid(),
@@ -6817,13 +6639,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             // A status change decided here binds on every node only via the
             // control epoch: `realm_status_cache` answers "active" on a miss
             // and is written by the serving node alone (task 24.6).
-            self.publish_control(|| {
-                self.realm_status_cache.rcu(|current| {
-                    let mut new_map = HashMap::clone(current);
-                    new_map.remove(&id);
-                    new_map
-                });
-            });
+            self.publish_control(Some(control::ControlOp::ForgetRealmStatus(id)));
         }
         // Drop realm-scoped session and MFA caches the key-space sweep does
         // not reach; otherwise a deleted realm's session stays readable from
@@ -11578,13 +11394,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             // A status change decided here binds on every node only via the
             // control epoch: `realm_status_cache` answers "active" on a miss
             // and is written by the serving node alone (task 24.6).
-            self.publish_control(|| {
-                self.realm_status_cache.rcu(|current| {
-                    let mut new_map = HashMap::clone(current);
-                    new_map.insert(id.clone(), RealmStatus::Active);
-                    new_map
-                });
-            });
+            self.publish_control(Some(control::ControlOp::SetRealmStatus(
+                id,
+                RealmStatus::Active,
+            )));
         }
 
         self.record_audit(
@@ -17579,6 +17392,8 @@ mod tests {
     mod client_assertion_jti;
     /// The persisted control epoch is bumped atomically and never moves back.
     mod control_epoch;
+    /// Control-cache reloads: lock-free validation, retries, ordering, coverage.
+    mod control_reload;
     /// Concurrent revocations survive a racing control-cache reload.
     mod revocation_reload_races;
     /// PKCE challenge and refresh-token hash compare in constant time.

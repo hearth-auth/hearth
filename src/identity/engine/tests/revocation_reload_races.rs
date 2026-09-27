@@ -18,6 +18,11 @@
 //! The race is driven, not waited for: many threads mint, revoke and introspect
 //! at once, and every token each of them revoked must read inactive. Before the
 //! fix this fails within a few hundred cycles; it cannot fail after it.
+//!
+//! The fix is `control::ControlPlane`: the reload now runs on a background
+//! thread and journals every cache change applied while it scans, replaying
+//! them before its swap (see `control_reload.rs` for the deterministic
+//! versions of this race, and for the proof that validation takes no lock).
 
 use super::*;
 
