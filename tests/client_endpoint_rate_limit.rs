@@ -41,6 +41,7 @@ async fn env() -> Env {
     let identity = h.identity_arc();
     let mut state = AppState::new_dev(Arc::clone(&identity), h.rbac_arc(), h.audit_arc());
     state.token_rate_limiter = Arc::new(TokenRateLimiter::with_limit(LIMIT));
+    state.par_rate_limiter = Arc::new(TokenRateLimiter::with_limit(LIMIT));
     let app = router(Arc::new(state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -188,4 +189,33 @@ async fn introspection_and_revocation_are_limited_before_the_client_is_verified(
             "{path}: past the limit the request is refused before the secret is checked"
         );
     }
+}
+
+/// `/as/par` has its own per-client bucket: a login is one push plus one
+/// code exchange, so sharing the `/token` bucket charged every login twice and
+/// let `/token` traffic starve pushes (review L6).
+#[tokio::test]
+async fn par_and_token_do_not_share_a_bucket() {
+    let env = env().await;
+    let client = env.client(None);
+    let id = client.as_uuid().to_string();
+    // Exhaust the client's /token bucket.
+    let token_form = vec![
+        ("grant_type", "authorization_code".to_string()),
+        ("client_id", id.clone()),
+        ("code", "not-a-code".to_string()),
+        ("redirect_uri", REDIRECT_URI.to_string()),
+    ];
+    for _ in 0..LIMIT {
+        let status = env.post("/token", true, &token_form, None).await;
+        assert_ne!(status, 429, "within the /token limit");
+    }
+    assert_eq!(
+        env.post("/token", true, &token_form, None).await,
+        429,
+        "control: /token is exhausted"
+    );
+    // A push for the same client is still served.
+    let status = env.post("/as/par", true, &par_form(id), None).await;
+    assert_eq!(status, 201, "/as/par must not draw on the /token bucket");
 }

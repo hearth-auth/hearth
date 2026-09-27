@@ -173,7 +173,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   checked `security.rate_limiting.token_per_minute` only after verifying the client, so a flood of
   wrong secrets was never limited and every one was hashed. All three now apply the `/token`
   per-client limit first, keyed on the claimed `client_id` (body, else Basic username) or, with none,
-  on the client IP; past it they answer `429` with `Retry-After`.
+  on the client IP; past it they answer `429` with `Retry-After`. `/as/par` has its own bucket of
+  that size, so a login (one push, one code exchange) is not charged twice against one budget.
 - **FAPI 2.0 clients authenticate with their registered JWKS, and a client with keys is never
   public** — `private_key_jwt` assertions were verified only against the separate
   `assertion_public_key`, never against the `jwks` that FAPI 2.0 registration requires, and "public"

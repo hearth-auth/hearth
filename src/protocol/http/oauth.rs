@@ -702,8 +702,17 @@ fn refuse_none_in_fapi_advanced_realm(
     Ok(())
 }
 
-/// Checks the per-client token rate limit for an endpoint that authenticates
-/// a client (`/as/par`, `/introspect`, `/revoke` and their twins) BEFORE the
+/// Which per-client budget an endpoint draws on.
+#[derive(Clone, Copy)]
+enum ClientBudget {
+    /// The `/token` bucket (`/introspect`, `/revoke`).
+    Token,
+    /// `/as/par`'s own bucket, same limit.
+    Par,
+}
+
+/// Checks the per-client rate limit for an endpoint that authenticates a
+/// client (`/as/par`, `/introspect`, `/revoke` and their twins) BEFORE the
 /// client is verified, as `/token` does: keyed on the CLAIMED client (body
 /// `client_id`, else the Basic username) or, when none parses, on the client
 /// IP. Limiting only after verification let a flood of wrong secrets through
@@ -714,14 +723,29 @@ fn check_claimed_client_rate_limit(
     headers: &HeaderMap,
     body_client_id: Option<&str>,
     peer_addr: std::net::SocketAddr,
+    budget: ClientBudget,
 ) -> Result<(), Response> {
     let claimed = body_client_id
         .and_then(non_empty_credential)
         .map(str::to_string)
         .or_else(|| parse_basic_auth(headers).map(|(id, _)| id));
-    match claimed.and_then(|raw| raw.parse::<uuid::Uuid>().ok()) {
-        Some(uuid) => check_token_rate_limit(state, realm_id, &ClientId::new(uuid)),
-        None => {
+    let claimed = claimed
+        .and_then(|raw| raw.parse::<uuid::Uuid>().ok())
+        .map(ClientId::new);
+    match (budget, claimed) {
+        (ClientBudget::Par, claimed) => {
+            let client_ip = extract_client_ip(headers, peer_addr, &state.trusted_proxies);
+            super::auth::check_client_or_ip_rate_limit(
+                &state.par_rate_limiter,
+                realm_id,
+                claimed.as_ref(),
+                &client_ip,
+            )
+        }
+        (ClientBudget::Token, Some(client_id)) => {
+            check_token_rate_limit(state, realm_id, &client_id)
+        }
+        (ClientBudget::Token, None) => {
             let client_ip = extract_client_ip(headers, peer_addr, &state.trusted_proxies);
             check_anonymous_token_rate_limit(state, realm_id, &client_ip)
         }
@@ -2305,13 +2329,15 @@ async fn par_handler(
 ) -> impl IntoResponse {
     use crate::identity::{CodeChallengeMethod, PushedAuthorizationRequest};
 
-    // Rate limit before authenticating the client, as `/token` does.
+    // Rate limit before authenticating the client, as `/token` does — from
+    // PAR's own bucket.
     if let Err(resp) = check_claimed_client_rate_limit(
         state,
         realm_id,
         headers,
         Some(body.client_id.as_str()),
         peer_addr,
+        ClientBudget::Par,
     ) {
         return resp;
     }
@@ -3069,6 +3095,7 @@ async fn token_revocation(
         &headers,
         body.client_id.as_deref(),
         peer_addr,
+        ClientBudget::Token,
     ) {
         return resp;
     }
@@ -3126,6 +3153,7 @@ async fn token_introspection(
         &headers,
         body.client_id.as_deref(),
         peer_addr,
+        ClientBudget::Token,
     ) {
         return resp;
     }
@@ -4239,6 +4267,7 @@ async fn realm_token_revocation(
         &headers,
         body.client_id.as_deref(),
         peer_addr,
+        ClientBudget::Token,
     ) {
         return resp;
     }
@@ -4296,6 +4325,7 @@ async fn realm_token_introspection(
         &headers,
         body.client_id.as_deref(),
         peer_addr,
+        ClientBudget::Token,
     ) {
         return resp;
     }

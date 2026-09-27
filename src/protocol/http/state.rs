@@ -46,6 +46,11 @@ pub struct AppState {
     /// device-authorization endpoints. Returns 429 with `Retry-After` when
     /// exceeded.
     pub token_rate_limiter: Arc<TokenRateLimiter>,
+    /// Per-`(realm, client_id)` rate limiter for pushed authorization requests
+    /// (`/as/par` and its realm twin), with the same limit as
+    /// [`Self::token_rate_limiter`] but its own buckets: a login is one push
+    /// and one code exchange, and sharing a bucket charged it twice.
+    pub par_rate_limiter: Arc<TokenRateLimiter>,
     /// Per-user rate limiter for backup/export endpoints (A-30).
     ///
     /// Limits each admin user to [`crate::protocol::admin_auth::EXPORT_RATE_LIMIT`]
@@ -151,6 +156,7 @@ impl AppState {
             metrics_bearer_token: None,
             admin_rate_limiter: Arc::new(AdminRateLimiter::new()),
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
+            par_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
             trusted_proxies: Vec::new(),
@@ -187,6 +193,7 @@ impl AppState {
             metrics_bearer_token: None,
             admin_rate_limiter: Arc::new(AdminRateLimiter::new()),
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
+            par_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
             trusted_proxies: Vec::new(),
@@ -229,6 +236,7 @@ impl AppState {
             metrics_bearer_token: None,
             admin_rate_limiter,
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
+            par_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
             trusted_proxies: Vec::new(),
@@ -401,6 +409,7 @@ impl AppState {
         }
         if let Some(limit) = token_per_minute {
             self.token_rate_limiter = Arc::new(TokenRateLimiter::with_limit(limit));
+            self.par_rate_limiter = Arc::new(TokenRateLimiter::with_limit(limit));
         }
         if let Some(limit) = export_per_hour {
             self.export_rate_limiter = Arc::new(ExportRateLimiter::with_limit(limit));
@@ -422,6 +431,7 @@ impl AppState {
         if disabled {
             self.admin_rate_limiter = Arc::new(AdminRateLimiter::disabled());
             self.token_rate_limiter = Arc::new(TokenRateLimiter::disabled());
+            self.par_rate_limiter = Arc::new(TokenRateLimiter::disabled());
             self.export_rate_limiter = Arc::new(ExportRateLimiter::disabled());
         }
         self

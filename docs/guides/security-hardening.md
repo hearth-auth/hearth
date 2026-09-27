@@ -526,7 +526,7 @@ on a production bind).
 
 | Config key | Default | Effect |
 |---|---|---|
-| `token_per_minute` | `200` | Requests/minute per `(realm, client)` pair at `/token`, `/as/par`, `/introspect`, `/revoke` and `/device_authorization` (and their realm twins), counted before the client is authenticated |
+| `token_per_minute` | `200` | Requests/minute per `(realm, client)` pair at `/token`, `/as/par`, `/introspect`, `/revoke` and `/device_authorization` (and their realm twins), counted before the client is authenticated; `/as/par` counts against a separate bucket of the same size |
 
 Applies to token issuance, introspection, and device-authorization requests. Same zero-warning
 behaviour as `admin_per_minute`.

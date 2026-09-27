@@ -508,6 +508,25 @@ pub(crate) fn check_anonymous_token_rate_limit(
     )
 }
 
+/// Checks a per-client limiter shaped like the token limiter — the claimed
+/// client's bucket, or the client-IP bucket when no client id parses — for an
+/// endpoint with a budget of its own (`/as/par`).
+pub(crate) fn check_client_or_ip_rate_limit(
+    limiter: &TokenRateLimiter,
+    realm_id: &RealmId,
+    claimed_client: Option<&ClientId>,
+    peer_ip: &str,
+) -> Result<(), Response> {
+    token_rate_limit_outcome(match claimed_client {
+        Some(client) => limiter.check(realm_id, client, now_micros()),
+        None => limiter.check_bucket(
+            realm_id,
+            &TokenRateLimiter::anonymous_ip_bucket(peer_ip),
+            now_micros(),
+        ),
+    })
+}
+
 /// Maps a [`TokenRateLimitOutcome`] onto the shared 429 response shape.
 fn token_rate_limit_outcome(outcome: TokenRateLimitOutcome) -> Result<(), Response> {
     match outcome {

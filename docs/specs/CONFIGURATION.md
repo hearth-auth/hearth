@@ -831,7 +831,7 @@ Global per-IP and per-account rate-limit thresholds. These are the server-wide d
 | `login_per_account.max_failures` | integer | `5` | Maximum consecutive failures for a single account before it is locked out. |
 | `login_per_account.lockout_seconds` | integer | `300` | Duration (seconds) of the account lockout after `max_failures` is reached. |
 | `admin_per_minute` | integer | `100` | Maximum admin-API requests per minute per admin user, shared across the REST and gRPC surfaces. Requests beyond the cap receive `429 Too Many Requests`. Set to `0` to disable the limiter entirely. |
-| `token_per_minute` | integer | `200` | Maximum OAuth token, pushed-authorization (`/as/par`), introspection, revocation and device-authorization requests per minute per `(realm, client)` pair, counted before the client is authenticated — keyed on the claimed `client_id` (body, else Basic username), or on the client IP when there is none. Set to `0` to disable the limiter entirely. |
+| `token_per_minute` | integer | `200` | Maximum OAuth token, pushed-authorization (`/as/par`), introspection, revocation and device-authorization requests per minute per `(realm, client)` pair, counted before the client is authenticated — keyed on the claimed `client_id` (body, else Basic username), or on the client IP when there is none. `/as/par` (and its realm twin) has its **own** budget of this size, so a login's push and its code exchange each draw on a separate bucket; the other endpoints share one. Set to `0` to disable the limiter entirely. |
 
 ```yaml
 security:
