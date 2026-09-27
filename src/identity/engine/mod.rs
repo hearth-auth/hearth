@@ -12636,6 +12636,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         org: &Organization,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_organization",
+            });
+        }
         // Mirror `create_organization`'s persisted layout (primary record +
         // raw-UUID slug index) but preserve the org's own ID and every field.
         let id_key = keys::encode_org_id(org.id());
@@ -12696,6 +12704,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         membership: &OrganizationMembership,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_organization_membership",
+            });
+        }
         let fwd_key = keys::encode_membership_by_org(membership.org_id(), membership.user_id());
         let exists = self
             .storage
@@ -12801,6 +12817,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         export: &AgentExport,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_agent",
+            });
+        }
         let agent = &export.agent;
         let id_key = keys::encode_agent_id(agent.id());
         let exists = self
@@ -12868,6 +12892,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         idp: &crate::identity::federation::IdpConfig,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_identity_provider",
+            });
+        }
         let key = keys::encode_idp_key(&idp.id);
         let exists = self
             .storage
@@ -12926,6 +12958,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         link: &FederationLinkExport,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_federation_link",
+            });
+        }
         let reverse_key = keys::encode_federation_ext_key(&link.idp_id, &link.external_sub);
         let forward_key = keys::encode_federation_ext_fwd_key(&link.user_id, &link.idp_id);
         let exists = self
@@ -13028,6 +13068,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         sp: &crate::identity::federation::saml::SamlServiceProvider,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_saml_service_provider",
+            });
+        }
         let key = keys::encode_saml_sp_key(&sp.sp_key);
         let exists = self
             .storage
@@ -13079,6 +13127,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         plaintext_json: &[u8],
     ) -> Result<(), IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_realm_saml_key",
+            });
+        }
         let stored: SamlStoredKey =
             serde_json::from_slice(plaintext_json).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
@@ -13216,6 +13272,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         invitation: &OrganizationInvitation,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_invitation",
+            });
+        }
         let id_key = keys::encode_invitation_id(invitation.id());
         let exists = self
             .storage

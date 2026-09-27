@@ -772,15 +772,24 @@ impl BackupImporter {
             if opts.dry_run {
                 report.id_token_signing_key.created += 1;
             } else {
-                let outcome = self
-                    .identity
-                    .import_realm_id_token_rsa_key(
-                        &restored_realm_id,
-                        pkcs8,
-                        opts.mode == RestoreMode::Overwrite,
-                    )
-                    .map_err(|e| BackupError::Engine(e.to_string()))?;
-                tally(&mut report.id_token_signing_key, outcome);
+                match self.identity.import_realm_id_token_rsa_key(
+                    &restored_realm_id,
+                    pkcs8,
+                    opts.mode == RestoreMode::Overwrite,
+                ) {
+                    Ok(outcome) => tally(&mut report.id_token_signing_key, outcome),
+                    // Reported, not fatal: the system realm never holds one.
+                    Err(e @ IdentityError::SystemRealmProtected { .. }) => {
+                        warn!(realm = %realm_slug, err = %e, "RS256 ID-token key refused");
+                        report.id_token_signing_key.errored += 1;
+                        report.conflicts.push(Conflict {
+                            entity_type: "id_token_signing_key".to_string(),
+                            identifier: realm_slug.to_string(),
+                            reason: e.to_string(),
+                        });
+                    }
+                    Err(e) => return Err(BackupError::Engine(e.to_string())),
+                }
             }
         }
 
@@ -1005,9 +1014,23 @@ impl BackupImporter {
         if let Some(raw) = files.get(&saml_key_member) {
             let plaintext = try_decrypt(raw)?;
             if !opts.dry_run {
-                self.identity
+                match self
+                    .identity
                     .import_realm_saml_key(&restored_realm_id, &plaintext)
-                    .map_err(|e| BackupError::Engine(e.to_string()))?;
+                {
+                    Ok(()) => {}
+                    // Reported, not fatal: the rest of the realm still comes
+                    // back (the system realm never holds a SAML key).
+                    Err(e @ IdentityError::SystemRealmProtected { .. }) => {
+                        warn!(member = %saml_key_member, err = %e, "record refused");
+                        report.conflicts.push(Conflict {
+                            entity_type: "saml_signing_key".to_string(),
+                            identifier: saml_key_member.clone(),
+                            reason: e.to_string(),
+                        });
+                    }
+                    Err(e) => return Err(BackupError::Engine(e.to_string())),
+                }
             }
         }
 

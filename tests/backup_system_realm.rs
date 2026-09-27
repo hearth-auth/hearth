@@ -734,3 +734,244 @@ async fn full_archives_restore_both_and_tenant_only_archives_leave_the_system_re
         .expect("lookup")
         .is_none());
 }
+
+// ── System-realm invariants ───────────────────────────────────────────────────
+
+/// Builds an UNENCRYPTED archive of the system realm (`realm.json` of the live
+/// nil realm) carrying `members` — each already-plaintext member body keyed by
+/// its member name. No signing key: restore it with
+/// `allow_missing_signing_key`.
+fn system_archive_with(h: &common::TestHarness, members: &[(&str, Vec<u8>)]) -> NamedTempFile {
+    use hearth::backup::{RealmManifest, RecordCounts};
+    let tmp = NamedTempFile::new().expect("tempfile");
+    let mut writer = BackupArchive::create(tmp.path()).expect("create archive");
+    let realm = h
+        .identity()
+        .get_realm(&system_realm())
+        .expect("get_realm")
+        .expect("the system realm is seeded");
+    writer
+        .add_file(
+            &format!("realms/{SYSTEM_SLUG}/realm.json"),
+            &serde_json::to_vec(&realm).expect("realm json"),
+        )
+        .expect("realm.json");
+    for (member, body) in members {
+        writer
+            .add_file(&format!("realms/{SYSTEM_SLUG}/{member}"), body)
+            .expect("member");
+    }
+    writer
+        .finish(BackupManifest::new(vec![RealmManifest {
+            realm_id: format!("realm_{}", uuid::Uuid::nil()),
+            slug: SYSTEM_SLUG.to_string(),
+            record_counts: RecordCounts::default(),
+            audit_chain_included: false,
+        }]))
+        .expect("finish");
+    tmp
+}
+
+/// Every member of a tenant realm's archive, decrypted, by member name.
+fn decrypted_members(
+    h: &common::TestHarness,
+    realm: &RealmId,
+) -> std::collections::HashMap<String, Vec<u8>> {
+    let tmp = NamedTempFile::new().expect("tempfile");
+    let mut writer = BackupArchive::create(tmp.path()).expect("create archive");
+    let exporter = BackupExporter::new(h.identity_arc(), h.audit_arc(), h.rbac_arc());
+    let dek = BackupExporter::generate_dek().expect("DEK");
+    let manifest = exporter
+        .export_realm(realm, &mut writer, &ExportOptions::default(), &dek)
+        .expect("export");
+    let slug = manifest.slug.clone();
+    writer
+        .finish(BackupManifest::new(vec![manifest]))
+        .expect("finish");
+    let reader = BackupArchive::open(tmp.path()).expect("open");
+    reader
+        .read_all_realm_files(&slug)
+        .expect("read")
+        .into_iter()
+        .map(|(path, bytes)| {
+            let member = path.rsplit('/').next().expect("member").to_string();
+            let plain = hearth::backup::decrypt_bytes(&bytes, &dek).expect("decrypt");
+            (member, plain.to_vec())
+        })
+        .collect()
+}
+
+/// The live API never creates organizations (nor their memberships and
+/// invitations), agents, external IdPs, federation links, SAML service
+/// providers or a SAML signing key in the system realm. A system-realm archive
+/// carrying them — hand-built, since no export of a real store can — must not
+/// write them there either: each is refused and reported, and the rest of the
+/// restore carries on.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one record of each forbidden family
+async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() {
+    use hearth::identity::federation::saml::{SamlNameIdFormat, SamlServiceProvider};
+    use hearth::identity::federation::{FederationSecret, IdpConfig, IdpKind};
+    use hearth::identity::{
+        AgentOwner, CreateAgentRequest, CreateInvitationRequest, CreateOrganizationRequest,
+        FederationLinkExport, OrganizationRole,
+    };
+
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let tenant = h.create_realm();
+    let id = h.identity();
+    let user = id
+        .create_user(
+            &tenant,
+            &CreateUserRequest {
+                email: "member@tenant.test".into(),
+                display_name: "Member".into(),
+                ..Default::default()
+            },
+        )
+        .expect("user");
+    let org = id
+        .create_organization(
+            &tenant,
+            &CreateOrganizationRequest {
+                name: "Acme".into(),
+                slug: "acme".into(),
+                ..Default::default()
+            },
+        )
+        .expect("org");
+    id.add_member(&tenant, org.id(), user.id(), OrganizationRole::Member)
+        .expect("membership");
+    id.create_invitation(
+        &tenant,
+        &CreateInvitationRequest {
+            org_id: org.id().clone(),
+            email: "invitee@tenant.test".into(),
+            role: OrganizationRole::Member,
+            invited_by: user.id().clone(),
+        },
+    )
+    .expect("invitation");
+    id.create_agent(
+        &tenant,
+        &CreateAgentRequest {
+            display_name: "Bot".into(),
+            description: None,
+            owner: AgentOwner::User(user.id().clone()),
+            capabilities: vec![],
+            max_delegation_depth: 1,
+        },
+        Some(user.id()),
+    )
+    .expect("agent");
+    let idp_id = hearth::core::IdpId::generate();
+    id.register_idp(&IdpConfig {
+        id: idp_id.clone(),
+        realm_id: tenant.clone(),
+        name: "corp".to_string(),
+        kind: IdpKind::Oidc,
+        display_name: "Corp".to_string(),
+        issuer: "https://idp.example".to_string(),
+        authorization_endpoint: "https://idp.example/auth".to_string(),
+        token_endpoint: "https://idp.example/token".to_string(),
+        userinfo_endpoint: None,
+        jwks_uri: Some("https://idp.example/jwks".to_string()),
+        scopes: vec!["openid".to_string()],
+        client_id: "c".to_string(),
+        client_secret: FederationSecret::new("s".to_string()),
+        claim_mappings: std::collections::BTreeMap::new(),
+        leeway_seconds: IdpConfig::default_leeway_seconds(),
+        want_assertions_signed: false,
+        trust_asserted_email: false,
+        apple: None,
+        created_at: hearth::core::Timestamp::from_micros(0),
+        updated_at: hearth::core::Timestamp::from_micros(0),
+    })
+    .expect("idp");
+    id.register_saml_sp(
+        &tenant,
+        &SamlServiceProvider {
+            sp_key: "crm".to_string(),
+            entity_id: "https://crm.example".to_string(),
+            acs_url: "https://crm.example/acs".to_string(),
+            slo_url: None,
+            sp_certificate_pem: None,
+            sign_assertions: true,
+            sign_responses: true,
+            want_authn_requests_signed: false,
+            nameid_format: SamlNameIdFormat::EmailAddress,
+            attribute_map: std::collections::BTreeMap::new(),
+        },
+    )
+    .expect("saml sp");
+    id.get_or_create_saml_signing_key(&tenant, "https://tenant.example")
+        .expect("saml key");
+
+    let members = decrypted_members(&h, &tenant);
+    let link = serde_json::to_vec(&FederationLinkExport {
+        user_id: user.id().clone(),
+        idp_id: idp_id.clone(),
+        external_sub: "ext-1".to_string(),
+    })
+    .expect("link json");
+    let mut carried: Vec<(&str, Vec<u8>)> = [
+        "organizations.ndjson",
+        "organization_memberships.ndjson",
+        "invitations.ndjson",
+        "agents.ndjson",
+        "identity_providers.ndjson",
+        "saml_service_providers.ndjson",
+        "saml_signing_key.json",
+    ]
+    .iter()
+    .map(|m| {
+        (
+            *m,
+            members.get(*m).cloned().unwrap_or_else(|| panic!("{m}")),
+        )
+    })
+    .collect();
+    carried.push(("federation_links.ndjson", link));
+    let archive = system_archive_with(&h, &carried);
+
+    let report = restore(
+        &h,
+        &archive,
+        &ImportOptions {
+            mode: RestoreMode::Overwrite,
+            allow_missing_signing_key: true,
+            ..ImportOptions::default()
+        },
+    )
+    .expect("the restore carries on past refused records");
+
+    for (family, counts) in [
+        ("organizations", &report.organizations),
+        ("organization_memberships", &report.organization_memberships),
+        ("invitations", &report.invitations),
+        ("agents", &report.agents),
+        ("identity_providers", &report.identity_providers),
+        ("federation_links", &report.federation_links),
+        ("saml_service_providers", &report.saml_service_providers),
+    ] {
+        assert_eq!(counts.errored, 1, "{family}: refused and reported");
+        assert_eq!(
+            counts.created + counts.overwritten,
+            0,
+            "{family}: nothing written"
+        );
+    }
+    assert!(
+        report
+            .conflicts
+            .iter()
+            .any(|c| c.identifier.contains("saml_signing_key")),
+        "the SAML key is refused and reported: {:?}",
+        report.conflicts
+    );
+
+    let sys = system_realm();
+    assert!(id.get_organization(&sys, org.id()).expect("get").is_none());
+    assert!(id.get_idp(&sys, &idp_id).expect("get").is_none());
+    assert!(id.get_saml_sp_by_key(&sys, "crm").expect("get").is_none());
+}
