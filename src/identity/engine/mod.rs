@@ -17471,6 +17471,8 @@ mod tests {
 
     /// `private_key_jwt` assertion-JTI replay markers carry an expiry and are swept.
     mod client_assertion_jti;
+    /// A presented assertion field is a `private_key_jwt` attempt, never ignored.
+    mod client_assertion_presence;
     /// `client_credentials` authenticates before revealing existence or grants.
     mod client_credentials_oracle;
     /// The persisted control epoch is bumped atomically and never moves back.

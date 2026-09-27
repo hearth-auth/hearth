@@ -243,6 +243,17 @@ or any client that registered a JWKS or an assertion key and no secret — prese
 somehow holds a secret is refused (`invalid_client`, naming `private_key_jwt`) after the secret
 verifies.
 
+**A presented assertion field is always a `private_key_jwt` attempt.** On every surface that reads
+`client_assertion` / `client_assertion_type` (every `/token` grant, `/as/par`, `/introspect`,
+`/revoke`, `/device_authorization` and their realm twins), a request that carries either field MUST
+have `client_assertion_type` equal to `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`, a
+non-empty `client_assertion`, and that assertion MUST verify for the named client — else `401
+invalid_client`. It never falls through to the secret check, to `none`, or to "no client
+authentication"; beside a secret (Basic or body) it is `400 invalid_request` (RFC 6749 §2.3). A
+blank field counts as absent. Grants that do not otherwise authenticate the client (step-up MFA,
+jwt-bearer, magic link) still verify a presented assertion. The engine applies the same rule at the
+`authorization_code` and `client_credentials` grants (defence in depth).
+
 #### 2.2.4 `s_hash` in JARM
 
 When a FAPI 2.0 client receives a JARM JWT and the authorization request included a non-empty `state`,

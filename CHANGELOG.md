@@ -188,6 +188,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   gRPC client authentication is refused in such a realm. A FAPI 2.0 client that somehow holds a
   secret is refused the same way once the secret verifies. **Breaking** for clients of an Advanced
   realm that authenticate with a secret or as public clients.
+- **A junk `client_assertion` no longer skips the client secret** — at the `authorization_code`
+  exchange (`/token` and `/realms/{realm}/token`) a client that holds a secret could redeem its code
+  with `client_assertion=junk` (no `client_assertion_type`, or a wrong one) and no secret, and got
+  tokens. A request carrying either `client_assertion` or `client_assertion_type` now always means
+  `private_key_jwt`, on every grant at `/token`, `/as/par`, `/introspect`, `/revoke` and their realm
+  twins: the type must be `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`, the assertion
+  must be present and must verify for the named client, else `401 invalid_client`; beside a secret
+  it is `400 invalid_request`. Grants that do not authenticate the client (step-up MFA, jwt-bearer,
+  magic link) verify a presented assertion instead of ignoring it. **Breaking** for a client that
+  sends assertion fields it does not mean to use.
 
 ### Added
 - **Per-client RS256 ID tokens (OIDC interop, task 26.55)** — a client can set

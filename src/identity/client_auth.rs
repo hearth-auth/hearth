@@ -30,6 +30,41 @@ use crate::core::{ClientId, RealmId};
 use crate::identity::oidc::{ClientCredentialsRequest, ClientCredentialsResponse};
 use crate::identity::{IdentityEngine, IdentityError, KdfGateError};
 
+/// `client_assertion_type` for `private_key_jwt` (RFC 7523 §2.2).
+pub const CLIENT_ASSERTION_TYPE_JWT_BEARER: &str =
+    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+
+/// Classifies the `private_key_jwt` fields of a request (RFC 7523 §2.2).
+///
+/// A blank field counts as absent. With neither field present the request
+/// did not attempt assertion authentication: `Ok(None)`. A request that
+/// carries EITHER field did, and must never fall through to another method
+/// (a secret, `none`) or be ignored: it is `Ok(Some(assertion))` only when the
+/// type is exactly [`CLIENT_ASSERTION_TYPE_JWT_BEARER`] and the assertion is
+/// present — the caller then MUST verify it — and
+/// [`IdentityError::InvalidClientAssertion`] otherwise.
+///
+/// # Errors
+///
+/// [`IdentityError::InvalidClientAssertion`] for a wrong or missing type, or
+/// a type with no assertion.
+pub fn presented_client_assertion<'a>(
+    assertion_type: Option<&'a str>,
+    assertion: Option<&'a str>,
+) -> Result<Option<&'a str>, IdentityError> {
+    let present = |field: Option<&'a str>| field.filter(|v| !v.trim().is_empty());
+    match (present(assertion_type), present(assertion)) {
+        (None, None) => Ok(None),
+        (Some(CLIENT_ASSERTION_TYPE_JWT_BEARER), Some(jwt)) => Ok(Some(jwt)),
+        _ => Err(IdentityError::InvalidClientAssertion {
+            reason: format!(
+                "client authentication by assertion requires client_assertion_type \
+                 {CLIENT_ASSERTION_TYPE_JWT_BEARER} and a client_assertion"
+            ),
+        }),
+    }
+}
+
 /// Runs `call` against `engine`, first waiting for a KDF-gate permit when a
 /// presented secret for `client_id` would be verified with Argon2id.
 ///
@@ -142,10 +177,16 @@ pub async fn client_credentials_token(
     realm_id: &RealmId,
     request: ClientCredentialsRequest,
 ) -> Result<ClientCredentialsResponse, IdentityError> {
-    // An assertion-authenticated request hashes nothing.
-    let secret_presented = request.client_secret.is_some()
-        && request.client_assertion_type.as_deref()
-            != Some("urn:ietf:params:oauth:client-assertion-type:jwt-bearer");
+    // A request that attempted an assertion hashes nothing: the engine
+    // verifies (or refuses) the assertion and never reaches the secret.
+    let assertion_attempted = !matches!(
+        presented_client_assertion(
+            request.client_assertion_type.as_deref(),
+            request.client_assertion.as_deref(),
+        ),
+        Ok(None)
+    );
+    let secret_presented = request.client_secret.is_some() && !assertion_attempted;
     let realm = realm_id.clone();
     let client_id = request.client_id.clone();
     with_client_secret_gate(engine, realm_id, &client_id, secret_presented, move |e| {

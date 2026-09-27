@@ -786,17 +786,17 @@ impl EmbeddedIdentityEngine {
         }
 
         // 6b. Authenticate the client if a private_key_jwt assertion was provided.
-        // If no assertion is supplied, we must still block private_key_jwt-only clients
-        // (those with an assertion_public_key but no client_secret_hash) from silently
-        // bypassing client authentication.
-        const PRIVATE_KEY_JWT_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
-        if request.client_assertion_type.as_deref() == Some(PRIVATE_KEY_JWT_TYPE) {
-            let assertion = request.client_assertion.as_deref().ok_or_else(|| {
-                IdentityError::InvalidClientAssertion {
-                    reason: "client_assertion is required when client_assertion_type is set"
-                        .to_string(),
-                }
-            })?;
+        // A request carrying EITHER assertion field attempted private_key_jwt: a
+        // wrong or missing type, or a type with no assertion, is refused here
+        // rather than read as "no assertion" (which let a secret-holding client
+        // redeem its code with a junk assertion and no secret). If no assertion
+        // is supplied, we must still block private_key_jwt-only clients
+        // (those with an assertion_public_key but no client_secret_hash) from
+        // silently bypassing client authentication.
+        if let Some(assertion) = crate::identity::client_auth::presented_client_assertion(
+            request.client_assertion_type.as_deref(),
+            request.client_assertion.as_deref(),
+        )? {
             self.verify_client_assertion(realm_id, &request.client_id, assertion)?;
         } else {
             // No assertion presented — reject if the client is registered for private_key_jwt
@@ -1429,15 +1429,13 @@ impl EmbeddedIdentityEngine {
         // which grants it has. Every arm now does the same work — one
         // verification of the presented secret, against a dummy when there is
         // no stored hash (22.25) — and gets one answer until it proves the
-        // secret. private_key_jwt takes precedence over client_secret.
-        const PRIVATE_KEY_JWT_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
-        if request.client_assertion_type.as_deref() == Some(PRIVATE_KEY_JWT_TYPE) {
-            let assertion = request.client_assertion.as_deref().ok_or_else(|| {
-                IdentityError::InvalidClientAssertion {
-                    reason: "client_assertion is required when client_assertion_type is set"
-                        .to_string(),
-                }
-            })?;
+        // secret. A presented assertion field means private_key_jwt: it is
+        // verified — or, malformed, refused — and never falls through to the
+        // secret check.
+        if let Some(assertion) = crate::identity::client_auth::presented_client_assertion(
+            request.client_assertion_type.as_deref(),
+            request.client_assertion.as_deref(),
+        )? {
             self.verify_client_assertion(realm_id, &request.client_id, assertion)?;
         } else {
             self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;

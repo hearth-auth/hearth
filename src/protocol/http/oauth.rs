@@ -748,10 +748,6 @@ async fn verify_endpoint_client_or_assertion(
     verify_endpoint_client(state, realm_id, headers, body_client_id, body_client_secret).await
 }
 
-/// `client_assertion_type` value for `private_key_jwt` (RFC 7523 §2.2).
-const CLIENT_ASSERTION_TYPE_JWT_BEARER: &str =
-    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
-
 /// The uniform RFC 6749 §5.2 `invalid_client` refusal for introspection and
 /// revocation.
 fn invalid_client_response() -> Response {
@@ -916,12 +912,58 @@ fn multiple_auth_methods_response() -> Response {
         .into_response()
 }
 
+/// Token-endpoint grants whose arm authenticates the client itself, and so
+/// verifies a presented `private_key_jwt` assertion (directly or in the
+/// engine's grant).
+const GRANTS_AUTHENTICATING_CLIENT: [&str; 5] = [
+    "authorization_code",
+    "refresh_token",
+    "client_credentials",
+    "urn:ietf:params:oauth:grant-type:device_code",
+    "urn:ietf:params:oauth:grant-type:token-exchange",
+];
+
+/// Screens the `private_key_jwt` fields of a request (RFC 7523 §2.2) before
+/// anything else authenticates the client.
+///
+/// A request that carries EITHER `client_assertion` or `client_assertion_type`
+/// has attempted `private_key_jwt`, whatever the values: it never falls
+/// through to a secret, to `none`, or to "no client authentication". So:
+///
+/// - neither field (blank counts as absent) → `Ok(None)`;
+/// - a field plus a secret, Basic or body → `400 invalid_request` (RFC 6749
+///   §2.3: one authentication method per request);
+/// - a type other than the jwt-bearer URN, no type, or no assertion → `401
+///   invalid_client`;
+/// - otherwise `Ok(Some(assertion))`, which the caller MUST verify (here via
+///   [`verify_assertion_client`], or by the engine's grant).
+fn screen_presented_assertion<'a>(
+    headers: &HeaderMap,
+    body_client_secret: Option<&str>,
+    assertion_type: Option<&'a str>,
+    assertion: Option<&'a str>,
+) -> Result<Option<&'a str>, Response> {
+    let presented =
+        crate::identity::client_auth::presented_client_assertion(assertion_type, assertion);
+    if matches!(presented, Ok(None)) {
+        return Ok(None);
+    }
+    // RFC 6749 §2.3 / §5.2: a client MUST NOT use more than one
+    // authentication mechanism in a request.
+    if parse_basic_auth(headers).is_some()
+        || body_client_secret.and_then(non_empty_credential).is_some()
+    {
+        return Err(multiple_auth_methods_response());
+    }
+    presented.map_err(|_| invalid_client_response())
+}
+
 /// Authenticates a client by its `private_key_jwt` assertion (RFC 7523 §2.2)
 /// at an endpoint that also accepts secrets (`/introspect`, `/revoke`).
 ///
-/// A request that also carries a secret — Basic or body — is `400
-/// invalid_request` (RFC 6749 §2.3: one authentication method per request).
-/// Any other failure is `401 invalid_client`.
+/// The request is screened by [`screen_presented_assertion`] (a secret beside
+/// the assertion is `400 invalid_request`); any other failure — including a
+/// request with no assertion at all — is `401 invalid_client`.
 fn verify_assertion_client(
     state: &AppState,
     realm_id: &RealmId,
@@ -931,14 +973,8 @@ fn verify_assertion_client(
     assertion_type: Option<&str>,
     assertion: Option<&str>,
 ) -> Result<ClientId, Response> {
-    // RFC 6749 §2.3 / §5.2: a client MUST NOT use more than one
-    // authentication mechanism in a request.
-    if parse_basic_auth(headers).is_some()
-        || body_client_secret.and_then(non_empty_credential).is_some()
-    {
-        return Err(multiple_auth_methods_response());
-    }
-    let (Some(CLIENT_ASSERTION_TYPE_JWT_BEARER), Some(assertion)) = (assertion_type, assertion)
+    let Some(assertion) =
+        screen_presented_assertion(headers, body_client_secret, assertion_type, assertion)?
     else {
         return Err(invalid_client_response());
     };
@@ -1028,26 +1064,30 @@ pub(super) async fn enforce_confidential_client_auth(
     // Same boundary normalization as `verify_endpoint_client` (HEA-2112).
     let body_client_secret = body_client_secret.and_then(non_empty_credential);
 
-    let assertion_type = assertion.assertion_type.and_then(non_empty_credential);
-    let assertion_jwt = assertion.assertion.and_then(non_empty_credential);
-    if assertion_type.is_some() || assertion_jwt.is_some() {
+    // A presented assertion field is a `private_key_jwt` attempt: screened
+    // here (one method, the jwt-bearer type, an assertion present) and then
+    // verified — never read as "no assertion" and waved on to the secret
+    // check, which let a secret-holding client redeem a code with a junk
+    // assertion and no secret.
+    if screen_presented_assertion(
+        headers,
+        body_client_secret,
+        assertion.assertion_type,
+        assertion.assertion,
+    )?
+    .is_some()
+    {
         return match assertion.check {
-            // The grant verifies it; only the one-method rule is checked here.
-            AssertionCheck::ByEngine => {
-                if parse_basic_auth(headers).is_some() || body_client_secret.is_some() {
-                    Err(multiple_auth_methods_response())
-                } else {
-                    Ok(())
-                }
-            }
+            // The grant verifies the (well-formed) assertion itself.
+            AssertionCheck::ByEngine => Ok(()),
             AssertionCheck::Here => verify_assertion_client(
                 state,
                 realm_id,
                 headers,
                 Some(body_client_id),
                 body_client_secret,
-                assertion_type,
-                assertion_jwt,
+                assertion.assertion_type,
+                assertion.assertion,
             )
             .map(|_| ()),
         };
@@ -2157,7 +2197,38 @@ async fn token_exchange_impl(
         return resp;
     }
 
+    // A presented `client_assertion` / `client_assertion_type` is a
+    // `private_key_jwt` attempt on EVERY grant: a malformed one is refused
+    // here, before any arm can read it as absent; a well-formed one is
+    // verified by the arm (or its engine grant).
+    let assertion_presented = match screen_presented_assertion(
+        &headers,
+        body.client_secret.as_deref(),
+        body.client_assertion_type.as_deref(),
+        body.client_assertion.as_deref(),
+    ) {
+        Ok(presented) => presented.is_some(),
+        Err(resp) => return resp,
+    };
+
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
+
+    // A grant that does not authenticate the client (step-up MFA, the
+    // jwt-bearer and magic-link grants) still never ignores a presented
+    // assertion: it must verify for the named client.
+    if assertion_presented && !GRANTS_AUTHENTICATING_CLIENT.contains(&grant_type) {
+        if let Err(resp) = verify_assertion_client(
+            &state,
+            &realm_id,
+            &headers,
+            Some(body.client_id.as_str()),
+            body.client_secret.as_deref(),
+            body.client_assertion_type.as_deref(),
+            body.client_assertion.as_deref(),
+        ) {
+            return resp;
+        }
+    }
 
     // Per-IP login rate limiting for the step-up-mfa grant.
     if grant_type == "urn:hearth:params:grant-type:step-up-mfa"
@@ -2313,7 +2384,7 @@ async fn token_exchange_impl(
             // unauthenticated — those grant families carry no client binding.
             let authenticated_client_id = if parse_basic_auth(&headers).is_some()
                 || !body.client_id.trim().is_empty()
-                || body.client_assertion.is_some()
+                || assertion_presented
             {
                 match verify_endpoint_client_or_assertion(
                     &state,
@@ -3331,7 +3402,38 @@ async fn realm_token_exchange(
     if let Err(resp) = rate_limited {
         return resp;
     }
+
+    // A presented `client_assertion` / `client_assertion_type` is a
+    // `private_key_jwt` attempt on EVERY grant: a malformed one is refused
+    // here, before any arm can read it as absent; a well-formed one is
+    // verified by the arm (or its engine grant).
+    let assertion_presented = match screen_presented_assertion(
+        &headers,
+        body.client_secret.as_deref(),
+        body.client_assertion_type.as_deref(),
+        body.client_assertion.as_deref(),
+    ) {
+        Ok(presented) => presented.is_some(),
+        Err(resp) => return resp,
+    };
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
+
+    // A grant that does not authenticate the client (step-up MFA, the
+    // jwt-bearer and magic-link grants) still never ignores a presented
+    // assertion: it must verify for the named client.
+    if assertion_presented && !GRANTS_AUTHENTICATING_CLIENT.contains(&grant_type) {
+        if let Err(resp) = verify_assertion_client(
+            &state,
+            &realm_id,
+            &headers,
+            Some(body.client_id.as_str()),
+            body.client_secret.as_deref(),
+            body.client_assertion_type.as_deref(),
+            body.client_assertion.as_deref(),
+        ) {
+            return resp;
+        }
+    }
 
     // Per-IP login rate limiting for the step-up-mfa grant.
     if grant_type == "urn:hearth:params:grant-type:step-up-mfa"
@@ -3484,7 +3586,7 @@ async fn realm_token_exchange(
             // family to this authenticated identity in rotate_grant_family.
             let authenticated_client_id = if parse_basic_auth(&headers).is_some()
                 || !body.client_id.trim().is_empty()
-                || body.client_assertion.is_some()
+                || assertion_presented
             {
                 match verify_endpoint_client_or_assertion(
                     &state,
