@@ -11732,6 +11732,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         })
     }
 
+    #[allow(clippy::too_many_lines)] // one validated setter per client field, in one write
     fn import_client(
         &self,
         realm_id: &RealmId,
@@ -11791,9 +11792,27 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             request.grant_types.clone()
         };
 
-        let mut client = if let Some(ref secret) = request.client_secret {
-            let secret_hash =
-                credentials::hash_raw_secret(secret.as_bytes(), &self.config.credential)?;
+        // The stored hash: computed from a plaintext secret (external provider,
+        // YAML), or taken verbatim from a Hearth backup — never re-hashed,
+        // since there is no plaintext, and only in a format Hearth can verify.
+        let secret_hash = match (&request.client_secret, &request.client_secret_hash) {
+            (Some(_), Some(_)) => {
+                return Err(IdentityError::InvalidInput {
+                    reason: "client_secret and client_secret_hash are mutually exclusive"
+                        .to_string(),
+                });
+            }
+            (Some(secret), None) => Some(credentials::hash_raw_secret(
+                secret.as_bytes(),
+                &self.config.credential,
+            )?),
+            (None, Some(hash)) => {
+                credentials::validate_stored_client_secret_hash(hash)?;
+                Some(hash.clone())
+            }
+            (None, None) => None,
+        };
+        let mut client = if let Some(secret_hash) = secret_hash {
             OAuthClient::new_confidential(
                 client_id,
                 client_name,
@@ -11816,10 +11835,61 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         );
         client.set_trust_level(request.trust_level);
         client.set_require_consent(
-            request.trust_level == crate::identity::ClientTrustLevel::ThirdParty,
+            request
+                .require_consent
+                .unwrap_or(request.trust_level == crate::identity::ClientTrustLevel::ThirdParty),
         );
         client.set_declared_scopes(request.declared_scopes.clone());
         client.set_consent_spans_orgs(request.consent_spans_orgs);
+        client.set_client_logo_url(request.client_logo_url.clone());
+        client.set_status(request.status);
+        if let Some(uri) = &request.backchannel_logout_uri {
+            validation::validate_logout_uri("backchannel_logout_uri", uri, false)?;
+        }
+        client.set_backchannel_logout_uri(request.backchannel_logout_uri.clone());
+        if let Some(uri) = &request.frontchannel_logout_uri {
+            validation::validate_logout_uri("frontchannel_logout_uri", uri, true)?;
+        }
+        client.set_frontchannel_logout_uri(request.frontchannel_logout_uri.clone());
+        client.set_post_logout_redirect_uris(request.post_logout_redirect_uris.clone());
+        client.set_cors_origins(request.cors_origins.clone());
+        client.set_access_token_authorization(request.access_token_authorization);
+        client.set_mfa_required(request.mfa_required);
+        // Credentials and the security profile, validated as a registration
+        // validates them and set in this same write, so the client is never
+        // stored weaker than requested — not even between two writes.
+        if let Some(key) = request.assertion_public_key.as_deref() {
+            Self::check_assertion_public_key(key)?;
+        }
+        client.set_assertion_public_key(request.assertion_public_key.clone());
+        if let Some(jwks) = request.jwks.as_deref() {
+            Self::check_client_jwks(jwks)?;
+        }
+        client.set_jwks(request.jwks.clone());
+        if request
+            .jwks_uri
+            .as_deref()
+            .is_some_and(|u| u.trim().is_empty())
+        {
+            return Err(IdentityError::InvalidInput {
+                reason: "jwks_uri must not be empty".to_string(),
+            });
+        }
+        client.set_jwks_uri(request.jwks_uri.clone());
+        if let Some(alg) = request.authorization_signed_response_alg.as_deref() {
+            if alg != "EdDSA" {
+                return Err(IdentityError::InvalidInput {
+                    reason: format!(
+                        "unsupported authorization_signed_response_alg '{alg}'; supported: EdDSA"
+                    ),
+                });
+            }
+        }
+        client.set_authorization_signed_response_alg(
+            request.authorization_signed_response_alg.clone(),
+        );
+        client.set_profile(request.profile);
+        Self::check_fapi2_client_keys(&client)?;
         // ID-token signing algorithm (task 26.55), parsed and its RSA key
         // provisioned as a registration does, but not refused under FAPI 2.0:
         // an import records the algorithm the source held rather than choosing

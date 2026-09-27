@@ -427,6 +427,20 @@ impl Auth0Importer {
         } else {
             ac.client_secret.clone().filter(|s| !s.is_empty())
         };
+        // A confidential application whose export carries no secret (Auth0
+        // tenant exports usually omit them) must not become a PUBLIC client —
+        // one anyone could act as by its client_id. Refuse it; the operator
+        // re-registers it (or re-exports with the secret).
+        if !is_public && client_secret.is_none() {
+            return Err(MigrationError::Identity(
+                crate::identity::IdentityError::InvalidInput {
+                    reason: "confidential application has no client secret in the export; \
+                         importing it without one would make it a public client — \
+                         register it in Hearth instead"
+                        .to_string(),
+                },
+            ));
+        }
 
         let grant_types = if ac.grant_types.is_empty() {
             vec!["authorization_code".to_string()]
@@ -448,6 +462,7 @@ impl Auth0Importer {
             // RS256 by default, so an RP that pinned RS256 must be switched
             // with `id_token_signed_response_alg` after the migration.
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
         self.identity.import_client(realm_id, &request)?;
         Ok(())

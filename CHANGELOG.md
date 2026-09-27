@@ -284,6 +284,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `DeviceAuthorizationRequest` gains the optional `client_assertion_type` (4) and `client_assertion`
   (5) fields (JSON names `client_assertion_type`, `client_assertion`), verified the same way. Poll at
   `/token` with the assertion as well.
+- **A backup restore no longer turns authenticated OAuth clients into public clients** — the export
+  wrote each client's stored secret hash, assertion key, JWKS and security profile, but the restore
+  read none of them and re-created every client as a secretless Standard client. After a restore,
+  anyone who knew a `client_id` could push to `/as/par`, start `/device_authorization`, redeem codes
+  with PKCE alone and refresh without client binding — including for FAPI 2.0 clients. A restore now
+  writes every credential and security field back in the single write that re-creates the client:
+  the secret hash verbatim (`$argon2id$` or `$hearth-sha256$v=1$`; any other format is refused), the
+  assertion key and JWKS (re-validated), `jwks_uri`, the profile, and the consent, logout, CORS, MFA,
+  JARM and lifecycle settings. A client that cannot be restored as strong as its source — an
+  unverifiable credential, or no credential although its grants need one — is not restored and is
+  listed with the reason in the restore report. If you restored with an earlier 1.x build, restore
+  again or re-register the affected clients (backup guide, *Client credentials*).
+- **Auth0 and Keycloak imports no longer create public clients from confidential ones** — a
+  confidential application whose export carried no secret (Auth0 exports usually omit them; a
+  partial Keycloak export masks them as `**********`) was imported with no secret, i.e. as a public
+  client; a masked Keycloak secret was even hashed as the client's secret. Such a client is now
+  skipped with a warning in the migration report; register it in Hearth instead.
 
 ### Added
 - **Per-client RS256 ID tokens (OIDC interop, task 26.55)** — a client can set

@@ -1217,6 +1217,7 @@ pub(crate) fn reconcile_applications(
                         declared_scopes: app_cfg.declared_scopes.clone().unwrap_or_default(),
                         consent_spans_orgs: app_cfg.consent_spans_orgs.unwrap_or(false),
                         id_token_signed_response_alg: Some(cfg_id_token_alg.clone()),
+                        ..Default::default()
                     },
                 )?;
                 // Apply consent-policy and profile fields: the import path

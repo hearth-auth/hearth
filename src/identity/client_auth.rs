@@ -437,6 +437,7 @@ mod tests {
                     declared_scopes: vec![],
                     consent_spans_orgs: false,
                     id_token_signed_response_alg: None,
+                    ..Default::default()
                 },
             );
             let before = hash_verification_count();

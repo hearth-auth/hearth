@@ -456,10 +456,30 @@ impl KeycloakImporter {
 
         let client_name = kc.name.clone().unwrap_or_else(|| kc.client_id.clone());
 
+        // A partial Keycloak export masks every secret as `**********`; that
+        // mask (or an empty value) is not the secret. Hashing the mask would
+        // give the client a known secret, and importing a confidential client
+        // without one would make it PUBLIC — anyone could act as it by its
+        // client_id. Refuse it instead; the operator re-exports with secrets
+        // or registers it in Hearth.
         let client_secret = if kc.public_client {
             None
         } else {
-            kc.secret.clone()
+            let usable = kc
+                .secret
+                .clone()
+                .filter(|s| !s.is_empty() && !s.chars().all(|c| c == '*'));
+            if usable.is_none() {
+                return Err(MigrationError::Identity(
+                    crate::identity::IdentityError::InvalidInput {
+                        reason: "confidential client has no usable client secret in the export \
+                             (missing or masked); importing it without one would make it a \
+                             public client — re-export with secrets or register it in Hearth"
+                            .to_string(),
+                    },
+                ));
+            }
+            usable
         };
 
         // Keycloak realm exports don't always list every grant type;
@@ -482,6 +502,7 @@ impl KeycloakImporter {
             // RS256 by default, so an RP that pinned RS256 must be switched
             // with `id_token_signed_response_alg` after the migration.
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
 
         self.identity.import_client(realm_id, &request)?;

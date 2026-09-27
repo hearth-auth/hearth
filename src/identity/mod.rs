@@ -1984,12 +1984,15 @@ pub trait IdentityEngine: Send + Sync {
         request: &ImportUserRequest,
     ) -> Result<User, IdentityError>;
 
-    /// Imports an OAuth 2.0 client from an external system.
+    /// Imports an OAuth 2.0 client: from an external system, a Hearth
+    /// backup, or `hearth.yaml` reconciliation.
     ///
-    /// Preserves the source-system client identifier if provided. The
-    /// supplied `client_secret` (if any) is hashed with Argon2id at
-    /// import time — the source system's hashed secret is not reusable
-    /// because Hearth's storage format requires Argon2id.
+    /// Preserves the source-system client identifier if provided. A supplied
+    /// plaintext `client_secret` is hashed with Argon2id; a supplied
+    /// `client_secret_hash` (a Hearth backup) is validated and stored
+    /// verbatim. Every credential and security field (secret, assertion key,
+    /// JWKS, profile, …) is validated as a registration validates it and
+    /// written in the single write that creates the client.
     fn import_client(
         &self,
         realm_id: &RealmId,

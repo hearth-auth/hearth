@@ -48,7 +48,7 @@ A `.hearth-backup` file is a zstd-compressed archive. Inside, each realm is stor
 | `realms/<slug>/users.ndjson` | User records (one JSON object per line) |
 | `realms/<slug>/credentials.ndjson` | Hashed credentials |
 | `realms/<slug>/mfa_factors.ndjson` | TOTP secrets, recovery codes and WebAuthn passkeys |
-| `realms/<slug>/clients.ndjson` | OAuth 2.0 application registrations |
+| `realms/<slug>/clients.ndjson` | OAuth 2.0 application registrations, including each client's credentials (see [Client credentials](#client-credentials)) |
 | `realms/<slug>/roles.ndjson` | RBAC role definitions |
 | `realms/<slug>/permissions.ndjson` | Permission definitions |
 | `realms/<slug>/groups.ndjson` | Group definitions |
@@ -207,6 +207,36 @@ band. `verify` passing does not establish it (see
 Every backup includes an AES-256-GCM encrypted copy of each realm's Ed25519 signing key, protected by a random 32-byte **DEK** (Data Encryption Key). The DEK itself is stored base64-encoded in `manifest.json`.
 
 A realm in which any client selected RS256 ID tokens (`id_token_signed_response_alg: RS256`) also has an RSA ID-token signing key. It travels the same way — `id_token_signing_key.json`, plus `retiring_id_token_signing_keys.json` for keys still inside a rotation grace window — and is re-sealed under the destination's KEK on restore, so ID tokens issued before the backup keep verifying against the restored JWKS. An archive whose clients receive RS256 ID tokens but which carries no restorable RSA key fails closed exactly like a missing Ed25519 key, with the same `--allow-missing-signing-key` override. An RS256 client comes back RS256 even in a realm with a `fapi_profile` (one that turned FAPI on after the client registered); there, as in the source, its ID-token grants are refused until it is switched to `EdDSA`.
+
+### Client credentials
+
+Each client record carries everything the client authenticates with: the
+stored client-secret **hash** (never a plaintext secret), the assertion public
+key, the inline `jwks` / `jwks_uri`, and the security `profile` (for example
+FAPI 2.0), together with its consent, logout, CORS, MFA, JARM and lifecycle
+settings. A restore writes them back in the same single write that re-creates
+the client, so a confidential or `private_key_jwt` client comes back exactly
+as strong as it was: it authenticates with the same secret or key, and is
+still refused without it. The secret hash is restored verbatim — only the two
+formats Hearth writes (`$argon2id$…` and `$hearth-sha256$v=1$…`) are accepted.
+
+A restore never re-creates a client weaker than its source. A client whose
+record does not restore — a secret hash in an unknown format, a JWKS or
+assertion key that no longer validates, or a FAPI 2.0 client without a
+verifiable key — is **not restored** and is listed, with the reason, in the
+restore report (`errors` in the HTTP response, `conflicts` in the CLI output),
+and counted as `errored`. So is a record that carries no credential at all
+although its grants (`client_credentials`, `jwt-bearer`) are only ever issued
+to a client that authenticates: that is what an archive that lost the
+credential looks like, and restoring it would create a public client in place
+of a confidential one. Every archive written by a 1.x server carries the full
+record; this guards hand-built or edited archives. Register such a client
+again, or restore from an archive that carries its credential.
+
+Before this release a restore dropped these fields and re-created **every**
+client as a public client. If you restored an archive with an earlier 1.x
+build, restore it again with this build (or re-register the affected
+clients).
 
 When `--encrypt` is passed, the DEK is additionally wrapped with a passphrase using **Argon2id** (m=65536, t=3, p=4) so that the archive is self-contained and the passphrase is the only external secret needed to restore signing keys. KDF parameters (algorithm, memory, iterations, parallelism, salt) are stored alongside the wrapped DEK in `manifest.json`.
 

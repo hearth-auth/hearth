@@ -109,13 +109,19 @@ pub struct ImportUserRequest {
     pub attributes: BTreeMap<String, String>,
 }
 
-/// Request to import an OAuth 2.0 client from an external provider.
+/// Request to import an OAuth 2.0 client: from an external provider, from a
+/// Hearth backup, or from `hearth.yaml` reconciliation.
 ///
 /// Unlike `RegisterClientRequest`, this allows preserving the client's
-/// source-system identifier. The secret (if any) is hashed with Argon2id
-/// at import time — the source system's hashed secret is not reusable
-/// because Hearth's storage format requires Argon2id.
-#[derive(Clone, Debug)]
+/// source-system identifier. A plaintext `client_secret` (an external
+/// provider's, or one declared in YAML) is hashed with Argon2id at import
+/// time; a Hearth backup instead carries the stored hash, restored verbatim
+/// through `client_secret_hash`.
+///
+/// Every credential and security field is set in the one write that creates
+/// the client, so a client is never — even briefly — stored weaker (public, or
+/// without its profile) than the request describes.
+#[derive(Clone, Debug, Default)]
 pub struct ImportClientRequest {
     /// Preserved source-system client UUID, or `None` to generate.
     pub id: Option<crate::core::ClientId>,
@@ -143,6 +149,41 @@ pub struct ImportClientRequest {
     /// in a realm whose `fapi_profile` refuses RS256 to a registration; there
     /// its ID-token grants are refused at issuance, as they were before.
     pub id_token_signed_response_alg: Option<String>,
+    /// A client-secret hash Hearth stored earlier (a backup restore), kept
+    /// verbatim. Only the two formats Hearth writes are accepted
+    /// (`$argon2id$…` and `$hearth-sha256$v=1$…`). Mutually exclusive with
+    /// `client_secret`.
+    pub client_secret_hash: Option<String>,
+    /// Whether consent is required. `None` derives it from `trust_level`
+    /// (third-party clients require consent), as a registration does.
+    pub require_consent: Option<bool>,
+    /// Logo URL shown on the consent screen.
+    pub client_logo_url: Option<String>,
+    /// Lifecycle status (a restored archived client stays archived).
+    pub status: crate::identity::ApplicationStatus,
+    /// OIDC back-channel logout URI.
+    pub backchannel_logout_uri: Option<String>,
+    /// OIDC front-channel logout URI.
+    pub frontchannel_logout_uri: Option<String>,
+    /// Allowed post-logout redirect URIs.
+    pub post_logout_redirect_uris: Vec<String>,
+    /// Allowed CORS origins for the token endpoint.
+    pub cors_origins: Vec<String>,
+    /// Base64url raw Ed25519 public key for `private_key_jwt` / `jwt-bearer`.
+    pub assertion_public_key: Option<String>,
+    /// How access-token authorization data reaches resource servers.
+    pub access_token_authorization: crate::identity::AccessTokenAuthorization,
+    /// Inline JWKS (JSON) of the client's public signing keys.
+    pub jwks: Option<String>,
+    /// JWKS URI (`https://`) of the client's public signing keys.
+    pub jwks_uri: Option<String>,
+    /// Mandatory-JARM signing algorithm (`"EdDSA"` only).
+    pub authorization_signed_response_alg: Option<String>,
+    /// Security profile. A FAPI 2.0 client must hold a verifiable key and no
+    /// secret, as at registration.
+    pub profile: crate::identity::ClientProfile,
+    /// Per-client MFA requirement.
+    pub mfa_required: Option<bool>,
 }
 
 /// Parameters for the large-scale demo seeder ([`IdentityEngine::seed_demo_users`]).

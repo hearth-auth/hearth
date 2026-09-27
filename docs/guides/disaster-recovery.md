@@ -880,8 +880,11 @@ Run this drill quarterly. An untested backup is not a backup.
    sleep 5
    ```
 
-5. **Verify functional invariants.** All four MUST pass; any failure is
-   a backup integrity bug — file an issue immediately.
+5. **Verify functional invariants.** All of them MUST pass; any failure is
+   a backup integrity bug — file an issue immediately. Also read the restore
+   report: a client it lists as not restored was refused because its archived
+   record could not be restored as strong as its source (see
+   [Client credentials](backup.md#client-credentials)).
 
    - [ ] JWKS responds for every realm in the manifest:
      ```bash
@@ -915,6 +918,14 @@ Run this drill quarterly. An untested backup is not a backup.
      `X-Realm-ID` is required on `/admin` routes; omitting it returns `400`,
      which `-fsS` surfaces as a drill failure indistinguishable from a real
      backup-integrity bug. Use the UUID of the realm the client belongs to.
+   - [ ] The same client is still **refused without its secret** — a restore
+     that dropped the credential would turn it into a public client that
+     anyone knowing its `client_id` can act as:
+     ```bash
+     curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8080/oauth/token \
+       -d grant_type=client_credentials -d client_id=<id>
+     # expect 401
+     ```
 
 6. **Tear down and document.**
 

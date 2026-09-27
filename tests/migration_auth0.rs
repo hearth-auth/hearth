@@ -333,3 +333,78 @@ async fn organization_members_assigned_correct_roles() {
         .expect("bob is member");
     assert_eq!(bob_membership.role(), OrganizationRole::Member);
 }
+
+// ===== Confidential clients never import as public =====
+//
+// Auth0 tenant exports usually omit client secrets. A `regular_web` or
+// `non_interactive` (confidential) application without one was imported with
+// no secret — as a PUBLIC client anyone could act as by its client_id. It is
+// now refused with a warning; a SPA (public) still imports.
+
+#[tokio::test]
+async fn a_confidential_application_without_its_secret_is_refused_not_made_public() {
+    let (identity, authz, _temp) = build_engines();
+    let importer = Auth0Importer::new(Arc::clone(&identity), Arc::clone(&authz));
+    let mut bundle: serde_json::Value =
+        serde_json::from_slice(&build_bundle_bytes()).expect("fixture json");
+    let base = bundle["clients"][0].clone();
+    let variant = |client_id: &str, app_type: &str, secret: Option<&str>| {
+        let mut c = base.clone();
+        c["client_id"] = serde_json::json!(client_id);
+        c["name"] = serde_json::json!(client_id);
+        c["app_type"] = serde_json::json!(app_type);
+        match secret {
+            Some(s) => c["client_secret"] = serde_json::json!(s),
+            None => {
+                c.as_object_mut().expect("object").remove("client_secret");
+            }
+        }
+        c
+    };
+    bundle["clients"] = serde_json::json!([
+        variant("regular-web-no-secret", "regular_web", None),
+        variant("m2m-empty-secret", "non_interactive", Some("")),
+        variant("spa-app", "spa", None),
+        variant(
+            "regular-web-with-secret",
+            "regular_web",
+            Some("an-auth0-secret")
+        ),
+    ]);
+    let bundle = Auth0Importer::parse(bundle.to_string().as_bytes()).expect("parse bundle");
+    let report = importer
+        .import_bundle(&bundle, None, &Auth0ImportOptions::default())
+        .expect("import_bundle");
+    let realm_id = report.realm_id.clone().expect("realm id");
+
+    for name in ["regular-web-no-secret", "m2m-empty-secret"] {
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains(name) && w.contains("secret")),
+            "{name}: the refusal must be reported; got {:?}",
+            report.warnings
+        );
+    }
+    assert_eq!(report.clients_imported, 2);
+    let clients = identity
+        .list_clients(&realm_id, &hearth::core::PageRequest::new(0, 50))
+        .expect("list clients")
+        .items;
+    let names: Vec<&str> = clients.iter().map(|c| c.client_name()).collect();
+    assert!(
+        !names.contains(&"regular-web-no-secret") && !names.contains(&"m2m-empty-secret"),
+        "confidential applications without a secret must not exist as public clients: {names:?}"
+    );
+    let spa = clients
+        .iter()
+        .find(|c| c.client_name() == "spa-app")
+        .expect("spa");
+    assert!(spa.is_public());
+    let web = clients
+        .iter()
+        .find(|c| c.client_name() == "regular-web-with-secret")
+        .expect("confidential with secret");
+    assert!(web.is_confidential());
+}

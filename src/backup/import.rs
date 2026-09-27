@@ -15,10 +15,11 @@ use crate::core::{ClientId, ImportOutcome, RealmId};
 use crate::identity::federation::saml::SamlServiceProvider;
 use crate::identity::federation::IdpConfig;
 use crate::identity::{
-    AgentExport, ClientTrustLevel, ConsentExport, CreateRealmRequest, FederationLinkExport,
-    IdentityEngine, IdentityError, ImportClientRequest, ImportUserRequest, MfaFactorExport,
-    Organization, OrganizationInvitation, OrganizationMembership, RawCredential, Realm,
-    RetiringSigningKeyExport, ScimMappingExport, User, Webhook,
+    AccessTokenAuthorization, AgentExport, ApplicationStatus, ClientProfile, ClientTrustLevel,
+    ConsentExport, CreateRealmRequest, FederationLinkExport, IdentityEngine, IdentityError,
+    ImportClientRequest, ImportUserRequest, MfaFactorExport, Organization, OrganizationInvitation,
+    OrganizationMembership, RawCredential, Realm, RetiringSigningKeyExport, ScimMappingExport,
+    User, Webhook,
 };
 use crate::rbac::{
     Group, GroupMembershipEdge, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport,
@@ -213,7 +214,9 @@ pub struct ImportReport {
     /// and the restored chain attests only to the restore, not to the source
     /// (audit 2026-08-28 §4.14#5).
     pub audit_chain_verified: bool,
-    /// Conflicts encountered — populated in Skip / Merge mode only.
+    /// Conflicts encountered in Skip / Merge mode, and every client that was
+    /// refused rather than restored weaker than its source (a missing or
+    /// unverifiable credential), each with its reason.
     pub conflicts: Vec<Conflict>,
 }
 
@@ -247,8 +250,13 @@ struct BackupCredential {
     created_at_micros: Option<i64>,
 }
 
-/// Minimal client fields extracted from an `OAuthClient` JSON line
+/// The client fields a restore carries, read from an `OAuthClient` JSON line
 /// (`clients.ndjson`). Field names match `OAuthClient`'s serde output.
+///
+/// Every credential and security field is read: the stored secret hash, the
+/// assertion key, the JWKS / `jwks_uri`, the profile. A restore that dropped
+/// them re-created every confidential and `private_key_jwt` client as a
+/// PUBLIC client — one anyone knowing its `client_id` could act as.
 #[derive(Deserialize)]
 struct BackupClient {
     client_id: String,
@@ -269,6 +277,84 @@ struct BackupClient {
     /// (and on legacy client records), which restore as EdDSA.
     #[serde(default)]
     id_token_signed_response_alg: Option<String>,
+    /// The stored hash (`$argon2id$…` or `$hearth-sha256$v=1$…`), restored
+    /// verbatim.
+    #[serde(default)]
+    client_secret_hash: Option<String>,
+    #[serde(default = "default_true")]
+    require_consent: bool,
+    #[serde(default)]
+    client_logo_url: Option<String>,
+    #[serde(default)]
+    status: ApplicationStatus,
+    #[serde(default)]
+    backchannel_logout_uri: Option<String>,
+    #[serde(default)]
+    frontchannel_logout_uri: Option<String>,
+    #[serde(default)]
+    post_logout_redirect_uris: Vec<String>,
+    #[serde(default)]
+    cors_origins: Vec<String>,
+    #[serde(default)]
+    assertion_public_key: Option<String>,
+    #[serde(default)]
+    access_token_authorization: AccessTokenAuthorization,
+    #[serde(default)]
+    jwks: Option<String>,
+    #[serde(default)]
+    jwks_uri: Option<String>,
+    #[serde(default)]
+    authorization_signed_response_alg: Option<String>,
+    #[serde(default)]
+    profile: ClientProfile,
+    #[serde(default)]
+    mfa_required: Option<bool>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Grants only ever issued to a client that authenticates.
+const AUTHENTICATED_ONLY_GRANTS: [&str; 2] = [
+    "client_credentials",
+    "urn:ietf:params:oauth:grant-type:jwt-bearer",
+];
+
+impl BackupClient {
+    /// Whether the record holds any client credential, or is FAPI 2.0 (which
+    /// is never public).
+    fn holds_a_credential(&self) -> bool {
+        self.client_secret_hash.is_some()
+            || self.assertion_public_key.is_some()
+            || self.jwks.is_some()
+            || self.jwks_uri.is_some()
+            || self.profile.is_fapi2()
+    }
+
+    /// Why this record must not be restored, if it cannot be restored as
+    /// strong as its source.
+    ///
+    /// A record with no credential whose grants are only issued to an
+    /// authenticating client is one whose credential the archive did not
+    /// carry (a hand-built or pre-release archive; every 1.x export writes the
+    /// full record). Restoring it would create a PUBLIC client in place of a
+    /// confidential one, so it is refused and reported instead.
+    fn missing_credential(&self) -> Option<String> {
+        if self.holds_a_credential() {
+            return None;
+        }
+        let grant = self
+            .grant_types
+            .iter()
+            .find(|g| AUTHENTICATED_ONLY_GRANTS.contains(&g.as_str()))?;
+        Some(format!(
+            "the archived client record carries no credential (no client_secret_hash, \
+             assertion key or JWKS), yet its '{grant}' grant is only issued to a client that \
+             authenticates; restoring it would create a public client. Register the client \
+             again (or restore from an archive that carries its credential)"
+        ))
+    }
 }
 
 // ── BackupImporter ────────────────────────────────────────────────────────────
@@ -1145,6 +1231,7 @@ impl BackupImporter {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)] // one field mapping per archived client field
     fn import_clients(
         &self,
         ndjson: &[u8],
@@ -1160,6 +1247,17 @@ impl BackupImporter {
             let client: BackupClient = serde_json::from_slice(line)?;
             let client_id_str = client.client_id.clone();
 
+            if let Some(reason) = client.missing_credential() {
+                warn!(client_id = %client_id_str, "refusing to restore client: {reason}");
+                report.clients.errored += 1;
+                report.conflicts.push(Conflict {
+                    entity_type: "client".to_string(),
+                    identifier: client_id_str,
+                    reason,
+                });
+                continue;
+            }
+
             // Parse the prefixed client ID into a `ClientId`.
             let parsed_id: Option<ClientId> = client.client_id.parse().ok();
 
@@ -1167,7 +1265,9 @@ impl BackupImporter {
                 id: parsed_id,
                 client_name: client.client_name.clone(),
                 redirect_uris: client.redirect_uris,
-                client_secret: None, // secrets are not restored (hashed in archive)
+                // No plaintext exists; the stored hash is restored verbatim.
+                client_secret: None,
+                client_secret_hash: client.client_secret_hash,
                 grant_types: client.grant_types,
                 slug: if client.slug.is_empty() {
                     None
@@ -1178,6 +1278,20 @@ impl BackupImporter {
                 declared_scopes: client.declared_scopes,
                 consent_spans_orgs: client.consent_spans_orgs,
                 id_token_signed_response_alg: client.id_token_signed_response_alg,
+                require_consent: Some(client.require_consent),
+                client_logo_url: client.client_logo_url,
+                status: client.status,
+                backchannel_logout_uri: client.backchannel_logout_uri,
+                frontchannel_logout_uri: client.frontchannel_logout_uri,
+                post_logout_redirect_uris: client.post_logout_redirect_uris,
+                cors_origins: client.cors_origins,
+                assertion_public_key: client.assertion_public_key,
+                access_token_authorization: client.access_token_authorization,
+                jwks: client.jwks,
+                jwks_uri: client.jwks_uri,
+                authorization_signed_response_alg: client.authorization_signed_response_alg,
+                profile: client.profile,
+                mfa_required: client.mfa_required,
             };
 
             if opts.dry_run {
@@ -1208,6 +1322,11 @@ impl BackupImporter {
                                         Err(e) => {
                                             warn!(client_id = %client_id_str, err = %e, "import_client retry failed");
                                             report.clients.errored += 1;
+                                            report.conflicts.push(Conflict {
+                                                entity_type: "client".to_string(),
+                                                identifier: client_id_str,
+                                                reason: format!("client not restored: {e}"),
+                                            });
                                         }
                                     }
                                 } else {
@@ -1220,8 +1339,16 @@ impl BackupImporter {
                     }
                 }
                 Err(e) => {
+                    // A client whose credential or profile does not validate
+                    // is refused rather than restored without it; the
+                    // operator sees why.
                     warn!(client_id = %client_id_str, err = %e, "import_client failed");
                     report.clients.errored += 1;
+                    report.conflicts.push(Conflict {
+                        entity_type: "client".to_string(),
+                        identifier: client_id_str,
+                        reason: format!("client not restored: {e}"),
+                    });
                 }
             }
         }
@@ -2002,6 +2129,152 @@ mod tests {
         assert_eq!(
             restored_pkcs8, original_pkcs8,
             "restored signing key must byte-for-byte equal the original"
+        );
+    }
+
+    // ── Client credentials (a restore never yields a weaker client) ──────────
+
+    /// Restores one `clients.ndjson` line into a fresh realm and returns the
+    /// report, the realm, and the client id the line named.
+    fn restore_client_line(line: &serde_json::Value) -> (TestRig, RealmId, ClientId, ImportReport) {
+        let rig = make_rig();
+        let realm = rig
+            .identity
+            .create_realm(&crate::identity::CreateRealmRequest {
+                name: format!("client-restore-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let cid: ClientId = serde_json::from_value(line["client_id"].clone()).expect("client id");
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
+        let mut report = ImportReport::default();
+        let ndjson = format!("{line}\n");
+        importer
+            .import_clients(
+                ndjson.as_bytes(),
+                &realm,
+                &opts_with_passphrase(),
+                &mut report,
+            )
+            .expect("import_clients");
+        (rig, realm, cid, report)
+    }
+
+    fn client_line(extra: &serde_json::Value) -> serde_json::Value {
+        let mut line = serde_json::json!({
+            "client_id": ClientId::generate(),
+            "client_name": "Nightly M2M",
+            "redirect_uris": [],
+            "created_at": 0,
+            "grant_types": ["client_credentials"],
+        });
+        for (k, v) in extra.as_object().expect("object") {
+            line[k] = v.clone();
+        }
+        line
+    }
+
+    /// An archived client record that carries no credential although its
+    /// grants need one — `client_credentials` is only ever issued to a client
+    /// that authenticates — is what an archive that lost the credential looks
+    /// like. Restoring it would create a PUBLIC client for a confidential
+    /// one, so it is refused and reported, never restored.
+    #[test]
+    fn a_client_record_missing_the_credential_its_grants_need_is_refused() {
+        let (rig, realm, cid, report) = restore_client_line(&client_line(&serde_json::json!({})));
+        assert!(
+            rig.identity
+                .get_client(&realm, &cid)
+                .expect("get")
+                .is_none(),
+            "the client must not be restored as a public client"
+        );
+        assert_eq!(report.clients.errored, 1);
+        assert_eq!(report.clients.created, 0);
+        let conflict = report
+            .conflicts
+            .iter()
+            .find(|c| c.entity_type == "client")
+            .expect("the refusal must be reported");
+        assert!(
+            conflict.reason.contains("credential"),
+            "the report must say the credential is missing: {}",
+            conflict.reason
+        );
+    }
+
+    /// A stored hash in a format Hearth cannot verify is refused rather than
+    /// stored (it could never authenticate) or dropped (that would make the
+    /// client public).
+    #[test]
+    fn a_client_record_with_an_unknown_secret_hash_format_is_refused() {
+        for bad in [
+            "plaintext-secret",
+            "$pbkdf2-sha256$i=1000$c2FsdA$aGFzaA",
+            "$hearth-sha256$v=1$tooshort",
+            "$hearth-sha256$v=2$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "$argon2i$v=19$m=256,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaA",
+        ] {
+            let (rig, realm, cid, report) = restore_client_line(&client_line(
+                &serde_json::json!({"client_secret_hash": bad}),
+            ));
+            assert!(
+                rig.identity
+                    .get_client(&realm, &cid)
+                    .expect("get")
+                    .is_none(),
+                "{bad}: must not be restored"
+            );
+            assert_eq!(report.clients.errored, 1, "{bad}");
+            assert!(
+                report.conflicts.iter().any(|c| c.entity_type == "client"),
+                "{bad}: the refusal must be reported"
+            );
+        }
+    }
+
+    /// Both stored formats come back verbatim; the client is not public.
+    #[test]
+    fn a_client_record_with_a_supported_hash_is_restored_verbatim() {
+        for hash in [
+            "$hearth-sha256$v=1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "$argon2id$v=19$m=256,t=1,p=1$48W7IQncfP/IRd+UEMNchQ$RVK0enJVqYZ2Ro4u93PK5B9jFWPeS0jq9iTiOAaI1uI",
+        ] {
+            let (rig, realm, cid, report) = restore_client_line(&client_line(
+                &serde_json::json!({"client_secret_hash": hash}),
+            ));
+            assert_eq!(report.clients.created, 1, "{hash}: {:?}", report.conflicts);
+            let client = rig
+                .identity
+                .get_client(&realm, &cid)
+                .expect("get")
+                .expect("restored");
+            assert_eq!(client.client_secret_hash(), Some(hash));
+            assert!(!client.is_public());
+        }
+    }
+
+    /// An archived (soft-deleted) client stays archived.
+    #[test]
+    fn an_archived_client_record_is_restored_archived() {
+        let (rig, realm, cid, _report) = restore_client_line(&client_line(&serde_json::json!({
+            "client_secret_hash": "$hearth-sha256$v=1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "status": "archived",
+        })));
+        let client = rig
+            .identity
+            .get_client(&realm, &cid)
+            .expect("get")
+            .expect("restored");
+        assert_eq!(
+            client.status(),
+            crate::identity::ApplicationStatus::Archived
         );
     }
 }

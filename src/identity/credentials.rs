@@ -859,6 +859,41 @@ pub(crate) fn is_fast_client_secret_hash(stored: &str) -> bool {
     stored.starts_with(FAST_CLIENT_SECRET_PREFIX)
 }
 
+/// Checks that `stored` is a client-secret hash Hearth can verify, in one of
+/// the two formats it writes: an Argon2id PHC string (`$argon2id$…`, a
+/// caller-chosen secret) or the fast format (`$hearth-sha256$v=1$` + the
+/// 43-character unpadded base64 of a 32-byte digest, a generated secret).
+///
+/// Used where a stored hash is taken as-is rather than computed here — a
+/// backup restore — so the hash is kept verbatim (never re-hashed: there is no
+/// plaintext) and anything else is refused. A value in an unknown format could
+/// never authenticate its client, and dropping it would leave the client
+/// public.
+pub(crate) fn validate_stored_client_secret_hash(stored: &str) -> Result<(), IdentityError> {
+    if let Some(digest) = stored.strip_prefix(FAST_CLIENT_SECRET_PREFIX) {
+        let decodes_to_a_digest = digest.len() == 43
+            && STANDARD_NO_PAD
+                .decode(digest)
+                .is_ok_and(|bytes| bytes.len() == 32);
+        if decodes_to_a_digest {
+            return Ok(());
+        }
+        return Err(IdentityError::InvalidInput {
+            reason: "malformed $hearth-sha256$v=1$ client secret hash".to_string(),
+        });
+    }
+    let argon2id = PasswordHash::new(stored)
+        .is_ok_and(|parsed| parsed.algorithm.as_str() == "argon2id" && parsed.hash.is_some());
+    if argon2id {
+        return Ok(());
+    }
+    Err(IdentityError::InvalidInput {
+        reason: "unsupported client secret hash format: expected $argon2id$ or \
+                 $hearth-sha256$v=1$"
+            .to_string(),
+    })
+}
+
 /// Fast-format verification: one SHA-256 of the presented secret, then a
 /// length-blind constant-time comparison of the two encoded digests
 /// ([`crate::core::secrets::ct_eq_secret_str`]). A malformed stored value

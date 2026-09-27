@@ -3518,7 +3518,7 @@ impl EmbeddedIdentityEngine {
 
     /// Refuses a client JWKS that is not a bounded set of public signing keys
     /// ([`super::client_jwks::validate_client_jwks`]).
-    fn check_client_jwks(jwks: &str) -> Result<(), IdentityError> {
+    pub(super) fn check_client_jwks(jwks: &str) -> Result<(), IdentityError> {
         super::client_jwks::validate_client_jwks(jwks).map_err(|reason| {
             IdentityError::InvalidInput {
                 reason: format!("invalid jwks: {reason}"),
@@ -3526,11 +3526,27 @@ impl EmbeddedIdentityEngine {
         })
     }
 
+    /// Refuses an assertion key that is not a base64url-encoded 32-byte
+    /// Ed25519 public key.
+    pub(super) fn check_assertion_public_key(key: &str) -> Result<(), IdentityError> {
+        let decoded = URL_SAFE_NO_PAD
+            .decode(key)
+            .map_err(|_| IdentityError::InvalidInput {
+                reason: "assertion_public_key must be base64url-encoded".to_string(),
+            })?;
+        if decoded.len() != 32 {
+            return Err(IdentityError::InvalidInput {
+                reason: "assertion_public_key must be a 32-byte Ed25519 public key".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// FAPI 2.0 clients authenticate with `private_key_jwt` only, so a FAPI
     /// 2.0 client must hold no secret and must hold a key Hearth can verify
     /// an assertion with — an inline `jwks` or an assertion key; a `jwks_uri`
     /// is never fetched. A no-op for any other profile.
-    fn check_fapi2_client_keys(client: &OAuthClient) -> Result<(), IdentityError> {
+    pub(super) fn check_fapi2_client_keys(client: &OAuthClient) -> Result<(), IdentityError> {
         if !client.profile().is_fapi2() {
             return Ok(());
         }
@@ -3648,18 +3664,7 @@ impl EmbeddedIdentityEngine {
         if let Some(pk) = &request.assertion_public_key {
             // Validate base64url decodes to exactly 32 bytes (Ed25519 public key)
             if let Some(key_str) = pk {
-                let decoded =
-                    URL_SAFE_NO_PAD
-                        .decode(key_str)
-                        .map_err(|_| IdentityError::InvalidInput {
-                            reason: "assertion_public_key must be base64url-encoded".to_string(),
-                        })?;
-                if decoded.len() != 32 {
-                    return Err(IdentityError::InvalidInput {
-                        reason: "assertion_public_key must be a 32-byte Ed25519 public key"
-                            .to_string(),
-                    });
-                }
+                Self::check_assertion_public_key(key_str)?;
             }
             client.set_assertion_public_key(pk.clone());
         }
