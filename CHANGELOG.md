@@ -122,7 +122,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   within `max_queue_wait` the request gets `503` with `Retry-After` (`kdf_overloaded`, `error_code`
   `HEARTH_RATE_LIMITED`; gRPC `UNAVAILABLE`). A burst of such requests larger than the blocking pool is served or shed; it cannot
   hang the runtime. Hearth-generated (SHA-256) secrets are unaffected. Rotate config-managed and
-  legacy clients to generated secrets to take them off this path entirely.
+  legacy clients to generated secrets to take them off this path entirely. The permit covers the
+  Argon2id verification only — token signing, issuance and storage for `client_credentials` run
+  after it is released — and an Argon2id verification never runs on a request worker, even when an
+  admin rotates a client to an Argon2id secret mid-request (the request is re-dispatched through
+  the gate). In a FAPI 2.0 Advanced realm a secret is refused before the gate (`401`, naming
+  `private_key_jwt`) for every client, so a saturated gate no longer answers `503` for an Argon2id
+  client and `401` for an unknown one — a client-existence oracle.
 - **`grant_type=client_credentials` no longer reveals which clients exist** — an unknown
   `client_id` was refused with `invalid_client` and a client without the grant with
   `unsupported_grant_type`, both before the secret was checked, so anyone could enumerate client ids

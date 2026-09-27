@@ -3316,13 +3316,16 @@ impl EmbeddedIdentityEngine {
     /// anyone can compute, so without the gate an unauthenticated caller could
     /// force one Argon2id run per request. The protocol layer reaches this
     /// through the async entry points in [`crate::identity::client_auth`],
-    /// which WAIT for a permit asynchronously and run the whole engine call on
-    /// the blocking pool; this code then runs inside the admitted closure. A
-    /// direct synchronous call (a test, a caller that bypassed the entry point,
-    /// a secret rotated between the entry point's check and this one) takes a
-    /// permit only if one is free right now and otherwise sheds — it never
-    /// waits, because waiting from synchronous code on a runtime is what
-    /// deadlocked the runtime. When the gate sheds, this returns
+    /// which verify the secret inside the gate (waiting for a permit
+    /// asynchronously) and run the engine call in a scope carrying the result:
+    /// here that result is used, and a hash the scope has no result for (a
+    /// secret rotated between the entry point's lookup and this call) is NOT
+    /// hashed on the caller's thread — the call fails and the entry point
+    /// re-dispatches it through the gate. A direct synchronous call outside any
+    /// scope (a test, a caller that bypassed the entry points) takes a permit
+    /// only if one is free right now and otherwise sheds — it never waits,
+    /// because waiting from synchronous code on a runtime is what deadlocked
+    /// the runtime. When the gate sheds, this returns
     /// [`IdentityError::KdfOverloaded`] and the protocol layer answers `503`
     /// with `Retry-After`. The fast format never touches the gate.
     pub(super) fn verify_presented_client_secret(
@@ -3334,6 +3337,24 @@ impl EmbeddedIdentityEngine {
                 credentials::verify_client_secret(presented.as_bytes(), hash)
             }
             Some(hash) => {
+                match crate::identity::client_auth::scoped_argon2_verification(
+                    hash,
+                    presented.as_bytes(),
+                ) {
+                    crate::identity::client_auth::ScopedArgon2::Verified(matched) => {
+                        return Ok(matched)
+                    }
+                    // Never hash on the entry point's (worker) thread: fail
+                    // the call; the entry point verifies against this hash
+                    // through the gate and runs the call again. The error is
+                    // discarded there.
+                    crate::identity::client_auth::ScopedArgon2::Redispatch => {
+                        return Err(IdentityError::KdfOverloaded {
+                            retry_after: std::time::Duration::from_secs(1),
+                        })
+                    }
+                    crate::identity::client_auth::ScopedArgon2::NotScoped => {}
+                }
                 let secret = zeroize::Zeroizing::new(presented.as_bytes().to_vec());
                 let hash = hash.to_string();
                 match crate::identity::gate()
@@ -3353,23 +3374,6 @@ impl EmbeddedIdentityEngine {
                 Ok(false)
             }
         }
-    }
-
-    /// Whether a secret presented for `client_id` would be verified with
-    /// Argon2id: the client exists and holds a stored hash that is not the
-    /// fast `$hearth-sha256$` format. An unknown client, a public client and a
-    /// fast-format client all answer `false` — their verification is one
-    /// SHA-256, run synchronously and ungated.
-    pub(super) fn client_secret_needs_kdf_inner(
-        &self,
-        realm_id: &RealmId,
-        client_id: &crate::core::ClientId,
-    ) -> Result<bool, IdentityError> {
-        Ok(self
-            .get_client_inner(realm_id, client_id)?
-            .as_ref()
-            .and_then(OAuthClient::client_secret_hash)
-            .is_some_and(|hash| !credentials::is_fast_client_secret_hash(hash)))
     }
 
     pub(super) fn list_clients_inner(

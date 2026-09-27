@@ -11158,14 +11158,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.authenticate_confidential_client_inner(realm_id, client_id, client_secret)
     }
 
-    fn client_secret_needs_kdf(
-        &self,
-        realm_id: &RealmId,
-        client_id: &crate::core::ClientId,
-    ) -> Result<bool, IdentityError> {
-        self.client_secret_needs_kdf_inner(realm_id, client_id)
-    }
-
     fn update_client(
         &self,
         realm_id: &RealmId,

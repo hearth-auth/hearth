@@ -733,8 +733,11 @@ caller-chosen or legacy client secret presented at `/token`, `/introspect`,
 service (gRPC sheds with `UNAVAILABLE`). Such a request waits for its permit
 asynchronously — it holds no worker or blocking-pool thread while it waits, so a
 burst larger than the blocking pool is served or shed, never hung — for at most
-`max_queue_wait_ms`. Hearth-generated client secrets are SHA-256 and never take a
-permit. See `docs/guides/security-hardening.md` § OAuth client secrets.
+`max_queue_wait_ms`. The permit covers the Argon2id verification alone; the rest
+of the request (for `client_credentials`, token signing and issuance) runs after it
+is released. In a FAPI 2.0 Advanced realm a presented secret is refused before the
+gate. Hearth-generated client secrets are SHA-256 and never take a permit. See
+`docs/guides/security-hardening.md` § OAuth client secrets.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

@@ -1420,19 +1420,6 @@ pub trait IdentityEngine: Send + Sync {
         client_secret: Option<&str>,
     ) -> Result<(), IdentityError>;
 
-    /// Whether verifying a secret presented for `client_id` runs Argon2id —
-    /// the client exists and its stored hash is not the fast
-    /// `$hearth-sha256$` format.
-    ///
-    /// The async entry points in [`client_auth`] use this to decide whether a
-    /// client authentication must first wait for a KDF-gate permit. It says
-    /// nothing a caller can observe: they answer the same on every arm.
-    fn client_secret_needs_kdf(
-        &self,
-        realm_id: &RealmId,
-        client_id: &crate::core::ClientId,
-    ) -> Result<bool, IdentityError>;
-
     /// Updates an existing OAuth client's fields.
     ///
     /// Only non-`None` fields in the request are applied.
