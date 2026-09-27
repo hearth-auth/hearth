@@ -4920,39 +4920,98 @@ fn run_backup_restore(
         .filter(|s| slugs.contains(s));
 
     let mut had_errors = false;
+    let mut system_report = None;
     for slug in &slugs {
         let report = importer.import_realm(slug, &reader, &opts)?;
         print_import_report(slug, &report);
         if import_report_had_errors(&report) {
             had_errors = true;
         }
+        if system_slug.as_ref() == Some(slug) {
+            system_report = Some(report);
+        }
     }
-    report_system_realm_restore(system_slug.is_some(), dry_run);
+    report_system_realm_restore(system_report.as_ref(), dry_run);
     warn_unexported_families("This restore did NOT bring back");
     Ok(had_errors)
 }
 
-/// Tells the operator whether a restore brought the system realm — every
-/// operator-console account — back.
-fn report_system_realm_restore(restored: bool, dry_run: bool) {
-    if restored {
-        tracing::info!(
-            "System realm {}: the operator-console accounts in this archive sign in at \
-             /ui/admin/login with their original passwords and second factors. Sessions are not \
-             restored, so every operator signs in again.",
-            if dry_run {
-                "(dry run — nothing written)"
-            } else {
-                "restored"
-            }
-        );
-    } else {
+/// Tells the operator whether a restore brought operator-console access back,
+/// from what the system realm's import actually did (`None`: the restore did
+/// not include the system realm).
+///
+/// It used to announce success whenever the archive merely contained the
+/// system realm — even when every operator was skipped (already present) or
+/// refused, and whatever happened to the signing key.
+fn report_system_realm_restore(report: Option<&hearth::backup::ImportReport>, dry_run: bool) {
+    let Some(report) = report else {
         tracing::warn!(
             "This restore does not contain the system realm, so it brought back no \
              operator-console account. If the target has none, restore the system realm from a \
              full `hearth backup create` archive (or a `POST /admin/backup` made by a \
              system-realm caller). See docs/guides/disaster-recovery.md."
         );
+        return;
+    };
+    let (verb, prefix) = if dry_run {
+        ("would be", "(dry run — nothing written) ")
+    } else {
+        ("", "")
+    };
+    let users = &report.users;
+    let restored = users.created + users.overwritten;
+    let key = system_key_outcome(&report.realms, dry_run);
+    if restored == 0 {
+        tracing::warn!(
+            "{prefix}System realm: this restore did NOT restore operator-console access — no \
+             operator account from the archive {verb}{}restored ({} already present in the target \
+             and kept with their current credentials, {} refused). {key}. See \
+             docs/guides/disaster-recovery.md.",
+            if dry_run { " " } else { "" },
+            users.skipped,
+            users.errored,
+        );
+        return;
+    }
+    let noun = if restored == 1 { "account" } else { "accounts" };
+    tracing::info!(
+        "{prefix}System realm: {restored} operator-console {noun} {verb}{}restored; they sign in \
+         at /ui/admin/login with their original passwords and second factors (sessions are not \
+         restored, so each signs in again). {key}.",
+        if dry_run { " " } else { "" },
+    );
+    if users.skipped > 0 || users.errored > 0 {
+        tracing::warn!(
+            "{prefix}System realm: {} operator account(s) in the archive already existed and were \
+             kept unchanged, and {} were refused and did NOT come back.",
+            users.skipped,
+            users.errored,
+        );
+    }
+    if report.assignments.errored > 0 {
+        tracing::warn!(
+            "{prefix}System realm: {} role assignment(s) were refused — an operator restored \
+             without its realm.admin grant cannot use the console.",
+            report.assignments.errored
+        );
+    }
+}
+
+/// Describes what the restore did with the system realm's signing key, from
+/// the realm-level counts [`hearth::backup::ImportReport::realms`] carries
+/// for the system realm.
+fn system_key_outcome(realms: &hearth::backup::EntityCounts, dry_run: bool) -> &'static str {
+    match (realms.created, realms.overwritten, realms.errored, dry_run) {
+        (0, 0, 0, false) => {
+            "The target's system signing key was kept (tokens it signed stay valid; tokens signed \
+             by the archived key do not verify)"
+        }
+        (0, 0, 0, true) => "The target's system signing key would be kept",
+        (_, _, e, _) if e > 0 => "The archived system signing key was NOT installed",
+        (c, _, _, false) if c > 0 => "The archived system signing key was installed",
+        (c, _, _, true) if c > 0 => "The archived system signing key would be installed",
+        (_, _, _, false) => "The archived system signing key replaced the live one",
+        (_, _, _, true) => "The archived system signing key would replace the live one",
     }
 }
 

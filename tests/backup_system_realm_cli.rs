@@ -463,3 +463,61 @@ async fn replacing_a_live_system_signing_key_takes_the_explicit_flag() {
         "--replace-system-signing-key installs the archived key: {out}"
     );
 }
+
+/// The closing message is based on what the restore actually did. Restoring
+/// the system realm into a store that already holds the archived operator
+/// (skip mode) brings back no operator from the archive and keeps the live
+/// key: the restore must say operator access did NOT come back from the
+/// archive, rather than that the archived operators sign in with their
+/// original passwords.
+#[tokio::test]
+async fn the_cli_says_when_operator_access_did_not_come_back() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (archive, verify_key, _) = signed_full_archive(dir.path());
+
+    // Fresh directory: the archived operator comes back.
+    let fresh = dir.path().join("fresh");
+    let (code, out) = hearth(&[
+        os("backup"),
+        os("restore"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--data-dir"),
+        fresh.as_os_str(),
+        os("--verify-key"),
+        os(&verify_key),
+    ]);
+    assert_eq!(code, Some(0), "fresh restore: {out}");
+    assert!(
+        out.contains("1 operator-console account restored"),
+        "a fresh restore reports the operator it restored: {out}"
+    );
+    assert!(
+        out.contains("archived system signing key was installed"),
+        "and that the archived key was installed: {out}"
+    );
+
+    // The same archive again, into the store it just produced: every operator
+    // already exists and is kept.
+    let again = dir.path().join("again");
+    copy_dir(&fresh, &again);
+    let (code, out) = hearth(&[
+        os("backup"),
+        os("restore"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--data-dir"),
+        again.as_os_str(),
+        os("--verify-key"),
+        os(&verify_key),
+    ]);
+    assert!(code.is_some_and(|c| c <= 1), "repeat restore: {out}");
+    assert!(
+        out.contains("did NOT restore operator-console access"),
+        "a restore that brought no operator back must say so: {out}"
+    );
+    assert!(
+        !out.contains("sign in at /ui/admin/login with their original passwords"),
+        "it must not claim the archived operators sign in: {out}"
+    );
+}
