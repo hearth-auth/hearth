@@ -193,13 +193,45 @@ fn client_credentials_wrong_secret_rejected() {
 
 #[test]
 fn client_credentials_unsupported_grant_type() {
-    use hearth::identity::ClientCredentialsRequest;
+    use hearth::identity::{ClientCredentialsRequest, GeneratedClientSecret};
 
     let (_dir, engine, _clock) = setup_engine();
     let realm_id = create_test_realm(&engine);
+    let request = |client: &hearth::identity::OAuthClient, secret: &str| ClientCredentialsRequest {
+        client_id: client.client_id().clone(),
+        client_secret: Some(secret.to_string()),
+        scope: None,
+        dpop_jkt: None,
+        client_assertion_type: None,
+        client_assertion: None,
+    };
 
-    // Register a public client (no client_credentials grant)
-    let client = engine
+    // A confidential client without the client_credentials grant that proves
+    // its secret learns that it lacks the grant.
+    let secret = GeneratedClientSecret::generate();
+    let confidential = engine
+        .register_client(
+            &realm_id,
+            &RegisterClientRequest {
+                client_name: "Code-Flow App".to_string(),
+                redirect_uris: vec!["https://app.example.com/cb".to_string()],
+                generated_client_secret: Some(secret.clone()),
+                grant_types: vec!["authorization_code".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("register confidential client");
+    let result =
+        engine.client_credentials_token(&realm_id, &request(&confidential, secret.expose()));
+    assert!(
+        matches!(result, Err(IdentityError::UnsupportedGrantType)),
+        "an authenticated client without the grant should get UnsupportedGrantType, got: \
+         {result:?}"
+    );
+
+    // A public client has no secret to prove, so it learns nothing about its
+    // grants: the answer is the wrong-secret one.
+    let public = engine
         .register_client(
             &realm_id,
             &RegisterClientRequest {
@@ -213,22 +245,10 @@ fn client_credentials_unsupported_grant_type() {
             },
         )
         .expect("register public client");
-
-    let result = engine.client_credentials_token(
-        &realm_id,
-        &ClientCredentialsRequest {
-            client_id: client.client_id().clone(),
-            client_secret: Some("anything".to_string()),
-            scope: None,
-            dpop_jkt: None,
-            client_assertion_type: None,
-            client_assertion: None,
-        },
-    );
-
+    let result = engine.client_credentials_token(&realm_id, &request(&public, "anything"));
     assert!(
-        matches!(result, Err(IdentityError::UnsupportedGrantType)),
-        "public client should not support client_credentials, got: {result:?}"
+        matches!(result, Err(IdentityError::InvalidClientSecret)),
+        "a public client cannot authenticate for client_credentials, got: {result:?}"
     );
 }
 
@@ -854,9 +874,11 @@ fn adversarial_invalid_client_secret_generic_error() {
             client_assertion: None,
         },
     );
+    // The same answer as a wrong secret: a caller that has not proved a secret
+    // must not learn whether the client id exists.
     assert!(
-        matches!(missing_result, Err(IdentityError::InvalidClient)),
-        "non-existent client should return InvalidClient"
+        matches!(missing_result, Err(IdentityError::InvalidClientSecret)),
+        "a non-existent client must get the wrong-secret answer, got {missing_result:?}"
     );
 }
 

@@ -108,6 +108,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   blocking pool; when the gate is saturated the request gets `503` with `Retry-After`
   (`kdf_overloaded`; gRPC `UNAVAILABLE`). Hearth-generated (SHA-256) secrets are unaffected. Rotate
   config-managed and legacy clients to generated secrets to take them off this path entirely.
+- **`grant_type=client_credentials` no longer reveals which clients exist** — an unknown
+  `client_id` was refused with `invalid_client` and a client without the grant with
+  `unsupported_grant_type`, both before the secret was checked, so anyone could enumerate client ids
+  and their grants without a secret. The client is now authenticated first, with the same work on
+  every arm; until it proves its secret (or `private_key_jwt` assertion) every caller gets the
+  wrong-secret answer, and only an authenticated client learns that it lacks the grant.
 - **Revocation only affects the caller's own tokens (RFC 7009 §2.1)** — `POST /revoke`, its realm twin
   and gRPC `Revoke` revoke a token only when it was issued to the authenticated client; any other token
   is left untouched and the endpoint still answers `200`. A `private_key_jwt` client must present its

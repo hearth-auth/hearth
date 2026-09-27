@@ -17448,6 +17448,8 @@ mod tests {
 
     /// `private_key_jwt` assertion-JTI replay markers carry an expiry and are swept.
     mod client_assertion_jti;
+    /// `client_credentials` authenticates before revealing existence or grants.
+    mod client_credentials_oracle;
     /// The persisted control epoch is bumped atomically and never moves back.
     mod control_epoch;
     /// Control-cache reloads: lock-free validation, retries, ordering, coverage.

@@ -1407,27 +1407,29 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::oidc::ClientCredentialsRequest,
     ) -> Result<crate::identity::oidc::ClientCredentialsResponse, IdentityError> {
-        // 1. Load the client
+        // 1. Load the client — absence is not reported yet.
         let client_key = keys::encode_oauth_client(&request.client_id);
-        let client_bytes = self
+        let existing: Option<OAuthClient> = self
             .storage
             .get(realm_id, &client_key)
             .map_err(Self::storage_err)?
-            .ok_or(IdentityError::InvalidClient)?;
-        let client: OAuthClient =
-            serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
+            .map(|bytes| {
+                serde_json::from_slice::<OAuthClient>(&bytes).map_err(|e| {
+                    IdentityError::Serialization {
+                        reason: e.to_string(),
+                    }
+                })
+            })
+            .transpose()?;
 
-        // 2. Verify this client supports client_credentials grant
-        if !client
-            .grant_types()
-            .contains(&"client_credentials".to_string())
-        {
-            return Err(IdentityError::UnsupportedGrantType);
-        }
-
-        // 3. Authenticate client: private_key_jwt takes precedence over client_secret
+        // 2. Authenticate the client BEFORE saying anything about it. An
+        // unknown client and a client without this grant used to be refused
+        // (`InvalidClient`, `UnsupportedGrantType`) before any secret check,
+        // which told an unauthenticated caller whether a client id exists and
+        // which grants it has. Every arm now does the same work — one
+        // verification of the presented secret, against a dummy when there is
+        // no stored hash (22.25) — and gets one answer until it proves the
+        // secret. private_key_jwt takes precedence over client_secret.
         const PRIVATE_KEY_JWT_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
         if request.client_assertion_type.as_deref() == Some(PRIVATE_KEY_JWT_TYPE) {
             let assertion = request.client_assertion.as_deref().ok_or_else(|| {
@@ -1442,13 +1444,23 @@ impl EmbeddedIdentityEngine {
                 .client_secret
                 .as_deref()
                 .ok_or(IdentityError::InvalidClientSecret)?;
-            // 22.25 (audit 2026-08-28 §4.25#3): a presented secret costs one
-            // verification whatever the client turns out to be. A
-            // client with no stored hash used to return before hashing, so the
-            // response time told the caller the client's type.
-            if !Self::verify_presented_client_secret(client.client_secret_hash(), secret)? {
+            let stored_hash = existing.as_ref().and_then(OAuthClient::client_secret_hash);
+            if !Self::verify_presented_client_secret(stored_hash, secret)? {
                 return Err(IdentityError::InvalidClientSecret);
             }
+        }
+        // A verified assertion or secret implies the client exists; the check
+        // stays for the type system and costs nothing.
+        let Some(client) = existing else {
+            return Err(IdentityError::InvalidClientSecret);
+        };
+
+        // 3. Only an authenticated client learns that it lacks the grant.
+        if !client
+            .grant_types()
+            .contains(&"client_credentials".to_string())
+        {
+            return Err(IdentityError::UnsupportedGrantType);
         }
 
         self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
