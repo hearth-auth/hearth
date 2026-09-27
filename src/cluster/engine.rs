@@ -967,9 +967,16 @@ fn refuse_restart_without_applied_state(
         None => Ok(()),
         Some(purged) => Err(ClusterBuildError::RaftInit(format!(
             "this node's Raft log is purged through index {} but its data directory holds no \
-             persisted applied state (it was written by an earlier Hearth release, or an \
-             interrupted snapshot install cleared it): it cannot be restarted in place. Re-seed it: stop it, move its data directory (including \
-             raft.db) aside, and start it empty so the leader sends it a snapshot",
+             persisted applied state (it was written by an earlier Hearth release, which kept \
+             its applied state and membership in memory only, or an interrupted snapshot \
+             install cleared it): it cannot be restarted in place. Re-seed it if the rest of \
+             the cluster still has a leader: stop it, move its data directory (including \
+             raft.db) aside, and start it empty so the leader sends it a snapshot. If no node \
+             can start (every node's log was purged, as in the full-cluster restart this \
+             release requires), there is no leader to send one: rebuild the cluster from a \
+             backup instead: start a fresh cluster with empty data directories and restore \
+             the backup taken before the upgrade into it (see the upgrading guide, \
+             \"Upgrading a cluster whose Raft logs were purged\")",
             purged.index
         ))),
     }
@@ -1331,8 +1338,14 @@ mod tests {
     }
 
     /// A data directory written by an earlier release (no persisted applied
-    /// state) over a purged log is refused with re-seed instructions; over an
-    /// unpurged log (openraft replays it all) it starts.
+    /// state) over a purged log is refused; over an unpurged log (openraft
+    /// replays it all) it starts.
+    ///
+    /// The instructions must work when NO node can start — the full-cluster
+    /// restart this release requires, on a cluster whose logs were purged.
+    /// "Start it empty and the leader sends it a snapshot" assumes a leader,
+    /// so on its own it sent operators round in a circle: the refusal must
+    /// also name the rebuild-from-backup procedure.
     #[test]
     fn a_purged_log_without_persisted_applied_state_is_refused_with_instructions() {
         assert!(refuse_restart_without_applied_state(None).is_ok());
@@ -1343,6 +1356,10 @@ mod tests {
         .expect_err("refused");
         let msg = err.to_string();
         assert!(msg.contains("5000") && msg.contains("Re-seed"), "{msg}");
+        assert!(
+            msg.contains("no node") && msg.contains("backup") && msg.contains("upgrading guide"),
+            "the refusal must give the procedure for when no node can start: {msg}"
+        );
     }
 
     fn open_engine(dir: &std::path::Path) -> Arc<EmbeddedStorageEngine> {

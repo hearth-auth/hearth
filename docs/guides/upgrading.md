@@ -517,10 +517,70 @@ Check the `CHANGELOG.md` `## [Unreleased]` section for in-flight breaking change
 > the counter on one node and wrote its successor, which is exactly the race the new command
 > closes, so the new build does not fall back to it.
 >
-> To upgrade: take a backup on the leader, **stop every node**, install the new binary on every
-> node, then start them all. Expect a write outage for the length of the restart. Single-node
-> deployments are unaffected. To roll back, stop every node and restore each node's data directory
-> (or restore the backup into a fresh cluster) before starting the older binary.
+> To upgrade a **young** cluster — one whose Raft logs have not been purged yet: take a backup on
+> the leader, **stop every node**, install the new binary on every node, then start them all.
+> Expect a write outage for the length of the restart. Single-node deployments are unaffected. To
+> roll back, stop every node and restore each node's data directory (or restore the backup into a
+> fresh cluster) before starting the older binary.
+>
+> **A cluster whose Raft logs were purged cannot be upgraded in place** — and that is nearly every
+> cluster in production: with the default snapshot policy a node takes its first snapshot, and
+> purges its log, once it has applied about 5,000 entries. Follow
+> [Upgrading a cluster whose Raft logs were purged](#cluster-purged-log-upgrade) instead.
+
+<a id="cluster-purged-log-upgrade"></a>
+
+### Upgrading a cluster whose Raft logs were purged
+
+Releases up to v1.6.11 kept the Raft state machine's applied index and the cluster membership **in
+memory only**. Once a node's log has been purged, neither can be recovered from its data directory:
+the older build could not restart such a node either, and the new build refuses to start it
+(`this node's Raft log is purged through index N but its data directory holds no persisted applied
+state …`). Re-seeding one node (move its data directory aside and start it empty, so the leader
+sends it a snapshot) works only while the rest of the cluster still has a leader. In the
+full-cluster restart this release requires every node is in that state at once, so there is no
+leader: rebuild the cluster from a backup.
+
+1. **Before stopping anything**, find a node that answers `/admin/cluster/status` as `leader`,
+   stop client writes (a maintenance window), and take a backup from it over HTTP — this also
+   avoids the offline CLI's data-directory lock:
+
+   ```bash
+   curl -fsS -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Realm-ID: $ADMIN_REALM_ID" \
+     "https://10.0.0.1:8420/admin/backup?include_audit=true" -o pre-upgrade.hearth-backup
+   hearth backup sign --input pre-upgrade.hearth-backup --key-file /etc/hearth/backup-signing.pem
+   hearth backup verify --input pre-upgrade.hearth-backup
+   ```
+
+   The token needs the `hearth.export` capability. See the [Backup guide](./backup.md) for the
+   options, for signing (the restore refuses an unsigned archive), and for what an archive does
+   **not** carry — sessions are not exported, so every user signs in again after the rebuild.
+2. **Stop every node.** Move each node's data directory (including `raft.db`) aside and keep it:
+   it is your rollback path to the older build.
+3. **Install the new binary on every node** and start the cluster with **empty** data directories,
+   exactly as a new cluster is bootstrapped ([Clustering guide](./clustering.md)). Wait until one
+   node reports `leader` and every node has joined.
+4. **Restore the backup through the leader**, so the restored data is written through Raft and
+   replicates to every node:
+
+   ```bash
+   curl -fsS -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Realm-ID: $ADMIN_REALM_ID" \
+     -F file=@pre-upgrade.hearth-backup \
+     "https://10.0.0.1:8420/admin/backup/restore"
+   ```
+
+   Use an admin token of the **new** cluster with the `hearth.export` capability; the new
+   cluster's `security.backup.verify_key` must match the key the archive was signed with.
+
+   Read the report (`errors`) before re-opening traffic, and run the
+   [post-restore checks](./disaster-recovery.md#test-restore-drill-checklist).
+5. **Re-open client traffic.** Tokens issued before the upgrade keep validating: the restore
+   preserves every realm's signing keys.
+
+To roll back, stop every node and put the data directories from step 2 back before starting the
+older binary.
 
 For releases that do not change the Raft log format, upgrade a Raft cluster (3 or 5 nodes) with
 minimal service interruption as follows:

@@ -106,7 +106,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   over older followers commits nothing), and an older binary cannot read the new Raft log, so
   rolling a node back needs its data directory restored from a pre-upgrade backup. A new-build node
   logs `peer cannot decode this node's Raft log` when it meets an older one. Single-node deployments
-  are unaffected. See the upgrading guide, *Cluster upgrades*.
+  are unaffected. A cluster whose Raft logs were purged — any node past about 5,000 applied
+  entries, so nearly every production cluster — **cannot be upgraded in place at all**: releases up
+  to v1.6.11 kept the applied index and membership in memory only, so such a node cannot restart on
+  either build, and with every node stopped there is no leader to re-seed from. Rebuild it from a
+  backup instead: take a backup over HTTP from the running old cluster, start the new build as a
+  fresh cluster with empty data directories, and restore the backup through its leader. See the
+  upgrading guide, *Cluster upgrades* and *Upgrading a cluster whose Raft logs were purged*.
 - **Cluster: a node restarts after its Raft log was purged** — the state machine kept its applied
   index in memory only, so on every restart openraft re-applied the log from index 0; once a
   snapshot had let the log be purged (with the default policy, after about 5,000 writes) the node
@@ -116,8 +122,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   plain write to the control-epoch counter (from an older binary) now moves the counter's
   replay-guard with it, so re-applying it can no longer move the epoch backwards. **Breaking** for
   a node already upgraded in place from an earlier release whose log was purged: it cannot restart
-  (it never could); startup now says so and asks to re-seed it — stop it, move its data directory
-  (including `raft.db`) aside, start it empty, and the leader sends it a snapshot.
+  (it never could); startup now says so. While the rest of the cluster has a leader, re-seed it —
+  stop it, move its data directory (including `raft.db`) aside, start it empty, and the leader
+  sends it a snapshot. When no node can start (the full-cluster upgrade of a purged cluster),
+  rebuild the cluster from a backup as described above; the startup error says both.
 - **Cluster: a corrupted control-epoch row is repaired, and a failed bump is alertable** — a
   control-epoch row that did not decode made the state machine refuse every later increment, so
   control propagation stopped for good with only a warning on each serving node. The state machine
