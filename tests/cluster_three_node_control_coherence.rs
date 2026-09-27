@@ -575,6 +575,7 @@ async fn eventual_rejection_where(
             }
             last = Some(e);
         }
+        // AUDIT: justified-sleep: poll interval of a deadline-bounded condition loop; the follower's background control reload exposes no completion signal to integration tests
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     last
@@ -1287,6 +1288,7 @@ async fn a_control_whose_bump_failed_binds_everywhere_after_a_leader_change() {
     // The old leader dropped the bumps it can no longer make.
     let deadline = Instant::now() + RELOAD_DEADLINE;
     while owed_gauge() > 0.0 && Instant::now() < deadline {
+        // AUDIT: justified-sleep: poll interval of a deadline-bounded condition loop on the owed-bumps gauge, which has no change notification
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(

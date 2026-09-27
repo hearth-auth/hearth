@@ -60,6 +60,7 @@ fn eventually_rejected(node: &EmbeddedIdentityEngine, realm_id: &RealmId, token:
         if node.validate_token(realm_id, token).is_err() {
             return true;
         }
+        // AUDIT: justified-sleep: poll interval of a deadline-bounded condition loop; the background control reloader exposes no completion signal to integration tests
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     false
