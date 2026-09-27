@@ -1530,7 +1530,7 @@ fn enable_realm_fapi(rig: &TestRig) {
 /// registers the JWKS its `private_key_jwt` authentication requires.
 fn register_rp(rig: &TestRig, alg: &str, profile: ClientProfile) -> OAuthClient {
     let jwks = profile.is_fapi2().then(|| {
-        r#"{"keys":[{"kty":"OKP","use":"sig","alg":"EdDSA","crv":"Ed25519","kid":"fapi2-rp"}]}"#
+        r#"{"keys":[{"kty":"OKP","use":"sig","alg":"EdDSA","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo","kid":"fapi2-rp"}]}"#
             .to_string()
     });
     rig.identity
