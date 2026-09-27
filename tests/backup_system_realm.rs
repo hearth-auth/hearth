@@ -390,9 +390,10 @@ async fn skip_and_merge_keep_a_live_system_realm_and_add_missing_operators() {
 
 // ── Overwrite ─────────────────────────────────────────────────────────────────
 
-/// Overwrite means the archive wins: the live system key is replaced by the
-/// archived one (and the published JWKS follows immediately), and an existing
-/// operator is replaced by its archived record and credential.
+/// Overwrite with the explicit opt-in means the archive wins: the live system
+/// key is replaced by the archived one (and the published JWKS follows
+/// immediately), and an existing operator is replaced by its archived record
+/// and credential.
 #[tokio::test]
 async fn overwrite_replaces_the_live_system_key_and_operators() {
     let sys = system_realm();
@@ -409,7 +410,7 @@ async fn overwrite_replaces_the_live_system_key_and_operators() {
     // Warm the key cache so a stale cached key would be observable.
     let _ = dst.identity().realm_jwks(&sys).expect("warm jwks");
 
-    let report = restore(&dst, &archive, &opts(RestoreMode::Overwrite)).expect("restore");
+    let report = restore(&dst, &archive, &replace_key(RestoreMode::Overwrite)).expect("restore");
     assert_eq!(report.realms.overwritten, 1, "the live key is replaced");
     assert_eq!(report.users.overwritten, 1);
     assert_eq!(report.users.errored, 0);
@@ -428,6 +429,132 @@ async fn overwrite_replaces_the_live_system_key_and_operators() {
     );
     assert!(password_ok(&dst, "shared@hearth.test", "Archive-Pa55word!"));
     assert!(!password_ok(&dst, "shared@hearth.test", "Live-Pa55word!"));
+}
+
+/// `mode` with the explicit opt-in to replace a live system signing key.
+fn replace_key(mode: RestoreMode) -> ImportOptions {
+    ImportOptions {
+        replace_live_system_signing_key: true,
+        ..opts(mode)
+    }
+}
+
+/// Overwrite alone replaces the operators but keeps the live system key: that
+/// key signs every live operator token, and replacing it takes an explicit
+/// opt-in (`--replace-system-signing-key`).
+#[tokio::test]
+async fn overwrite_keeps_a_live_system_key_without_the_explicit_opt_in() {
+    let src = common::TestHarness::embedded().await.expect("src");
+    seed_operator(&src, "shared@hearth.test", "Archive-Pa55word!");
+    let archive = export(&src, &[system_realm()]);
+
+    let dst = common::TestHarness::embedded().await.expect("dst");
+    seed_operator(&dst, "shared@hearth.test", "Live-Pa55word!");
+    let live_key = system_key(&dst);
+
+    let report = restore(&dst, &archive, &opts(RestoreMode::Overwrite)).expect("restore");
+    assert_eq!(report.realms.skipped, 1, "the live key is kept");
+    assert_eq!(report.realms.overwritten + report.realms.created, 0);
+    assert!(
+        report
+            .conflicts
+            .iter()
+            .any(|c| c.entity_type == "realm" && c.reason.contains("replace-system-signing-key")),
+        "keeping the key names the opt-in: {:?}",
+        report.conflicts
+    );
+    assert_eq!(system_key(&dst), live_key, "the live key is untouched");
+    assert_eq!(
+        report.users.overwritten, 1,
+        "the operators are still overwritten"
+    );
+    assert!(password_ok(&dst, "shared@hearth.test", "Archive-Pa55word!"));
+}
+
+/// A key the live system realm rotated away from — for instance after it was
+/// compromised — is never reinstalled by a restore, whatever the mode and even
+/// with the opt-in. Rotation records every key it retires; the check reads that
+/// record, and also the retiring keys still inside their grace window (a
+/// rotation made before the record existed).
+#[tokio::test]
+async fn a_system_key_the_live_realm_rotated_away_from_is_never_reinstalled() {
+    let sys = system_realm();
+    for grace_secs in [0_u64, 3600] {
+        let dst = common::TestHarness::embedded().await.expect("dst");
+        seed_operator(&dst, "operator@hearth.test", "Operat0r-Pa55word!");
+        let archive = export(&dst, std::slice::from_ref(&sys));
+        dst.identity()
+            .rotate_realm_signing_key(&sys, grace_secs)
+            .expect("rotate the system key");
+        let live_key = system_key(&dst);
+
+        for options in [
+            replace_key(RestoreMode::Overwrite),
+            opts(RestoreMode::Overwrite),
+            opts(RestoreMode::Skip),
+        ] {
+            let outcome = restore(&dst, &archive, &options);
+            if options.replace_live_system_signing_key {
+                let err = outcome.expect_err("a rotated-away key must be refused");
+                assert!(
+                    err.to_string().contains("rotated away"),
+                    "grace {grace_secs}: the refusal says why: {err}"
+                );
+            } else {
+                let report = outcome.expect("the live key is simply kept");
+                assert_eq!(report.realms.skipped, 1, "grace {grace_secs}");
+            }
+            assert_eq!(
+                system_key(&dst),
+                live_key,
+                "grace {grace_secs}, {:?}: the rotated-away key must not come back",
+                options.mode
+            );
+        }
+    }
+}
+
+/// A retiring key the live system realm revoked (a rotation with no grace
+/// window purges every retiring key) is not reinstated as a retiring key by
+/// an archive made while it was still inside its window.
+#[tokio::test]
+async fn a_revoked_system_retiring_key_is_not_reinstated_by_a_restore() {
+    let sys = system_realm();
+    let dst = common::TestHarness::embedded().await.expect("dst");
+    seed_operator(&dst, "operator@hearth.test", "Operat0r-Pa55word!");
+    dst.identity()
+        .rotate_realm_signing_key(&sys, 3600)
+        .expect("rotate with a grace window");
+    let archive = export(&dst, std::slice::from_ref(&sys));
+    dst.identity()
+        .rotate_realm_signing_key(&sys, 0)
+        .expect("revoking rotation");
+    assert!(
+        dst.identity()
+            .export_retiring_signing_keys(&sys)
+            .expect("retiring keys")
+            .is_empty(),
+        "precondition: the revoking rotation purged the retiring key"
+    );
+
+    for mode in [
+        RestoreMode::Skip,
+        RestoreMode::Merge,
+        RestoreMode::Overwrite,
+    ] {
+        let report = restore(&dst, &archive, &opts(mode.clone())).expect("restore");
+        assert_eq!(
+            report.retiring_signing_keys.errored, 1,
+            "{mode:?}: the revoked retiring key is refused and reported"
+        );
+        assert!(
+            dst.identity()
+                .export_retiring_signing_keys(&sys)
+                .expect("retiring keys")
+                .is_empty(),
+            "{mode:?}: a revoked key must not verify tokens again"
+        );
+    }
 }
 
 // ── Dry run ───────────────────────────────────────────────────────────────────

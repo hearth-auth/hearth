@@ -4651,6 +4651,78 @@ impl EmbeddedIdentityEngine {
     /// background cascade — which owns only a cloned storage handle — can reuse
     /// it. Best-effort: a failure here must never abort a rotation or delete, so
     /// errors are logged and the count of removed blobs is returned.
+    /// Records, for the system realm, that a rotation retired `old_key_id` —
+    /// and, for a revoking rotation, every retiring key it is about to purge —
+    /// so a backup restore can never reinstall one of them
+    /// ([`keys::encode_system_retired_signing_kid`]). Written before the new
+    /// key, so a rotation that fails later leaves at worst a record for a key
+    /// that is still active, which the restore check never consults (an
+    /// archive carrying the active key is a no-op).
+    fn record_system_keys_retired(
+        &self,
+        old_key_id: &str,
+        revoking: bool,
+        now_secs: u64,
+    ) -> Result<(), IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        let mut kids = vec![old_key_id.to_string()];
+        if revoking {
+            let prefix = keys::realm_retiring_key_scan_prefix(&sys_realm);
+            let end = keys::prefix_end(&prefix);
+            for entry in self
+                .storage
+                .scan(&sys_realm, &prefix, &end)
+                .map_err(Self::storage_err)?
+            {
+                if let Some(kid) = keys::parse_retiring_key_id(&entry.key) {
+                    kids.push(kid);
+                }
+            }
+        }
+        let stamp = now_secs.to_string();
+        for kid in kids {
+            self.storage
+                .put(
+                    &sys_realm,
+                    &keys::encode_system_retired_signing_kid(&kid),
+                    stamp.as_bytes(),
+                )
+                .map_err(Self::storage_err)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the system realm has rotated away from the signing key `key_id`:
+    /// a rotation recorded it ([`Self::record_system_keys_retired`]), or it is
+    /// one of the system realm's retiring keys (a rotation made before the
+    /// record existed, still inside its grace window).
+    fn system_rotated_away_from(&self, key_id: &str) -> Result<bool, IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        if self
+            .storage
+            .get(&sys_realm, &keys::encode_system_retired_signing_kid(key_id))
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        self.system_retiring_key_is_live(key_id)
+    }
+
+    /// Whether the system realm currently holds a retiring-key row for
+    /// `key_id` (any deadline).
+    fn system_retiring_key_is_live(&self, key_id: &str) -> Result<bool, IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        let prefix = keys::realm_retiring_key_scan_prefix(&sys_realm);
+        let end = keys::prefix_end(&prefix);
+        Ok(self
+            .storage
+            .scan(&sys_realm, &prefix, &end)
+            .map_err(Self::storage_err)?
+            .iter()
+            .any(|e| keys::parse_retiring_key_id(&e.key).as_deref() == Some(key_id)))
+    }
+
     fn purge_realm_retiring_keys(
         storage: &Arc<dyn StorageEngine>,
         realm_id: &RealmId,
@@ -7401,6 +7473,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
         let revoking = grace_period_secs == 0;
         let cutoff = if revoking { None } else { Some(now_secs) };
+        if keys::is_system_realm(realm_id) {
+            self.record_system_keys_retired(&old_key_id, revoking, now_secs)?;
+        }
         let purged = Self::purge_realm_retiring_keys(&self.storage, realm_id, cutoff);
 
         // Store the old key as a retiring key with its expiry deadline. A
@@ -11889,6 +11964,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if !pristine && !overwrite {
             return Ok(ImportOutcome::Skipped);
         }
+        // Never reinstall a key this system realm rotated away from — for
+        // instance one retired after a compromise. An archive older than the
+        // rotation still carries it, and installing it would re-arm every
+        // token its holder can mint.
+        if self.system_rotated_away_from(archived.key_id())? {
+            return Err(IdentityError::InvalidInput {
+                reason: format!(
+                    "the archived system signing key {} is one this system realm rotated away                      from; a restore never reinstalls a retired key (restore a backup made                      after the rotation)",
+                    archived.key_id()
+                ),
+            });
+        }
 
         let kek = self
             .config
@@ -13222,6 +13309,28 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Refuse material that does not load, rather than storing a blob that
         // `load_realm_retiring_keys` will silently drop at validation time.
         let _usable = SigningKey::from_pkcs8(&key.pkcs8)?;
+        // A system-realm key that a rotation retired and that no longer has a
+        // retiring row was purged — by a revoking rotation, the remedy for a
+        // leaked key. An archive made inside its grace window still carries
+        // it; reinstating it would let it verify tokens again.
+        if keys::is_system_realm(realm_id)
+            && self
+                .storage
+                .get(
+                    &keys::system_realm_id(),
+                    &keys::encode_system_retired_signing_kid(&key.key_id),
+                )
+                .map_err(Self::storage_err)?
+                .is_some()
+            && !self.system_retiring_key_is_live(&key.key_id)?
+        {
+            return Err(IdentityError::InvalidInput {
+                reason: format!(
+                    "retiring system signing key {} was revoked by a rotation; a restore never                      reinstates it",
+                    key.key_id
+                ),
+            });
+        }
         let sys_realm = keys::system_realm_id();
         let storage_key = keys::encode_realm_retiring_key(realm_id, key.deadline_secs, &key.key_id);
         let exists = self

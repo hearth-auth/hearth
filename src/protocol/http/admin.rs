@@ -5439,6 +5439,11 @@ async fn admin_backup_restore(
             // `--allow-missing-signing-key` for the deliberate override (HEA-2168).
             allow_missing_signing_key: false,
             allowed_realm,
+            // Over HTTP a restore never replaces a LIVE system signing key: the
+            // caller's own token is signed with it, and the deliberate
+            // replacement is an operator action on the data directory
+            // (`hearth backup restore --replace-system-signing-key`).
+            replace_live_system_signing_key: false,
         };
 
         let slugs: Vec<String> = if let Some(slug) = &realm_filter {

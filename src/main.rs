@@ -227,6 +227,18 @@ enum BackupAction {
         #[arg(long)]
         allow_missing_signing_key: bool,
 
+        /// With `--mode overwrite`, also replace the system realm's LIVE
+        /// signing key with the archived one.
+        ///
+        /// Overwrite alone replaces a live system realm's operator accounts but
+        /// keeps its signing key: every live operator token is signed with it,
+        /// and replacing it signs every operator out. Pass this to replace it
+        /// too. A system realm with no operator (a rebuilt, empty data
+        /// directory) takes the archived key without it. A key the target's
+        /// system realm has rotated away from is refused either way.
+        #[arg(long)]
+        replace_system_signing_key: bool,
+
         /// Base64url Ed25519 public key the archive's manifest must be signed
         /// with. Overrides `security.backup.verify_key` from `--config`.
         #[arg(long, value_name = "BASE64URL")]
@@ -681,6 +693,7 @@ async fn main() {
                     dry_run,
                     skip_verify,
                     allow_missing_signing_key,
+                    replace_system_signing_key,
                     verify_key,
                     allow_unsigned,
                     data_dir,
@@ -695,6 +708,7 @@ async fn main() {
                             skip_verify,
                             allow_missing_signing_key,
                             allow_unsigned,
+                            replace_system_signing_key,
                         },
                         verify_key.as_deref(),
                         &data_dir,
@@ -4684,12 +4698,13 @@ fn warn_unexported_families(lead: &str) {
 }
 
 /// Boolean switches of `hearth backup restore`.
-#[allow(clippy::struct_excessive_bools)] // four independent CLI flags
+#[allow(clippy::struct_excessive_bools)] // five independent CLI flags
 struct RestoreFlags {
     dry_run: bool,
     skip_verify: bool,
     allow_missing_signing_key: bool,
     allow_unsigned: bool,
+    replace_system_signing_key: bool,
 }
 
 /// Reads a backup signing key (PEM, PKCS#8 Ed25519) from `path`.
@@ -4733,6 +4748,27 @@ fn resolve_restore_verify_key(
         .map_err(|reason| format!("security.backup.verify_key: {reason}"))?)
 }
 
+/// Parses `--mode`, refusing `--replace-system-signing-key` outside overwrite.
+fn restore_mode(
+    mode_str: &str,
+    replace_system_signing_key: bool,
+) -> Result<hearth::backup::RestoreMode, Box<dyn std::error::Error>> {
+    use hearth::backup::RestoreMode;
+    let mode = match mode_str {
+        "overwrite" => RestoreMode::Overwrite,
+        "merge" => RestoreMode::Merge,
+        _ => RestoreMode::Skip,
+    };
+    if replace_system_signing_key && mode != RestoreMode::Overwrite {
+        return Err(
+            "--replace-system-signing-key replaces a live system signing key and applies only \
+             with --mode overwrite"
+                .into(),
+        );
+    }
+    Ok(mode)
+}
+
 /// Runs `hearth backup restore`.
 ///
 /// Returns `Ok(true)` when some records were skipped or errored (exit code 1),
@@ -4747,8 +4783,7 @@ fn run_backup_restore(
     config_path: Option<&std::path::Path>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use hearth::backup::{
-        check_restore_signature, BackupArchive, BackupImporter, ImportOptions, RestoreMode,
-        SignatureCheck,
+        check_restore_signature, BackupArchive, BackupImporter, ImportOptions, SignatureCheck,
     };
 
     let RestoreFlags {
@@ -4756,14 +4791,11 @@ fn run_backup_restore(
         skip_verify,
         allow_missing_signing_key,
         allow_unsigned,
+        replace_system_signing_key,
     } = flags;
     let verify_key = resolve_restore_verify_key(verify_key_flag, config_path)?;
 
-    let mode = match mode_str {
-        "overwrite" => RestoreMode::Overwrite,
-        "merge" => RestoreMode::Merge,
-        _ => RestoreMode::Skip,
-    };
+    let mode = restore_mode(mode_str, replace_system_signing_key)?;
 
     // The signature covers `manifest.json` only; each member is bound to it by
     // the manifest's checksum, and nothing else — the importer does not hash
@@ -4863,6 +4895,7 @@ fn run_backup_restore(
         // directory, so it may restore every realm the archive contains. The
         // HTTP route scopes this to the caller's realm instead (B1).
         allowed_realm: None,
+        replace_live_system_signing_key: replace_system_signing_key,
     };
 
     let slugs: Vec<String> = if let Some(slug) = realm_slug {
@@ -6139,6 +6172,7 @@ mod tests {
                 allow_missing_signing_key: true,
                 // Not under test here: this archive is unsigned.
                 allow_unsigned: true,
+                replace_system_signing_key: false,
             },
             None,
             &control_target,
@@ -6162,6 +6196,7 @@ mod tests {
                 skip_verify: false,
                 allow_missing_signing_key: true,
                 allow_unsigned: true,
+                replace_system_signing_key: false,
             },
             None,
             &target,
@@ -6229,6 +6264,7 @@ mod tests {
             skip_verify: false,
             allow_missing_signing_key: true,
             allow_unsigned,
+            replace_system_signing_key: false,
         };
         // No verify key and no opt-in: refused before the target is created.
         let refused_target = dir.path().join("refused");
@@ -6798,6 +6834,7 @@ mod tests {
             allow_missing_signing_key: false,
             // Not under test here: this archive is unsigned.
             allow_unsigned: true,
+            replace_system_signing_key: false,
         };
 
         // Each command below stands for a separate process: the CLI's engines

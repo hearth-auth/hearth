@@ -345,3 +345,121 @@ async fn an_archive_without_the_system_realm_restores_and_says_so() {
         "no operator exists after a tenant-only restore"
     );
 }
+
+fn system_key(dir: &Path) -> Vec<u8> {
+    open(dir)
+        .identity
+        .export_realm_signing_key_pkcs8(&RealmId::new(uuid::Uuid::nil()))
+        .expect("system key")
+}
+
+/// Writes a signed full archive of a freshly seeded store, returning the
+/// archive, the verify key and the source's system signing key.
+fn signed_full_archive(dir: &Path) -> (std::path::PathBuf, String, Vec<u8>) {
+    let origin = dir.join("origin");
+    seed_source_store(&origin);
+    let source = dir.join("source");
+    copy_dir(&origin, &source);
+    let key_file = dir.join("backup-signing.pem");
+    let (code, out) = hearth(&[
+        os("backup"),
+        os("keygen"),
+        os("--output"),
+        key_file.as_os_str(),
+    ]);
+    assert_eq!(code, Some(0), "keygen: {out}");
+    let verify_key = hearth::backup::BackupSigningKey::from_pem(
+        &std::fs::read_to_string(&key_file).expect("key"),
+    )
+    .expect("key parses")
+    .verify_key_b64();
+    let archive = dir.join("full.hearth-backup");
+    let (code, out) = hearth(&[
+        os("backup"),
+        os("create"),
+        os("--data-dir"),
+        source.as_os_str(),
+        os("--output"),
+        archive.as_os_str(),
+        os("--sign-key"),
+        key_file.as_os_str(),
+    ]);
+    assert_eq!(code, Some(0), "backup create: {out}");
+    let key = system_key(&source);
+    (archive, verify_key, key)
+}
+
+/// A data directory whose system realm already holds an operator (so its
+/// signing key is live), copied so the CLI child can take its lock.
+fn live_target(dir: &Path, name: &str) -> std::path::PathBuf {
+    let seeded = dir.join(format!("{name}-seed"));
+    {
+        let e = open(&seeded);
+        e.identity
+            .create_admin_user(&CreateUserRequest {
+                email: "live-operator@hearth.test".to_string(),
+                display_name: "Live operator".to_string(),
+                ..Default::default()
+            })
+            .expect("live operator");
+    }
+    let target = dir.join(name);
+    copy_dir(&seeded, &target);
+    target
+}
+
+/// `--mode overwrite` replaces the operators of a live system realm but keeps
+/// its signing key — the key every live operator token is signed with.
+/// Replacing it takes `--replace-system-signing-key` as well.
+#[tokio::test]
+async fn replacing_a_live_system_signing_key_takes_the_explicit_flag() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (archive, verify_key, archived_key) = signed_full_archive(dir.path());
+
+    let kept = live_target(dir.path(), "kept");
+    let live_key = system_key(&kept);
+    assert_ne!(live_key, archived_key, "precondition: distinct keys");
+    let (code, out) = hearth(&[
+        os("backup"),
+        os("restore"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--data-dir"),
+        kept.as_os_str(),
+        os("--verify-key"),
+        os(&verify_key),
+        os("--mode"),
+        os("overwrite"),
+    ]);
+    assert!(code.is_some_and(|c| c <= 1), "overwrite restore: {out}");
+    assert_eq!(
+        system_key(&kept),
+        live_key,
+        "overwrite alone must keep the live system key: {out}"
+    );
+    assert!(
+        out.contains("--replace-system-signing-key"),
+        "the restore must say how to replace the key: {out}"
+    );
+
+    let replaced = live_target(dir.path(), "replaced");
+    let (code, out) = hearth(&[
+        os("backup"),
+        os("restore"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--data-dir"),
+        replaced.as_os_str(),
+        os("--verify-key"),
+        os(&verify_key),
+        os("--mode"),
+        os("overwrite"),
+        os("--replace-system-signing-key"),
+    ]);
+    assert_eq!(code, Some(0), "overwrite + replace restore: {out}");
+    assert_eq!(
+        system_key(&replaced),
+        archived_key,
+        "--replace-system-signing-key installs the archived key: {out}"
+    );
+}

@@ -117,6 +117,16 @@ pub struct ImportOptions {
     /// manifest is caller-supplied and may name one realm while the archive
     /// carries another (audit 2026-08-28 §3 B1, §4.1#1).
     pub allowed_realm: Option<RealmId>,
+    /// Allow an `Overwrite` restore of the system realm to replace a **live**
+    /// system signing key — the key every live operator token is signed with.
+    ///
+    /// `Overwrite` alone replaces the system realm's operators but keeps its
+    /// live key; replacing it too takes this explicit opt-in (the CLI's
+    /// `--replace-system-signing-key`; the HTTP route never sets it). A seeded
+    /// system realm with no operator (a rebuilt data directory) takes the
+    /// archived key regardless: its key has signed nothing. Either way, a key
+    /// the target's system realm has rotated away from is never reinstalled.
+    pub replace_live_system_signing_key: bool,
 }
 
 /// Per-entity-type outcome counts for a single realm restore operation.
@@ -542,6 +552,24 @@ impl BackupImporter {
             }
         }
 
+        // ── System realm signing key (before any other write) ───────────────
+        //
+        // The system realm (operator-console accounts) exists in every store —
+        // engine construction seeds it — so there is no realm record to
+        // create; its contents are imported into it below, with the same
+        // member importers and validation as any other realm. Only its signing
+        // key needs its own path, and it runs first so that a key the engine
+        // refuses (one the target rotated away from) fails the restore with
+        // nothing written. Reaching this point already required system-realm
+        // authority: a caller scoped to a tenant realm was refused just above.
+        if realm.id().as_uuid().is_nil() {
+            self.restore_system_realm_key(
+                signing_key_pkcs8.as_ref().map(|z| z.as_slice()),
+                opts,
+                &mut report,
+            )?;
+        }
+
         // ── Audit events (restored FIRST) ───────────────────────────────────
         //
         // Audit events are re-chained under the destination realm's HMAC key
@@ -650,18 +678,7 @@ impl BackupImporter {
         };
 
         let restored_realm_id = if realm_id.as_uuid().is_nil() {
-            // The system realm (operator-console accounts). It exists in every
-            // store — engine construction seeds it — so there is no realm
-            // record to create; its contents are imported into it below, with
-            // the same member importers and validation as any other realm.
-            // Only its signing key needs its own path. Reaching this point
-            // already required system-realm authority: a caller scoped to a
-            // tenant realm was refused by the `allowed_realm` check above.
-            self.restore_system_realm_key(
-                signing_key_pkcs8.as_ref().map(|z| z.as_slice()),
-                opts,
-                &mut report,
-            )?;
+            // Its signing key was restored above; there is no record to create.
             realm_id
         } else if opts.dry_run {
             // A dry run reports what the real restore would do. An overwrite
@@ -1117,10 +1134,12 @@ impl BackupImporter {
     ///
     /// The engine replaces the key only when the target's system realm holds
     /// no operator account (the freshly seeded state of a rebuilt data
-    /// directory) or when `opts.mode` is `Overwrite`; otherwise the live key is
-    /// kept and the conflict reported. With no archived key (possible only
-    /// under `allow_missing_signing_key`, checked by the caller) the target's
-    /// key is kept.
+    /// directory), or when `opts.mode` is `Overwrite` **and**
+    /// `opts.replace_live_system_signing_key` is set; otherwise the live key is
+    /// kept and the conflict reported. A key the target rotated away from is
+    /// refused outright (an error: nothing has been written yet). With no
+    /// archived key (possible only under `allow_missing_signing_key`, checked
+    /// by the caller) the target's key is kept.
     fn restore_system_realm_key(
         &self,
         pkcs8: Option<&[u8]>,
@@ -1142,9 +1161,11 @@ impl BackupImporter {
             report.realms.created += 1;
             return Ok(());
         }
+        let replace_live =
+            opts.mode == RestoreMode::Overwrite && opts.replace_live_system_signing_key;
         match self
             .identity
-            .import_system_realm_signing_key(pkcs8, opts.mode == RestoreMode::Overwrite)
+            .import_system_realm_signing_key(pkcs8, replace_live)
         {
             Ok(ImportOutcome::Skipped) => {
                 report.realms.skipped += 1;
@@ -1152,8 +1173,9 @@ impl BackupImporter {
                     entity_type: "realm".to_string(),
                     identifier: crate::identity::keys::SYSTEM_REALM_NAME.to_string(),
                     reason: "the target's system signing key was kept: it is already the \
-                             archived key, or the system realm holds operator accounts \
-                             (restore in overwrite mode to replace it)"
+                             archived key, or the system realm holds operator accounts (to \
+                             replace a live key, restore from the CLI in overwrite mode with \
+                             --replace-system-signing-key)"
                         .to_string(),
                 });
                 Ok(())

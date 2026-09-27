@@ -667,6 +667,19 @@ pub(crate) fn encode_control_epoch() -> Vec<u8> {
 
 /// Storage key for the KEK enrolment marker.
 ///
+/// Records that the system realm rotated away from the signing key `key_id`.
+///
+/// Format: `sys:signing_key:retired:{key_id}` — value: the rotation time in
+/// Unix seconds (decimal). Stored under the system realm. Written by every
+/// rotation of the system realm's key, for the key it retires and for every
+/// retiring key a revoking rotation purges; never deleted. It holds no key
+/// material — only the identifier a backup restore checks so that an archive
+/// older than a rotation (for instance one made before a key compromise)
+/// cannot reinstall the retired key.
+pub(crate) fn encode_system_retired_signing_kid(key_id: &str) -> Vec<u8> {
+    format!("sys:signing_key:retired:{key_id}").into_bytes()
+}
+
 /// Written once, the first time a KEK-configured process opens a store. Its
 /// presence means every signing key in the store has been through the HKEY
 /// envelope, so an unenveloped signing key read afterwards is a downgrade and
