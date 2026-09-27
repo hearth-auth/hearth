@@ -118,6 +118,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   a node already upgraded in place from an earlier release whose log was purged: it cannot restart
   (it never could); startup now says so and asks to re-seed it — stop it, move its data directory
   (including `raft.db`) aside, start it empty, and the leader sends it a snapshot.
+- **Cluster: a corrupted control-epoch row is repaired, and a failed bump is alertable** — a
+  control-epoch row that did not decode made the state machine refuse every later increment, so
+  control propagation stopped for good with only a warning on each serving node. The state machine
+  now repairs the row, identically on every node, to the incrementing entry's log index (above
+  every value ever handed out) and the bump succeeds. A bump that cannot be persisted is logged at
+  `ERROR` and counted in the new `hearth_control_epoch_bump_failures_total` metric; alert on it.
 - **Cluster: deleting a user ends its sessions on every node** — the delete removed the user's
   sessions and evicted them from the serving node's cache only; another node that had one cached
   kept accepting the deleted user's tokens (a cache hit never reads storage) until something else

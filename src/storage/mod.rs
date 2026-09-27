@@ -272,7 +272,9 @@ pub trait StorageEngine: Send + Sync {
     /// Any error from the underlying read or write, or
     /// [`StorageError::DeserializationFailed`] when the stored value is not
     /// exactly eight bytes — a corrupted counter is reported, never reset, so
-    /// it cannot silently restart below values already handed out.
+    /// it cannot silently restart below values already handed out. (In a
+    /// cluster the Raft state machine instead repairs it to the incrementing
+    /// entry's log index, which is above every value ever handed out.)
     fn increment_u64(&self, realm_id: &RealmId, key: &[u8]) -> Result<u64, StorageError> {
         static DEFAULT_INCREMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = DEFAULT_INCREMENT_LOCK

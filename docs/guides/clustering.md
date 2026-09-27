@@ -304,6 +304,15 @@ curl -s http://10.0.0.1:8420/admin/cluster/status \
 
 `role` is one of `"leader"`, `"follower"`, `"candidate"`, `"learner"`, or `"unknown"`. `is_healthy` reflects whether the peer appears in the leader's replication map.
 
+**Alert on `hearth_control_epoch_bump_failures_total`.** A control — a token or session
+revocation, a DPoP key block, a realm status change — is applied on the node that served it and
+announced to the others by bumping the replicated control epoch. When a bump cannot be persisted
+(for example while Raft has no leader) the control still binds on the serving node, but the other
+nodes do not reload for it until the next successful bump, which reloads every control cache. Each
+failed bump is logged at `ERROR` and counted in this Prometheus counter; any increase means other
+nodes may be enforcing stale controls until the next control is asserted. A control-epoch row that
+does not decode is repaired by the state machine on the next bump (every node the same way).
+
 ---
 
 ### Graceful Shutdown

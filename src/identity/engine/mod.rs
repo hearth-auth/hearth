@@ -4633,8 +4633,20 @@ impl EmbeddedIdentityEngine {
             // change to its own caches; otherwise this node would reload for
             // no reason.
             Ok(next) => Some(next),
+            // Alertable, not silent (M5): the control is applied on this node
+            // regardless, but other nodes do not reload for it until the next
+            // successful bump — which reloads every control cache, so the gap
+            // closes then. In a cluster a corrupted epoch row is repaired by
+            // the state machine on the next increment.
             Err(err) => {
-                tracing::warn!(error = %err, "could not persist the control epoch bump");
+                crate::metrics::metrics()
+                    .control_epoch_bump_failures_total
+                    .inc();
+                tracing::error!(
+                    error = %err,
+                    "could not persist the control epoch bump: other nodes will not reload \
+                     for this control until the next successful bump"
+                );
                 None
             }
         }

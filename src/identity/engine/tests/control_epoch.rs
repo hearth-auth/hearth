@@ -67,3 +67,31 @@ fn concurrent_control_epoch_bumps_are_never_lost() {
         expected.saturating_sub(after)
     );
 }
+
+/// A control-epoch bump that cannot be persisted is alertable (M5): it used
+/// to log a warning and nothing else, so control propagation could stop
+/// unnoticed. It now logs at error level and counts in
+/// `hearth_control_epoch_bump_failures_total`.
+#[test]
+fn a_failed_control_epoch_bump_is_counted() {
+    let (_dir, engine, _clock) = setup_engine();
+    engine
+        .storage
+        .put(
+            &keys::system_realm_id(),
+            &keys::encode_control_epoch(),
+            b"bad",
+        )
+        .expect("corrupt the epoch row");
+    let before = crate::metrics::metrics()
+        .control_epoch_bump_failures_total
+        .get();
+    engine.bump_control_epoch();
+    let after = crate::metrics::metrics()
+        .control_epoch_bump_failures_total
+        .get();
+    assert!(
+        (after - before - 1.0).abs() < f64::EPSILON,
+        "a failed bump must be counted once: {before} -> {after}"
+    );
+}

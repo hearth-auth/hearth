@@ -860,8 +860,9 @@ impl ClusterEngine {
                 })
                 .await?;
             if !resp.success {
-                // The state machine refused the entry on every node: the
-                // stored counter does not decode.
+                // Defensive: the state machine repairs a counter that does not
+                // decode and succeeds (every node the same way), so no current
+                // state machine answers `false` here.
                 return Err(ClusterError::Storage(
                     crate::storage::StorageError::DeserializationFailed {
                         reason: "the replicated counter is corrupted; the increment was refused"

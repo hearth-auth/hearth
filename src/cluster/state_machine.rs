@@ -578,11 +578,13 @@ impl HearthStateMachine {
     /// Re-application-safe: see [`increment_once`]. A re-applied entry changes
     /// nothing and is not reported to the observer.
     ///
-    /// A counter (or sidecar) row that does not decode refuses the entry with
-    /// `success: false` and writes nothing but the applied-state row. That
-    /// outcome is a function of the replicated state alone, so every node
-    /// gives the same answer; a fatal storage error instead would halt this
-    /// node's state machine, and the entry would fail again on every restart.
+    /// A counter (or sidecar) row that does not decode is repaired to the
+    /// entry's log index (see [`increment_once`]) and the entry succeeds with
+    /// that value. The repair is a function of the replicated state and the
+    /// entry alone, so every node makes the same one. Refusing the entry
+    /// instead left the corrupted row in place and every later increment was
+    /// refused too (control propagation stopped); a fatal storage error would
+    /// halt this node's state machine and fail again on every restart.
     async fn apply_increment(
         &mut self,
         log_index: u64,
@@ -599,16 +601,18 @@ impl HearthStateMachine {
         .await
         .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
         let value = match outcome {
-            Increment::Undecodable(reason) => {
+            Increment::Repaired { value, reason } => {
                 tracing::error!(
                     realm = %realm,
                     reason = %reason,
-                    "refused a replicated counter increment: the stored counter is corrupted"
+                    repaired_to = value,
+                    "a replicated counter did not decode; repaired it to the entry's log index"
                 );
-                return Ok(HearthLogResponse {
-                    success: false,
-                    payload: Vec::new(),
-                });
+                let bytes = value.to_le_bytes();
+                if let Some(obs) = self.observer.get() {
+                    obs.on_replicated_put(&realm, &key, &bytes);
+                }
+                bytes
             }
             Increment::Applied(next) => {
                 let value = next.to_le_bytes();
@@ -734,8 +738,14 @@ enum Increment {
     Applied(u64),
     /// The entry had already been applied; the counter still holds this value.
     Replayed(u64),
-    /// The counter or its sidecar row does not decode; nothing was written.
-    Undecodable(String),
+    /// The counter or its sidecar row did not decode; both were repaired to
+    /// the entry's index, which is the counter's new value.
+    Repaired {
+        /// The counter's value after the repair (the entry's log index).
+        value: u64,
+        /// Why the stored rows did not decode.
+        reason: String,
+    },
 }
 
 /// Increments the counter at `key` for the log entry at `log_index`, exactly
@@ -767,8 +777,23 @@ fn increment_once(
     ) {
         (Ok(current), Ok(last_index)) => (current, last_index),
         (Err(e), _) | (_, Err(e)) => {
-            engine.write_batch(realm, &[applied], &[])?;
-            return Ok(Increment::Undecodable(e.to_string()));
+            // Repair, the same way on every node: the counter and its sidecar
+            // become this entry's index. Every value ever handed out is at most
+            // the index of the entry that produced it, so the repaired value is
+            // above all of them and the counter stays monotone.
+            engine.write_batch(
+                realm,
+                &[
+                    (key.to_vec(), log_index.to_le_bytes().to_vec()),
+                    (marker, log_index.to_le_bytes().to_vec()),
+                    applied,
+                ],
+                &[],
+            )?;
+            return Ok(Increment::Repaired {
+                value: log_index,
+                reason: e.to_string(),
+            });
         }
     };
     if last_index >= log_index {
@@ -1047,38 +1072,68 @@ mod tests {
         );
     }
 
-    /// A counter row that does not decode is refused deterministically — the
-    /// same answer on every node — with a failure response, not a fatal
-    /// storage error: a fatal error halts the state machine, and the entry is
-    /// re-applied (and fails again) on every restart, stopping the cluster.
+    /// A counter (or sidecar) row that does not decode is REPAIRED, the same
+    /// way on every node (M5): the counter and its sidecar are set to the
+    /// entry's log index — every value ever handed out is at most the index of
+    /// the entry that produced it, so the repaired value is still greater than
+    /// all of them — and the entry succeeds with that value. It used to be
+    /// refused, leaving the corrupted row in place so every later increment
+    /// (every control-epoch bump) was refused too and control propagation
+    /// silently stopped. A fatal storage error would instead halt the state
+    /// machine and fail again on every restart.
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
-    async fn an_undecodable_counter_fails_the_entry_not_the_state_machine() {
+    async fn an_undecodable_counter_is_repaired_to_the_entry_index() {
         let dir = tempdir().unwrap();
         let mut sm = open_sm(dir.path().join("data").as_path());
         let realm = make_realm();
-        sm.engine.put(&realm, b"ctr", b"bad").unwrap();
-        let incr = Entry {
-            log_id: make_log_id(1),
+        let incr = |index: u64, key: &[u8]| Entry {
+            log_id: make_log_id(index),
             payload: EntryPayload::Normal(RaftCommand::IncrementU64 {
                 leader_timestamp: 0,
                 realm: realm.clone(),
-                key: b"ctr".to_vec(),
+                key: key.to_vec(),
             }),
         };
+        let value = |r: &HearthLogResponse| crate::storage::decode_u64_counter(Some(&r.payload));
+        // A corrupted counter, and a good counter with a corrupted sidecar.
+        sm.engine.put(&realm, b"ctr", b"bad").unwrap();
+        sm.engine.put(&realm, b"ok", &3_u64.to_le_bytes()).unwrap();
+        sm.engine
+            .put(&realm, &applied_index_key(b"ok"), b"bad")
+            .unwrap();
 
         let responses = sm
             .apply([
-                incr,
-                make_put_entry(2, realm.clone(), b"k".to_vec(), b"v".to_vec()),
+                incr(10, b"ctr"),
+                incr(11, b"ok"),
+                make_put_entry(12, realm.clone(), b"k".to_vec(), b"v".to_vec()),
+                incr(13, b"ctr"),
             ])
             .await
             .expect("a corrupted counter must not fail the state machine");
-        assert!(!responses[0].success, "the increment is refused");
+        assert!(responses[0].success, "the corrupted counter is repaired");
         assert_eq!(
-            sm.engine.get(&realm, b"ctr").unwrap(),
-            Some(b"bad".to_vec()),
-            "a refused increment writes nothing"
+            value(&responses[0]).unwrap(),
+            10,
+            "repaired to the entry's index"
+        );
+        assert!(responses[1].success, "a corrupted sidecar is repaired too");
+        assert_eq!(value(&responses[1]).unwrap(), 11);
+        assert_eq!(
+            value(&responses[3]).unwrap(),
+            11,
+            "the repaired counter increments normally afterwards"
+        );
+        assert_eq!(
+            crate::storage::decode_u64_counter(
+                sm.engine
+                    .get(&realm, &applied_index_key(b"ctr"))
+                    .unwrap()
+                    .as_deref()
+            )
+            .unwrap(),
+            13
         );
         assert_eq!(
             sm.engine.get(&realm, b"k").unwrap(),
