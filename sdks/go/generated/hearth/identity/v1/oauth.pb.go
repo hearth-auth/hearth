@@ -931,9 +931,17 @@ type DeviceAuthorizationRequest struct {
 	// Client secret for a confidential client (RFC 8628 s3.1). HTTP Basic Auth
 	// is preferred and takes precedence; this is the client_secret_post
 	// fallback. Public clients omit it.
-	ClientSecret  *string `protobuf:"bytes,3,opt,name=client_secret,json=clientSecret,proto3,oneof" json:"client_secret,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ClientSecret *string `protobuf:"bytes,3,opt,name=client_secret,json=clientSecret,proto3,oneof" json:"client_secret,omitempty"`
+	// private_key_jwt client authentication (RFC 7523 s2.2, RFC 8628 s3.1):
+	// must be "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" when
+	// present. A request carrying either assertion field is authenticated by
+	// the assertion alone; combining it with a secret is refused.
+	ClientAssertionType *string `protobuf:"bytes,4,opt,name=client_assertion_type,proto3,oneof" json:"client_assertion_type,omitempty"`
+	// The signed client assertion JWT (RFC 7523 s2.2), `aud` = the realm
+	// issuer.
+	ClientAssertion *string `protobuf:"bytes,5,opt,name=client_assertion,proto3,oneof" json:"client_assertion,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *DeviceAuthorizationRequest) Reset() {
@@ -983,6 +991,20 @@ func (x *DeviceAuthorizationRequest) GetScope() string {
 func (x *DeviceAuthorizationRequest) GetClientSecret() string {
 	if x != nil && x.ClientSecret != nil {
 		return *x.ClientSecret
+	}
+	return ""
+}
+
+func (x *DeviceAuthorizationRequest) GetClientAssertionType() string {
+	if x != nil && x.ClientAssertionType != nil {
+		return *x.ClientAssertionType
+	}
+	return ""
+}
+
+func (x *DeviceAuthorizationRequest) GetClientAssertion() string {
+	if x != nil && x.ClientAssertion != nil {
+		return *x.ClientAssertion
 	}
 	return ""
 }
@@ -2238,13 +2260,17 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\n" +
 	"expires_in\x18\x03 \x01(\x03R\texpiresIn\x12\x19\n" +
 	"\x05scope\x18\x04 \x01(\tH\x00R\x05scope\x88\x01\x01B\b\n" +
-	"\x06_scope\"\x9a\x01\n" +
+	"\x06_scope\"\xb5\x02\n" +
 	"\x1aDeviceAuthorizationRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x19\n" +
 	"\x05scope\x18\x02 \x01(\tH\x00R\x05scope\x88\x01\x01\x12(\n" +
-	"\rclient_secret\x18\x03 \x01(\tH\x01R\fclientSecret\x88\x01\x01B\b\n" +
+	"\rclient_secret\x18\x03 \x01(\tH\x01R\fclientSecret\x88\x01\x01\x129\n" +
+	"\x15client_assertion_type\x18\x04 \x01(\tH\x02R\x15client_assertion_type\x88\x01\x01\x12/\n" +
+	"\x10client_assertion\x18\x05 \x01(\tH\x03R\x10client_assertion\x88\x01\x01B\b\n" +
 	"\x06_scopeB\x10\n" +
-	"\x0e_client_secret\"\xc1\x01\n" +
+	"\x0e_client_secretB\x18\n" +
+	"\x16_client_assertion_typeB\x13\n" +
+	"\x11_client_assertion\"\xc1\x01\n" +
 	"\x1bDeviceAuthorizationResponse\x12\x1f\n" +
 	"\vdevice_code\x18\x01 \x01(\tR\n" +
 	"deviceCode\x12\x1b\n" +

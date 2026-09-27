@@ -71,6 +71,8 @@ fn device_request(
         client_id: client_id.as_uuid().to_string(),
         scope: None,
         client_secret: None,
+        client_assertion_type: None,
+        client_assertion: None,
     });
     r.metadata_mut().insert(
         "x-realm-id",
@@ -178,6 +180,8 @@ fn device_request_with_body_secret(
         client_id: client_id.as_uuid().to_string(),
         scope: None,
         client_secret: Some(secret.to_string()),
+        client_assertion_type: None,
+        client_assertion: None,
     });
     r.metadata_mut().insert(
         "x-realm-id",

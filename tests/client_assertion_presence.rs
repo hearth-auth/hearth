@@ -617,3 +617,21 @@ async fn revoke() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn device_authorization() {
+    let env = env().await;
+    let id = env.id();
+    check_surface(
+        &env,
+        "/device_authorization",
+        "device_authorization",
+        Some(200),
+        true,
+        || {
+            let form = vec![("client_id", id.clone())];
+            async move { form }
+        },
+    )
+    .await;
+}

@@ -177,7 +177,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   Assertions now verify against the client's inline `jwks` too (PS256, ES256 or EdDSA; key chosen by
   `kid`; RS256 is not accepted), the `refresh_token`, token-exchange and `device_code` grants accept
   `client_assertion`, and any client holding a JWKS or an assertion key and no secret must
-  authenticate with `private_key_jwt` everywhere (gRPC, which carries no assertion, refuses it). A
+  authenticate with `private_key_jwt` everywhere (gRPC, which carries no assertion outside
+  `DeviceAuthorize`, refuses it). A
   client registered with only a `jwks_uri` cannot authenticate (key sets are not fetched).
   **Breaking** for a secretless client that registered a JWKS (for example only to sign request
   objects) and used `/token`, `/as/par` or `/revoke` on its `client_id` alone.
@@ -192,12 +193,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   exchange (`/token` and `/realms/{realm}/token`) a client that holds a secret could redeem its code
   with `client_assertion=junk` (no `client_assertion_type`, or a wrong one) and no secret, and got
   tokens. A request carrying either `client_assertion` or `client_assertion_type` now always means
-  `private_key_jwt`, on every grant at `/token`, `/as/par`, `/introspect`, `/revoke` and their realm
-  twins: the type must be `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`, the assertion
+  `private_key_jwt`, on every grant at `/token`, `/as/par`, `/introspect`, `/revoke`,
+  `/device_authorization` and their realm twins, and at gRPC `DeviceAuthorize`: the type must be `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`, the assertion
   must be present and must verify for the named client, else `401 invalid_client`; beside a secret
   it is `400 invalid_request`. Grants that do not authenticate the client (step-up MFA, jwt-bearer,
   magic link) verify a presented assertion instead of ignoring it. **Breaking** for a client that
   sends assertion fields it does not mean to use.
+- **`private_key_jwt` clients can use the device flow (RFC 8628 §3.1)** — `POST /device_authorization`
+  rejected `client_assertion` as an unknown field (`400`) and `/realms/{realm}/device_authorization`
+  ignored it (`401`), so a FAPI 2.0 client (JWKS, no secret) could never start a device flow. Both
+  routes (form or JSON) now accept and verify `client_assertion_type` + `client_assertion`, and gRPC
+  `DeviceAuthorizationRequest` gains the optional `client_assertion_type` (4) and `client_assertion`
+  (5) fields (JSON names `client_assertion_type`, `client_assertion`), verified the same way. Poll at
+  `/token` with the assertion as well.
 
 ### Added
 - **Per-client RS256 ID tokens (OIDC interop, task 26.55)** — a client can set

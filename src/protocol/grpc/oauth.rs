@@ -217,6 +217,47 @@ impl OAuthService for OAuthSvc {
         // this check — but the handler decoded the field and dropped it
         // (task 23.9). Public clients pass through unchanged.
         //
+        // `private_key_jwt` (RFC 7523 §2.2): a request carrying either
+        // assertion field is authenticated by the assertion alone — never
+        // read as absent and sent on to the secret or public-client paths.
+        let presented = crate::identity::client_auth::presented_client_assertion(
+            body.client_assertion_type.as_deref(),
+            body.client_assertion.as_deref(),
+        );
+        if !matches!(presented, Ok(None)) {
+            // RFC 6749 §2.3: one authentication method per request.
+            if md.get(CLIENT_ID_META_KEY).is_some()
+                || body
+                    .client_secret
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+            {
+                return Err(Status::invalid_argument(
+                    "more than one client authentication method was used",
+                ));
+            }
+            let Some(assertion) = presented.map_err(|e| super::convert::client_auth_status(&e))?
+            else {
+                return Err(Status::unauthenticated("invalid client credentials"));
+            };
+            self.state
+                .identity
+                .verify_client_assertion(&realm_id, &client_id, assertion)
+                .map_err(|e| super::convert::client_auth_status(&e))?;
+            let resp = self
+                .state
+                .identity
+                .device_authorize(
+                    &realm_id,
+                    &DeviceAuthorizationRequest {
+                        client_id,
+                        scope: body.scope,
+                    },
+                )
+                .map_err(identity_to_status)?;
+            return Ok(Response::new(pb::DeviceAuthorizationResponse::from(&resp)));
+        }
+
         // The lookup fails closed: a storage error becomes an error to the
         // caller rather than a skipped gate.
         let client = self

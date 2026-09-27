@@ -881,6 +881,7 @@ pub(super) struct ClientAssertion<'a> {
     pub(super) check: AssertionCheck,
 }
 
+#[cfg(test)]
 impl ClientAssertion<'_> {
     /// A request shape that has no assertion fields.
     pub(super) const NONE: Self = ClientAssertion {
@@ -1040,7 +1041,9 @@ fn non_empty_credential(field: &str) -> Option<&str> {
 /// A request carrying a `private_key_jwt` assertion must use no other method
 /// (`400 invalid_request`); the assertion is verified by the engine's grant
 /// ([`AssertionCheck::ByEngine`], `authorization_code`) or here
-/// ([`AssertionCheck::Here`], `device_code`, device authorization).
+/// ([`AssertionCheck::Here`]: the `device_code` grant and
+/// `/device_authorization`, both routes, which read `client_assertion` /
+/// `client_assertion_type` from a form or JSON body).
 ///
 /// 22.25 (audit 2026-08-28 §4.25#3): the *decision* above is unchanged, but the
 /// *work* is no longer a function of what the lookup found. Equalising
@@ -3009,7 +3012,11 @@ async fn device_authorization(
         &headers,
         &body.client_id,
         body.client_secret.as_deref(),
-        ClientAssertion::NONE,
+        ClientAssertion {
+            assertion_type: body.client_assertion_type.as_deref(),
+            assertion: body.client_assertion.as_deref(),
+            check: AssertionCheck::Here,
+        },
     )
     .await
     {
@@ -4140,7 +4147,11 @@ async fn realm_device_authorization(
         &headers,
         &client_id_str,
         body.get("client_secret").and_then(|v| v.as_str()),
-        ClientAssertion::NONE,
+        ClientAssertion {
+            assertion_type: body.get("client_assertion_type").and_then(|v| v.as_str()),
+            assertion: body.get("client_assertion").and_then(|v| v.as_str()),
+            check: AssertionCheck::Here,
+        },
     )
     .await
     {

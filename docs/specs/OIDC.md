@@ -239,7 +239,8 @@ secret, no assertion key and no JWKS; every other client must authenticate. A FA
 or any client that registered a JWKS or an assertion key and no secret — presenting only its
 `client_id` is `401 invalid_client` at `/as/par`, at every `/token` grant (including
 `authorization_code`, `refresh_token`, `device_code` and token exchange, each of which accepts a
-`client_assertion`), at `/introspect` and `/revoke`, and over gRPC. A FAPI 2.0 client that
+`client_assertion`), at `/device_authorization` (which accepts one too, as does gRPC
+`DeviceAuthorize`), at `/introspect` and `/revoke`, and over gRPC. A FAPI 2.0 client that
 somehow holds a secret is refused (`invalid_client`, naming `private_key_jwt`) after the secret
 verifies.
 
@@ -638,7 +639,9 @@ A **confidential** client MUST authenticate on both device-grant endpoints — t
 authorization request (RFC 8628 §3.1) and the device access token request (RFC 8628 §3.4) — with
 the same rule the `authorization_code` arm applies. HTTP Basic Auth takes precedence; body
 `client_secret` is the `client_secret_post` fallback. A missing or wrong secret returns `401`
-`invalid_client`. Public clients carry no secret and are unaffected. Dynamic client registration
+`invalid_client`. Public clients carry no secret and are unaffected. A `private_key_jwt` client
+presents `client_assertion_type` + `client_assertion` on both (form or JSON; gRPC
+`DeviceAuthorizationRequest` fields 4 and 5), verified as at the token endpoint. Dynamic client registration
 (`POST /register`, RFC 7591) and the JSON permission-decision endpoint remain JSON-only by design.
 
 ### 8.1 Introspection and Revocation — Client Authentication
