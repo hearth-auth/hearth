@@ -181,7 +181,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `DeviceAuthorize`, refuses it). A
   client registered with only a `jwks_uri` cannot authenticate (key sets are not fetched).
   **Breaking** for a secretless client that registered a JWKS (for example only to sign request
-  objects) and used `/token`, `/as/par` or `/revoke` on its `client_id` alone.
+  objects) and used `/token`, `/as/par` or `/revoke` on its `client_id` alone. **Migrating such a
+  client** — pick one:
+  - *keep it public*: remove its JWKS (`PATCH /admin/applications/{id}` with `"jwks": null`, or drop
+    `jwks` from its `hearth.yaml` application). It then authenticates with `none` + PKCE again, but
+    can no longer sign request objects (JAR);
+  - *make it confidential*: have it send `client_assertion_type` +
+    `client_assertion` (a `private_key_jwt` assertion signed with a key from the same JWKS, `aud` =
+    the realm issuer) at `/token`, `/as/par`, `/revoke` and `/device_authorization`. Its JWKS must
+    then satisfy the client-JWKS rules below (public signing keys, `kid`s when more than one).
+  A FAPI 2.0 client has only the second option.
 - **FAPI 2.0 Advanced realms require `private_key_jwt`** (`docs/specs/OIDC.md` §2.1.2 item 6) —
   `client_secret_basic`, `client_secret_post` and `none` were accepted. `/token`, `/as/par`,
   `/introspect`, `/revoke` and their realm twins now answer `401 invalid_client` with
