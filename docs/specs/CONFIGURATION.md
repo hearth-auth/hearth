@@ -727,6 +727,12 @@ Argon2id compute). The gate caps concurrent KDF work; requests wait briefly for 
 slot and then **shed with `503 Service Unavailable` + `Retry-After`** rather than
 queueing unboundedly.
 
+The shared pool also admits every **Argon2id client-secret verification** — a
+caller-chosen or legacy client secret presented at `/token`, `/introspect`,
+`/revoke`, `/device_authorization`, their realm twins or the gRPC OAuth service
+(gRPC sheds with `UNAVAILABLE`). Hearth-generated client secrets are SHA-256 and
+never take a permit. See `docs/guides/security-hardening.md` § OAuth client secrets.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `max_in_flight` | integer | host **core count** | Maximum concurrent Argon2id operations. Omit (or `null`) to default to [`available_parallelism`] — the Little's-Law bound at which Argon2id throughput saturates, so higher values buy no throughput and only add queue latency. An explicit `0` is **rejected at startup**. Calibrate against your hardware using the C7/HEA-1875 saturation sweep. |
