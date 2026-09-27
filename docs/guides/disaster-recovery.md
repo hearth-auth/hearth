@@ -407,6 +407,12 @@ The node re-joins the cluster, the leader detects that it is behind, and
 re-sends the snapshot. Phase 1 + Phase 2 run to completion; the marker
 is removed automatically.
 
+If the node's Raft log has been purged, this restart is refused instead
+(`this node's Raft log is purged through index N but its data directory
+holds no persisted applied state …`): Phase 1 removed the node's persisted
+applied index, and the log no longer holds the entries to rebuild from.
+Use the clean-slate path below.
+
 **Cluster is unavailable or you want a clean slate:**
 
 Wipe the data directory entirely and let the node stream a fresh snapshot on join:

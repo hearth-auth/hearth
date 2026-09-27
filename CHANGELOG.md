@@ -98,14 +98,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   move it backwards. A follower that had already reloaded at the higher value then ignored the later
   control: a realm suspension, DPoP key block or session revocation stayed unenforced on that node
   until its next restart. The bump is now one atomic increment (a new Raft command whose value is
-  computed at apply time), applied exactly once per log entry even when a restarted node replays its
-  log, and a node whose epoch a snapshot install lowered re-bases on it so later controls still bind.
+  computed at apply time), counted exactly once per log entry even when a node applies an entry twice
+  after a snapshot install, and a node whose epoch a snapshot install lowered re-bases on it so later
+  controls still bind.
   **Breaking** for clusters: this release needs a **full-cluster restart**, not a rolling upgrade —
   an older node cannot decode the new command, so replication to it stalls (and a new-build leader
   over older followers commits nothing), and an older binary cannot read the new Raft log, so
   rolling a node back needs its data directory restored from a pre-upgrade backup. A new-build node
   logs `peer cannot decode this node's Raft log` when it meets an older one. Single-node deployments
   are unaffected. See the upgrading guide, *Cluster upgrades*.
+- **Cluster: a node restarts after its Raft log was purged** — the state machine kept its applied
+  index in memory only, so on every restart openraft re-applied the log from index 0; once a
+  snapshot had let the log be purged (with the default policy, after about 5,000 writes) the node
+  could not start again (`Failed to get log entries, expected index: [0, N)`). The applied index and
+  membership are now persisted with every applied entry, in the same atomic storage write as its
+  effect, and by every snapshot install; a restart resumes from them and re-applies nothing. A
+  plain write to the control-epoch counter (from an older binary) now moves the counter's
+  replay-guard with it, so re-applying it can no longer move the epoch backwards. **Breaking** for
+  a node already upgraded in place from an earlier release whose log was purged: it cannot restart
+  (it never could); startup now says so and asks to re-seed it — stop it, move its data directory
+  (including `raft.db`) aside, start it empty, and the leader sends it a snapshot.
 - **Cluster: deleting a user ends its sessions on every node** — the delete removed the user's
   sessions and evicted them from the serving node's cache only; another node that had one cached
   kept accepting the deleted user's tokens (a cache hit never reads storage) until something else

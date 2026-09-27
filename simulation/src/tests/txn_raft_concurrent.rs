@@ -172,7 +172,8 @@ async fn build_cluster(n: usize) -> (Vec<TestNode>, RealmId) {
         let log_store = HearthLogStore::open(&log_db_path).unwrap();
         let storage_config = StorageConfig::dev(data_dir);
         let storage = Arc::new(EmbeddedStorageEngine::open(storage_config).unwrap());
-        let sm = HearthStateMachine::new(Arc::clone(&storage) as Arc<dyn StorageEngine>);
+        let sm = HearthStateMachine::new(Arc::clone(&storage) as Arc<dyn StorageEngine>)
+            .expect("state machine");
         let factory = InMemFactory {
             nodes: Arc::clone(&registry),
         };

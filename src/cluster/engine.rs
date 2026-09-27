@@ -194,7 +194,7 @@ impl ClusterEngine {
         faults: Option<Arc<PeerFaults>>,
     ) -> Result<Self, ClusterBuildError> {
         let raft_db_path = storage_config.data_dir.join("raft.db");
-        let log_store = HearthLogStore::open(&raft_db_path)
+        let mut log_store = HearthLogStore::open(&raft_db_path)
             .map_err(|e| ClusterBuildError::LogStore(e.to_string()))?;
 
         let sm_engine: Arc<dyn StorageEngine> = Arc::clone(&inner) as Arc<dyn StorageEngine>;
@@ -204,8 +204,21 @@ impl ClusterEngine {
         // `set_replicated_write_observer` (audit 2026-08-28 §4.16#5).
         let observer_slot: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>> =
             Arc::new(OnceLock::new());
-        let state_machine =
-            HearthStateMachine::with_observer_slot(sm_engine, Arc::clone(&observer_slot));
+        // The state machine loads its persisted applied state (storage reads:
+        // on the blocking pool).
+        let slot = Arc::clone(&observer_slot);
+        let state_machine = tokio::task::spawn_blocking(move || {
+            HearthStateMachine::with_observer_slot(sm_engine, slot)
+        })
+        .await
+        .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?
+        .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?;
+        if state_machine.has_no_applied_state() {
+            let log_state = openraft::storage::RaftLogStorage::get_log_state(&mut log_store)
+                .await
+                .map_err(|e| ClusterBuildError::LogStore(e.to_string()))?;
+            refuse_restart_without_applied_state(log_state.last_purged_log_id)?;
+        }
 
         let cert_pem = tokio::fs::read(&config.tls_cert_path).await?;
         let key_pem = tokio::fs::read(&config.tls_key_path).await?;
@@ -940,6 +953,27 @@ impl IncomingRpcDispatch for ClusterEngine {
 
 // ── Background lag monitor ────────────────────────────────────────────────────
 
+/// A node whose log was purged but whose data directory holds no persisted
+/// applied state was written by an earlier release, which did not persist it:
+/// openraft would replay from index 0, which the log no longer holds, and fail
+/// deep inside `Raft::new`. Refuse with instructions instead. (A current
+/// binary persists the applied state with every entry, so it cannot reach
+/// this state: a log is purged only after a snapshot of applied entries.)
+fn refuse_restart_without_applied_state(
+    last_purged: Option<openraft::LogId<u64>>,
+) -> Result<(), ClusterBuildError> {
+    match last_purged {
+        None => Ok(()),
+        Some(purged) => Err(ClusterBuildError::RaftInit(format!(
+            "this node's Raft log is purged through index {} but its data directory holds no \
+             persisted applied state (it was written by an earlier Hearth release, or an \
+             interrupted snapshot install cleared it): it cannot be restarted in place. Re-seed it: stop it, move its data directory (including \
+             raft.db) aside, and start it empty so the leader sends it a snapshot",
+            purged.index
+        ))),
+    }
+}
+
 async fn run_lag_monitor(
     raft: openraft::Raft<HearthRaftConfig>,
     reads_allowed: Arc<AtomicBool>,
@@ -1293,6 +1327,21 @@ mod tests {
 
     fn make_realm() -> RealmId {
         RealmId::new(Uuid::new_v4())
+    }
+
+    /// A data directory written by an earlier release (no persisted applied
+    /// state) over a purged log is refused with re-seed instructions; over an
+    /// unpurged log (openraft replays it all) it starts.
+    #[test]
+    fn a_purged_log_without_persisted_applied_state_is_refused_with_instructions() {
+        assert!(refuse_restart_without_applied_state(None).is_ok());
+        let err = refuse_restart_without_applied_state(Some(LogId::new(
+            CommittedLeaderId::new(1, 1),
+            5_000,
+        )))
+        .expect_err("refused");
+        let msg = err.to_string();
+        assert!(msg.contains("5000") && msg.contains("Re-seed"), "{msg}");
     }
 
     fn open_engine(dir: &std::path::Path) -> Arc<EmbeddedStorageEngine> {
