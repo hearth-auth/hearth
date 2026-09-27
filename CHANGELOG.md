@@ -196,6 +196,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 - Backup manifest signatures verify reliably (the checksum map serialized in a random order).
   `POST /admin/backup/restore` signature refusals return the documented `error` codes.
 - The OpenAPI entry for `POST /admin/cluster/transfer-leadership` lists its real responses.
+- The admin console's *New application* form now shows a confidential application's generated
+  secret once, on the page it answers with. It used to discard it (redirecting to a page that never
+  showed a secret), so the new client could not authenticate until its secret was regenerated.
 
 <!-- End of GA software-blocker fixes. -->
 

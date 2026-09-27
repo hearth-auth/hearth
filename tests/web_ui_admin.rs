@@ -1618,6 +1618,74 @@ fn assert_fapi_rs256_refusal(status: StatusCode, body: &str) {
     );
 }
 
+/// Creating a confidential application shows its generated secret once, in
+/// the response body and never in a URL, and that secret authenticates.
+///
+/// The form used to mint the secret, register the client, and redirect to the
+/// detail page with `?secret_shown=1` — which nothing read: the page always
+/// rendered without a secret, so the secret was discarded and the new client
+/// could not authenticate until someone pressed *Regenerate secret*.
+#[tokio::test]
+async fn console_create_shows_a_confidential_applications_secret_once() {
+    const SHOWN: &str = "Client secret (shown once)";
+    let rig = build_rig();
+    let (status, location, body) = console_request(
+        &rig,
+        "/ui/admin/realms/acme/applications/new",
+        Some(
+            "client_name=Billing+Service&client_type=confidential\
+             &grant_client_credentials=1&trust_level=first_party",
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "creating a confidential application must answer with the page that shows its \
+         secret (location: {location:?})"
+    );
+    assert!(
+        location.is_empty(),
+        "the secret must not travel through a redirect"
+    );
+    let at = body
+        .find(SHOWN)
+        .expect("the response shows the new client secret");
+    let code = at + body[at..].find("<code").expect("secret element");
+    let open = code + body[code..].find('>').expect("secret element end") + 1;
+    let close = open + body[open..].find("</code>").expect("secret close");
+    let secret = body[open..close].trim().to_string();
+    assert!(
+        secret.len() >= 43,
+        "a 256-bit secret, got {} chars",
+        secret.len()
+    );
+
+    let client = rig
+        .identity
+        .list_clients(&rig.realm_id, &PageRequest::default())
+        .expect("list_clients")
+        .items
+        .into_iter()
+        .find(|c| c.client_name() == "Billing Service")
+        .expect("the application was registered");
+    rig.identity
+        .authenticate_client(&rig.realm_id, client.client_id(), Some(&secret))
+        .expect("the secret shown on creation must authenticate the new client");
+
+    // Shown once: the detail page does not show it again.
+    let (_, _, detail) = console_request(
+        &rig,
+        &format!(
+            "/ui/admin/realms/acme/applications/{}",
+            client.client_id().as_uuid()
+        ),
+        None,
+    )
+    .await;
+    assert!(!detail.contains(SHOWN) && !detail.contains(&secret));
+}
+
 /// Creating an RS256 application in a FAPI realm shows the engine's reason on
 /// the form and stores nothing; the same form with EdDSA registers.
 #[tokio::test]

@@ -474,18 +474,40 @@ pub async fn admin_app_create_submit(
     }
 
     let req = parse_app_create_form(&form);
-    let confidential = req.generated_client_secret.is_some();
     let realm_name = target.0.name().to_string();
 
     match state.identity.register_client(target.id(), &req) {
         Ok(client) => {
             audit_app_event(&state, &session, &target.0, client.client_id(), "create");
-            let secret_param = if confidential { "?secret_shown=1" } else { "" };
+            // A confidential client's secret exists only in this request:
+            // storage keeps its hash. Show it here, once, in the response body
+            // — as *Regenerate secret* does — and never in a URL, a redirect
+            // or a log. (The form used to redirect with `?secret_shown=1`,
+            // which nothing read, so the secret was discarded and the client
+            // could not authenticate until it was regenerated.) HTML responses
+            // carry `Cache-Control: no-store`.
+            if let Some(secret) = &req.generated_client_secret {
+                return render(&AppDetailTemplate {
+                    app: client,
+                    realm_name,
+                    client_secret: Some(secret.expose().to_string()),
+                    chrome: true,
+                    active: "applications",
+                    user_email: Some(session.user_email.clone()),
+                    is_admin: true,
+                    flash: None,
+                    csrf: session.csrf.clone(),
+                    narrow: false,
+                    product_name: state.product_name.clone(),
+                    logo_url: state.logo_url.clone(),
+                    realm_theme_url: state.realm_theme_url(),
+                    inline_theme_css: state.inline_theme_css(),
+                });
+            }
             Redirect::to(&format!(
-                "/ui/admin/realms/{}/applications/{}{}",
+                "/ui/admin/realms/{}/applications/{}",
                 realm_name,
                 client.client_id().as_uuid(),
-                secret_param,
             ))
             .into_response()
         }
