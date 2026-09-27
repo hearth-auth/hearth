@@ -119,8 +119,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `/introspect`, `/revoke`, `/device_authorization`, their realm twins and gRPC. These verifications
   now take a permit from the same gate (`security.password.kdf.max_in_flight`), waiting for it
   asynchronously (no thread is held while waiting), and run on the blocking pool; when no permit frees
-  within `max_queue_wait` the request gets `503` with `Retry-After` (`kdf_overloaded`; gRPC
-  `UNAVAILABLE`). A burst of such requests larger than the blocking pool is served or shed; it cannot
+  within `max_queue_wait` the request gets `503` with `Retry-After` (`kdf_overloaded`, `error_code`
+  `HEARTH_RATE_LIMITED`; gRPC `UNAVAILABLE`). A burst of such requests larger than the blocking pool is served or shed; it cannot
   hang the runtime. Hearth-generated (SHA-256) secrets are unaffected. Rotate config-managed and
   legacy clients to generated secrets to take them off this path entirely.
 - **`grant_type=client_credentials` no longer reveals which clients exist** — an unknown
@@ -205,6 +205,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   MX lookup is performed. Registration behaviour does not change.
 
 ### Fixed
+- A `503 kdf_overloaded` body (a password or client-secret hash shed by the KDF admission gate) now
+  carries `error_code: "HEARTH_RATE_LIMITED"`, like every other error body.
 - **SDK client registration authenticates (Rust, Python, PHP)** — Rust and Python sent `POST /clients`
   with no `Authorization` header and with `name` instead of `client_name`. PHP's `registerClient`
   accepts an RFC 7591 initial access token. Rust and Python `AdminClient` create/update now send the

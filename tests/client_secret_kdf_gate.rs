@@ -82,7 +82,7 @@ async fn post(
     req.send().await.expect("request")
 }
 
-fn assert_shed(resp: &reqwest::Response, what: &str) {
+async fn assert_shed(resp: reqwest::Response, what: &str) {
     assert_eq!(
         resp.status().as_u16(),
         503,
@@ -92,6 +92,11 @@ fn assert_shed(resp: &reqwest::Response, what: &str) {
     assert!(
         resp.headers().contains_key("retry-after"),
         "{what}: a shed response must carry Retry-After"
+    );
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(
+        body["error_code"], "HEARTH_RATE_LIMITED",
+        "{what}: a shed response carries the machine-readable error code: {body}"
     );
 }
 
@@ -171,7 +176,7 @@ async fn argon2_client_secrets_are_verified_behind_the_kdf_gate() {
         &introspect,
     )
     .await;
-    assert_shed(&resp, "POST /introspect");
+    assert_shed(resp, "POST /introspect").await;
 
     let resp = post(
         format!("{base}/realms/{realm_name}/revoke"),
@@ -181,7 +186,7 @@ async fn argon2_client_secrets_are_verified_behind_the_kdf_gate() {
         &[("token", "not-a-token")],
     )
     .await;
-    assert_shed(&resp, "POST /realms/{realm}/revoke");
+    assert_shed(resp, "POST /realms/{realm}/revoke").await;
 
     let resp = post(
         format!("{base}/realms/{realm_name}/token"),
@@ -191,7 +196,7 @@ async fn argon2_client_secrets_are_verified_behind_the_kdf_gate() {
         &[("grant_type", "client_credentials")],
     )
     .await;
-    assert_shed(&resp, "POST /realms/{realm}/token client_credentials");
+    assert_shed(resp, "POST /realms/{realm}/token client_credentials").await;
 
     let argon2_id = argon2_client.as_uuid().to_string();
     let resp = post(
@@ -202,7 +207,7 @@ async fn argon2_client_secrets_are_verified_behind_the_kdf_gate() {
         &[("client_id", argon2_id.as_str())],
     )
     .await;
-    assert_shed(&resp, "POST /realms/{realm}/device_authorization");
+    assert_shed(resp, "POST /realms/{realm}/device_authorization").await;
 
     // gRPC reaches the same verification.
     assert_grpc_introspect_shed(&h, &realm, &argon2_client).await;

@@ -702,7 +702,7 @@ secret it cannot hold, and an unknown client all receive `401 {"error":"invalid_
 `WWW-Authenticate: Basic` (RFC 6749 §5.2). Combining an assertion with a secret is `400
 invalid_request` (RFC 6749 §2.3). The work follows the caller's input as at the token endpoint: a
 presented secret costs one verification on every arm, no secret costs none. An Argon2id secret
-whose verification the KDF admission gate sheds is `503` `kdf_overloaded` + `Retry-After`.
+whose verification the KDF admission gate sheds is `503` `kdf_overloaded` (`error_code` `HEARTH_RATE_LIMITED`) + `Retry-After`.
 
 The pushed request is stored under the **authenticated** client. A request object (RFC 9101) must
 then carry that client as `iss` and, when it has a `client_id` claim, as `client_id` too (RFC 9101

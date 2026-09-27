@@ -2454,7 +2454,7 @@
             "description": "`invalid_client` \u2014 missing, wrong or unverifiable client authentication (carries `WWW-Authenticate: Basic`)"
           },
           "503": {
-            "description": "`kdf_overloaded` \u2014 the client-secret verification was shed by the KDF admission gate; retry after `Retry-After` seconds"
+            "description": "`kdf_overloaded` (`error_code` `HEARTH_RATE_LIMITED`) \u2014 the client-secret verification was shed by the KDF admission gate; retry after `Retry-After` seconds"
           }
         }
       }

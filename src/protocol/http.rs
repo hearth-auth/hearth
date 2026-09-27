@@ -153,7 +153,8 @@ pub(crate) fn identity_error_response(err: &crate::identity::IdentityError) -> R
 }
 
 /// Builds the `503 Service Unavailable` JSON shed response for an overloaded
-/// KDF gate, carrying a `Retry-After` header (seconds, floored to 1).
+/// KDF gate, carrying a `Retry-After` header (seconds, floored to 1) and the
+/// `HEARTH_RATE_LIMITED` error code every other shed or rate-limit body uses.
 pub(crate) fn kdf_shed_json_response(retry_after: std::time::Duration) -> Response {
     let secs = retry_after.as_secs().max(1);
     let mut resp = (
@@ -161,6 +162,7 @@ pub(crate) fn kdf_shed_json_response(retry_after: std::time::Duration) -> Respon
         axum::Json(serde_json::json!({
             "error": "kdf_overloaded",
             "error_description": "Server is busy hashing credentials. Please retry shortly.",
+            "error_code": crate::protocol::error_codes::RATE_LIMITED,
         })),
     )
         .into_response();
