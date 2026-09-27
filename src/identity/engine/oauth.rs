@@ -226,6 +226,9 @@ impl EmbeddedIdentityEngine {
         client.set_declared_scopes(request.declared_scopes.clone());
         client.set_consent_spans_orgs(request.consent_spans_orgs);
         client.set_access_token_authorization(request.access_token_authorization);
+        if let Some(jwks) = request.jwks.as_deref() {
+            Self::check_client_jwks(jwks)?;
+        }
         client.set_jwks(request.jwks.clone());
         client.set_jwks_uri(request.jwks_uri.clone());
         if let Some(ref alg) = request.authorization_signed_response_alg {
@@ -3498,6 +3501,16 @@ impl EmbeddedIdentityEngine {
             .map_or(Ok(()), Self::refuse_secret_for_fapi2_client)
     }
 
+    /// Refuses a client JWKS that is not a bounded set of public signing keys
+    /// ([`super::client_jwks::validate_client_jwks`]).
+    fn check_client_jwks(jwks: &str) -> Result<(), IdentityError> {
+        super::client_jwks::validate_client_jwks(jwks).map_err(|reason| {
+            IdentityError::InvalidInput {
+                reason: format!("invalid jwks: {reason}"),
+            }
+        })
+    }
+
     /// FAPI 2.0 clients authenticate with `private_key_jwt` only, so a FAPI
     /// 2.0 client must hold no secret and must hold a key Hearth can verify
     /// an assertion with — an inline `jwks` or an assertion key; a `jwks_uri`
@@ -3651,6 +3664,9 @@ impl EmbeddedIdentityEngine {
             client.set_authorization_signed_response_alg(alg_opt.clone());
         }
         if let Some(jwks) = &request.jwks {
+            if let Some(jwks) = jwks.as_deref() {
+                Self::check_client_jwks(jwks)?;
+            }
             client.set_jwks(jwks.clone());
         }
         if let Some(profile) = request.profile {

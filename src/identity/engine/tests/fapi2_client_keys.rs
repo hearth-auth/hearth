@@ -149,3 +149,48 @@ fn update_refuses_to_make_a_keyless_client_fapi2() {
     );
     assert_fapi_violation(outcome, "removing a FAPI 2.0 client's JWKS");
 }
+
+/// Registration and update validate a client JWKS (FAPI review L-FAPI-2):
+/// public signing keys only, bounded, unique kids — for every client, since
+/// the same keys verify request objects too.
+#[test]
+fn registration_and_update_validate_the_jwks() {
+    let (_dir, engine, _clock) = setup_engine();
+    let realm = create_test_realm(&engine);
+    let mut private: serde_json::Value = serde_json::from_str(&jwks()).expect("json");
+    private["keys"][0]["d"] = serde_json::json!("nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A");
+    let mut enc: serde_json::Value = serde_json::from_str(&jwks()).expect("json");
+    enc["keys"][0]["use"] = serde_json::json!("enc");
+    for (what, bad) in [
+        ("private key material", private.to_string()),
+        ("an encryption key", enc.to_string()),
+        ("not a JWKS", "{\"kty\":\"OKP\"}".to_string()),
+    ] {
+        let outcome = engine.register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "jar-client".to_string(),
+                redirect_uris: vec![REDIRECT.to_string()],
+                jwks: Some(bad.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(outcome, Err(IdentityError::InvalidInput { .. })),
+            "register with {what}: {outcome:?}"
+        );
+        let client = public_client(&engine, &realm);
+        let outcome = engine.update_client(
+            &realm,
+            client.client_id(),
+            &UpdateClientRequest {
+                jwks: Some(Some(bad)),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(outcome, Err(IdentityError::InvalidInput { .. })),
+            "update with {what}: {outcome:?}"
+        );
+    }
+}

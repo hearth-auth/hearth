@@ -231,7 +231,16 @@ only. A `client_assertion` is verified against the client's registered keys:
 | `jwks` (inline) | PS256, ES256, EdDSA (FAPI 2.0 §5.4; RS256 is not accepted) | the JWS `kid`, or the only key when there is no `kid`; a key whose `alg` names another algorithm is refused |
 
 `jwks_uri` is not fetched: a client registered with only a `jwks_uri` cannot authenticate and
-must register its keys inline. The assertion rules are those of §8.1 (`iss` = `sub` = the
+must register its keys inline.
+
+**A client JWKS holds public signing keys only**, checked at registration (every surface), on
+update, by `hearth config validate`, and again before every signature verification (so a set
+stored before these rules fails closed): at most 8 keys and 16 KiB; no private or symmetric
+material (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth`, `k`; `kty: oct`); `use`, when present, is
+`sig` and `key_ops`, when present, includes `verify`; `kty`/`crv` is `OKP`/`Ed25519` (EdDSA),
+`EC`/`P-256` (ES256) or `RSA` with `n` and `e` (RS256 for request objects only, PS256), and a key's
+`alg` must be one its `kty` supports; `kid`s are unique and required on every key when the set has
+more than one. A violation is `400` (`invalid_client_metadata` at dynamic registration). The assertion rules are those of §8.1 (`iss` = `sub` = the
 client, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min).
 
 **A client with keys is never public, nor is a FAPI 2.0 client.** `OAuthClient::is_public` is true

@@ -200,6 +200,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   application without `jwks` or with a secret, and an unknown `profile` value (it used to be read
   as `standard`). **Breaking** for a `profile: fapi2` application without keys in `hearth.yaml`: add
   its `jwks`.
+- **Client JWKS are validated** — a client's `jwks` (used for `private_key_jwt` assertions and
+  signed request objects) was stored unparsed, and at verification a key was picked by `kid` alone:
+  an encryption key, a key whose `kty` did not match its algorithm (EdDSA checked only `crv`), or a
+  duplicated `kid` (the first match won) could be used, and private key material was accepted and
+  stored. Registration (admin, gRPC, dynamic), update, `hearth.yaml` and verification now require
+  public signing keys only: at most 8 keys / 16 KiB, no `d`/`p`/`q`/`dp`/`dq`/`qi`/`oth`/`k`
+  (and no `kty: oct`), `use: sig` and `key_ops` including `verify` when present, `kty`/`crv`/`alg`
+  consistent (OKP/Ed25519, EC/P-256, RSA), unique `kid`s required when there is more than one key.
+  **Breaking** for a client registered with such a JWKS: re-register its public keys.
 - **A junk `client_assertion` no longer skips the client secret** — at the `authorization_code`
   exchange (`/token` and `/realms/{realm}/token`) a client that holds a secret could redeem its code
   with `client_assertion=junk` (no `client_assertion_type`, or a wrong one) and no secret, and got

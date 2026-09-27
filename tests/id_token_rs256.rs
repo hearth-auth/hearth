@@ -1217,7 +1217,9 @@ async fn concurrent_rs256_registrations_converge_on_one_rsa_key() {
 
 /// A JWKS a FAPI 2.0 client must register for `private_key_jwt`.
 fn fapi_client_jwks() -> String {
-    r#"{"keys":[{"kty":"OKP","use":"sig","alg":"EdDSA","crv":"Ed25519","kid":"fapi2-rp"}]}"#
+    // A complete public JWK: registration validates the set (the key is never
+    // used to verify anything here).
+    r#"{"keys":[{"kty":"OKP","use":"sig","alg":"EdDSA","crv":"Ed25519","kid":"fapi2-rp","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}]}"#
         .to_string()
 }
 
@@ -1371,6 +1373,9 @@ async fn an_update_cannot_combine_rs256_with_fapi() {
         &rs_client,
         &UpdateClientRequest {
             profile: Some(ClientProfile::Fapi2),
+            // Keys, so the only thing wrong with the move is RS256 (a FAPI 2.0
+            // client without keys is refused on its own account).
+            jwks: Some(Some(fapi_client_jwks())),
             ..Default::default()
         },
     );

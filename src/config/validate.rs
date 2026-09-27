@@ -1865,6 +1865,14 @@ fn validate_app_profile_keys(
     app: &super::types::ApplicationYamlConfig,
     issues: &mut Vec<ValidationIssue>,
 ) {
+    if let Some(jwks) = app.jwks_json() {
+        if let Err(reason) = crate::identity::validate_client_jwks(&jwks) {
+            issues.push(ValidationIssue {
+                field: format!("{prefix}.jwks"),
+                reason,
+            });
+        }
+    }
     let fapi2 = match app.profile.as_deref() {
         None | Some("standard") => false,
         Some("fapi2") => true,
@@ -3460,6 +3468,15 @@ realms:
         assert!(
             unknown.iter().any(|i| i.contains(".profile")),
             "an unknown profile must be refused: {unknown:?}"
+        );
+        let private = issues(&format!(
+            "        profile: fapi2\n{jwks}\n              d: nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A"
+        ));
+        assert!(
+            private
+                .iter()
+                .any(|i| i.contains(".jwks") && i.contains("private")),
+            "a JWKS carrying private key material must be refused: {private:?}"
         );
         let ok = issues(&format!("        profile: fapi2\n{jwks}"));
         assert!(ok.is_empty(), "fapi2 with an inline JWKS is valid: {ok:?}");

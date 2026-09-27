@@ -501,37 +501,31 @@ fn jar_nbf_in_future_rejected() {
 #[test]
 fn jar_wrong_crv_rejected() {
     let env = setup();
-    let (pkcs8, pub_bytes) = generate_ed25519();
+    let (_pkcs8, pub_bytes) = generate_ed25519();
 
-    // Register the client with a JWKS that has crv=Ed448 instead of Ed25519.
+    // A JWKS whose EdDSA key has crv=Ed448 instead of Ed25519 can never verify
+    // a request object, so registration refuses it outright (client JWKS
+    // validation) rather than storing a key every JAR would fail against.
     let x = URL_SAFE_NO_PAD.encode(&pub_bytes);
     let bad_crv_jwks = format!(
         r#"{{"keys":[{{"kty":"OKP","crv":"Ed448","alg":"EdDSA","kid":"{TEST_KID}","x":"{x}"}}]}}"#
     );
-    let client = register_client_with_jwks(&env, &bad_crv_jwks);
-    let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
-
-    let jar = sign_jar(
-        &pkcs8,
-        &cid_str,
-        &env.issuer,
-        None,
-        None,
-        None,
-        Some("jti-crv-1"),
-        None,
-    );
-    let req = par_with_jar(client_id, jar);
-
     let err = env
         .engine
-        .push_authorization_request(&env.realm, &req)
-        .expect_err("EdDSA JWK with crv=Ed448 must be rejected");
-
+        .register_client(
+            &env.realm,
+            &RegisterClientRequest {
+                client_name: "JAR Test Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                grant_types: vec!["authorization_code".to_string()],
+                jwks: Some(bad_crv_jwks),
+                ..Default::default()
+            },
+        )
+        .expect_err("an EdDSA JWK with crv=Ed448 must be refused");
     assert!(
-        matches!(err, IdentityError::InvalidJar { .. }),
-        "expected InvalidJar for crv=Ed448, got {err:?}"
+        matches!(err, IdentityError::InvalidInput { ref reason } if reason.contains("jwks")),
+        "expected an invalid-jwks refusal for crv=Ed448, got {err:?}"
     );
 }
 

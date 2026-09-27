@@ -81,6 +81,7 @@ pub use email::{
     MailgunEmailSender, MailtrapEmailSender, PostmarkEmailSender, SendgridEmailSender,
     SharedEmailSender, StubHttpTransport,
 };
+pub(crate) use engine::client_jwks::validate_client_jwks;
 pub use engine::cross_realm::{find_system_sourced_cross_realm_policies, SystemSourcedPolicy};
 pub use engine::{
     EmbeddedIdentityEngine, IdentityConfig, RateLimitConfig, SessionConfig, TokenIssuanceContext,
