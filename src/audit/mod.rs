@@ -86,6 +86,18 @@ impl std::fmt::Debug for AuditChainMaterial {
     }
 }
 
+/// What [`AuditEngine::import_events`] did with an archive's events.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AuditImportOutcome {
+    /// Events written into the destination chain.
+    pub imported: u64,
+    /// Events skipped because the realm already holds an event with that id.
+    pub duplicates: u64,
+    /// Whether the imported events were stamped with the import time (the
+    /// realm already held events) rather than keeping their original times.
+    pub restamped: bool,
+}
+
 pub trait AuditEngine: Send + Sync {
     /// Appends a new audit event to the log.
     ///
@@ -93,18 +105,32 @@ pub trait AuditEngine: Send + Sync {
     /// Returns the complete event including computed fields.
     fn append(&self, event: &CreateAuditEvent) -> Result<AuditEvent, AuditError>;
 
-    /// Restores an audit event from a backup archive (HEA-2160).
+    /// Restores audit events from a backup archive into `realm_id`'s chain
+    /// (HEA-2160).
     ///
-    /// Unlike [`append`](Self::append), the event's original `id`, `timestamp`,
-    /// `actor`, `action`, and resource fields are preserved; only the
-    /// `integrity_hash` is recomputed so the event re-chains under the
-    /// destination realm's HMAC key (the source realm's key is not portable
-    /// across a restore). The restored chain therefore verifies under the
-    /// destination realm even though individual hashes differ from the source.
+    /// `events` are the archive's events in their source chain order (the
+    /// caller has already checked them against the archive's own chain). Each
+    /// keeps its `id`, `actor`, `action`, resource fields and metadata, gains
+    /// an explicit `backup_restore` marker in its metadata recording its
+    /// original timestamp, and is re-chained under the destination realm's
+    /// HMAC key (the source key is not portable) **at the end of the
+    /// destination chain** — imported history never slots in before, or is
+    /// re-signed together with, events the destination already holds:
     ///
-    /// Events MUST be imported in chronological (ascending-timestamp) order so
-    /// the re-chained sequence matches the original ordering.
-    fn import_event(&self, event: &AuditEvent) -> Result<(), AuditError>;
+    /// - Into a realm whose chain holds no event, events keep their original
+    ///   timestamps (a rebuilt data directory keeps its history's times).
+    /// - Into a realm that already holds events, each is stamped with the
+    ///   import time — the original stays in the marker — so storage order
+    ///   stays chain order and the realm keeps verifying.
+    ///
+    /// An event whose `id` the realm already holds is skipped, so re-importing
+    /// an archive adds nothing. Events are written under the realm's chain lock
+    /// in atomic chunks, each advancing the signed chain head with it.
+    fn import_events(
+        &self,
+        realm_id: &RealmId,
+        events: &[AuditEvent],
+    ) -> Result<AuditImportOutcome, AuditError>;
 
     /// Returns the material a restore needs to verify an exported chain.
     ///

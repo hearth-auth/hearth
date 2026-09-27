@@ -621,15 +621,16 @@ impl BackupImporter {
         //
         // Audit events are re-chained under the destination realm's HMAC key
         // (the source key is not portable), so the integrity hash changes but
-        // the event content is preserved. They MUST be restored before any
-        // other member: the identity/RBAC `import_*` calls below emit their own
-        // fresh audit events with current timestamps, so replaying the older
-        // historical events afterwards would interleave newer-then-older records
-        // and break the tamper-evident chain (verification walks events in
-        // timestamp order, which must equal insertion order). The exporter
-        // writes events in ascending-timestamp scan order, so NDJSON line order
-        // is already chronological. Each event carries its own realm ID, which
-        // equals the restored realm ID (restore never remaps realm IDs).
+        // the event content is preserved and each event is marked as restored.
+        // `import_events` appends them at the END of the destination chain: a
+        // realm that already holds events (a live system realm, a tenant merged
+        // into itself) gets them stamped with the import time, the original
+        // kept in the marker, so storage order stays chain order. They are
+        // restored before any other member so that, into an EMPTY realm, they
+        // keep their original timestamps ahead of the fresh events the
+        // identity/RBAC `import_*` calls below emit. The exporter writes events
+        // in ascending-timestamp scan order, so NDJSON line order is the
+        // source chain order.
         let audit_key = format!("realms/{realm_slug}/audit.ndjson");
         if let Some(raw) = files.get(&audit_key) {
             let decrypted = try_decrypt(raw)?;
@@ -691,16 +692,23 @@ impl BackupImporter {
                 }
             }
 
-            for event in &events {
-                if opts.dry_run {
-                    report.audit_events.created += 1;
-                    continue;
-                }
-                match self.audit.import_event(event) {
-                    Ok(()) => report.audit_events.created += 1,
+            if opts.dry_run {
+                report.audit_events.created += events.len() as u64;
+            } else {
+                // Appended at the END of the target realm's chain, marked as
+                // restored, deduplicated by event id — so a live realm keeps a
+                // verifiable chain and a repeated restore adds nothing.
+                match self.audit.import_events(realm.id(), &events) {
+                    Ok(outcome) => {
+                        report.audit_events.created += outcome.imported;
+                        report.audit_events.skipped += outcome.duplicates;
+                    }
                     Err(e) => {
-                        warn!(err = %e, "import audit event failed");
-                        report.audit_events.errored += 1;
+                        // Chunks written before the failure are durable and
+                        // chained; the count cannot tell which, so every event
+                        // is reported as not restored.
+                        warn!(err = %e, "import audit events failed");
+                        report.audit_events.errored += events.len() as u64;
                     }
                 }
             }

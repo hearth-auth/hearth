@@ -1801,3 +1801,157 @@ async fn a_tenant_restore_naming_the_system_realm_is_refused_before_any_write() 
         "a refused restore records nothing in the caller's realm: {events:?}"
     );
 }
+
+/// Events in `realm` that a backup restore imported (carry the
+/// `backup_restore` marker).
+fn imported_events(h: &common::TestHarness, realm: &RealmId) -> usize {
+    h.audit()
+        .query(&AuditQuery::for_realm(realm.clone()))
+        .expect("audit query")
+        .iter()
+        .filter(|e| {
+            e.metadata
+                .as_ref()
+                .is_some_and(|m| m.get("backup_restore").is_some())
+        })
+        .count()
+}
+
+fn chain_ok(h: &common::TestHarness, realm: &RealmId) -> bool {
+    h.audit()
+        .verify_integrity(realm, None, None)
+        .expect("verify_integrity")
+}
+
+/// Restoring archived audit history into a LIVE realm — the system realm over
+/// HTTP, and a tenant realm merged into a live copy of itself — keeps that
+/// realm's tamper-evident chain verifiable. The archived events are older than
+/// the live ones; appended with their original timestamps they sorted before
+/// events they chained after, and verification (which walks storage order)
+/// failed. Restoring an archive whose events the realm already holds adds no
+/// duplicate.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one scenario across two instances
+async fn restoring_audit_history_into_a_live_realm_keeps_its_chain_verifiable() {
+    set_master_key();
+    let src = common::TestHarness::embedded().await.expect("src");
+    let tenant = src.create_realm();
+    src.rbac().seed_realm(&tenant).expect("seed");
+    let _ = make_admin_token(&src, &tenant).await;
+    let src_token = make_system_token(&src, "operator@hearth.test");
+    let first = sign_bytes(
+        &post_backup(
+            &src,
+            "/admin/backup?include_audit=true",
+            &src_token,
+            &system_realm(),
+        )
+        .await,
+        &test_signing_key(),
+    );
+    // More history at the source, then a second archive carrying it too.
+    let _ = make_admin_token(&src, &tenant).await;
+    let _ = make_system_token(&src, "second@hearth.test");
+    let second = sign_bytes(
+        &post_backup(
+            &src,
+            "/admin/backup?include_audit=true",
+            &src_token,
+            &system_realm(),
+        )
+        .await,
+        &test_signing_key(),
+    );
+
+    // Restoring into the source itself: every archived event is already
+    // there, so nothing is added and both chains still verify.
+    let (status, body) = post_restore(
+        &src,
+        "/admin/backup/restore?mode=merge",
+        &src_token,
+        &system_realm(),
+        &first,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(chain_ok(&src, &system_realm()), "src system chain verifies");
+    assert!(chain_ok(&src, &tenant), "src tenant chain verifies");
+    assert_eq!(imported_events(&src, &tenant), 0, "nothing is duplicated");
+
+    // A live instance with its own system-realm history.
+    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst_token = make_system_token(&dst, "dst-operator@hearth.test");
+    let (status, body) = post_restore(
+        &dst,
+        "/admin/backup/restore",
+        &dst_token,
+        &system_realm(),
+        &first,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        chain_ok(&dst, &system_realm()),
+        "the live system realm's audit chain must verify after the restore"
+    );
+    assert!(
+        chain_ok(&dst, &tenant),
+        "the restored tenant realm verifies"
+    );
+    let after_first = (
+        imported_events(&dst, &system_realm()),
+        imported_events(&dst, &tenant),
+    );
+    assert!(
+        after_first.0 > 0 && after_first.1 > 0,
+        "the archived history is imported and marked: {after_first:?}"
+    );
+
+    // The tenant realm is now live on dst and gains newer history; merging
+    // the second archive adds the source's later events after it.
+    let _ = make_admin_token(&dst, &tenant).await;
+    for round in 1..=2 {
+        let (status, body) = post_restore(
+            &dst,
+            "/admin/backup/restore?mode=merge",
+            &dst_token,
+            &system_realm(),
+            &second,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "round {round}: {body}");
+        assert!(
+            chain_ok(&dst, &system_realm()),
+            "round {round}: the system realm verifies"
+        );
+        assert!(
+            chain_ok(&dst, &tenant),
+            "round {round}: a tenant realm merged while live verifies"
+        );
+    }
+    let after_second = (
+        imported_events(&dst, &system_realm()),
+        imported_events(&dst, &tenant),
+    );
+    assert!(
+        after_second.0 > after_first.0 && after_second.1 > after_first.1,
+        "the second archive's later events are imported: {after_first:?} -> {after_second:?}"
+    );
+    let (status, body) = post_restore(
+        &dst,
+        "/admin/backup/restore?mode=merge",
+        &dst_token,
+        &system_realm(),
+        &second,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        (
+            imported_events(&dst, &system_realm()),
+            imported_events(&dst, &tenant)
+        ),
+        after_second,
+        "re-importing the same archive must not duplicate events"
+    );
+}
