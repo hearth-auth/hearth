@@ -310,13 +310,27 @@ served it and announced to the others by bumping the replicated control epoch. W
 be persisted (for example a leader change between the control's write and its bump, or while Raft
 has no leader) the control still binds on the serving node and the admin call still succeeds; the
 failed bump is logged at `ERROR`, counted in `hearth_control_epoch_bump_failures_total`, and
-recorded as **owed**. That node's control-cache reloader retries the owed bump with backoff (100 ms
-doubling to 5 s) until it succeeds; `hearth_control_epoch_bumps_owed` is the number of controls
-still waiting, and returns to 0 when the retry lands and every other node reloads. While it is
-above 0 the other nodes are enforcing stale controls. The owed count lives in memory: if the serving
-node stops before the retry succeeds, the other nodes catch up at the next control asserted
-anywhere. A control-epoch row that does not decode is repaired by the state machine on the next
-bump (every node the same way).
+recorded as **owed**. What happens next depends on why it failed:
+
+- **The node is still the leader** (a write timeout, a storage fault): a background thread on that
+  node retries the owed bump with backoff (100 ms doubling to 5 s) until it succeeds, and every
+  other node then reloads.
+- **Leadership moved** (the node is now a follower, or no leader was known): followers cannot write
+  — Hearth does not forward a follower's writes to the leader — so the bump could never succeed
+  there. Instead, **every node that becomes the Raft leader bumps the control epoch once**. The
+  control's row was committed before that bump in the new leader's log, so every node, the new
+  leader included, reloads and enforces it. The old leader drops what it owed (logged once at
+  `INFO`), and the gauge returns to 0.
+
+`hearth_control_epoch_bumps_owed` is the number of controls still waiting, summed over the
+process. **Alert when it stays above 0 for more than a minute**: the node that owes the bump still
+believes it is the leader but cannot commit (it lost its quorum, or storage is failing), and until
+it succeeds or steps down the other nodes enforce stale controls. Check `/admin/cluster/status` on
+that node; if another node has been elected, step the stuck node down or restart it. Any election
+— including the one that follows restarting the stuck leader — makes every node reload, and so does
+the next control asserted anywhere. The owed count lives in memory: a node that stops while owing
+loses the count, and the election that follows covers it. A control-epoch row that does not decode
+is repaired by the state machine on the next bump (every node the same way).
 
 ---
 

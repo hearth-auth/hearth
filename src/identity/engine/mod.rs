@@ -636,9 +636,9 @@ pub struct EmbeddedIdentityEngine {
     /// only compares epochs and signals that thread; it never takes a lock or
     /// waits for a reload. See [`control`] for the ordering argument.
     control: Arc<control::ControlPlane>,
-    /// The background reloader, joined when the engine drops so no thread
+    /// The background reloader and bump threads, joined when the engine drops so no thread
     /// outlives the storage handle it reads.
-    control_worker: Option<std::thread::JoinHandle<()>>,
+    control_worker: Vec<std::thread::JoinHandle<()>>,
     /// Micros timestamp before which the hot path skips epoch reconciliation.
     ///
     /// Reconciling both epochs costs two storage reads, and the validation hot
@@ -1002,6 +1002,12 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
         }
     }
 
+    fn on_leadership_acquired(&self) {
+        // Only a flag and an unpark: the control plane's bump thread makes the
+        // bump (a storage write must not run on the Raft watch task).
+        self.control.on_leadership_acquired();
+    }
+
     fn on_replicated_reset(&self) {
         self.rbac.on_replicated_snapshot();
         self.audit.on_replicated_snapshot();
@@ -1024,7 +1030,7 @@ impl Drop for EmbeddedIdentityEngine {
         // Stop and join the reloader so it never outlives this engine's
         // storage handle (a restart in the same process reopens the store).
         self.control.shutdown();
-        if let Some(worker) = self.control_worker.take() {
+        for worker in std::mem::take(&mut self.control_worker) {
             let _ = worker.join();
         }
     }
@@ -1330,7 +1336,7 @@ impl EmbeddedIdentityEngine {
             realm_id_token_rsa_retiring_keys: Arc::new(ShardedEpochMap::new()),
             realm_key_epoch: Arc::new(ShardedEpochMap::new()),
             control: Arc::clone(&control),
-            control_worker: None,
+            control_worker: Vec::new(),
             epoch_sync_after: AtomicI64::new(0),
             realm_status_cache: Arc::clone(&caches.realm_status),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
@@ -1758,7 +1764,7 @@ impl EmbeddedIdentityEngine {
             realm_id_token_rsa_retiring_keys: Arc::new(ShardedEpochMap::new()),
             realm_key_epoch: Arc::new(ShardedEpochMap::new()),
             control: Arc::clone(&control),
-            control_worker: None,
+            control_worker: Vec::new(),
             epoch_sync_after: AtomicI64::new(0),
             realm_status_cache: Arc::clone(&caches.realm_status),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.

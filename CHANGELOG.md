@@ -135,10 +135,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   forgotten: the control's row was already written and the admin call succeeded, but other nodes
   learn of a realm status change, DPoP key block or session deletion only through the epoch, so a
   bump lost to (for example) a leader change between the two Raft proposals left them enforcing the
-  stale control indefinitely. The failed bump is now owed and the control-cache reloader retries it
-  with backoff (100 ms doubling to 5 s) until it succeeds; the new
-  `hearth_control_epoch_bumps_owed` gauge counts controls still waiting — alert on it staying
-  above 0.
+  stale control indefinitely. The failed bump is now owed, and a background thread (not the
+  control-cache reloader, which keeps reloading meanwhile) retries it with backoff (100 ms doubling
+  to 5 s) while the node still leads. A bump lost because leadership moved can never be made by the
+  old leader — followers do not forward writes — so **every node that becomes the Raft leader now
+  bumps the control epoch once**, which makes every node (the new leader included) reload and
+  enforce controls committed under the previous leader; the old leader drops what it owed when
+  refused as `NotLeader`. The new `hearth_control_epoch_bumps_owed` gauge (summed over the process)
+  counts controls still waiting — alert on it staying above 0: a node that believes it leads cannot
+  commit; step it down or restart it (clustering guide).
 - **Cluster: deleting a user ends its sessions on every node** — the delete removed the user's
   sessions and evicted them from the serving node's cache only; another node that had one cached
   kept accepting the deleted user's tokens (a cache hit never reads storage) until something else

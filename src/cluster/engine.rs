@@ -152,8 +152,17 @@ impl ClusterEngine {
     /// startup.
     pub fn set_replicated_write_observer(&self, observer: Arc<dyn ReplicatedWriteObserver>) {
         if let Some(slot) = &self.observer_slot {
-            if slot.set(observer).is_err() {
+            if slot.set(Arc::clone(&observer)).is_err() {
                 warn!("replicated-write observer already set; ignoring second registration");
+                return;
+            }
+            // The leadership watch drops a transition it sees before an
+            // observer exists; a node that already leads when the observer
+            // arrives is told now. Both firing costs one extra epoch bump.
+            if let Some(raft) = &self.raft {
+                if raft.metrics().borrow().state == ServerState::Leader {
+                    observer.on_leadership_acquired();
+                }
             }
         }
     }
@@ -263,6 +272,7 @@ impl ClusterEngine {
         tokio::spawn(async move {
             run_lag_monitor(raft_for_monitor, reads_flag, threshold).await;
         });
+        tokio::spawn(watch_leadership(raft.clone(), Arc::clone(&observer_slot)));
 
         // Build initial membership map for use by the bootstrap HTTP handler.
         let mut initial_members = BTreeMap::new();
@@ -1117,12 +1127,62 @@ impl ClusterStorageAdapter {
     }
 }
 
-fn cluster_to_storage_err(e: ClusterError) -> crate::storage::StorageError {
+/// Tells the replicated-write observer each time this node wins leadership —
+/// once per term it leads, however quickly the metrics change around it.
+///
+/// A control's durable row and its control-epoch bump are two Raft proposals.
+/// When leadership moves between them the bump is lost, and cluster storage
+/// has no follower-to-leader forwarding, so the old leader can never make it
+/// up; the observer bumps the epoch on the new leader instead (see the
+/// identity engine's control plane). Exits when the Raft instance shuts down.
+async fn watch_leadership(
+    raft: openraft::Raft<HearthRaftConfig>,
+    observer: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>>,
+) {
+    let mut metrics = raft.metrics();
+    let mut led_term: Option<u64> = None;
+    loop {
+        let won = {
+            let m = metrics.borrow_and_update();
+            let won = m.state == ServerState::Leader && led_term != Some(m.current_term);
+            if won {
+                led_term = Some(m.current_term);
+            }
+            won
+        };
+        if won {
+            if let Some(observer) = observer.get() {
+                observer.on_leadership_acquired();
+            }
+        }
+        if metrics.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// How a [`ClusterError::NotLeader`] reads once carried as a
+/// [`crate::storage::StorageError::Io`] (see [`cluster_to_storage_err`]).
+const NOT_LEADER_PREFIX: &str = "raft: not the leader";
+
+/// Whether a storage error is cluster storage refusing a write because this
+/// node is not the Raft leader.
+///
+/// Cluster storage does not forward a follower's write to the leader, so such
+/// a write can never succeed on this node until it leads again — a caller
+/// retrying one is waiting on an election, not on a transient fault.
+pub fn is_not_leader(err: &crate::storage::StorageError) -> bool {
+    matches!(err, crate::storage::StorageError::Io(e) if e.to_string().starts_with(NOT_LEADER_PREFIX))
+}
+
+/// Maps a [`ClusterError`] onto the [`crate::storage::StorageError`] the
+/// [`StorageEngine`] facade returns.
+pub(crate) fn cluster_to_storage_err(e: ClusterError) -> crate::storage::StorageError {
     use crate::storage::StorageError;
     match e {
         ClusterError::Storage(se) => se,
         ClusterError::NotLeader { leader_addr } => StorageError::Io(std::io::Error::other(
-            format!("raft: not the leader; redirect to {leader_addr}"),
+            format!("{NOT_LEADER_PREFIX}; redirect to {leader_addr}"),
         )),
         ClusterError::ReplicationLagExceeded { leader_addr } => {
             StorageError::Io(std::io::Error::other(format!(

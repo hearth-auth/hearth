@@ -66,6 +66,25 @@
 //! it started: any later reload on another node rescans every control row, so
 //! one bump covers them all, and a bump that turns out to be extra only costs
 //! other nodes one reload. The validation path never looks at owed bumps.
+//!
+//! The retry runs on a thread of its own, never the reloader's: one attempt
+//! can block for a whole `cluster.write_timeout_ms` on a leader that lost its
+//! quorum, and the reloader must keep reloading for controls asserted
+//! elsewhere meanwhile.
+//!
+//! # Leader changes
+//!
+//! Cluster storage does not forward a follower's write to the leader, so a
+//! bump lost because leadership moved can never be made by the node that owes
+//! it. Two rules cover that case:
+//!
+//! * a node that becomes the Raft leader bumps the epoch once
+//!   ([`ControlPlane::on_leadership_acquired`]). Every control row committed
+//!   under an earlier leader is in the new leader's log before that bump, so
+//!   every node — the new leader included, which does not record the bump as
+//!   its own — reloads and finds them;
+//! * a node whose owed bump is refused as `NotLeader` drops what it owes: the
+//!   bump of whichever node is (or will be) elected covers it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -257,12 +276,17 @@ pub(super) struct ControlPlane {
     /// Controls whose epoch bump failed and has not been made up yet (see
     /// "Owed bumps" in the module docs).
     owed_bumps: AtomicU64,
+    /// This node became the Raft leader and has not bumped the epoch for it
+    /// yet (see "Leader changes" in the module docs).
+    election_bump_due: AtomicBool,
     /// Taken only by control writers and the reloader — never by validation.
     journal: Mutex<Journal>,
     /// One reload at a time (the background thread and a snapshot install).
     reload_exclusive: Mutex<()>,
     /// The reloader thread, once started, for `unpark`.
     worker: OnceLock<Thread>,
+    /// The bump thread (owed and election bumps), once started, for `unpark`.
+    bump_worker: OnceLock<Thread>,
     /// The runtime the engine was built in: cluster storage reads block on
     /// it, so the reloader thread enters it.
     runtime: Option<tokio::runtime::Handle>,
@@ -301,9 +325,11 @@ impl ControlPlane {
             local_bumps: std::sync::atomic::AtomicUsize::new(0),
             parked_overflow_reported: AtomicBool::new(false),
             owed_bumps: AtomicU64::new(0),
+            election_bump_due: AtomicBool::new(false),
             journal: Mutex::new(Journal::default()),
             reload_exclusive: Mutex::new(()),
             worker: OnceLock::new(),
+            bump_worker: OnceLock::new(),
             runtime: tokio::runtime::Handle::try_current().ok(),
             #[cfg(test)]
             scan_hook: Mutex::new(None),
@@ -312,11 +338,12 @@ impl ControlPlane {
         })
     }
 
-    /// Starts the background reloader. Returns its handle for the owner to
-    /// join after [`Self::shutdown`], or `None` if the thread could not be
-    /// spawned (validation then relies on start-up state and local writes;
-    /// the failure is logged).
-    pub(super) fn start(self: &Arc<Self>) -> Option<JoinHandle<()>> {
+    /// Starts the background reloader and the bump thread. Returns their
+    /// handles for the owner to join after [`Self::shutdown`]; a thread that
+    /// could not be spawned is logged and left out (validation then relies on
+    /// start-up state and local writes).
+    pub(super) fn start(self: &Arc<Self>) -> Vec<JoinHandle<()>> {
+        let mut handles = Vec::with_capacity(2);
         let plane = Arc::clone(self);
         match std::thread::Builder::new()
             .name("hearth-control-reload".to_string())
@@ -324,23 +351,37 @@ impl ControlPlane {
         {
             Ok(handle) => {
                 let _ = self.worker.set(handle.thread().clone());
-                Some(handle)
+                handles.push(handle);
             }
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "could not start the control-cache reloader; controls asserted on other \
-                     nodes will bind here only after a restart"
-                );
-                None
-            }
+            Err(err) => tracing::error!(
+                error = %err,
+                "could not start the control-cache reloader; controls asserted on other \
+                 nodes will bind here only after a restart"
+            ),
         }
+        let plane = Arc::clone(self);
+        match std::thread::Builder::new()
+            .name("hearth-control-bump".to_string())
+            .spawn(move || plane.run_bumps())
+        {
+            Ok(handle) => {
+                let _ = self.bump_worker.set(handle.thread().clone());
+                handles.push(handle);
+            }
+            Err(err) => tracing::error!(
+                error = %err,
+                "could not start the control-epoch bump thread; a failed control-epoch bump \
+                 will not be retried"
+            ),
+        }
+        handles
     }
 
-    /// Stops the background reloader; the owner then joins its handle.
+    /// Stops the background threads; the owner then joins their handles.
     pub(super) fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
         self.wake();
+        self.wake_bumps();
     }
 
     /// The control epoch the caches are known to reflect.
@@ -383,9 +424,18 @@ impl ControlPlane {
     /// Records that a control's epoch bump failed: the reloader retries it
     /// until it succeeds, so other nodes still learn of the control.
     pub(super) fn owe_bump(&self) {
-        let owed = self.owed_bumps.fetch_add(1, Ordering::AcqRel) + 1;
-        publish_owed(owed);
-        self.wake();
+        self.owed_bumps.fetch_add(1, Ordering::AcqRel);
+        owed_gauge_add(1);
+        self.wake_bumps();
+    }
+
+    /// This node just became the Raft leader: bump the epoch once, so every
+    /// node reloads for any control row committed under the previous leader
+    /// whose own bump was lost. Fast and non-blocking — the bump thread makes
+    /// the bump.
+    pub(super) fn on_leadership_acquired(&self) {
+        self.election_bump_due.store(true, Ordering::Release);
+        self.wake_bumps();
     }
 
     /// Controls whose epoch bump is still owed.
@@ -393,31 +443,89 @@ impl ControlPlane {
         self.owed_bumps.load(Ordering::Acquire)
     }
 
-    /// Makes up the owed bumps with one increment of the persisted epoch.
-    /// Only the reloader thread calls this.
+    /// Makes up the owed bumps, and the election bump when one is due, with
+    /// one increment of the persisted epoch. Only the bump thread calls this.
     ///
     /// Pays only the bumps owed when it started: a control whose bump failed
     /// while this increment was in flight may have written its row after the
     /// increment was ordered, so it stays owed and gets a bump of its own.
+    ///
+    /// Refused as `NotLeader`, the owed bumps are dropped rather than retried:
+    /// see "Leader changes" in the module docs.
     fn pay_owed_bumps(&self) -> Result<(), crate::storage::StorageError> {
         let owed = self.owed_bumps.load(Ordering::Acquire);
-        if owed == 0 {
+        let election = self.election_bump_due.swap(false, Ordering::AcqRel);
+        if owed == 0 && !election {
             return Ok(());
         }
-        let next = self
+        // Held only when the bump is recorded as this node's own (below), so
+        // the reloader does not reload for it.
+        let in_flight = (!election).then(|| self.begin_local_bump());
+        match self
             .storage
-            .increment_u64(&keys::system_realm_id(), &keys::encode_control_epoch())?;
-        let left = self.owed_bumps.fetch_sub(owed, Ordering::AcqRel) - owed;
-        publish_owed(left);
-        // This node applied those controls already: record the epoch the bump
-        // produced so it does not reload for its own bump.
-        self.apply(None, Some(next));
-        tracing::info!(
-            paid = owed,
-            epoch = next,
-            "control epoch bump made up; other nodes now reload for the controls it was owed for"
-        );
-        Ok(())
+            .increment_u64(&keys::system_realm_id(), &keys::encode_control_epoch())
+        {
+            Ok(next) => {
+                self.settle_owed(owed);
+                if election {
+                    // Not recorded: this node was a follower until now and may
+                    // itself trail a control whose bump was lost, so it reloads
+                    // for this bump like every other node.
+                    tracing::info!(
+                        paid = owed,
+                        epoch = next,
+                        "control epoch bumped on becoming the Raft leader; every node reloads \
+                         its control caches"
+                    );
+                } else {
+                    // This node applied those controls already: record the
+                    // epoch the bump produced so it does not reload for it.
+                    self.apply(None, Some(next));
+                    tracing::info!(
+                        paid = owed,
+                        epoch = next,
+                        "control epoch bump made up; other nodes now reload for the controls \
+                         it was owed for"
+                    );
+                }
+                drop(in_flight);
+                Ok(())
+            }
+            Err(err) if crate::cluster::is_not_leader(&err) => {
+                // This node no longer leads, and cluster storage does not
+                // forward its writes: the bump can never succeed here. The
+                // node that is (or will be) elected bumps the epoch when it
+                // takes over, after every row this node committed.
+                self.settle_owed(owed);
+                if owed > 0 {
+                    tracing::info!(
+                        dropped = owed,
+                        "owed control epoch bumps dropped: this node is no longer the Raft \
+                         leader, and the new leader's election bump makes every node reload"
+                    );
+                }
+                Ok(())
+            }
+            Err(err) => {
+                if election {
+                    self.election_bump_due.store(true, Ordering::Release);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// Removes `paid` from the owed count and from the process-wide gauge.
+    fn settle_owed(&self, paid: u64) {
+        if paid > 0 {
+            self.owed_bumps.fetch_sub(paid, Ordering::AcqRel);
+            owed_gauge_sub(paid);
+        }
+    }
+
+    /// Whether a bump (owed or election) is waiting to be made.
+    fn bump_due(&self) -> bool {
+        self.owed_bumps() > 0 || self.election_bump_due.load(Ordering::Acquire)
     }
 
     /// Asks the reloader for a full reload whatever the epochs say.
@@ -430,6 +538,12 @@ impl ControlPlane {
         #[cfg(test)]
         self.wakes.fetch_add(1, Ordering::Relaxed);
         if let Some(worker) = self.worker.get() {
+            worker.unpark();
+        }
+    }
+
+    fn wake_bumps(&self) {
+        if let Some(worker) = self.bump_worker.get() {
             worker.unpark();
         }
     }
@@ -813,40 +927,43 @@ impl ControlPlane {
         }
     }
 
-    /// Retries owed bumps when one is due. Returns when the next retry is due
-    /// if bumps are still owed.
-    fn retry_owed_bumps(
-        &self,
-        retry_at: &mut Option<Instant>,
-        backoff: &mut Duration,
-    ) -> Option<Instant> {
-        if self.owed_bumps() == 0 {
-            *retry_at = None;
-            *backoff = RETRY_MIN;
-            return None;
-        }
-        if retry_at.is_some_and(|at| Instant::now() < at) {
-            return *retry_at;
-        }
-        match self.pay_owed_bumps() {
-            Ok(()) => {
-                *backoff = RETRY_MIN;
-                *retry_at = None;
+    /// The bump thread's loop: makes owed and election bumps, with bounded
+    /// backoff after a failure. Each attempt is panic-isolated like a reload,
+    /// so a panic in storage cannot end the retries.
+    fn run_bumps(self: Arc<Self>) {
+        let _runtime = self.runtime.as_ref().map(tokio::runtime::Handle::enter);
+        let mut backoff = RETRY_MIN;
+        loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                return;
             }
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    owed = self.owed_bumps(),
-                    retry_in_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
-                    "could not make up an owed control epoch bump; other nodes do not yet \
-                     enforce the controls it is owed for"
-                );
-                *retry_at = Some(Instant::now() + *backoff);
-                *backoff = (*backoff * 2).min(RETRY_MAX);
+            if !self.bump_due() {
+                std::thread::park_timeout(IDLE_RECHECK);
+                continue;
+            }
+            let outcome =
+                catch_unwind(AssertUnwindSafe(|| self.pay_owed_bumps())).unwrap_or_else(|_| {
+                    Err(crate::storage::StorageError::Io(std::io::Error::other(
+                        "control epoch bump panicked",
+                    )))
+                });
+            match outcome {
+                Ok(()) => backoff = RETRY_MIN,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        owed = self.owed_bumps(),
+                        retry_in_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
+                        "could not make up an owed control epoch bump; other nodes do not yet \
+                         enforce the controls it is owed for"
+                    );
+                    if !self.pause_until(Instant::now() + backoff) {
+                        return;
+                    }
+                    backoff = (backoff * 2).min(RETRY_MAX);
+                }
             }
         }
-        // A bump owed during the attempt is retried on the next pass.
-        (self.owed_bumps() > 0).then(|| retry_at.unwrap_or_else(Instant::now))
     }
 
     /// The background reloader's loop.
@@ -854,19 +971,12 @@ impl ControlPlane {
         let _runtime = self.runtime.as_ref().map(tokio::runtime::Handle::enter);
         let mut last_start: Option<Instant> = None;
         let mut backoff = RETRY_MIN;
-        let mut bump_retry_at: Option<Instant> = None;
-        let mut bump_backoff = RETRY_MIN;
         loop {
             if self.shutdown.load(Ordering::Acquire) {
                 return;
             }
-            let bump_due = self.retry_owed_bumps(&mut bump_retry_at, &mut bump_backoff);
             if !self.reload_wanted() {
-                let idle = bump_due.map_or(IDLE_RECHECK, |at| {
-                    at.saturating_duration_since(Instant::now())
-                        .min(IDLE_RECHECK)
-                });
-                std::thread::park_timeout(idle);
+                std::thread::park_timeout(IDLE_RECHECK);
                 continue;
             }
             let mut not_before = Instant::now() + RELOAD_SETTLE;
@@ -974,12 +1084,32 @@ pub(super) fn revoked_jti_cache_key(realm: &RealmId, jti: &str) -> String {
     format!("{}:{}", realm.as_uuid(), jti)
 }
 
-/// Exports the owed-bump count (`hearth_control_epoch_bumps_owed`).
-fn publish_owed(owed: u64) {
+/// Adds to `hearth_control_epoch_bumps_owed`.
+///
+/// The gauge is process-wide and a process can hold several identity engines
+/// (each with its own control plane), so every plane adds and removes its own
+/// contribution — the gauge is the sum over live planes — instead of setting
+/// its own count, which would show whichever plane wrote last.
+fn owed_gauge_add(n: u64) {
     #[allow(clippy::cast_precision_loss)] // a count of failed bumps: far below 2^52
     crate::metrics::metrics()
         .control_epoch_bumps_owed
-        .set(owed as f64);
+        .add(n as f64);
+}
+
+/// Removes from `hearth_control_epoch_bumps_owed`; see [`owed_gauge_add`].
+fn owed_gauge_sub(n: u64) {
+    #[allow(clippy::cast_precision_loss)] // a count of failed bumps: far below 2^52
+    crate::metrics::metrics()
+        .control_epoch_bumps_owed
+        .sub(n as f64);
+}
+
+impl Drop for ControlPlane {
+    fn drop(&mut self) {
+        // A dropped plane owes nothing any more: take its share off the gauge.
+        owed_gauge_sub(*self.owed_bumps.get_mut());
+    }
 }
 
 /// One in-flight local control bump; see [`ControlPlane::begin_local_bump`].

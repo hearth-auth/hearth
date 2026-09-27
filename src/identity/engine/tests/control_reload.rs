@@ -36,6 +36,14 @@ struct FaultStorage {
     fail_scans: AtomicBool,
     /// Refuse `increment_u64` (a control-epoch bump) while set.
     fail_increments: AtomicBool,
+    /// Refuse `increment_u64` with the error cluster storage returns on a
+    /// node that is not the Raft leader, while set.
+    not_leader_increments: AtomicBool,
+    /// Hold every `increment_u64` (block the caller) while set — a Raft
+    /// proposal waiting out `write_timeout` on a leader that lost its quorum.
+    hold_increments: AtomicBool,
+    /// Every `increment_u64` call, refused or not.
+    increment_attempts: AtomicUsize,
     /// Scans refused while `fail_scans` was set.
     failed_scans: AtomicUsize,
     writes: AtomicUsize,
@@ -53,6 +61,9 @@ impl FaultStorage {
             inner,
             fail_scans: AtomicBool::new(false),
             fail_increments: AtomicBool::new(false),
+            not_leader_increments: AtomicBool::new(false),
+            hold_increments: AtomicBool::new(false),
+            increment_attempts: AtomicUsize::new(0),
             failed_scans: AtomicUsize::new(0),
             writes: AtomicUsize::new(0),
             on_increment: std::sync::Mutex::new(None),
@@ -127,6 +138,17 @@ impl StorageEngine for FaultStorage {
     }
 
     fn increment_u64(&self, realm_id: &RealmId, key: &[u8]) -> Result<u64, StorageError> {
+        self.increment_attempts.fetch_add(1, Ordering::SeqCst);
+        while self.hold_increments.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if self.not_leader_increments.load(Ordering::SeqCst) {
+            return Err(crate::cluster::engine::cluster_to_storage_err(
+                crate::cluster::ClusterError::NotLeader {
+                    leader_addr: "unknown".to_string(),
+                },
+            ));
+        }
         if self.fail_increments.load(Ordering::SeqCst) {
             return Err(StorageError::Io(std::io::Error::other(
                 "injected increment failure (e.g. a leader change between two proposals)",
@@ -812,7 +834,13 @@ fn a_failed_epoch_bump_is_retried_until_other_nodes_bind() {
         .validate_token(&realm, &token)
         .expect("precondition: without the bump the other node has not reloaded");
 
-    // The fault clears (a new leader is elected); the owed bump must go out.
+    // The fault clears on this same node — a transient failure (a write
+    // timeout, say) while it is still the leader — and the owed bump must go
+    // out. A leader change is a different case: the node that owes the bump is
+    // then a follower that can never make it, and the new leader's election
+    // bump covers it instead
+    // (`a_bump_refused_as_not_leader_is_dropped_not_retried` here, and the
+    // real leader change in `tests/cluster_three_node_control_coherence.rs`).
     fault.fail_increments.store(false, Ordering::SeqCst);
     let deadline = Instant::now() + CONVERGE;
     let mut bound = false;
@@ -837,4 +865,204 @@ fn a_failed_epoch_bump_is_retried_until_other_nodes_bind() {
         0,
         "a successful retry pays the owed bump"
     );
+}
+
+/// Cluster storage has no follower-to-leader write forwarding: once
+/// leadership moved, every bump a node owes is refused as `NotLeader`, forever.
+/// It used to be retried every 5 s for as long as the node lived. The node
+/// now drops those bumps — the new leader bumps the epoch when it is elected,
+/// and that bump orders after every control row the old leader committed —
+/// and stops retrying.
+#[test]
+fn a_bump_refused_as_not_leader_is_dropped_not_retried() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = open_storage(&dir);
+    let fault = FaultStorage::over(Arc::clone(&shared));
+    let faulty_storage = Arc::clone(&fault) as Arc<dyn StorageEngine>;
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let node = engine_over(&faulty_storage, &clock);
+    let (realm, _token) = seed_token(&node);
+
+    fault.not_leader_increments.store(true, Ordering::SeqCst);
+    suspend(&node, &realm);
+
+    let deadline = Instant::now() + CONVERGE;
+    while node.control.owed_bumps() > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        node.control.owed_bumps(),
+        0,
+        "a bump refused as NotLeader must be dropped, not owed forever"
+    );
+    // And not retried: nothing is owed any more, so no further increment.
+    let attempts = fault.increment_attempts.load(Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        fault.increment_attempts.load(Ordering::SeqCst),
+        attempts,
+        "a dropped bump must not be retried"
+    );
+    #[allow(clippy::float_cmp)] // an integral count stored as f64
+    {
+        assert_eq!(
+            crate::metrics::metrics().control_epoch_bumps_owed.get(),
+            0.0,
+            "the owed gauge must not keep counting a dropped bump"
+        );
+    }
+}
+
+/// A node that becomes the Raft leader bumps the control epoch once, so
+/// every node — itself included — reloads and picks up any control row
+/// committed under the previous leader whose own bump never went out.
+#[test]
+fn becoming_leader_bumps_the_epoch_once_and_every_node_reloads() {
+    use crate::cluster::ReplicatedWriteObserver as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = open_storage(&dir);
+    let fault = FaultStorage::over(Arc::clone(&shared));
+    let faulty_storage = Arc::clone(&fault) as Arc<dyn StorageEngine>;
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+
+    // The old leader: its row writes land, its bumps never do.
+    let old_leader = engine_over(&faulty_storage, &clock);
+    let (realm, token) = seed_token(&old_leader);
+    let bystander = engine_over(&shared, &clock);
+    let new_leader = engine_over(&shared, &clock);
+    for node in [&bystander, &new_leader] {
+        node.validate_token(&realm, &token).expect("warm");
+    }
+    fault.fail_increments.store(true, Ordering::SeqCst);
+    suspend(&old_leader, &realm);
+    clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
+    for node in [&bystander, &new_leader] {
+        node.validate_token(&realm, &token)
+            .expect("precondition: the failed bump left the other nodes unaware");
+    }
+
+    let sys = keys::system_realm_id();
+    let epoch_key = keys::encode_control_epoch();
+    let read_epoch = || {
+        crate::storage::decode_u64_counter(shared.get(&sys, &epoch_key).expect("get").as_deref())
+            .expect("epoch")
+    };
+    let before = read_epoch();
+    new_leader.on_leadership_acquired();
+
+    for (name, node) in [("bystander", &bystander), ("new leader", &new_leader)] {
+        let deadline = Instant::now() + CONVERGE;
+        let mut bound = false;
+        while Instant::now() < deadline {
+            clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
+            if matches!(
+                node.validate_token(&realm, &token),
+                Err(IdentityError::RealmSuspended)
+            ) {
+                bound = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            bound,
+            "the {name} never bound a control committed under the previous leader: \
+             becoming leader must bump the control epoch"
+        );
+    }
+    assert_eq!(
+        read_epoch(),
+        before + 1,
+        "one leadership acquisition is one epoch bump"
+    );
+}
+
+/// An owed bump retry can block for a whole `write_timeout` (10 s by
+/// default) on a leader that lost its quorum. It used to run on the reloader
+/// thread, so while it blocked this node reloaded for nothing: controls
+/// asserted on other nodes went unenforced here. The retry now runs off the
+/// reloader's path.
+#[test]
+fn a_blocked_bump_retry_does_not_hold_up_reloads() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = open_storage(&dir);
+    let fault = FaultStorage::over(Arc::clone(&shared));
+    let faulty_storage = Arc::clone(&fault) as Arc<dyn StorageEngine>;
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+
+    let other = engine_over(&shared, &clock);
+    let (realm, token) = seed_token(&other);
+    let node = engine_over(&faulty_storage, &clock);
+    // Releases the held increment before `node` drops (locals drop in reverse
+    // order), so its threads can be joined.
+    struct Release(Arc<FaultStorage>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.hold_increments.store(false, Ordering::SeqCst);
+        }
+    }
+    let _release = Release(Arc::clone(&fault));
+    node.validate_token(&realm, &token).expect("warm");
+
+    // This node owes a bump, and its retry is now stuck inside the increment.
+    let (own_realm, _) = seed_token(&node);
+    fault.fail_increments.store(true, Ordering::SeqCst);
+    suspend(&node, &own_realm);
+    fault.fail_increments.store(false, Ordering::SeqCst);
+    let attempts = fault.increment_attempts.load(Ordering::SeqCst);
+    fault.hold_increments.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + CONVERGE;
+    while fault.increment_attempts.load(Ordering::SeqCst) == attempts {
+        assert!(Instant::now() < deadline, "the owed bump was never retried");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // Another node asserts a control; this node must still reload for it.
+    suspend(&other, &realm);
+    clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
+    assert!(
+        binds_suspension(&node, &realm, &token),
+        "a bump retry blocked in storage stopped this node reloading for a control \
+         asserted elsewhere"
+    );
+}
+
+/// `hearth_control_epoch_bumps_owed` is one process-wide gauge, and a process
+/// can hold more than one identity engine. Each engine used to `set` its own
+/// count, so the gauge showed whichever wrote last, and an engine dropped
+/// while owing kept its count on the gauge. It is now the sum over live
+/// engines.
+#[test]
+fn the_owed_gauge_sums_every_engine_and_forgets_a_dropped_one() {
+    let owed_gauge = || crate::metrics::metrics().control_epoch_bumps_owed.get();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = open_storage(&dir);
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let fault_a = FaultStorage::over(Arc::clone(&shared));
+    let fault_b = FaultStorage::over(Arc::clone(&shared));
+    let a = engine_over(&(Arc::clone(&fault_a) as Arc<dyn StorageEngine>), &clock);
+    let b = engine_over(&(Arc::clone(&fault_b) as Arc<dyn StorageEngine>), &clock);
+    let (realm_a, _) = seed_token(&a);
+    let (realm_b, _) = seed_token(&b);
+    fault_a.fail_increments.store(true, Ordering::SeqCst);
+    fault_b.fail_increments.store(true, Ordering::SeqCst);
+    suspend(&a, &realm_a);
+    suspend(&b, &realm_b);
+    let owed = a.control.owed_bumps() + b.control.owed_bumps();
+    assert!(owed >= 2, "precondition: both engines owe");
+    #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
+    {
+        assert_eq!(
+            owed_gauge(),
+            owed as f64,
+            "the gauge is the sum over engines"
+        );
+        let b_owed = b.control.owed_bumps();
+        drop(b);
+        assert_eq!(
+            owed_gauge(),
+            (owed - b_owed) as f64,
+            "a dropped engine's owed bumps leave the gauge"
+        );
+    }
 }

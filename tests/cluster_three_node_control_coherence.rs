@@ -39,7 +39,9 @@ use hearth::rbac::{
     AssignRoleRequest, CreateRoleRequest, EmbeddedRbacEngine, Permission, RbacEngine, RoleId,
     Scope, Subject,
 };
-use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
+use hearth::storage::{
+    EmbeddedStorageEngine, ScanEntry, StorageConfig, StorageEngine, StorageError,
+};
 use tempfile::TempDir;
 
 // ── Throwaway mTLS bundle (same convention as tests/cluster_grpc_loopback.rs) ─
@@ -111,8 +113,18 @@ struct ThreeNodeCluster {
 /// `main.rs` does (including the `ReplicatedWriteObserver` wiring).
 type AppStack = (Arc<EmbeddedRbacEngine>, Arc<EmbeddedIdentityEngine>);
 
-fn app_stack_over(cluster: &Arc<ClusterEngine>, clock: &Arc<FakeClock>) -> AppStack {
+/// Wraps one node's storage handle (the node's Raft id, its adapter) before
+/// the application stack is built over it — the seam a test uses to inject a
+/// storage fault on one node.
+type StorageWrap = dyn Fn(u64, Arc<dyn StorageEngine>) -> Arc<dyn StorageEngine> + Send + Sync;
+
+fn app_stack_over_wrapped(
+    cluster: &Arc<ClusterEngine>,
+    clock: &Arc<FakeClock>,
+    wrap: &StorageWrap,
+) -> AppStack {
     let storage: Arc<dyn StorageEngine> = Arc::new(ClusterStorageAdapter::new(Arc::clone(cluster)));
+    let storage = wrap(cluster.node_id().unwrap_or(0), storage);
     app_stack_over_storage(cluster, &storage, clock)
 }
 
@@ -154,6 +166,12 @@ fn app_stack_over_storage(
 
 impl ThreeNodeCluster {
     async fn build(clock: &Arc<FakeClock>) -> Self {
+        Self::build_with(clock, &|_, storage| storage).await
+    }
+
+    /// As [`Self::build`], with each node's storage handle passed through
+    /// `wrap` before its application stack is built.
+    async fn build_with(clock: &Arc<FakeClock>, wrap: &StorageWrap) -> Self {
         let tempdir = tempfile::tempdir().unwrap();
         let (ca_path, leaf_certs) = generate_cluster_certs(tempdir.path(), 3);
         let ports = pick_free_loopback_ports(3);
@@ -219,7 +237,8 @@ impl ThreeNodeCluster {
             .iter()
             .position(|e| e.raft_metrics().map(|m| m.id) == Some(leader_id))
             .unwrap();
-        let (leader_rbac, leader_identity) = app_stack_over(&engines[leader_idx], clock);
+        let (leader_rbac, leader_identity) =
+            app_stack_over_wrapped(&engines[leader_idx], clock, wrap);
 
         // Let the signing-key write reach every node before the followers'
         // constructors read it.
@@ -234,7 +253,7 @@ impl ThreeNodeCluster {
                     identity: Arc::clone(&leader_identity),
                 });
             } else {
-                let (rbac, identity) = app_stack_over(engine, clock);
+                let (rbac, identity) = app_stack_over_wrapped(engine, clock, wrap);
                 nodes.push(Node {
                     cluster: Arc::clone(engine),
                     rbac,
@@ -1074,6 +1093,192 @@ async fn a_follower_persists_and_clears_its_own_rate_limit_tracker_rows() {
         "the durable lockout row on node {follower_id} survived a successful verification \
          — a restart of that node would rehydrate a lockout for a user who has already \
          authenticated (26.49)"
+    );
+
+    cluster.shutdown();
+}
+
+// ── Owed control-epoch bumps across a real leader change ─────────────────────
+
+/// A node's cluster storage handle whose `increment_u64` — the control-epoch
+/// bump — can be made to fail, standing in for a bump lost between the
+/// control row's Raft proposal and its own. Every other call passes through.
+struct IncrementFault {
+    inner: Arc<dyn StorageEngine>,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl StorageEngine for IncrementFault {
+    fn accepts_writes(&self) -> bool {
+        self.inner.accepts_writes()
+    }
+    fn put_node_local(&self, r: &RealmId, k: &[u8], v: &[u8]) -> Result<(), StorageError> {
+        self.inner.put_node_local(r, k, v)
+    }
+    fn delete_node_local(&self, r: &RealmId, k: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete_node_local(r, k)
+    }
+    fn get(&self, r: &RealmId, k: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.get(r, k)
+    }
+    fn put(&self, r: &RealmId, k: &[u8], v: &[u8]) -> Result<(), StorageError> {
+        self.inner.put(r, k, v)
+    }
+    fn delete(&self, r: &RealmId, k: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete(r, k)
+    }
+    fn scan(&self, r: &RealmId, a: &[u8], b: &[u8]) -> Result<Vec<ScanEntry>, StorageError> {
+        self.inner.scan(r, a, b)
+    }
+    fn put_batch(&self, r: &RealmId, e: &[(Vec<u8>, Vec<u8>)]) -> Result<(), StorageError> {
+        self.inner.put_batch(r, e)
+    }
+    fn write_batch(
+        &self,
+        r: &RealmId,
+        puts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> Result<(), StorageError> {
+        self.inner.write_batch(r, puts, deletes)
+    }
+    fn backup_barrier(&self) -> Option<Arc<std::sync::RwLock<()>>> {
+        self.inner.backup_barrier()
+    }
+    fn put_if_absent(&self, r: &RealmId, k: &[u8], v: &[u8]) -> Result<bool, StorageError> {
+        self.inner.put_if_absent(r, k, v)
+    }
+    fn increment_u64(&self, r: &RealmId, k: &[u8]) -> Result<u64, StorageError> {
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected: the control-epoch bump was lost",
+            )));
+        }
+        self.inner.increment_u64(r, k)
+    }
+    fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+        self.inner.list_realms()
+    }
+    fn begin_snapshot_restore(&self, id: &str) -> Result<(), StorageError> {
+        self.inner.begin_snapshot_restore(id)
+    }
+    fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
+        self.inner.complete_snapshot_restore()
+    }
+    fn flush_memtable(&self) -> Result<(), StorageError> {
+        self.inner.flush_memtable()
+    }
+}
+
+fn owed_gauge() -> f64 {
+    hearth::metrics::metrics().control_epoch_bumps_owed.get()
+}
+
+/// A control whose epoch bump failed on the leader must still bind on every
+/// other node after leadership moves.
+///
+/// Cluster storage does not forward a follower's write to the leader, so once
+/// the leader stepped down the bump it owed could never succeed: it retried
+/// every 5 s for as long as it lived, and nothing else bumped the epoch, so
+/// the other two nodes enforced the stale control (here: kept validating a
+/// suspended realm's token) until an unrelated control was asserted somewhere.
+///
+/// Now the node that wins the election bumps the epoch once, which orders
+/// after every row the old leader committed, so every node reloads; and the
+/// old leader, refused as `NotLeader`, drops what it owed.
+///
+/// Real sockets, a real step-down (`transfer_leadership`), no shortcut: the
+/// injected fault is only the loss of the one bump.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_control_whose_bump_failed_binds_everywhere_after_a_leader_change() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let faults: Arc<std::sync::Mutex<BTreeMap<u64, Arc<std::sync::atomic::AtomicBool>>>> =
+        Arc::default();
+    let registry = Arc::clone(&faults);
+    let wrap = move |id: u64, storage: Arc<dyn StorageEngine>| -> Arc<dyn StorageEngine> {
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        registry.lock().unwrap().insert(id, Arc::clone(&fail));
+        Arc::new(IncrementFault {
+            inner: storage,
+            fail,
+        })
+    };
+    let cluster = ThreeNodeCluster::build_with(&clock, &wrap).await;
+    let seeded = seed_realm_user_and_token(&cluster, &clock, "owed-bump-leader-change").await;
+    for node in &cluster.nodes {
+        node.identity
+            .validate_token(&seeded.realm_id, &seeded.access_token)
+            .unwrap_or_else(|e| panic!("node {} rejected a valid token: {e:?}", node.id()));
+    }
+
+    // The leader suspends the realm; the row commits, its epoch bump is lost.
+    let old_leader_id = cluster.leader_id;
+    let fail = Arc::clone(&faults.lock().unwrap()[&old_leader_id]);
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    cluster
+        .leader()
+        .identity
+        .update_realm(
+            &seeded.realm_id,
+            &UpdateRealmRequest {
+                name: None,
+                status: Some(RealmStatus::Suspended),
+                config: None,
+            },
+        )
+        .unwrap();
+    cluster.converge().await;
+    assert!(owed_gauge() >= 1.0, "precondition: the lost bump is owed");
+    clock.advance(1_000_000);
+    for node in cluster.followers() {
+        node.identity
+            .validate_token(&seeded.realm_id, &seeded.access_token)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "precondition: with the bump lost node {} should not know yet: {e:?}",
+                    node.id()
+                )
+            });
+    }
+
+    // Leadership moves. The fault clears, so the old leader's retries reach
+    // real cluster storage — which, on a follower, refuses them as NotLeader.
+    let new_leader_id = cluster
+        .leader()
+        .cluster
+        .transfer_leadership()
+        .await
+        .expect("step down");
+    assert_ne!(new_leader_id, old_leader_id);
+    fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    cluster.converge().await;
+    clock.advance(1_000_000);
+
+    for node in cluster.nodes.iter().filter(|n| n.id() != old_leader_id) {
+        let err = eventual_rejection_where(node, &seeded.realm_id, &seeded.access_token, |e| {
+            matches!(e, hearth::identity::IdentityError::RealmSuspended)
+        })
+        .await;
+        assert!(
+            matches!(err, Some(hearth::identity::IdentityError::RealmSuspended)),
+            "node {} (new leader: {}) never enforced a suspension whose bump the old \
+             leader lost: {err:?}",
+            node.id(),
+            node.id() == new_leader_id
+        );
+    }
+
+    // The old leader dropped the bumps it can no longer make.
+    let deadline = Instant::now() + RELOAD_DEADLINE;
+    while owed_gauge() > 0.0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        owed_gauge() < 0.5,
+        "the old leader still owes bumps it can never make: {}",
+        owed_gauge()
     );
 
     cluster.shutdown();
