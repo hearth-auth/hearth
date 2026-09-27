@@ -113,6 +113,22 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
+    /// Parses a client's requested `id_token_signed_response_alg` (`None` is
+    /// EdDSA) and refuses RS256 when `fapi` applies — the validation half of
+    /// [`Self::resolve_client_id_token_alg`], with no key provisioned.
+    ///
+    /// # Errors
+    /// [`IdentityError::InvalidInput`] for anything but `RS256`/`EdDSA`, and
+    /// [`IdentityError::FapiViolation`] for RS256 under FAPI.
+    pub(super) fn parse_client_id_token_alg(
+        requested: Option<&str>,
+        fapi: bool,
+    ) -> Result<IdTokenSigningAlg, IdentityError> {
+        let alg = requested.map_or(Ok(IdTokenSigningAlg::EdDsa), IdTokenSigningAlg::parse)?;
+        Self::refuse_rs256_under_fapi(alg, fapi)?;
+        Ok(alg)
+    }
+
     /// Validates a client's requested `id_token_signed_response_alg` and, for
     /// RS256, provisions the realm's RSA key.
     ///
@@ -136,8 +152,7 @@ impl EmbeddedIdentityEngine {
         requested: Option<&str>,
         fapi: bool,
     ) -> Result<IdTokenSigningAlg, IdentityError> {
-        let alg = requested.map_or(Ok(IdTokenSigningAlg::EdDsa), IdTokenSigningAlg::parse)?;
-        Self::refuse_rs256_under_fapi(alg, fapi)?;
+        let alg = Self::parse_client_id_token_alg(requested, fapi)?;
         if alg == IdTokenSigningAlg::Rs256 {
             self.ensure_realm_id_token_rsa_key(realm_id)?;
         }

@@ -6189,6 +6189,175 @@ impl EmbeddedIdentityEngine {
         }
         Ok(())
     }
+
+    /// Validates an import request and builds the client it would create —
+    /// every rule [`IdentityEngine::import_client`] applies, with no storage
+    /// read or write, no existence check and no RSA key provisioned.
+    ///
+    /// The single source of those rules: `import_client` builds the client it
+    /// writes with it, and [`IdentityEngine::validate_import_client`] (a
+    /// backup restore's overwrite and dry-run modes) runs it alone, so the
+    /// check that decides whether a live client may be replaced cannot drift
+    /// from the one the replacement must pass.
+    #[allow(clippy::too_many_lines)] // one validated setter per client field
+    fn build_imported_client(
+        &self,
+        request: &ImportClientRequest,
+    ) -> Result<OAuthClient, IdentityError> {
+        let client_name = validation::validate_client_name(&request.client_name)?;
+
+        let has_client_credentials = request
+            .grant_types
+            .contains(&"client_credentials".to_string());
+        let has_device_code = request
+            .grant_types
+            .contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string());
+        let has_jwt_bearer = request
+            .grant_types
+            .contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer".to_string());
+        if request.redirect_uris.is_empty()
+            && !has_client_credentials
+            && !has_device_code
+            && !has_jwt_bearer
+        {
+            return Err(IdentityError::InvalidInput {
+                reason: "at least one redirect URI is required".to_string(),
+            });
+        }
+        for uri in &request.redirect_uris {
+            if uri.trim().is_empty() {
+                return Err(IdentityError::InvalidInput {
+                    reason: "redirect URIs must not be empty".to_string(),
+                });
+            }
+            validation::validate_redirect_uri(uri)?;
+        }
+
+        let client_id = request.id.clone().unwrap_or_else(ClientId::generate);
+
+        let now = self.clock.now();
+        let grant_types = if request.grant_types.is_empty() {
+            vec!["authorization_code".to_string()]
+        } else {
+            request.grant_types.clone()
+        };
+
+        // The stored hash: computed from a plaintext secret (external provider,
+        // YAML), or taken verbatim from a Hearth backup — never re-hashed,
+        // since there is no plaintext, and only in a format Hearth can verify.
+        let secret_hash = match (&request.client_secret, &request.client_secret_hash) {
+            (Some(_), Some(_)) => {
+                return Err(IdentityError::InvalidInput {
+                    reason: "client_secret and client_secret_hash are mutually exclusive"
+                        .to_string(),
+                });
+            }
+            (Some(secret), None) => Some(credentials::hash_raw_secret(
+                secret.as_bytes(),
+                &self.config.credential,
+            )?),
+            (None, Some(hash)) => {
+                credentials::validate_stored_client_secret_hash(hash)?;
+                Some(hash.clone())
+            }
+            (None, None) => None,
+        };
+        let mut client = if let Some(secret_hash) = secret_hash {
+            OAuthClient::new_confidential(
+                client_id,
+                client_name,
+                request.redirect_uris.clone(),
+                now,
+                secret_hash,
+                grant_types,
+            )
+        } else {
+            let mut c =
+                OAuthClient::new(client_id, client_name, request.redirect_uris.clone(), now);
+            c.set_grant_types(grant_types);
+            c
+        };
+        client.set_slug(
+            request
+                .slug
+                .clone()
+                .unwrap_or_else(|| client.client_name().to_lowercase().replace(' ', "-")),
+        );
+        client.set_trust_level(request.trust_level);
+        client.set_require_consent(
+            request
+                .require_consent
+                .unwrap_or(request.trust_level == crate::identity::ClientTrustLevel::ThirdParty),
+        );
+        client.set_declared_scopes(request.declared_scopes.clone());
+        client.set_consent_spans_orgs(request.consent_spans_orgs);
+        client.set_client_logo_url(request.client_logo_url.clone());
+        client.set_status(request.status);
+        if let Some(uri) = &request.backchannel_logout_uri {
+            validation::validate_logout_uri("backchannel_logout_uri", uri, false)?;
+        }
+        client.set_backchannel_logout_uri(request.backchannel_logout_uri.clone());
+        if let Some(uri) = &request.frontchannel_logout_uri {
+            validation::validate_logout_uri("frontchannel_logout_uri", uri, true)?;
+        }
+        client.set_frontchannel_logout_uri(request.frontchannel_logout_uri.clone());
+        client.set_post_logout_redirect_uris(request.post_logout_redirect_uris.clone());
+        client.set_cors_origins(request.cors_origins.clone());
+        client.set_access_token_authorization(request.access_token_authorization);
+        client.set_mfa_required(request.mfa_required);
+        // Credentials and the security profile, validated as a registration
+        // validates them and set in this same write, so the client is never
+        // stored weaker than requested — not even between two writes.
+        if let Some(key) = request.assertion_public_key.as_deref() {
+            Self::check_assertion_public_key(key)?;
+        }
+        client.set_assertion_public_key(request.assertion_public_key.clone());
+        if let Some(jwks) = request.jwks.as_deref() {
+            Self::check_client_jwks(jwks)?;
+        }
+        client.set_jwks(request.jwks.clone());
+        if request
+            .jwks_uri
+            .as_deref()
+            .is_some_and(|u| u.trim().is_empty())
+        {
+            return Err(IdentityError::InvalidInput {
+                reason: "jwks_uri must not be empty".to_string(),
+            });
+        }
+        client.set_jwks_uri(request.jwks_uri.clone());
+        if let Some(alg) = request.authorization_signed_response_alg.as_deref() {
+            if alg != "EdDSA" {
+                return Err(IdentityError::InvalidInput {
+                    reason: format!(
+                        "unsupported authorization_signed_response_alg '{alg}'; supported: EdDSA"
+                    ),
+                });
+            }
+        }
+        client.set_authorization_signed_response_alg(
+            request.authorization_signed_response_alg.clone(),
+        );
+        client.set_profile(request.profile);
+        Self::check_fapi2_client_keys(&client)?;
+        // ID-token signing algorithm (task 26.55), parsed as a registration
+        // parses it (`import_client` then provisions the RSA key), but not
+        // refused under a REALM's
+        // FAPI 2.0 profile: an import records the algorithm the source held
+        // rather than choosing one. A realm that turned `fapi_profile` on after
+        // an RS256 client registered still holds that client, so its backup
+        // carries it, and a restore must not drop it. FAPI still governs what
+        // is issued: `id_token_signer` refuses the client's ID-token grants
+        // while FAPI applies to it. A backup restore installs the archived RSA
+        // key first, so an RS256 client finds that key rather than minting a
+        // new one. A client whose OWN profile is FAPI 2.0 can never hold RS256
+        // (registration and update refuse it, §5.4.1), so that is refused.
+        client.set_id_token_signed_response_alg(Self::parse_client_id_token_alg(
+            request.id_token_signed_response_alg.as_deref(),
+            request.profile.is_fapi2(),
+        )?);
+        Ok(client)
+    }
 }
 
 impl IdentityEngine for EmbeddedIdentityEngine {
@@ -11765,7 +11934,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         })
     }
 
-    #[allow(clippy::too_many_lines)] // one validated setter per client field, in one write
+    fn validate_import_client(
+        &self,
+        realm_id: &RealmId,
+        request: &ImportClientRequest,
+    ) -> Result<(), IdentityError> {
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_client",
+            });
+        }
+        self.build_imported_client(request).map(|_| ())
+    }
+
     fn import_client(
         &self,
         realm_id: &RealmId,
@@ -11776,170 +11957,30 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 operation: "import_client",
             });
         }
-        let client_name = validation::validate_client_name(&request.client_name)?;
-
-        let has_client_credentials = request
-            .grant_types
-            .contains(&"client_credentials".to_string());
-        let has_device_code = request
-            .grant_types
-            .contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string());
-        let has_jwt_bearer = request
-            .grant_types
-            .contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer".to_string());
-        if request.redirect_uris.is_empty()
-            && !has_client_credentials
-            && !has_device_code
-            && !has_jwt_bearer
-        {
-            return Err(IdentityError::InvalidInput {
-                reason: "at least one redirect URI is required".to_string(),
-            });
-        }
-        for uri in &request.redirect_uris {
-            if uri.trim().is_empty() {
+        // The existence check comes before the build so an existing client
+        // (every `hearth.yaml` client on every restart) costs no Argon2id run
+        // for a plaintext secret it is not going to store.
+        if let Some(id) = &request.id {
+            if self
+                .storage
+                .get(realm_id, &keys::encode_oauth_client(id))
+                .map_err(Self::storage_err)?
+                .is_some()
+            {
                 return Err(IdentityError::InvalidInput {
-                    reason: "redirect URIs must not be empty".to_string(),
-                });
-            }
-            validation::validate_redirect_uri(uri)?;
-        }
-
-        let client_id = request.id.clone().unwrap_or_else(ClientId::generate);
-        let key = keys::encode_oauth_client(&client_id);
-        if self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            return Err(IdentityError::InvalidInput {
-                reason: "a client with this id already exists".to_string(),
-            });
-        }
-
-        let now = self.clock.now();
-        let grant_types = if request.grant_types.is_empty() {
-            vec!["authorization_code".to_string()]
-        } else {
-            request.grant_types.clone()
-        };
-
-        // The stored hash: computed from a plaintext secret (external provider,
-        // YAML), or taken verbatim from a Hearth backup — never re-hashed,
-        // since there is no plaintext, and only in a format Hearth can verify.
-        let secret_hash = match (&request.client_secret, &request.client_secret_hash) {
-            (Some(_), Some(_)) => {
-                return Err(IdentityError::InvalidInput {
-                    reason: "client_secret and client_secret_hash are mutually exclusive"
-                        .to_string(),
-                });
-            }
-            (Some(secret), None) => Some(credentials::hash_raw_secret(
-                secret.as_bytes(),
-                &self.config.credential,
-            )?),
-            (None, Some(hash)) => {
-                credentials::validate_stored_client_secret_hash(hash)?;
-                Some(hash.clone())
-            }
-            (None, None) => None,
-        };
-        let mut client = if let Some(secret_hash) = secret_hash {
-            OAuthClient::new_confidential(
-                client_id,
-                client_name,
-                request.redirect_uris.clone(),
-                now,
-                secret_hash,
-                grant_types,
-            )
-        } else {
-            let mut c =
-                OAuthClient::new(client_id, client_name, request.redirect_uris.clone(), now);
-            c.set_grant_types(grant_types);
-            c
-        };
-        client.set_slug(
-            request
-                .slug
-                .clone()
-                .unwrap_or_else(|| client.client_name().to_lowercase().replace(' ', "-")),
-        );
-        client.set_trust_level(request.trust_level);
-        client.set_require_consent(
-            request
-                .require_consent
-                .unwrap_or(request.trust_level == crate::identity::ClientTrustLevel::ThirdParty),
-        );
-        client.set_declared_scopes(request.declared_scopes.clone());
-        client.set_consent_spans_orgs(request.consent_spans_orgs);
-        client.set_client_logo_url(request.client_logo_url.clone());
-        client.set_status(request.status);
-        if let Some(uri) = &request.backchannel_logout_uri {
-            validation::validate_logout_uri("backchannel_logout_uri", uri, false)?;
-        }
-        client.set_backchannel_logout_uri(request.backchannel_logout_uri.clone());
-        if let Some(uri) = &request.frontchannel_logout_uri {
-            validation::validate_logout_uri("frontchannel_logout_uri", uri, true)?;
-        }
-        client.set_frontchannel_logout_uri(request.frontchannel_logout_uri.clone());
-        client.set_post_logout_redirect_uris(request.post_logout_redirect_uris.clone());
-        client.set_cors_origins(request.cors_origins.clone());
-        client.set_access_token_authorization(request.access_token_authorization);
-        client.set_mfa_required(request.mfa_required);
-        // Credentials and the security profile, validated as a registration
-        // validates them and set in this same write, so the client is never
-        // stored weaker than requested — not even between two writes.
-        if let Some(key) = request.assertion_public_key.as_deref() {
-            Self::check_assertion_public_key(key)?;
-        }
-        client.set_assertion_public_key(request.assertion_public_key.clone());
-        if let Some(jwks) = request.jwks.as_deref() {
-            Self::check_client_jwks(jwks)?;
-        }
-        client.set_jwks(request.jwks.clone());
-        if request
-            .jwks_uri
-            .as_deref()
-            .is_some_and(|u| u.trim().is_empty())
-        {
-            return Err(IdentityError::InvalidInput {
-                reason: "jwks_uri must not be empty".to_string(),
-            });
-        }
-        client.set_jwks_uri(request.jwks_uri.clone());
-        if let Some(alg) = request.authorization_signed_response_alg.as_deref() {
-            if alg != "EdDSA" {
-                return Err(IdentityError::InvalidInput {
-                    reason: format!(
-                        "unsupported authorization_signed_response_alg '{alg}'; supported: EdDSA"
-                    ),
+                    reason: "a client with this id already exists".to_string(),
                 });
             }
         }
-        client.set_authorization_signed_response_alg(
-            request.authorization_signed_response_alg.clone(),
-        );
-        client.set_profile(request.profile);
-        Self::check_fapi2_client_keys(&client)?;
-        // ID-token signing algorithm (task 26.55), parsed and its RSA key
-        // provisioned as a registration does, but not refused under a REALM's
-        // FAPI 2.0 profile: an import records the algorithm the source held
-        // rather than choosing one. A realm that turned `fapi_profile` on after
-        // an RS256 client registered still holds that client, so its backup
-        // carries it, and a restore must not drop it. FAPI still governs what
-        // is issued: `id_token_signer` refuses the client's ID-token grants
-        // while FAPI applies to it. A backup restore installs the archived RSA
-        // key first, so an RS256 client finds that key rather than minting a
-        // new one. A client whose OWN profile is FAPI 2.0 can never hold RS256
-        // (registration and update refuse it, §5.4.1), so that is refused.
-        client.set_id_token_signed_response_alg(self.resolve_client_id_token_alg(
-            realm_id,
-            request.id_token_signed_response_alg.as_deref(),
-            request.profile.is_fapi2(),
-        )?);
-
+        let client = self.build_imported_client(request)?;
+        // The one effect the build leaves out: an RS256 client needs the
+        // realm's RSA ID-token key, provisioned as a registration does. A
+        // backup restore installs the archived key first, so it is found.
+        if client.id_token_signed_response_alg() == crate::identity::oidc::IdTokenSigningAlg::Rs256
+        {
+            self.ensure_realm_id_token_rsa_key(realm_id)?;
+        }
+        let key = keys::encode_oauth_client(client.client_id());
         let client_bytes =
             serde_json::to_vec(&client).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),

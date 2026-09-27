@@ -311,8 +311,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   assertion key and JWKS (re-validated), `jwks_uri`, the profile, and the consent, logout, CORS, MFA,
   JARM and lifecycle settings. A client that cannot be restored as strong as its source — an
   unverifiable credential, or no credential although its grants need one — is not restored and is
-  listed with the reason in the restore report. If you restored with an earlier 1.x build, restore
-  again or re-register the affected clients (backup guide, *Client credentials*).
+  listed with the reason in the restore report. The record is validated before anything is
+  written: an overwrite-mode restore used to delete the live client first, so a refused record left
+  the realm with neither — the live client is now kept — and a dry run, which counted every client
+  as created, now reports the clients the real restore would refuse. If you restored with an
+  earlier 1.x build, restore again or re-register the affected clients (backup guide, *Client
+  credentials*).
 - **Auth0 and Keycloak imports no longer create public clients from confidential ones** — a
   confidential application whose export carried no secret (Auth0 exports usually omit them; a
   partial Keycloak export masks them as `**********`) was imported with no secret, i.e. as a public

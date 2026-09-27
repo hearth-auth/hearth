@@ -239,6 +239,13 @@ of a confidential one. Every archive written by a 1.x server carries the full
 record; this guards hand-built or edited archives. Register such a client
 again, or restore from an archive that carries its credential.
 
+The record is validated before anything is written or deleted, with exactly
+the rules the restore applies. In `--mode overwrite` a refused record
+therefore never costs the live client: the live client is kept unchanged (it
+still authenticates as before) and the refusal is reported. A `--dry-run`
+runs the same validation and reports the clients the real restore would
+refuse, instead of counting them as created.
+
 Before this release a restore dropped these fields and re-created **every**
 client as a public client. If you restored an archive with an earlier 1.x
 build, restore it again with this build (or re-register the affected

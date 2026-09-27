@@ -1294,6 +1294,21 @@ impl BackupImporter {
                 mfa_required: client.mfa_required,
             };
 
+            // Validate before anything is written or deleted — with exactly
+            // the rules `import_client` applies. A dry run reports what the
+            // real restore would refuse, and an overwrite never deletes a live
+            // client for a record that cannot replace it.
+            if let Err(e) = self.identity.validate_import_client(realm_id, &req) {
+                warn!(client_id = %client_id_str, err = %e, "refusing to restore client");
+                report.clients.errored += 1;
+                report.conflicts.push(Conflict {
+                    entity_type: "client".to_string(),
+                    identifier: client_id_str,
+                    reason: format!("client not restored: {e}"),
+                });
+                continue;
+            }
+
             if opts.dry_run {
                 report.clients.created += 1;
                 continue;
@@ -1314,7 +1329,10 @@ impl BackupImporter {
                             });
                         }
                         RestoreMode::Overwrite => {
-                            // Delete by client_id then re-import.
+                            // Delete by client_id then re-import. The record
+                            // was validated above, so the re-import can fail
+                            // only on storage — not on a rule that would have
+                            // refused it before the live client was deleted.
                             if let Some(ref cid) = req.id {
                                 if let Ok(()) = self.identity.delete_client(realm_id, cid) {
                                     match self.identity.import_client(realm_id, &req) {
@@ -2268,6 +2286,179 @@ mod tests {
             "the report must name the cost parameter: {}",
             conflict.reason
         );
+    }
+
+    /// Restores one `clients.ndjson` line into an existing realm with `opts`.
+    fn restore_client_line_into(
+        rig: &TestRig,
+        realm: &RealmId,
+        line: &serde_json::Value,
+        opts: &ImportOptions,
+    ) -> ImportReport {
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
+        let mut report = ImportReport::default();
+        importer
+            .import_clients(format!("{line}\n").as_bytes(), realm, opts, &mut report)
+            .expect("import_clients");
+        report
+    }
+
+    /// A realm holding one live confidential client whose secret is
+    /// `live-secret`; returns the rig, the realm and the client's id.
+    fn realm_with_live_client() -> (TestRig, RealmId, ClientId) {
+        let rig = make_rig();
+        let realm = rig
+            .identity
+            .create_realm(&crate::identity::CreateRealmRequest {
+                name: format!("client-overwrite-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let cid = ClientId::generate();
+        rig.identity
+            .import_client(
+                &realm,
+                &crate::identity::ImportClientRequest {
+                    id: Some(cid.clone()),
+                    client_name: "Live M2M".to_string(),
+                    client_secret: Some("live-secret".to_string()),
+                    grant_types: vec!["client_credentials".to_string()],
+                    ..Default::default()
+                },
+            )
+            .expect("live client");
+        rig.identity
+            .authenticate_confidential_client(&realm, &cid, Some("live-secret"))
+            .expect("control: the live client authenticates before the restore");
+        (rig, realm, cid)
+    }
+
+    /// An archived record for `cid` that validates in every respect but its
+    /// JWKS, which is not a JWK set.
+    fn invalid_jwks_line(cid: &ClientId) -> serde_json::Value {
+        let mut line = client_line(&serde_json::json!({
+            "client_secret_hash": "$hearth-sha256$v=1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "jwks": "this is not a JWK set",
+        }));
+        line["client_id"] = serde_json::to_value(cid).expect("client id");
+        line
+    }
+
+    /// Overwrite mode used to delete the live client and only then try to
+    /// import the archived record, so a record that failed validation left
+    /// the realm with neither. The record is now validated first: the live
+    /// client survives, still authenticates, and the report says why the
+    /// archived record was refused.
+    #[test]
+    fn overwrite_keeps_the_live_client_when_the_archived_record_is_refused() {
+        let (rig, realm, cid) = realm_with_live_client();
+        let opts = ImportOptions {
+            mode: RestoreMode::Overwrite,
+            ..opts_with_passphrase()
+        };
+        let report = restore_client_line_into(&rig, &realm, &invalid_jwks_line(&cid), &opts);
+
+        let live = rig
+            .identity
+            .get_client(&realm, &cid)
+            .expect("get")
+            .expect("the live client must survive a refused overwrite");
+        assert_eq!(live.client_name(), "Live M2M", "and stay the live record");
+        rig.identity
+            .authenticate_confidential_client(&realm, &cid, Some("live-secret"))
+            .expect("the live client must still authenticate with its own secret");
+        assert_eq!(report.clients.overwritten, 0);
+        assert_eq!(report.clients.errored, 1);
+        let conflict = report
+            .conflicts
+            .iter()
+            .find(|c| c.entity_type == "client")
+            .expect("the refusal must be reported");
+        assert!(
+            conflict.reason.contains("not restored") && conflict.reason.contains("jwks"),
+            "the report must say why: {}",
+            conflict.reason
+        );
+    }
+
+    /// Control for the test above: a VALID archived record does replace the
+    /// live one in overwrite mode.
+    #[test]
+    fn overwrite_replaces_the_live_client_with_a_valid_archived_record() {
+        let (rig, realm, cid) = realm_with_live_client();
+        let mut line = client_line(&serde_json::json!({
+            "client_secret_hash": "$hearth-sha256$v=1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        }));
+        line["client_id"] = serde_json::to_value(&cid).expect("client id");
+        let opts = ImportOptions {
+            mode: RestoreMode::Overwrite,
+            ..opts_with_passphrase()
+        };
+        let report = restore_client_line_into(&rig, &realm, &line, &opts);
+        assert_eq!(report.clients.overwritten, 1, "{:?}", report.conflicts);
+        let restored = rig
+            .identity
+            .get_client(&realm, &cid)
+            .expect("get")
+            .expect("restored");
+        assert_eq!(restored.client_name(), "Nightly M2M");
+    }
+
+    /// A dry run used to count every client as created before validating it,
+    /// so it promised a restore the real run would refuse. It now runs the
+    /// same validation, reports the refusal, and still writes nothing.
+    #[test]
+    fn dry_run_reports_a_client_the_real_restore_would_refuse() {
+        let rig = make_rig();
+        let realm = rig
+            .identity
+            .create_realm(&crate::identity::CreateRealmRequest {
+                name: format!("client-dry-run-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let opts = ImportOptions {
+            dry_run: true,
+            ..opts_with_passphrase()
+        };
+
+        let bad_id = ClientId::generate();
+        let report = restore_client_line_into(&rig, &realm, &invalid_jwks_line(&bad_id), &opts);
+        assert_eq!(
+            report.clients.created, 0,
+            "a refused client is not 'created'"
+        );
+        assert_eq!(report.clients.errored, 1);
+        assert!(
+            report
+                .conflicts
+                .iter()
+                .any(|c| c.entity_type == "client" && c.reason.contains("jwks")),
+            "the dry run must report the refusal: {:?}",
+            report.conflicts
+        );
+
+        // Control: a valid record is still counted, and nothing is written.
+        let good = client_line(&serde_json::json!({
+            "client_secret_hash": "$hearth-sha256$v=1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        }));
+        let good_id: ClientId = serde_json::from_value(good["client_id"].clone()).expect("id");
+        let report = restore_client_line_into(&rig, &realm, &good, &opts);
+        assert_eq!(report.clients.created, 1, "{:?}", report.conflicts);
+        for cid in [&bad_id, &good_id] {
+            assert!(
+                rig.identity.get_client(&realm, cid).expect("get").is_none(),
+                "a dry run writes nothing"
+            );
+        }
     }
 
     /// Both stored formats come back verbatim; the client is not public.

@@ -2015,6 +2015,21 @@ pub trait IdentityEngine: Send + Sync {
         request: &ImportClientRequest,
     ) -> Result<OAuthClient, IdentityError>;
 
+    /// Runs every validation [`import_client`](Self::import_client) applies
+    /// to `request`, without writing anything and without checking whether a
+    /// client with its id already exists.
+    ///
+    /// A backup restore calls it before an overwrite deletes the live client
+    /// (so a record that would be refused never costs the live one) and in a
+    /// dry run (so the report lists what the real restore would refuse).
+    /// `import_client` builds its client with the same code, so the two can
+    /// never disagree.
+    fn validate_import_client(
+        &self,
+        realm_id: &RealmId,
+        request: &ImportClientRequest,
+    ) -> Result<(), IdentityError>;
+
     /// Bulk-seeds synthetic demo users for the large-scale demo seeder.
     ///
     /// Generates `spec.target_count` accounts named `user0000001@<domain>`, …,
