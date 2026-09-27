@@ -580,7 +580,11 @@ impl OAuthClient {
         self.client_secret_hash.as_deref()
     }
 
-    /// Returns whether this client is confidential (has a secret).
+    /// Returns whether this client holds a secret.
+    ///
+    /// A secretless client is not necessarily public: one with an assertion
+    /// key or a JWKS authenticates with `private_key_jwt`. Use
+    /// [`Self::is_public`] to decide whether `client_id` alone suffices.
     pub fn is_confidential(&self) -> bool {
         self.client_secret_hash.is_some()
     }
@@ -713,7 +717,8 @@ impl OAuthClient {
     }
 
     /// Returns whether this client authenticates ONLY with a `private_key_jwt`
-    /// assertion (RFC 7523 §2.2): it has an assertion key and no secret, as a
+    /// assertion (RFC 7523 §2.2): it holds no secret but has keys — an
+    /// assertion key, or a registered JWKS (`jwks` or `jwks_uri`), as every
     /// FAPI 2.0 client must.
     ///
     /// Such a client is confidential even though [`Self::is_confidential`]
@@ -722,7 +727,17 @@ impl OAuthClient {
     /// presented a verified assertion — otherwise anyone who knows its public
     /// identifier can act as it.
     pub fn requires_client_assertion(&self) -> bool {
-        self.assertion_public_key.is_some() && self.client_secret_hash.is_none()
+        self.client_secret_hash.is_none()
+            && (self.assertion_public_key.is_some()
+                || self.jwks.is_some()
+                || self.jwks_uri.is_some())
+    }
+
+    /// Returns whether this is a PUBLIC client — one that holds no credential
+    /// at all (no secret, no assertion key, no JWKS) and so is identified by
+    /// its `client_id` alone. Every other client must authenticate.
+    pub fn is_public(&self) -> bool {
+        self.client_secret_hash.is_none() && !self.requires_client_assertion()
     }
 
     /// Sets the assertion public key.  `None` clears it, disabling the

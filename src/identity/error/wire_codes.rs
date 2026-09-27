@@ -20,7 +20,9 @@ impl IdentityError {
             Self::InvalidCredential { .. } | Self::CredentialNotFound => {
                 Some("HEARTH_INVALID_CREDENTIAL")
             }
-            Self::InvalidClient | Self::InvalidClientSecret => Some("HEARTH_INVALID_CLIENT"),
+            Self::InvalidClient | Self::InvalidClientSecret | Self::PrivateKeyJwtRequired => {
+                Some("HEARTH_INVALID_CLIENT")
+            }
             Self::InvalidClientAssertion { .. } => Some("HEARTH_INVALID_CLIENT_ASSERTION"),
             Self::InvalidAuthorizationCode | Self::InvalidGrant { .. } => {
                 Some("HEARTH_INVALID_GRANT")

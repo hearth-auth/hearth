@@ -599,6 +599,20 @@ pub(crate) fn identity_error_to_response(
         );
     }
 
+    // A FAPI auth-method refusal says which method is required (RFC 6749 §5.2
+    // `error_description`); it names the realm's or client's profile, never
+    // whether a presented credential was right.
+    if matches!(err, IdentityError::PrivateKeyJwtRequired) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "invalid_client",
+                "error_description": err.to_string(),
+                "error_code": crate::protocol::error_codes::for_identity_error(err),
+            })),
+        );
+    }
+
     let (status, message) = match err {
         IdentityError::RealmNotFound | IdentityError::UserNotFound => {
             (StatusCode::NOT_FOUND, "not found")
@@ -633,7 +647,9 @@ pub(crate) fn identity_error_to_response(
             (StatusCode::BAD_REQUEST, "invalid authorization code")
         }
         IdentityError::InvalidGrant { .. } => (StatusCode::BAD_REQUEST, "invalid grant"),
-        IdentityError::InvalidClientSecret => (StatusCode::UNAUTHORIZED, "invalid_client"),
+        IdentityError::InvalidClientSecret | IdentityError::PrivateKeyJwtRequired => {
+            (StatusCode::UNAUTHORIZED, "invalid_client")
+        }
         IdentityError::AuthorizationPending => (StatusCode::BAD_REQUEST, "authorization_pending"),
         IdentityError::SlowDown => (StatusCode::BAD_REQUEST, "slow_down"),
         IdentityError::DeviceCodeExpired => (StatusCode::BAD_REQUEST, "expired_token"),

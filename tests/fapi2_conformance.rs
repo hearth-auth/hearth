@@ -50,10 +50,63 @@ fn pkce_challenge() -> String {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-/// Minimal JWKS JSON for registration (key details not verified in these tests).
+const CLIENT_ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+
+/// The FAPI2 clients' signing key (one per test process).
+fn fapi2_key() -> &'static ring::signature::Ed25519KeyPair {
+    static KEY: std::sync::OnceLock<ring::signature::Ed25519KeyPair> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                .expect("keygen");
+        ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("key")
+    })
+}
+
+/// The FAPI2 clients' JWKS: the one key they sign `private_key_jwt`
+/// assertions with (FAPI 2.0 clients authenticate with nothing else).
 fn minimal_jwks() -> String {
-    r#"{"keys":[{"kty":"OKP","use":"sig","alg":"EdDSA","crv":"Ed25519","kid":"fapi2-test"}]}"#
-        .to_string()
+    use ring::signature::KeyPair as _;
+    let x = BASE64_URL_SAFE_NO_PAD.encode(fapi2_key().public_key().as_ref());
+    format!(
+        r#"{{"keys":[{{"kty":"OKP","use":"sig","alg":"EdDSA","crv":"Ed25519","kid":"fapi2-test","x":"{x}"}}]}}"#
+    )
+}
+
+/// A `private_key_jwt` assertion (RFC 7523 §2.2) for `client` in `realm`.
+fn fapi2_client_assertion(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    client: &hearth::core::ClientId,
+) -> String {
+    let name = h
+        .identity()
+        .get_realm(realm)
+        .expect("get realm")
+        .expect("realm")
+        .name()
+        .to_string();
+    let aud = format!("{}/realms/{name}", h.identity().oidc_discovery().issuer);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let header = serde_json::json!({"alg": "EdDSA", "kid": "fapi2-test"});
+    let claims = serde_json::json!({
+        "iss": client.to_string(),
+        "sub": client.to_string(),
+        "aud": aud,
+        "exp": now + 60,
+        "iat": now,
+        "jti": uuid::Uuid::new_v4().to_string(),
+    });
+    let input = format!(
+        "{}.{}",
+        BASE64_URL_SAFE_NO_PAD.encode(header.to_string()),
+        BASE64_URL_SAFE_NO_PAD.encode(claims.to_string())
+    );
+    let sig = fapi2_key().sign(input.as_bytes());
+    format!("{input}.{}", BASE64_URL_SAFE_NO_PAD.encode(sig.as_ref()))
 }
 
 async fn create_realm(h: &common::TestHarness) -> RealmId {
@@ -338,8 +391,8 @@ async fn fapi2_token01_no_dpop_rejected() {
                 redirect_uri: REDIRECT_URI.to_string(),
                 code_verifier: Some(PKCE_VERIFIER.to_string()),
                 dpop_jkt: None, // no DPoP
-                client_assertion_type: None,
-                client_assertion: None,
+                client_assertion_type: Some(CLIENT_ASSERTION_TYPE.to_string()),
+                client_assertion: Some(fapi2_client_assertion(&h, &realm, &client_id)),
             },
         )
         .expect_err("FAPI2 token exchange without DPoP must fail");
@@ -392,8 +445,8 @@ async fn fapi2_token02_with_dpop_accepted() {
                 redirect_uri: REDIRECT_URI.to_string(),
                 code_verifier: Some(PKCE_VERIFIER.to_string()),
                 dpop_jkt: Some("abc123_thumbprint".to_string()),
-                client_assertion_type: None,
-                client_assertion: None,
+                client_assertion_type: Some(CLIENT_ASSERTION_TYPE.to_string()),
+                client_assertion: Some(fapi2_client_assertion(&h, &realm, &client_id)),
             },
         )
         .expect("FAPI2 token exchange with DPoP must succeed");
@@ -658,8 +711,8 @@ async fn fapi2_token03_refresh_no_dpop_rejected() {
                 redirect_uri: REDIRECT_URI.to_string(),
                 code_verifier: Some(PKCE_VERIFIER.to_string()),
                 dpop_jkt: Some("initial_thumbprint".to_string()),
-                client_assertion_type: None,
-                client_assertion: None,
+                client_assertion_type: Some(CLIENT_ASSERTION_TYPE.to_string()),
+                client_assertion: Some(fapi2_client_assertion(&h, &realm, &client_id)),
             },
         )
         .expect("initial token exchange with DPoP");
@@ -719,8 +772,8 @@ async fn fapi2_token04_refresh_with_dpop_accepted() {
                 redirect_uri: REDIRECT_URI.to_string(),
                 code_verifier: Some(PKCE_VERIFIER.to_string()),
                 dpop_jkt: Some("initial_thumbprint".to_string()),
-                client_assertion_type: None,
-                client_assertion: None,
+                client_assertion_type: Some(CLIENT_ASSERTION_TYPE.to_string()),
+                client_assertion: Some(fapi2_client_assertion(&h, &realm, &client_id)),
             },
         )
         .expect("initial token exchange with DPoP");
@@ -728,14 +781,20 @@ async fn fapi2_token04_refresh_with_dpop_accepted() {
     // RFC 9449 §5: refresh MUST present the same key used at the initial exchange.
     const REFRESH_THUMBPRINT: &str = "initial_thumbprint";
 
-    // Refresh WITH the bound DPoP thumbprint — must succeed.
+    // Refresh WITH the bound DPoP thumbprint — must succeed. A FAPI2 client is
+    // confidential (it holds keys), so the refresh carries the client the
+    // protocol layer authenticated with its `private_key_jwt` assertion.
     let refreshed = h
         .identity()
         .refresh_tokens(
             &realm,
             initial_tokens.refresh_token(),
             Some(REFRESH_THUMBPRINT),
-            None,
+            Some(&hearth::identity::RefreshBindContext {
+                user_agent: None,
+                asn: None,
+                authenticated_client_id: Some(client_id.clone()),
+            }),
         )
         .expect("FAPI2 refresh with DPoP must succeed");
 

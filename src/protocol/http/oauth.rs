@@ -645,17 +645,81 @@ async fn verify_endpoint_client(
     )
     .await
     .map(|()| client_id)
-    .map_err(|e| match e {
-        // An Argon2id secret whose verification the KDF gate shed.
+    .map_err(|e| client_auth_refusal(&e))
+}
+
+/// The response for a failed client authentication: a shed Argon2id
+/// verification is `503` + `Retry-After`; a FAPI auth-method refusal is `401
+/// invalid_client` saying `private_key_jwt` is required; anything else is the
+/// uniform `401 invalid_client` (RFC 6749 §5.2), which reveals nothing about
+/// the client.
+fn client_auth_refusal(err: &crate::identity::IdentityError) -> Response {
+    match err {
         crate::identity::IdentityError::KdfOverloaded { retry_after } => {
-            kdf_shed_json_response(retry_after)
+            kdf_shed_json_response(*retry_after)
         }
-        _ => (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "invalid_client"})),
-        )
-            .into_response(),
-    })
+        crate::identity::IdentityError::PrivateKeyJwtRequired => {
+            let mut resp = identity_error_to_response(err).into_response();
+            resp.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                axum::http::HeaderValue::from_static("Basic realm=\"hearth\""),
+            );
+            resp
+        }
+        _ => invalid_client_response(),
+    }
+}
+
+/// Refuses a request that carries no `private_key_jwt` assertion in a FAPI
+/// 2.0 Advanced realm (`docs/specs/OIDC.md` §2.1.2 item 6) — for the paths
+/// that would otherwise accept a public client (`none`) without asking the
+/// engine. The answer depends on the realm alone.
+fn refuse_none_in_fapi_advanced_realm(
+    state: &AppState,
+    realm_id: &RealmId,
+) -> Result<(), Response> {
+    let advanced = state
+        .identity
+        .get_realm(realm_id)
+        .map_err(|e| identity_error_to_response(&e).into_response())?
+        .is_some_and(|realm| {
+            realm.config().fapi_profile == Some(crate::identity::FapiProfile::Advanced)
+        });
+    if advanced {
+        return Err(client_auth_refusal(
+            &crate::identity::IdentityError::PrivateKeyJwtRequired,
+        ));
+    }
+    Ok(())
+}
+
+/// Authenticates a client by its `private_key_jwt` assertion when the request
+/// carries one, else as [`verify_endpoint_client`] does (a secret, or a
+/// public client's `client_id`). For the token-endpoint arms that the engine
+/// does not authenticate itself (`refresh_token`, token exchange).
+async fn verify_endpoint_client_or_assertion(
+    state: &AppState,
+    realm_id: &RealmId,
+    headers: &HeaderMap,
+    body_client_id: Option<&str>,
+    body_client_secret: Option<&str>,
+    assertion_type: Option<&str>,
+    assertion: Option<&str>,
+) -> Result<ClientId, Response> {
+    let assertion_type = assertion_type.and_then(non_empty_credential);
+    let assertion = assertion.and_then(non_empty_credential);
+    if assertion_type.is_some() || assertion.is_some() {
+        return verify_assertion_client(
+            state,
+            realm_id,
+            headers,
+            body_client_id,
+            body_client_secret,
+            assertion_type,
+            assertion,
+        );
+    }
+    verify_endpoint_client(state, realm_id, headers, body_client_id, body_client_secret).await
 }
 
 /// `client_assertion_type` value for `private_key_jwt` (RFC 7523 §2.2).
@@ -721,12 +785,7 @@ async fn verify_introspection_client(
         )
         .await
         .map(|()| client_id)
-        .map_err(|e| match e {
-            crate::identity::IdentityError::KdfOverloaded { retry_after } => {
-                kdf_shed_json_response(retry_after)
-            }
-            _ => invalid_client_response(),
-        });
+        .map_err(|e| client_auth_refusal(&e));
     }
     verify_assertion_client(
         state,
@@ -789,6 +848,48 @@ async fn verify_revocation_client(
     }
 }
 
+/// The `private_key_jwt` fields of a request, and who verifies them.
+#[derive(Clone, Copy)]
+pub(super) struct ClientAssertion<'a> {
+    /// `client_assertion_type`, if present.
+    pub(super) assertion_type: Option<&'a str>,
+    /// `client_assertion`, if present.
+    pub(super) assertion: Option<&'a str>,
+    /// Who verifies a presented assertion.
+    pub(super) check: AssertionCheck,
+}
+
+impl ClientAssertion<'_> {
+    /// A request shape that has no assertion fields.
+    pub(super) const NONE: Self = ClientAssertion {
+        assertion_type: None,
+        assertion: None,
+        check: AssertionCheck::Here,
+    };
+}
+
+/// Who verifies a `private_key_jwt` assertion presented to a grant arm.
+#[derive(Clone, Copy)]
+pub(super) enum AssertionCheck {
+    /// The engine's grant verifies it (the `authorization_code` exchange).
+    ByEngine,
+    /// The protocol layer verifies it before the grant runs.
+    Here,
+}
+
+/// `400 invalid_request`: more than one client authentication method (RFC
+/// 6749 §2.3).
+fn multiple_auth_methods_response() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": "invalid_request",
+            "error_description": "more than one client authentication method was used"
+        })),
+    )
+        .into_response()
+}
+
 /// Authenticates a client by its `private_key_jwt` assertion (RFC 7523 §2.2)
 /// at an endpoint that also accepts secrets (`/introspect`, `/revoke`).
 ///
@@ -809,14 +910,7 @@ fn verify_assertion_client(
     if parse_basic_auth(headers).is_some()
         || body_client_secret.and_then(non_empty_credential).is_some()
     {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "invalid_request",
-                "error_description": "more than one client authentication method was used"
-            })),
-        )
-            .into_response());
+        return Err(multiple_auth_methods_response());
     }
     let (Some(CLIENT_ASSERTION_TYPE_JWT_BEARER), Some(assertion)) = (assertion_type, assertion)
     else {
@@ -873,10 +967,18 @@ fn non_empty_credential(field: &str) -> Option<&str> {
 /// - unparseable or unknown `client_id` → `Ok(())`, so the exchange itself
 ///   surfaces `invalid_grant` for the (bad) code rather than leaking client
 ///   existence via a differing error;
-/// - public clients (no `client_secret_hash`) → `Ok(())`, since PKCE alone
-///   authenticates them (RFC 9700 §2.1.1);
-/// - confidential clients → the secret (HTTP Basic Auth preferred, body
-///   `client_secret` fallback) must verify, else `Err` with a 401.
+/// - public clients (no secret, no assertion key, no JWKS) → `Ok(())`, since
+///   PKCE alone authenticates them (RFC 9700 §2.1.1) — except in a FAPI 2.0
+///   Advanced realm, which accepts only `private_key_jwt`;
+/// - every other client → the secret (HTTP Basic Auth preferred, body
+///   `client_secret` fallback) must verify, else `Err` with a 401. A client
+///   that holds keys instead of a secret authenticates only with its
+///   assertion.
+///
+/// A request carrying a `private_key_jwt` assertion must use no other method
+/// (`400 invalid_request`); the assertion is verified by the engine's grant
+/// ([`AssertionCheck::ByEngine`], `authorization_code`) or here
+/// ([`AssertionCheck::Here`], `device_code`, device authorization).
 ///
 /// 22.25 (audit 2026-08-28 §4.25#3): the *decision* above is unchanged, but the
 /// *work* is no longer a function of what the lookup found. Equalising
@@ -895,9 +997,38 @@ pub(super) async fn enforce_confidential_client_auth(
     headers: &HeaderMap,
     body_client_id: &str,
     body_client_secret: Option<&str>,
+    assertion: ClientAssertion<'_>,
 ) -> Result<(), Response> {
     // Same boundary normalization as `verify_endpoint_client` (HEA-2112).
     let body_client_secret = body_client_secret.and_then(non_empty_credential);
+
+    let assertion_type = assertion.assertion_type.and_then(non_empty_credential);
+    let assertion_jwt = assertion.assertion.and_then(non_empty_credential);
+    if assertion_type.is_some() || assertion_jwt.is_some() {
+        return match assertion.check {
+            // The grant verifies it; only the one-method rule is checked here.
+            AssertionCheck::ByEngine => {
+                if parse_basic_auth(headers).is_some() || body_client_secret.is_some() {
+                    Err(multiple_auth_methods_response())
+                } else {
+                    Ok(())
+                }
+            }
+            AssertionCheck::Here => verify_assertion_client(
+                state,
+                realm_id,
+                headers,
+                Some(body_client_id),
+                body_client_secret,
+                assertion_type,
+                assertion_jwt,
+            )
+            .map(|_| ()),
+        };
+    }
+    // No assertion: this request authenticates with a secret or with `none`,
+    // neither of which a FAPI 2.0 Advanced realm accepts.
+    refuse_none_in_fapi_advanced_realm(state, realm_id)?;
 
     // RFC 6749 §2.3.1: a request must not use more than one client
     // authentication mechanism. If a Basic header is present, its username
@@ -949,14 +1080,19 @@ pub(super) async fn enforce_confidential_client_auth(
     };
 
     // A shed Argon2id verification answers 503 on every arm: the caller's
-    // own request cost the gate a slot either way.
-    if let Some(Err(crate::identity::IdentityError::KdfOverloaded { retry_after })) = &verified {
-        return Err(kdf_shed_json_response(*retry_after));
+    // own request cost the gate a slot either way. A FAPI auth-method refusal
+    // (the realm is Advanced, or a FAPI 2.0 client proved a secret) says so.
+    if let Some(Err(
+        e @ (crate::identity::IdentityError::KdfOverloaded { .. }
+        | crate::identity::IdentityError::PrivateKeyJwtRequired),
+    )) = &verified
+    {
+        return Err(client_auth_refusal(e));
     }
     let Some(client) = client else {
         return Ok(());
     };
-    if !client.is_confidential() {
+    if client.is_public() {
         return Ok(());
     }
     match verified {
@@ -1821,19 +1957,15 @@ async fn verify_par_client(
         )
         .await
         .map(|()| client_id)
-        .map_err(|e| match e {
-            crate::identity::IdentityError::KdfOverloaded { retry_after } => {
-                kdf_shed_json_response(retry_after)
-            }
-            _ => invalid_client_response(),
-        });
+        .map_err(|e| client_auth_refusal(&e));
     }
 
-    // No credential: only a public client may push on its `client_id` alone.
+    // No credential (`none`): only a public client — no secret, no assertion
+    // key, no JWKS — may push on its `client_id` alone, and never in a FAPI
+    // 2.0 Advanced realm.
+    refuse_none_in_fapi_advanced_realm(state, realm_id)?;
     match state.identity.get_client(realm_id, &client_id) {
-        Ok(Some(client)) if !client.is_confidential() && !client.requires_client_assertion() => {
-            Ok(client_id)
-        }
+        Ok(Some(client)) if client.is_public() => Ok(client_id),
         Ok(_) => Err(invalid_client_response()),
         Err(e) => Err(identity_error_to_response(&e).into_response()),
     }
@@ -2062,6 +2194,11 @@ async fn token_exchange_impl(
                 &headers,
                 &body.client_id,
                 body.client_secret.as_deref(),
+                ClientAssertion {
+                    assertion_type: body.client_assertion_type.as_deref(),
+                    assertion: body.client_assertion.as_deref(),
+                    check: AssertionCheck::ByEngine,
+                },
             )
             .await
             {
@@ -2134,23 +2271,27 @@ async fn token_exchange_impl(
             // authenticated identity in rotate_grant_family. Requests with no
             // client_id and no Basic Auth (legacy session refresh) pass through
             // unauthenticated — those grant families carry no client binding.
-            let authenticated_client_id =
-                if parse_basic_auth(&headers).is_some() || !body.client_id.trim().is_empty() {
-                    match verify_endpoint_client(
-                        &state,
-                        &realm_id,
-                        &headers,
-                        Some(body.client_id.as_str()),
-                        body.client_secret.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok(cid) => Some(cid),
-                        Err(resp) => return resp,
-                    }
-                } else {
-                    None
-                };
+            let authenticated_client_id = if parse_basic_auth(&headers).is_some()
+                || !body.client_id.trim().is_empty()
+                || body.client_assertion.is_some()
+            {
+                match verify_endpoint_client_or_assertion(
+                    &state,
+                    &realm_id,
+                    &headers,
+                    Some(body.client_id.as_str()),
+                    body.client_secret.as_deref(),
+                    body.client_assertion_type.as_deref(),
+                    body.client_assertion.as_deref(),
+                )
+                .await
+                {
+                    Ok(cid) => Some(cid),
+                    Err(resp) => return resp,
+                }
+            } else {
+                None
+            };
 
             let refresh_bind = crate::identity::RefreshBindContext {
                 user_agent: headers
@@ -2264,6 +2405,11 @@ async fn token_exchange_impl(
                 &headers,
                 &body.client_id,
                 body.client_secret.as_deref(),
+                ClientAssertion {
+                    assertion_type: body.client_assertion_type.as_deref(),
+                    assertion: body.client_assertion.as_deref(),
+                    check: AssertionCheck::Here,
+                },
             )
             .await
             {
@@ -2432,12 +2578,14 @@ async fn token_exchange_impl(
         "urn:ietf:params:oauth:grant-type:token-exchange" => {
             // M2: token-exchange MUST authenticate the requesting client (RFC 8693 §2.1).
             // Derive actor_sub from the authenticated identity, not the unauthenticated body.
-            let authenticated_client_id = match verify_endpoint_client(
+            let authenticated_client_id = match verify_endpoint_client_or_assertion(
                 &state,
                 &realm_id,
                 &headers,
                 Some(body.client_id.as_str()),
                 body.client_secret.as_deref(),
+                body.client_assertion_type.as_deref(),
+                body.client_assertion.as_deref(),
             )
             .await
             {
@@ -2734,6 +2882,7 @@ async fn device_authorization(
         &headers,
         &body.client_id,
         body.client_secret.as_deref(),
+        ClientAssertion::NONE,
     )
     .await
     {
@@ -3216,6 +3365,11 @@ async fn realm_token_exchange(
                 &headers,
                 &body.client_id,
                 body.client_secret.as_deref(),
+                ClientAssertion {
+                    assertion_type: body.client_assertion_type.as_deref(),
+                    assertion: body.client_assertion.as_deref(),
+                    check: AssertionCheck::ByEngine,
+                },
             )
             .await
             {
@@ -3272,23 +3426,27 @@ async fn realm_token_exchange(
             // O1 (HEA-1755): authenticate the presenting client (see the
             // header-realm handler for rationale). The engine binds the grant
             // family to this authenticated identity in rotate_grant_family.
-            let authenticated_client_id =
-                if parse_basic_auth(&headers).is_some() || !body.client_id.trim().is_empty() {
-                    match verify_endpoint_client(
-                        &state,
-                        &realm_id,
-                        &headers,
-                        Some(body.client_id.as_str()),
-                        body.client_secret.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok(cid) => Some(cid),
-                        Err(resp) => return resp,
-                    }
-                } else {
-                    None
-                };
+            let authenticated_client_id = if parse_basic_auth(&headers).is_some()
+                || !body.client_id.trim().is_empty()
+                || body.client_assertion.is_some()
+            {
+                match verify_endpoint_client_or_assertion(
+                    &state,
+                    &realm_id,
+                    &headers,
+                    Some(body.client_id.as_str()),
+                    body.client_secret.as_deref(),
+                    body.client_assertion_type.as_deref(),
+                    body.client_assertion.as_deref(),
+                )
+                .await
+                {
+                    Ok(cid) => Some(cid),
+                    Err(resp) => return resp,
+                }
+            } else {
+                None
+            };
             let refresh_bind = crate::identity::RefreshBindContext {
                 user_agent: headers
                     .get(axum::http::header::USER_AGENT)
@@ -3378,6 +3536,11 @@ async fn realm_token_exchange(
                 &headers,
                 &body.client_id,
                 body.client_secret.as_deref(),
+                ClientAssertion {
+                    assertion_type: body.client_assertion_type.as_deref(),
+                    assertion: body.client_assertion.as_deref(),
+                    check: AssertionCheck::Here,
+                },
             )
             .await
             {
@@ -3527,12 +3690,14 @@ async fn realm_token_exchange(
             // the actor identity is unverified, letting any subject-token holder mint a
             // token with an attacker-controlled `aud`/`resource`/`cnf.jkt`. Derive the
             // `ClientId` from the authenticated identity, not the unauthenticated body.
-            let authenticated_client_id = match verify_endpoint_client(
+            let authenticated_client_id = match verify_endpoint_client_or_assertion(
                 &state,
                 &realm_id,
                 &headers,
                 Some(body.client_id.as_str()),
                 body.client_secret.as_deref(),
+                body.client_assertion_type.as_deref(),
+                body.client_assertion.as_deref(),
             )
             .await
             {
@@ -3801,6 +3966,7 @@ async fn realm_device_authorization(
         &headers,
         &client_id_str,
         body.get("client_secret").and_then(|v| v.as_str()),
+        ClientAssertion::NONE,
     )
     .await
     {

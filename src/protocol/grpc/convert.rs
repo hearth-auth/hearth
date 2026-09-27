@@ -48,7 +48,8 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::TokenExpired
         | IdentityError::InvalidCredential { .. }
         | IdentityError::InvalidClient
-        | IdentityError::InvalidClientSecret => (Code::Unauthenticated, err.to_string()),
+        | IdentityError::InvalidClientSecret
+        | IdentityError::PrivateKeyJwtRequired => (Code::Unauthenticated, err.to_string()),
         // Deliberately generic — internal reason MUST NOT reach the caller (enumeration resistance).
         IdentityError::InvalidClientAssertion { .. } => {
             (Code::Unauthenticated, "invalid_client".to_string())
@@ -398,6 +399,9 @@ pub fn client_auth_status(err: &crate::identity::IdentityError) -> Status {
     match err {
         crate::identity::IdentityError::KdfOverloaded { .. } => {
             Status::unavailable("server is busy verifying credentials; retry shortly")
+        }
+        crate::identity::IdentityError::PrivateKeyJwtRequired => {
+            Status::unauthenticated(err.to_string())
         }
         _ => Status::unauthenticated("invalid client credentials"),
     }

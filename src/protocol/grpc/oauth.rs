@@ -102,13 +102,25 @@ impl OAuthService for OAuthSvc {
 
         // O2 (HEA-1755): confidential clients MUST authenticate on the
         // code-exchange path. Public (PKCE) and unknown clients pass through —
-        // the exchange enforces PKCE and surfaces invalid_grant for bad codes.
+        // the exchange enforces PKCE and surfaces invalid_grant for bad codes —
+        // except that a FAPI 2.0 Advanced realm accepts no public client.
+        // A client with keys instead of a secret is not public; this RPC
+        // carries no assertion, so it is refused (it exchanges over HTTP).
         if let Ok(Some(client)) = self
             .state
             .identity
             .get_client(&realm_id, &domain_req.client_id)
         {
-            if client.is_confidential() {
+            if client.is_public() {
+                crate::identity::client_auth::authenticate_client(
+                    &self.state.identity,
+                    &realm_id,
+                    &domain_req.client_id,
+                    None,
+                )
+                .await
+                .map_err(|e| super::convert::client_auth_status(&e))?;
+            } else {
                 let authenticated =
                     verify_grpc_client_auth(&md, &realm_id, &self.state.identity).await?;
                 if authenticated != domain_req.client_id {
@@ -212,7 +224,19 @@ impl OAuthService for OAuthSvc {
             .identity
             .get_client(&realm_id, &client_id)
             .map_err(identity_to_status)?;
-        if client.as_ref().is_some_and(|c| c.is_confidential()) {
+        // A FAPI 2.0 Advanced realm refuses a public client too (the engine's
+        // check answers for the realm); a client with keys instead of a secret
+        // is not public and, with no assertion on this RPC, is refused.
+        if client.as_ref().is_some_and(|c| c.is_public()) {
+            crate::identity::client_auth::authenticate_client(
+                &self.state.identity,
+                &realm_id,
+                &client_id,
+                None,
+            )
+            .await
+            .map_err(|e| super::convert::client_auth_status(&e))?;
+        } else if client.is_some() {
             if md.get(CLIENT_ID_META_KEY).is_some() {
                 // Metadata credentials are the gRPC analogue of HTTP Basic and
                 // take precedence, as the proto comment states.

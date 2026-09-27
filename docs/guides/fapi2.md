@@ -27,7 +27,7 @@ FAPI 2.0 layered requirements in Hearth:
 | `iss` in every redirect response (RFC 9207) | ✓ | ✓ |
 | JAR mandatory — signed request object (RFC 9101) | | ✓ |
 | JARM mandatory — JWT-wrapped response | | ✓ |
-| `private_key_jwt` only — no `client_secret` | | ✓ |
+| `private_key_jwt` only — no `client_secret`, no public (`none`) clients, at `/token`, `/as/par`, `/introspect` and `/revoke` | | ✓ |
 | DPoP sender-constrained tokens (RFC 9449) | ✓ | ✓ |
 
 **Keycloak equivalent:** Keycloak's FAPI 1.0 Advanced / FAPI CIBA profiles are analogous to
@@ -489,7 +489,13 @@ curl -s -X POST "$ISSUER/realms/$REALM/token" \
 ```
 
 `client_assertion` is a short-lived JWT signed with the client private key (separate from the
-DPoP proof). See RFC 7523 for the assertion structure.
+DPoP proof). See RFC 7523 for the assertion structure. Sign it with a key from the client's
+registered JWKS — PS256, ES256 or EdDSA, with the key's `kid` in the JWS header — and set
+`iss` = `sub` = the client id, `aud` = the realm issuer, a fresh `jti` and `exp` at most five
+minutes ahead. A FAPI 2.0 client is never public: without an assertion every endpoint answers
+`401 invalid_client`, including the `refresh_token` grant, which takes the same
+`client_assertion` fields. A client registered with only a `jwks_uri` cannot authenticate
+(Hearth does not fetch key sets); register the keys inline as `jwks`.
 
 **Rejected — DPoP header missing (FAPI 2.0 client):**
 ```json

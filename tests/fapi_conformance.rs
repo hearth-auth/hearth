@@ -218,6 +218,34 @@ fn sign_jar(pkcs8_bytes: &[u8], client_id: &str, issuer: &str) -> String {
     format!("{signing_input}.{sig_b64}")
 }
 
+/// Signs a `private_key_jwt` client assertion (RFC 7523 §2.2) with the
+/// client's registered JWKS key — how a client authenticates in a FAPI 2.0
+/// Advanced realm (OIDC.md §2.1.2 item 6).
+fn sign_client_assertion(pkcs8_bytes: &[u8], client_id: &str, issuer: &str) -> String {
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let header = serde_json::json!({"alg": "EdDSA", "kid": "fapi-key"});
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "sub": client_id,
+        "aud": issuer,
+        "exp": now + 60,
+        "iat": now,
+        "jti": uuid::Uuid::new_v4().to_string(),
+    });
+    let signing_input = format!(
+        "{}.{}",
+        b64.encode(serde_json::to_vec(&header).unwrap()),
+        b64.encode(serde_json::to_vec(&claims).unwrap())
+    );
+    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8_bytes).unwrap();
+    let sig = pair.sign(signing_input.as_bytes());
+    format!("{signing_input}.{}", b64.encode(sig.as_ref()))
+}
+
 /// Builds an `AuthorizationRequest` from a `PushedAuthorizationRequest`, setting
 /// `via_par = true`. Used to simulate the web layer consuming a PAR entry.
 fn auth_req_from_par(par: &PushedAuthorizationRequest, user_id: UserId) -> AuthorizationRequest {
@@ -1651,7 +1679,11 @@ async fn fapi_a08_http_par_jar_authorize_flow_succeeds() {
             "code_challenge": PKCE_CHALLENGE,
             "code_challenge_method": "S256",
             "nonce": "fapi-a08-nonce",
-            "request": jar
+            "request": jar,
+            // A FAPI 2.0 Advanced realm authenticates the pushing client with
+            // private_key_jwt only (OIDC.md §2.1.2 item 6, RFC 9126 §2).
+            "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            "client_assertion": sign_client_assertion(&srv.pkcs8_bytes, &srv.client_id_str, &issuer),
         }))
         .send()
         .await

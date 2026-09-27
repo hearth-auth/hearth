@@ -13,6 +13,12 @@ use crate::identity::federation::oidc as fed_oidc;
 /// Algorithms a request object may be signed with.
 pub(super) const JAR_ALGS: &[&str] = &["EdDSA", "RS256", "PS256", "ES256"];
 
+/// Algorithms a `private_key_jwt` assertion verified against the client's
+/// JWKS may be signed with: the FAPI 2.0 Security Profile set (§5.4 — PS256,
+/// ES256, EdDSA). RS256 (PKCS#1 v1.5) is not accepted for client
+/// authentication.
+pub(super) const CLIENT_ASSERTION_ALGS: &[&str] = &["PS256", "ES256", "EdDSA"];
+
 /// Verifies the signature of the compact JWS `header.payload.signature`
 /// (already split into `parts`) with the key `kid` selects from `jwks_json`.
 ///

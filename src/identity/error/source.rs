@@ -25,6 +25,7 @@ impl std::error::Error for IdentityError {
             | Self::InvalidAuthorizationCode
             | Self::InvalidGrant { .. }
             | Self::InvalidClientSecret
+            | Self::PrivateKeyJwtRequired
             | Self::InvalidClientAssertion { .. }
             | Self::AuthorizationPending
             | Self::SlowDown

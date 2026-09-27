@@ -148,8 +148,14 @@ Enforces all Baseline requirements plus:
    parameter (RFC 9101 JWT Authorization Request). Requests without `request` are rejected.
 5. **JARM required** — all authorization responses MUST be JARM-wrapped JWTs. The plain query/fragment
    response mode is forbidden.
-6. **`private_key_jwt` required** — clients MUST authenticate at the token endpoint using
-   `private_key_jwt` (RFC 7523). `client_secret_basic`, `client_secret_post`, and `none` are rejected.
+6. **`private_key_jwt` required** — clients MUST authenticate using `private_key_jwt` (RFC 7523)
+   at every endpoint that authenticates a client: `/token`, `/as/par`, `/introspect`, `/revoke`
+   and their `/realms/{realm}/…` twins. `client_secret_basic`, `client_secret_post`, and `none`
+   are rejected with `401 {"error":"invalid_client","error_description":"FAPI 2.0 requires
+   private_key_jwt client authentication; …"}`. The refusal depends on the realm alone and is
+   decided before any secret is hashed. gRPC carries no client assertion, so gRPC client
+   authentication (`Introspect`, `Revoke`, `DeviceAuthorization`, `ClientCredentials`, the code
+   exchange) is refused in such a realm with `UNAUTHENTICATED`.
 
 ### 2.2 Per-Client Profile (`ClientProfile::Fapi2`)
 
@@ -163,6 +169,7 @@ regardless of the realm's `fapi_profile` setting:
 |-----------|-------------------|------------|
 | No `client_secret` at registration | `register_client` | `invalid_client_metadata` |
 | JWKS required at registration | `register_client` | `invalid_client_metadata` |
+| `private_key_jwt` only — never public, never a secret (§2.2.5) | every client-auth surface | `invalid_client` |
 | No RS256 ID tokens (`id_token_signed_response_alg`; §1.2) | `register_client`, `update_client`, token issuance | `fapi_violation` |
 | PAR-only authorization | `authorize` (`via_par` must be `true`) | `invalid_request` |
 | `response_type=code` only | `authorize` | `unsupported_response_type` |
@@ -212,6 +219,29 @@ POST /token
 Authorization: Basic <client_id>:<client_secret>    # rejected — no client_secret allowed anyway
 DPoP: <proof-JWT>                                   # required
 ```
+
+#### 2.2.5 Client Authentication
+
+A FAPI 2.0 client registers a JWKS and no secret, so it authenticates with `private_key_jwt`
+only. A `client_assertion` is verified against the client's registered keys:
+
+| Key source | Algorithms | Key selection |
+|------------|------------|---------------|
+| `assertion_public_key` (raw Ed25519) | EdDSA | the key |
+| `jwks` (inline) | PS256, ES256, EdDSA (FAPI 2.0 §5.4; RS256 is not accepted) | the JWS `kid`, or the only key when there is no `kid`; a key whose `alg` names another algorithm is refused |
+
+`jwks_uri` is not fetched: a client registered with only a `jwks_uri` cannot authenticate and
+must register its keys inline. The assertion rules are those of §8.1 (`iss` = `sub` = the
+client, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min).
+
+**A client with keys is never public.** `OAuthClient::is_public` is true only for a client with no
+secret, no assertion key and no JWKS; every other client must authenticate. A FAPI 2.0 client —
+or any client that registered a JWKS or an assertion key and no secret — presenting only its
+`client_id` is `401 invalid_client` at `/as/par`, at every `/token` grant (including
+`authorization_code`, `refresh_token`, `device_code` and token exchange, each of which accepts a
+`client_assertion`), at `/introspect` and `/revoke`, and over gRPC. A FAPI 2.0 client that
+somehow holds a secret is refused (`invalid_client`, naming `private_key_jwt`) after the secret
+verifies.
 
 #### 2.2.4 `s_hash` in JARM
 
@@ -610,7 +640,7 @@ authenticate the caller as a confidential client, by exactly one of:
 |--------|---------------------|
 | `client_secret_basic` | `Authorization: Basic base64(client_id:client_secret)` |
 | `client_secret_post` | `client_id` + `client_secret` body fields |
-| `private_key_jwt` | `client_id` + `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer` + `client_assertion` (RFC 7523 §2.2 — same rules as the token endpoint: EdDSA, `iss`/`sub` = the client, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min). HTTP only. |
+| `private_key_jwt` | `client_id` + `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer` + `client_assertion` (RFC 7523 §2.2 — same rules as the token endpoint: signed with the client's assertion key (EdDSA) or a key from its registered JWKS (PS256/ES256/EdDSA, §2.2.5), `iss`/`sub` = the client, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min). HTTP only. |
 
 gRPC callers present `x-hearth-client-id` + `x-hearth-client-secret` metadata.
 
@@ -693,8 +723,8 @@ in `token_endpoint_auth_methods_supported` (RFC 9126 §5):
 |--------|--------------|
 | `client_secret_basic` | a client with a stored secret; body `client_id` may be omitted (RFC 6749 §3.2.1) and, when present, must equal the Basic username (else `400 invalid_request`) |
 | `client_secret_post` | a client with a stored secret |
-| `private_key_jwt` | a client with an assertion key — same rules as the token endpoint (EdDSA, `iss`/`sub` = the body `client_id`, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min) |
-| `none` | a **public** client only: no stored secret and no assertion key |
+| `private_key_jwt` | a client with an assertion key or a registered JWKS — same rules as the token endpoint (§2.2.5; `iss`/`sub` = the body `client_id`, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min) |
+| `none` | a **public** client only: no stored secret, no assertion key and no JWKS — and never in a FAPI 2.0 Advanced realm (§2.1.2 item 6) |
 
 A confidential client with no credentials or a wrong one, a `private_key_jwt` client (every FAPI
 2.0 client) presenting only its `client_id` or a made-up secret, a public client presenting a
@@ -708,7 +738,8 @@ The pushed request is stored under the **authenticated** client. A request objec
 then carry that client as `iss` and, when it has a `client_id` claim, as `client_id` too (RFC 9101
 §6.3); otherwise the push is `400`.
 FAPI adds no auth-method rule at PAR beyond the token endpoint's: a FAPI 2.0 client holds no
-secret (§2.2.1), so once it has an assertion key it can authenticate only with `private_key_jwt`.
+secret (§2.2.1) and registers a JWKS, so it authenticates only with `private_key_jwt` (§2.2.5),
+and a FAPI 2.0 Advanced realm accepts nothing else from any client (§2.1.2 item 6).
 
 ---
 
@@ -721,6 +752,7 @@ secret (§2.2.1), so once it has an assertion key it can authenticate only with 
 | `tests/jarm.rs` | JARM JWT structure, signing, response mode negotiation, error wrapping |
 | `tests/jar.rs` | JAR (RFC 9101) request JWT parsing, signature verification |
 | `tests/private_key_jwt.rs` | `private_key_jwt` client authentication |
+| `tests/fapi_client_auth.rs` | A JWKS-only FAPI 2.0 client authenticates with an ES256/EdDSA assertion from its JWKS and is refused with nothing at `/as/par` and `/token` (`authorization_code`, `refresh_token`, `client_credentials`), on both routes; a FAPI 2.0 Advanced realm refuses `client_secret_*` at `/token`, `/as/par`, `/introspect`, `/revoke` and `none` at `/as/par`, `/token`, `/revoke`, and accepts `private_key_jwt` |
 | `tests/rfc9207_iss.rs` | `iss` in authorization responses per RFC 9207 |
 | `tests/oauth_form_encoding.rs` | Form + JSON content-type acceptance on token/revoke/introspect/PAR/device-authorization and their realm twins (HEA-2077) |
 | `tests/device_grant_client_auth.rs` | Confidential-client authentication on both device-grant endpoints and both realm twins (audit 2026-08-28 §4.19#4, §4.22#6) |

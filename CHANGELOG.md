@@ -161,8 +161,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   invalid_client` with `WWW-Authenticate: Basic`; Basic and body credentials naming different clients,
   or an assertion combined with a secret, are `400 invalid_request`; a request object must name the
   authenticated client; a shed Argon2id secret check is `503` + `Retry-After`. **Breaking** for
-  confidential clients — including every FAPI 2.0 client with an assertion key — that push without
-  authenticating.
+  confidential clients — including every FAPI 2.0 client — that push without authenticating.
+- **FAPI 2.0 clients authenticate with their registered JWKS, and a client with keys is never
+  public** — `private_key_jwt` assertions were verified only against the separate
+  `assertion_public_key`, never against the `jwks` that FAPI 2.0 registration requires, and "public"
+  meant "no stored secret". A FAPI 2.0 client that registered only a JWKS therefore could not
+  authenticate with its keys, and `/as/par`, the `authorization_code`, `refresh_token` and
+  `device_code` grants at `/token` (and their realm twins) accepted it on its `client_id` alone.
+  Assertions now verify against the client's inline `jwks` too (PS256, ES256 or EdDSA; key chosen by
+  `kid`; RS256 is not accepted), the `refresh_token`, token-exchange and `device_code` grants accept
+  `client_assertion`, and any client holding a JWKS or an assertion key and no secret must
+  authenticate with `private_key_jwt` everywhere (gRPC, which carries no assertion, refuses it). A
+  client registered with only a `jwks_uri` cannot authenticate (key sets are not fetched).
+  **Breaking** for a secretless client that registered a JWKS (for example only to sign request
+  objects) and used `/token`, `/as/par` or `/revoke` on its `client_id` alone.
+- **FAPI 2.0 Advanced realms require `private_key_jwt`** (`docs/specs/OIDC.md` §2.1.2 item 6) —
+  `client_secret_basic`, `client_secret_post` and `none` were accepted. `/token`, `/as/par`,
+  `/introspect`, `/revoke` and their realm twins now answer `401 invalid_client` with
+  `error_description` naming `private_key_jwt`, decided from the realm before any secret is hashed;
+  gRPC client authentication is refused in such a realm. A FAPI 2.0 client that somehow holds a
+  secret is refused the same way once the secret verifies. **Breaking** for clients of an Advanced
+  realm that authenticate with a secret or as public clients.
 
 ### Added
 - **Per-client RS256 ID tokens (OIDC interop, task 26.55)** — a client can set

@@ -3505,9 +3505,11 @@ impl EmbeddedIdentityEngine {
             // confidential client could be redeemed unauthenticated or by a
             // different client. Require that the caller authenticated as the
             // exact confidential client the family was issued to. Public
-            // clients (no secret) are exempt — they have no secret channel
-            // and are already constrained by rotation + DPoP binding.
-            if client.client_secret_hash().is_some() {
+            // clients are exempt — they have no credential to present and
+            // are already constrained by rotation + DPoP binding. A secretless
+            // client with an assertion key or a JWKS is not public: it binds
+            // like a secret holder (it authenticates with `private_key_jwt`).
+            if !client.is_public() {
                 let authenticated = bind_ctx.and_then(|c| c.authenticated_client_id.as_ref());
                 if authenticated != Some(client_id) {
                     return Err(IdentityError::InvalidClient);

@@ -1000,7 +1000,11 @@ async fn par_jar_accepted_under_fapi_advanced() {
         "code_challenge": CHALLENGE,
         "code_challenge_method": "S256",
         "nonce": "hea1019-nonce",
-        "request": jar_jwt
+        "request": jar_jwt,
+        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        "client_assertion": advanced_realm_client_assertion(
+            pkcs8.as_ref(), "hea1019", client.client_id(), &issuer
+        ),
     }))
     .expect("body json");
 
@@ -1095,6 +1099,38 @@ async fn par_endpoint_stores_the_pushed_prompt() {
     assert_eq!(stored.prompt.as_deref(), Some("none"));
 }
 
+/// A `private_key_jwt` client assertion (RFC 7523 §2.2) signed with an
+/// Ed25519 key from the client's JWKS (`kid`), for a FAPI 2.0 Advanced realm,
+/// which authenticates clients with nothing else (OIDC.md §2.1.2 item 6).
+fn advanced_realm_client_assertion(
+    pkcs8: &[u8],
+    kid: &str,
+    client: &crate::core::ClientId,
+    issuer: &str,
+) -> String {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let input = format!(
+        "{}.{}",
+        b64.encode(serde_json::json!({"alg": "EdDSA", "kid": kid}).to_string()),
+        b64.encode(
+            serde_json::json!({
+                "iss": client.to_string(), "sub": client.to_string(), "aud": issuer,
+                "exp": now + 60, "iat": now, "jti": uuid::Uuid::new_v4().to_string(),
+            })
+            .to_string()
+        )
+    );
+    let sig = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8)
+        .expect("pair")
+        .sign(input.as_bytes());
+    format!("{input}.{}", b64.encode(sig.as_ref()))
+}
+
 /// PAR without a JAR JWT is rejected under FAPI Advanced.
 ///
 /// Counterpart to `par_jar_accepted_under_fapi_advanced`: confirms the
@@ -1131,6 +1167,14 @@ async fn par_without_jar_rejected_under_fapi_advanced() {
         )
         .expect("set FAPI Advanced");
 
+    // An Advanced realm authenticates clients with private_key_jwt only, so
+    // the client holds a JWKS key and authenticates with it; the refusal
+    // below is then the JAR rule's.
+    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+        .expect("keygen");
+    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("pair");
+    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(ring::signature::KeyPair::public_key(&pair).as_ref());
     let client = state
         .identity
         .register_client(
@@ -1138,13 +1182,16 @@ async fn par_without_jar_rejected_under_fapi_advanced() {
             &RegisterClientRequest {
                 client_name: "FAPI-A No-JAR Client".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
-                client_secret: Some("secret".to_string()),
                 grant_types: vec!["authorization_code".to_string()],
                 require_consent: false,
+                jwks: Some(format!(
+                    r#"{{"keys":[{{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","kid":"nojar","x":"{x}"}}]}}"#
+                )),
                 ..Default::default()
             },
         )
         .expect("register client");
+    let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
 
     let body = serde_json::to_vec(&serde_json::json!({
         "client_id": client.client_id().as_uuid().to_string(),
@@ -1154,7 +1201,11 @@ async fn par_without_jar_rejected_under_fapi_advanced() {
         "response_type": "code",
         "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
         "code_challenge_method": "S256",
-        "nonce": "test-nonce"
+        "nonce": "test-nonce",
+        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        "client_assertion": advanced_realm_client_assertion(
+            pkcs8.as_ref(), "nojar", client.client_id(), &issuer
+        ),
     }))
     .expect("body json");
 
@@ -1165,16 +1216,6 @@ async fn par_without_jar_rejected_under_fapi_advanced() {
                 .method("POST")
                 .uri(format!("/realms/{}/as/par", realm_rec.name()))
                 .header("content-type", "application/json")
-                // The client is confidential: RFC 9126 §2 requires it to
-                // authenticate, so the refusal below is the FAPI gate's.
-                .header(
-                    "authorization",
-                    format!(
-                        "Basic {}",
-                        base64::engine::general_purpose::STANDARD
-                            .encode(format!("{}:secret", client.client_id().as_uuid()))
-                    ),
-                )
                 .body(axum::body::Body::from(body))
                 .expect("request"),
         )
@@ -3277,6 +3318,7 @@ fn http_client_auth_hashes_the_same_for_unknown_and_registered_clients() {
             &headers,
             &conf_id.as_uuid().to_string(),
             Some("wrong-secret"),
+            super::oauth::ClientAssertion::NONE,
         ));
         assert!(r.is_err(), "a wrong secret must still be refused");
     });
@@ -3287,6 +3329,7 @@ fn http_client_auth_hashes_the_same_for_unknown_and_registered_clients() {
             &headers,
             &unknown.as_uuid().to_string(),
             Some("wrong-secret"),
+            super::oauth::ClientAssertion::NONE,
         )));
     });
 
@@ -3317,6 +3360,7 @@ fn http_client_auth_hashes_the_same_for_public_and_confidential_clients() {
             &headers,
             &pub_id.as_uuid().to_string(),
             Some("stray-secret"),
+            super::oauth::ClientAssertion::NONE,
         )));
     });
     let conf_hashes = hashes_during(|| {
@@ -3326,6 +3370,7 @@ fn http_client_auth_hashes_the_same_for_public_and_confidential_clients() {
             &headers,
             &conf_id.as_uuid().to_string(),
             Some("stray-secret"),
+            super::oauth::ClientAssertion::NONE,
         )));
     });
 
@@ -3353,7 +3398,12 @@ fn http_client_auth_without_a_secret_costs_no_hashing() {
     ] {
         let n = hashes_during(|| {
             drop(block_on(super::oauth::enforce_confidential_client_auth(
-                &state, &realm_id, &headers, &id, None,
+                &state,
+                &realm_id,
+                &headers,
+                &id,
+                None,
+                super::oauth::ClientAssertion::NONE,
             )));
         });
         assert_eq!(
@@ -3379,6 +3429,7 @@ fn http_client_auth_still_accepts_the_right_secret_and_refuses_the_wrong_one() {
             &headers,
             &cid,
             Some(secret.as_str()),
+            super::oauth::ClientAssertion::NONE
         ))
         .is_ok(),
         "the registered secret must still authenticate"
@@ -3390,6 +3441,7 @@ fn http_client_auth_still_accepts_the_right_secret_and_refuses_the_wrong_one() {
             &headers,
             &cid,
             Some("nope"),
+            super::oauth::ClientAssertion::NONE
         ))
         .is_err(),
         "a wrong secret must still be refused"
@@ -3401,6 +3453,7 @@ fn http_client_auth_still_accepts_the_right_secret_and_refuses_the_wrong_one() {
         &headers,
         &pub_id.as_uuid().to_string(),
         Some("stray"),
+        super::oauth::ClientAssertion::NONE
     ))
     .is_ok());
 }

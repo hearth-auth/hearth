@@ -1440,6 +1440,7 @@ impl EmbeddedIdentityEngine {
             })?;
             self.verify_client_assertion(realm_id, &request.client_id, assertion)?;
         } else {
+            self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;
             let secret = request
                 .client_secret
                 .as_deref()
@@ -1447,6 +1448,9 @@ impl EmbeddedIdentityEngine {
             let stored_hash = existing.as_ref().and_then(OAuthClient::client_secret_hash);
             if !Self::verify_presented_client_secret(stored_hash, secret)? {
                 return Err(IdentityError::InvalidClientSecret);
+            }
+            if let Some(client) = existing.as_ref() {
+                Self::refuse_secret_for_fapi2_client(client)?;
             }
         }
         // A verified assertion or secret implies the client exists; the check
@@ -1720,25 +1724,7 @@ impl EmbeddedIdentityEngine {
                 reason: e.to_string(),
             })?;
 
-        let pk_b64 =
-            client
-                .assertion_public_key()
-                .ok_or_else(|| IdentityError::InvalidClientAssertion {
-                    reason: "no assertion public key registered for this client".to_string(),
-                })?;
-        let pk_bytes =
-            URL_SAFE_NO_PAD
-                .decode(pk_b64)
-                .map_err(|_| IdentityError::InvalidClientAssertion {
-                    reason: "client has an invalid assertion public key".to_string(),
-                })?;
-
-        // Verify EdDSA signature — rejects alg:none, HMAC, RSA, etc.
-        let claims = tokens::verify_assertion_signature(assertion, &pk_bytes).map_err(|_| {
-            IdentityError::InvalidClientAssertion {
-                reason: "assertion signature verification failed".to_string(),
-            }
-        })?;
+        let claims = Self::verify_client_assertion_signature(&client, assertion)?;
 
         // iss MUST equal client_id (RFC 7523 §3)
         if claims.iss != client_id.to_string() {
@@ -1819,6 +1805,81 @@ impl EmbeddedIdentityEngine {
         }
 
         Ok(())
+    }
+
+    /// Verifies a `private_key_jwt` assertion's signature with the keys the
+    /// client registered and returns its claims (not yet validated).
+    ///
+    /// Two key sources, tried in order:
+    ///
+    /// 1. the dedicated `assertion_public_key` (raw Ed25519, `alg` EdDSA);
+    /// 2. the client's registered `jwks` — the keys FAPI 2.0 registration
+    ///    requires — with the key chosen by the JWS `kid` (or the only key) and
+    ///    `alg` one of PS256, ES256, EdDSA (FAPI 2.0 Security Profile §5.4).
+    ///
+    /// A client registered with only a `jwks_uri` cannot be verified: Hearth
+    /// does not fetch client key sets, so such a client must register its keys
+    /// inline.
+    fn verify_client_assertion_signature(
+        client: &OAuthClient,
+        assertion: &str,
+    ) -> Result<crate::identity::tokens::JwtAssertionClaims, IdentityError> {
+        let refused = |reason: &str| IdentityError::InvalidClientAssertion {
+            reason: reason.to_string(),
+        };
+        if client.assertion_public_key().is_none() && client.jwks().is_none() {
+            return Err(refused(if client.jwks_uri().is_some() {
+                "the client registered only a jwks_uri, which is not fetched; register its keys \
+                 inline as jwks"
+            } else {
+                "no assertion public key or jwks registered for this client"
+            }));
+        }
+
+        if let Some(pk_b64) = client.assertion_public_key() {
+            let pk_bytes = URL_SAFE_NO_PAD
+                .decode(pk_b64)
+                .map_err(|_| refused("client has an invalid assertion public key"))?;
+            // EdDSA only — rejects alg:none, HMAC, RSA, etc.
+            if let Ok(claims) = tokens::verify_assertion_signature(assertion, &pk_bytes) {
+                return Ok(claims);
+            }
+            if client.jwks().is_none() {
+                return Err(refused("assertion signature verification failed"));
+            }
+        }
+
+        let Some(jwks) = client.jwks() else {
+            return Err(refused("assertion signature verification failed"));
+        };
+        #[derive(serde::Deserialize)]
+        struct AssertionHeader {
+            alg: String,
+            #[serde(default)]
+            kid: Option<String>,
+        }
+        let parts: Vec<&str> = assertion.split('.').collect();
+        let [header_b64, payload_b64, signature_b64] = parts.as_slice() else {
+            return Err(refused("malformed assertion"));
+        };
+        let header: AssertionHeader = URL_SAFE_NO_PAD
+            .decode(header_b64)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .ok_or_else(|| refused("invalid assertion header"))?;
+        super::client_jwks::verify_with_client_jwks(
+            [header_b64, payload_b64, signature_b64],
+            &header.alg,
+            header.kid.as_deref(),
+            jwks,
+            super::client_jwks::CLIENT_ASSERTION_ALGS,
+        )
+        .map_err(|_| refused("assertion signature verification failed"))?;
+        URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .ok_or_else(|| refused("invalid assertion claims"))
     }
 
     pub(super) fn verify_jar_inner(
@@ -3167,6 +3228,7 @@ impl EmbeddedIdentityEngine {
         client_id: &ClientId,
         client_secret: &str,
     ) -> Result<(), IdentityError> {
+        self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;
         let client_key = keys::encode_oauth_client(client_id);
         let client_bytes = self
             .storage
@@ -3197,6 +3259,35 @@ impl EmbeddedIdentityEngine {
         };
         if client.client_secret_hash().is_none() || !matched {
             return Err(IdentityError::InvalidClientSecret);
+        }
+        Self::refuse_secret_for_fapi2_client(client)
+    }
+
+    /// Refuses secret-based and public (`none`) client authentication in a
+    /// realm whose FAPI profile is Advanced (`docs/specs/OIDC.md` §2.1.2 item
+    /// 6: only `private_key_jwt`). Runs before any secret is hashed, on every
+    /// arm alike: the answer depends on the realm, never on the client.
+    pub(super) fn refuse_secrets_in_fapi_advanced_realm(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<(), IdentityError> {
+        use crate::identity::types::FapiProfile;
+        let advanced = self
+            .get_realm(realm_id)?
+            .is_some_and(|realm| realm.config().fapi_profile == Some(FapiProfile::Advanced));
+        if advanced {
+            return Err(IdentityError::PrivateKeyJwtRequired);
+        }
+        Ok(())
+    }
+
+    /// Refuses a FAPI 2.0 client that authenticated with a secret (it may hold
+    /// none — registration refuses one — but a secret set by any other route
+    /// must not authenticate it). Called only AFTER the secret verified, so
+    /// the refusal tells nothing to a caller who does not hold it.
+    fn refuse_secret_for_fapi2_client(client: &OAuthClient) -> Result<(), IdentityError> {
+        if client.profile().is_fapi2() {
+            return Err(IdentityError::PrivateKeyJwtRequired);
         }
         Ok(())
     }
@@ -3361,18 +3452,24 @@ impl EmbeddedIdentityEngine {
         // Costing the no-secret case nothing keeps the public-client token path
         // — the common browser flow, which legitimately authenticates by
         // `client_id` alone — off every hash entirely.
+        //
+        // A FAPI 2.0 Advanced realm accepts neither a secret nor `none`: this
+        // path only ever authenticates one of the two, so it refuses first.
+        self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;
         let client = self.get_client(realm_id, client_id)?;
 
         let Some(secret) = client_secret else {
             return match client.as_ref() {
                 // Public client: no secret needed, client_id alone suffices.
-                Some(c) if c.client_secret_hash().is_none() => Ok(()),
+                // A secretless client with an assertion key or a JWKS is not
+                // public — it authenticates with `private_key_jwt` only.
+                Some(c) if c.is_public() => Ok(()),
                 _ => Err(IdentityError::InvalidClientSecret),
             };
         };
 
         let stored_hash = client.as_ref().and_then(OAuthClient::client_secret_hash);
-        let is_public = client.is_some() && stored_hash.is_none();
+        let is_public = client.as_ref().is_some_and(OAuthClient::is_public);
         let matched = Self::verify_presented_client_secret(stored_hash, secret)?;
         if is_public {
             // A stray secret on a public client is ignored, as before.
@@ -3381,7 +3478,9 @@ impl EmbeddedIdentityEngine {
         if !matched {
             return Err(IdentityError::InvalidClientSecret);
         }
-        Ok(())
+        client
+            .as_ref()
+            .map_or(Ok(()), Self::refuse_secret_for_fapi2_client)
     }
 
     /// Confidential-only twin of [`Self::authenticate_client_inner`] for the
@@ -3398,6 +3497,7 @@ impl EmbeddedIdentityEngine {
         client_id: &crate::core::ClientId,
         client_secret: Option<&str>,
     ) -> Result<(), IdentityError> {
+        self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;
         let client = self.get_client(realm_id, client_id)?;
         // No secret: refuse on every arm without hashing. A public client has
         // nothing else to prove, so it cannot pass here.
@@ -3411,7 +3511,9 @@ impl EmbeddedIdentityEngine {
         if stored_hash.is_none() || !matched {
             return Err(IdentityError::InvalidClientSecret);
         }
-        Ok(())
+        client
+            .as_ref()
+            .map_or(Ok(()), Self::refuse_secret_for_fapi2_client)
     }
 
     pub(super) fn update_client_inner(
