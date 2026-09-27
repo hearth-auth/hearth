@@ -64,6 +64,7 @@ pub mod openapi;
 pub mod realm_resolver;
 pub mod required_action;
 pub mod saml;
+pub mod secret_reveal;
 pub mod security;
 pub mod sms_challenge;
 pub(crate) mod templates;
@@ -228,6 +229,9 @@ pub struct WebState {
     /// authenticated session may make. Shared via `Arc` so the router can be
     /// cloned per request without resetting the counters.
     pub device_approval_guard: Arc<crate::abuse::device_approval::DeviceApprovalGuard>,
+    /// Client secrets the console minted and has yet to show, once, on the
+    /// page its post/redirect/get lands on (see [`secret_reveal`]).
+    pub secret_reveals: Arc<secret_reveal::SecretReveals>,
 }
 
 /// A logo loaded from a local file path at startup.
@@ -329,6 +333,7 @@ impl WebState {
             device_approval_guard: Arc::new(
                 crate::abuse::device_approval::DeviceApprovalGuard::new(),
             ),
+            secret_reveals: Arc::new(secret_reveal::SecretReveals::default()),
         }
     }
 

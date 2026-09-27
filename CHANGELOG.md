@@ -250,8 +250,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `POST /admin/backup/restore` signature refusals return the documented `error` codes.
 - The OpenAPI entry for `POST /admin/cluster/transfer-leadership` lists its real responses.
 - The admin console's *New application* form now shows a confidential application's generated
-  secret once, on the page it answers with. It used to discard it (redirecting to a page that never
-  showed a secret), so the new client could not authenticate until its secret was regenerated.
+  secret once. It used to discard it (redirecting to a page that never showed a secret), so the new
+  client could not authenticate until its secret was regenerated. The form redirects to the
+  application's page, which shows the secret from a single-use, session-bound, five-minute
+  server-side reveal (never in a URL; `Cache-Control: no-store`), so reloading the page neither
+  registers a duplicate application nor shows the secret again. *Regenerate secret* works the same
+  way, so a reload no longer rotates the secret a second time. Behind a load balancer without
+  session affinity the page after the redirect may land on another node and show no secret;
+  regenerate it there.
 
 <!-- End of GA software-blocker fixes. -->
 

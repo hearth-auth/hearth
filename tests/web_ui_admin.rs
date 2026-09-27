@@ -1618,18 +1618,21 @@ fn assert_fapi_rs256_refusal(status: StatusCode, body: &str) {
     );
 }
 
-/// Creating a confidential application shows its generated secret once, in
-/// the response body and never in a URL, and that secret authenticates.
+/// Creating a confidential application redirects (post/redirect/get) to its
+/// page, which shows the generated secret once — held server-side for this
+/// session, never in a URL — with `Cache-Control: no-store`; that secret
+/// authenticates, and reloading the page neither shows it again nor creates a
+/// second application.
 ///
-/// The form used to mint the secret, register the client, and redirect to the
-/// detail page with `?secret_shown=1` — which nothing read: the page always
-/// rendered without a secret, so the secret was discarded and the new client
-/// could not authenticate until someone pressed *Regenerate secret*.
+/// The form used to redirect with `?secret_shown=1`, which nothing read, so
+/// the secret was discarded; the fix after that answered the POST itself with
+/// the secret (200), so reloading the page re-submitted the form — the CSRF
+/// token is per session — and registered a duplicate application.
 #[tokio::test]
 async fn console_create_shows_a_confidential_applications_secret_once() {
     const SHOWN: &str = "Client secret (shown once)";
     let rig = build_rig();
-    let (status, location, body) = console_request(
+    let (status, location, _) = console_request(
         &rig,
         "/ui/admin/realms/acme/applications/new",
         Some(
@@ -1640,17 +1643,55 @@ async fn console_create_shows_a_confidential_applications_secret_once() {
     .await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "creating a confidential application must answer with the page that shows its \
-         secret (location: {location:?})"
+        StatusCode::SEE_OTHER,
+        "creating an application must redirect, so a reload cannot re-submit the form"
     );
-    assert!(
-        location.is_empty(),
-        "the secret must not travel through a redirect"
+    let client = rig
+        .identity
+        .list_clients(&rig.realm_id, &PageRequest::default())
+        .expect("list_clients")
+        .items
+        .into_iter()
+        .find(|c| c.client_name() == "Billing Service")
+        .expect("the application was registered");
+    assert_eq!(
+        location,
+        format!(
+            "/ui/admin/realms/acme/applications/{}",
+            client.client_id().as_uuid()
+        ),
+        "the redirect goes to the application's page and carries nothing else"
     );
+
+    let reveal = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&location)
+                .header(header::COOKIE, admin_cookie(&rig, "csrf-id-token-alg"))
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(reveal.status(), StatusCode::OK);
+    assert_eq!(
+        reveal
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "the page that shows a secret must not be cached"
+    );
+    let body = to_bytes(reveal.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = String::from_utf8(body.to_vec()).expect("utf-8");
     let at = body
         .find(SHOWN)
-        .expect("the response shows the new client secret");
+        .expect("the page after creation shows the new client secret");
     let code = at + body[at..].find("<code").expect("secret element");
     let open = code + body[code..].find('>').expect("secret element end") + 1;
     let close = open + body[open..].find("</code>").expect("secret close");
@@ -1660,30 +1701,57 @@ async fn console_create_shows_a_confidential_applications_secret_once() {
         "a 256-bit secret, got {} chars",
         secret.len()
     );
+    rig.identity
+        .authenticate_client(&rig.realm_id, client.client_id(), Some(&secret))
+        .expect("the secret shown on creation must authenticate the new client");
 
-    let client = rig
+    // Shown once: a reload shows the page without it, and registers nothing.
+    let (status, _, detail) = console_request(&rig, &location, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!detail.contains(SHOWN) && !detail.contains(&secret));
+    let registered = rig
         .identity
         .list_clients(&rig.realm_id, &PageRequest::default())
         .expect("list_clients")
         .items
         .into_iter()
-        .find(|c| c.client_name() == "Billing Service")
-        .expect("the application was registered");
-    rig.identity
-        .authenticate_client(&rig.realm_id, client.client_id(), Some(&secret))
-        .expect("the secret shown on creation must authenticate the new client");
+        .filter(|c| c.client_name() == "Billing Service")
+        .count();
+    assert_eq!(registered, 1, "exactly one application was created");
+}
 
-    // Shown once: the detail page does not show it again.
-    let (_, _, detail) = console_request(
+/// *Regenerate secret* follows the same post/redirect/get: it redirects to the
+/// application's page, which shows the new secret once. It used to answer the
+/// POST with the secret, so a reload rotated the secret again and the one on
+/// screen stopped working.
+#[tokio::test]
+async fn console_regenerate_shows_the_new_secret_once_after_a_redirect() {
+    const SHOWN: &str = "Client secret (shown once)";
+    let rig = build_rig();
+    let (_, location, _) = console_request(
         &rig,
-        &format!(
-            "/ui/admin/realms/acme/applications/{}",
-            client.client_id().as_uuid()
+        "/ui/admin/realms/acme/applications/new",
+        Some(
+            "client_name=Rotating+Service&client_type=confidential\
+             &grant_client_credentials=1&trust_level=first_party",
         ),
-        None,
     )
     .await;
-    assert!(!detail.contains(SHOWN) && !detail.contains(&secret));
+    // Consume the creation reveal.
+    let (_, _, first) = console_request(&rig, &location, None).await;
+    assert!(first.contains(SHOWN));
+
+    let (status, regen_location, _) =
+        console_request(&rig, &format!("{location}/regenerate-secret"), Some("x=1")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "regenerate must redirect");
+    assert_eq!(regen_location, location);
+    let (_, _, shown) = console_request(&rig, &location, None).await;
+    assert!(
+        shown.contains(SHOWN),
+        "the new secret is shown after the redirect"
+    );
+    let (_, _, again) = console_request(&rig, &location, None).await;
+    assert!(!again.contains(SHOWN), "and only once");
 }
 
 /// Creating an RS256 application in a FAPI realm shows the engine's reason on

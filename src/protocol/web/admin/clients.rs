@@ -104,7 +104,12 @@ pub async fn admin_app_detail(
         Ok(Some(app)) => render(&AppDetailTemplate {
             app,
             realm_name: target.0.name().to_string(),
-            client_secret: None,
+            // A secret this session's create or regenerate just minted is
+            // shown here, once (post/redirect/get; HTML is `no-store`).
+            client_secret: state
+                .secret_reveals
+                .take(&session.session_id, &client_id)
+                .map(|secret| secret.as_str().to_string()),
             chrome: true,
             active: "applications",
             user_email: Some(session.user_email.clone()),
@@ -151,31 +156,20 @@ pub async fn admin_app_regenerate_secret(
     {
         Ok(new_secret) => {
             audit_app_event(&state, &session, &target.0, &client_id, "update");
-            // Re-fetch the client to render the detail page with the new secret.
-            match state.identity.get_client(target.id(), &client_id) {
-                Ok(Some(app)) => render(&AppDetailTemplate {
-                    app,
-                    realm_name: target.0.name().to_string(),
-                    client_secret: Some(new_secret),
-                    chrome: true,
-                    active: "applications",
-                    user_email: Some(session.user_email.clone()),
-                    is_admin: true,
-                    flash: None,
-                    csrf: session.csrf.clone(),
-                    narrow: false,
-                    product_name: state.product_name.clone(),
-                    logo_url: state.logo_url.clone(),
-                    realm_theme_url: state.realm_theme_url(),
-                    inline_theme_css: state.inline_theme_css(),
-                }),
-                _ => Redirect::to(&format!(
-                    "/ui/admin/realms/{}/applications/{}",
-                    target.0.name(),
-                    client_id.as_uuid()
-                ))
-                .into_response(),
-            }
+            // Post/redirect/get: the application's page shows the new secret
+            // once, from the server-side reveal, so a reload cannot rotate it
+            // again.
+            state.secret_reveals.stash(
+                &session.session_id,
+                &client_id,
+                zeroize::Zeroizing::new(new_secret),
+            );
+            Redirect::to(&format!(
+                "/ui/admin/realms/{}/applications/{}",
+                target.0.name(),
+                client_id.as_uuid()
+            ))
+            .into_response()
         }
         Err(IdentityError::InvalidClient) => {
             super::handlers_common::not_found("Application not found")
@@ -480,29 +474,17 @@ pub async fn admin_app_create_submit(
         Ok(client) => {
             audit_app_event(&state, &session, &target.0, client.client_id(), "create");
             // A confidential client's secret exists only in this request:
-            // storage keeps its hash. Show it here, once, in the response body
-            // — as *Regenerate secret* does — and never in a URL, a redirect
-            // or a log. (The form used to redirect with `?secret_shown=1`,
-            // which nothing read, so the secret was discarded and the client
-            // could not authenticate until it was regenerated.) HTML responses
-            // carry `Cache-Control: no-store`.
+            // storage keeps its hash. It is held server-side for this session
+            // and shown once by the page this redirect lands on — never in a
+            // URL, a redirect or a log. Post/redirect/get matters: answering
+            // this POST with the secret meant a reload re-submitted the form
+            // (the CSRF token is per session) and registered a duplicate.
             if let Some(secret) = &req.generated_client_secret {
-                return render(&AppDetailTemplate {
-                    app: client,
-                    realm_name,
-                    client_secret: Some(secret.expose().to_string()),
-                    chrome: true,
-                    active: "applications",
-                    user_email: Some(session.user_email.clone()),
-                    is_admin: true,
-                    flash: None,
-                    csrf: session.csrf.clone(),
-                    narrow: false,
-                    product_name: state.product_name.clone(),
-                    logo_url: state.logo_url.clone(),
-                    realm_theme_url: state.realm_theme_url(),
-                    inline_theme_css: state.inline_theme_css(),
-                });
+                state.secret_reveals.stash(
+                    &session.session_id,
+                    client.client_id(),
+                    zeroize::Zeroizing::new(secret.expose().to_string()),
+                );
             }
             Redirect::to(&format!(
                 "/ui/admin/realms/{}/applications/{}",
