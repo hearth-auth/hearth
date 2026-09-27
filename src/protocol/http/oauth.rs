@@ -693,6 +693,32 @@ fn refuse_none_in_fapi_advanced_realm(
     Ok(())
 }
 
+/// Checks the per-client token rate limit for an endpoint that authenticates
+/// a client (`/as/par`, `/introspect`, `/revoke` and their twins) BEFORE the
+/// client is verified, as `/token` does: keyed on the CLAIMED client (body
+/// `client_id`, else the Basic username) or, when none parses, on the client
+/// IP. Limiting only after verification let a flood of wrong secrets through
+/// unbounded — each one hashed.
+fn check_claimed_client_rate_limit(
+    state: &AppState,
+    realm_id: &RealmId,
+    headers: &HeaderMap,
+    body_client_id: Option<&str>,
+    peer_addr: std::net::SocketAddr,
+) -> Result<(), Response> {
+    let claimed = body_client_id
+        .and_then(non_empty_credential)
+        .map(str::to_string)
+        .or_else(|| parse_basic_auth(headers).map(|(id, _)| id));
+    match claimed.and_then(|raw| raw.parse::<uuid::Uuid>().ok()) {
+        Some(uuid) => check_token_rate_limit(state, realm_id, &ClientId::new(uuid)),
+        None => {
+            let client_ip = extract_client_ip(headers, peer_addr, &state.trusted_proxies);
+            check_anonymous_token_rate_limit(state, realm_id, &client_ip)
+        }
+    }
+}
+
 /// Authenticates a client by its `private_key_jwt` assertion when the request
 /// carries one, else as [`verify_endpoint_client`] does (a secret, or a
 /// public client's `client_id`). For the token-endpoint arms that the engine
@@ -1857,6 +1883,7 @@ fn default_response_type() -> String {
 /// Push authorization parameters (RFC 9126) — header-realm variant.
 async fn pushed_authorization_request(
     State(state): State<Arc<AppState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     JsonOrForm(body): JsonOrForm<HttpParRequest>,
 ) -> impl IntoResponse {
@@ -1864,7 +1891,7 @@ async fn pushed_authorization_request(
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
-    par_handler(&state, &realm_id, &headers, body)
+    par_handler(&state, &realm_id, &headers, body, peer_addr)
         .await
         .into_response()
 }
@@ -1873,6 +1900,7 @@ async fn pushed_authorization_request(
 async fn realm_pushed_authorization_request(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     JsonOrForm(body): JsonOrForm<HttpParRequest>,
 ) -> impl IntoResponse {
@@ -1880,7 +1908,7 @@ async fn realm_pushed_authorization_request(
         Ok(id) => id,
         Err(e) => return e,
     };
-    par_handler(&state, &realm_id, &headers, body)
+    par_handler(&state, &realm_id, &headers, body, peer_addr)
         .await
         .into_response()
 }
@@ -1976,8 +2004,20 @@ async fn par_handler(
     realm_id: &crate::core::RealmId,
     headers: &HeaderMap,
     body: HttpParRequest,
+    peer_addr: std::net::SocketAddr,
 ) -> impl IntoResponse {
     use crate::identity::{CodeChallengeMethod, PushedAuthorizationRequest};
+
+    // Rate limit before authenticating the client, as `/token` does.
+    if let Err(resp) = check_claimed_client_rate_limit(
+        state,
+        realm_id,
+        headers,
+        Some(body.client_id.as_str()),
+        peer_addr,
+    ) {
+        return resp;
+    }
 
     // RFC 9126 §2: authenticate the client before anything is stored in its
     // name. The pushed request carries the AUTHENTICATED identity, so the
@@ -2685,6 +2725,7 @@ async fn token_exchange_impl(
 /// no-op.
 async fn token_revocation(
     State(state): State<Arc<AppState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     JsonOrForm(body): JsonOrForm<HttpRevocationBody>,
 ) -> impl IntoResponse {
@@ -2693,13 +2734,20 @@ async fn token_revocation(
         Err(e) => return e.into_response(),
     };
 
+    // Rate limit the claimed client before verifying it, as `/token` does.
+    if let Err(resp) = check_claimed_client_rate_limit(
+        &state,
+        &realm_id,
+        &headers,
+        body.client_id.as_deref(),
+        peer_addr,
+    ) {
+        return resp;
+    }
     let client_id = match verify_revocation_client(&state, &realm_id, &headers, &body).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
-        return resp;
-    }
 
     // RFC 7009 §2.1: only a token issued to the authenticated client is
     // revoked; any other token is a silent 200 no-op (task 26.43 follow-up).
@@ -2734,6 +2782,7 @@ async fn token_revocation(
 /// `private_key_jwt`; a public client gets `401 invalid_client` (task 26.43).
 async fn token_introspection(
     State(state): State<Arc<AppState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     JsonOrForm(body): JsonOrForm<HttpIntrospectionBody>,
 ) -> impl IntoResponse {
@@ -2742,13 +2791,20 @@ async fn token_introspection(
         Err(e) => return e.into_response(),
     };
 
+    // Rate limit the claimed client before verifying it, as `/token` does.
+    if let Err(resp) = check_claimed_client_rate_limit(
+        &state,
+        &realm_id,
+        &headers,
+        body.client_id.as_deref(),
+        peer_addr,
+    ) {
+        return resp;
+    }
     let client_id = match verify_introspection_client(&state, &realm_id, &headers, &body).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
-        return resp;
-    }
 
     let request = crate::identity::TokenIntrospectionRequest {
         token: body.token,
@@ -3805,6 +3861,7 @@ async fn realm_token_exchange(
 async fn realm_token_revocation(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     JsonOrForm(body): JsonOrForm<HttpRevocationBody>,
 ) -> impl IntoResponse {
@@ -3812,13 +3869,20 @@ async fn realm_token_revocation(
         Ok(id) => id,
         Err(e) => return e,
     };
+    // Rate limit the claimed client before verifying it, as `/token` does.
+    if let Err(resp) = check_claimed_client_rate_limit(
+        &state,
+        &realm_id,
+        &headers,
+        body.client_id.as_deref(),
+        peer_addr,
+    ) {
+        return resp;
+    }
     let client_id = match verify_revocation_client(&state, &realm_id, &headers, &body).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
-        return resp;
-    }
 
     // RFC 7009 §2.1: only a token issued to the authenticated client is
     // revoked; any other token is a silent 200 no-op (task 26.43 follow-up).
@@ -3854,6 +3918,7 @@ async fn realm_token_revocation(
 async fn realm_token_introspection(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     JsonOrForm(body): JsonOrForm<HttpIntrospectionBody>,
 ) -> impl IntoResponse {
@@ -3861,13 +3926,20 @@ async fn realm_token_introspection(
         Ok(id) => id,
         Err(e) => return e,
     };
+    // Rate limit the claimed client before verifying it, as `/token` does.
+    if let Err(resp) = check_claimed_client_rate_limit(
+        &state,
+        &realm_id,
+        &headers,
+        body.client_id.as_deref(),
+        peer_addr,
+    ) {
+        return resp;
+    }
     let client_id = match verify_introspection_client(&state, &realm_id, &headers, &body).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
-        return resp;
-    }
 
     let request = crate::identity::TokenIntrospectionRequest {
         token: body.token,

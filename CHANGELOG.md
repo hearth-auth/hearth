@@ -162,6 +162,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   or an assertion combined with a secret, are `400 invalid_request`; a request object must name the
   authenticated client; a shed Argon2id secret check is `503` + `Retry-After`. **Breaking** for
   confidential clients — including every FAPI 2.0 client — that push without authenticating.
+- **`/as/par` is rate-limited, and `/introspect` and `/revoke` limit before authenticating** — pushed
+  authorization requests (and the realm twin) had no rate limit, and `/introspect` and `/revoke`
+  checked `security.rate_limiting.token_per_minute` only after verifying the client, so a flood of
+  wrong secrets was never limited and every one was hashed. All three now apply the `/token`
+  per-client limit first, keyed on the claimed `client_id` (body, else Basic username) or, with none,
+  on the client IP; past it they answer `429` with `Retry-After`.
 - **FAPI 2.0 clients authenticate with their registered JWKS, and a client with keys is never
   public** — `private_key_jwt` assertions were verified only against the separate
   `assertion_public_key`, never against the `jwks` that FAPI 2.0 registration requires, and "public"
