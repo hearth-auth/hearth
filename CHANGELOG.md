@@ -104,10 +104,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   on a request worker, outside the KDF gate that bounds password hashing. `hearth.yaml` client ids
   are computable, so an unauthenticated caller could force one Argon2id run per request at `/token`,
   `/introspect`, `/revoke`, `/device_authorization`, their realm twins and gRPC. These verifications
-  now take a permit from the same gate (`security.password.kdf.max_in_flight`) and run on the
-  blocking pool; when the gate is saturated the request gets `503` with `Retry-After`
-  (`kdf_overloaded`; gRPC `UNAVAILABLE`). Hearth-generated (SHA-256) secrets are unaffected. Rotate
-  config-managed and legacy clients to generated secrets to take them off this path entirely.
+  now take a permit from the same gate (`security.password.kdf.max_in_flight`), waiting for it
+  asynchronously (no thread is held while waiting), and run on the blocking pool; when no permit frees
+  within `max_queue_wait` the request gets `503` with `Retry-After` (`kdf_overloaded`; gRPC
+  `UNAVAILABLE`). A burst of such requests larger than the blocking pool is served or shed; it cannot
+  hang the runtime. Hearth-generated (SHA-256) secrets are unaffected. Rotate config-managed and
+  legacy clients to generated secrets to take them off this path entirely.
 - **`grant_type=client_credentials` no longer reveals which clients exist** — an unknown
   `client_id` was refused with `invalid_client` and a client without the grant with
   `unsupported_grant_type`, both before the secret was checked, so anyone could enumerate client ids

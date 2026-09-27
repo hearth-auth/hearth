@@ -601,7 +601,7 @@ fn resolve_client_credentials(
 /// accepted with client_id alone — including a `private_key_jwt` client, so
 /// `/revoke` layers [`verify_revocation_client`] on top, and `/introspect`
 /// uses [`verify_introspection_client`] instead (task 26.43).
-fn verify_endpoint_client(
+async fn verify_endpoint_client(
     state: &AppState,
     realm_id: &RealmId,
     headers: &HeaderMap,
@@ -637,21 +637,25 @@ fn verify_endpoint_client(
     })?;
     let client_id = ClientId::new(client_uuid);
 
-    state
-        .identity
-        .authenticate_client(realm_id, &client_id, secret.as_deref())
-        .map(|()| client_id)
-        .map_err(|e| match e {
-            // An Argon2id secret whose verification the KDF gate shed.
-            crate::identity::IdentityError::KdfOverloaded { retry_after } => {
-                kdf_shed_json_response(retry_after)
-            }
-            _ => (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "invalid_client"})),
-            )
-                .into_response(),
-        })
+    crate::identity::client_auth::authenticate_client(
+        &state.identity,
+        realm_id,
+        &client_id,
+        secret.as_deref(),
+    )
+    .await
+    .map(|()| client_id)
+    .map_err(|e| match e {
+        // An Argon2id secret whose verification the KDF gate shed.
+        crate::identity::IdentityError::KdfOverloaded { retry_after } => {
+            kdf_shed_json_response(retry_after)
+        }
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid_client"})),
+        )
+            .into_response(),
+    })
 }
 
 /// `client_assertion_type` value for `private_key_jwt` (RFC 7523 §2.2).
@@ -681,7 +685,7 @@ fn invalid_client_response() -> Response {
 ///
 /// `/revoke` uses [`verify_revocation_client`], which accepts a public client:
 /// RFC 7009 §2.1 lets public clients revoke.
-fn verify_introspection_client(
+async fn verify_introspection_client(
     state: &AppState,
     realm_id: &RealmId,
     headers: &HeaderMap,
@@ -709,16 +713,20 @@ fn verify_introspection_client(
             .parse::<uuid::Uuid>()
             .map(ClientId::new)
             .map_err(|_| invalid_client_response())?;
-        return state
-            .identity
-            .authenticate_confidential_client(realm_id, &client_id, secret.as_deref())
-            .map(|()| client_id)
-            .map_err(|e| match e {
-                crate::identity::IdentityError::KdfOverloaded { retry_after } => {
-                    kdf_shed_json_response(retry_after)
-                }
-                _ => invalid_client_response(),
-            });
+        return crate::identity::client_auth::authenticate_confidential_client(
+            &state.identity,
+            realm_id,
+            &client_id,
+            secret.as_deref(),
+        )
+        .await
+        .map(|()| client_id)
+        .map_err(|e| match e {
+            crate::identity::IdentityError::KdfOverloaded { retry_after } => {
+                kdf_shed_json_response(retry_after)
+            }
+            _ => invalid_client_response(),
+        });
     }
     verify_assertion_client(
         state,
@@ -740,7 +748,7 @@ fn verify_introspection_client(
 /// presents no assertion: [`verify_endpoint_client`] treats any client with no
 /// stored secret as public, so a FAPI 2.0 client (which may not hold a secret)
 /// could otherwise be impersonated here by anyone who knew its identifier.
-fn verify_revocation_client(
+async fn verify_revocation_client(
     state: &AppState,
     realm_id: &RealmId,
     headers: &HeaderMap,
@@ -772,7 +780,8 @@ fn verify_revocation_client(
         headers,
         body.client_id.as_deref(),
         body.client_secret.as_deref(),
-    )?;
+    )
+    .await?;
     match state.identity.get_client(realm_id, &client_id) {
         Ok(Some(client)) if client.requires_client_assertion() => Err(invalid_client_response()),
         Ok(_) => Ok(client_id),
@@ -880,7 +889,7 @@ fn non_empty_credential(field: &str) -> Option<&str> {
 /// realm-parameterised dummy hash when there is no stored one), and presenting
 /// no secret costs none, which keeps the public-client browser flow off the
 /// Argon2id path entirely.
-pub(super) fn enforce_confidential_client_auth(
+pub(super) async fn enforce_confidential_client_auth(
     state: &AppState,
     realm_id: &RealmId,
     headers: &HeaderMap,
@@ -926,11 +935,18 @@ pub(super) fn enforce_confidential_client_auth(
     // whether the client exists or holds a hash, so the unknown and public arms
     // below now cost what the confidential arm costs. The result is discarded
     // on the arms that do not consult it — the work is the point.
-    let verified = secret.as_deref().map(|s| {
-        state
-            .identity
-            .authenticate_client(realm_id, &client_id, Some(s))
-    });
+    let verified = match secret.as_deref() {
+        Some(s) => Some(
+            crate::identity::client_auth::authenticate_client(
+                &state.identity,
+                realm_id,
+                &client_id,
+                Some(s),
+            )
+            .await,
+        ),
+        None => None,
+    };
 
     // A shed Argon2id verification answers 503 on every arm: the caller's
     // own request cost the gate a slot either way.
@@ -1757,7 +1773,7 @@ async fn realm_pushed_authorization_request(
 /// public, confidential — a dummy hash when none is stored), and no secret
 /// costs none, as at the token endpoint. An Argon2id verification the KDF gate
 /// sheds is `503` + `Retry-After`.
-fn verify_par_client(
+async fn verify_par_client(
     state: &AppState,
     realm_id: &RealmId,
     headers: &HeaderMap,
@@ -1797,16 +1813,20 @@ fn verify_par_client(
         .map_err(|_| invalid_client_response())?;
 
     if let Some(secret) = secret {
-        return state
-            .identity
-            .authenticate_confidential_client(realm_id, &client_id, Some(&secret))
-            .map(|()| client_id)
-            .map_err(|e| match e {
-                crate::identity::IdentityError::KdfOverloaded { retry_after } => {
-                    kdf_shed_json_response(retry_after)
-                }
-                _ => invalid_client_response(),
-            });
+        return crate::identity::client_auth::authenticate_confidential_client(
+            &state.identity,
+            realm_id,
+            &client_id,
+            Some(&secret),
+        )
+        .await
+        .map(|()| client_id)
+        .map_err(|e| match e {
+            crate::identity::IdentityError::KdfOverloaded { retry_after } => {
+                kdf_shed_json_response(retry_after)
+            }
+            _ => invalid_client_response(),
+        });
     }
 
     // No credential: only a public client may push on its `client_id` alone.
@@ -1831,7 +1851,7 @@ async fn par_handler(
     // name. The pushed request carries the AUTHENTICATED identity, so the
     // engine's request-object checks (`iss` and `client_id` must name the
     // client, RFC 9101 §6.3) bind the request object to it too.
-    let client_id = match verify_par_client(state, realm_id, headers, &body) {
+    let client_id = match verify_par_client(state, realm_id, headers, &body).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
@@ -2042,7 +2062,9 @@ async fn token_exchange_impl(
                 &headers,
                 &body.client_id,
                 body.client_secret.as_deref(),
-            ) {
+            )
+            .await
+            {
                 return resp;
             }
 
@@ -2120,7 +2142,9 @@ async fn token_exchange_impl(
                         &headers,
                         Some(body.client_id.as_str()),
                         body.client_secret.as_deref(),
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(cid) => Some(cid),
                         Err(resp) => return resp,
                     }
@@ -2199,7 +2223,13 @@ async fn token_exchange_impl(
             request.client_assertion = body.client_assertion;
 
             let realm_str = realm_id.as_uuid().to_string();
-            match state.identity.client_credentials_token(&realm_id, &request) {
+            match crate::identity::client_auth::client_credentials_token(
+                &state.identity,
+                &realm_id,
+                request,
+            )
+            .await
+            {
                 Ok(response) => {
                     crate::metrics::metrics()
                         .auth_attempts_total
@@ -2234,7 +2264,9 @@ async fn token_exchange_impl(
                 &headers,
                 &body.client_id,
                 body.client_secret.as_deref(),
-            ) {
+            )
+            .await
+            {
                 return resp;
             }
 
@@ -2406,7 +2438,9 @@ async fn token_exchange_impl(
                 &headers,
                 Some(body.client_id.as_str()),
                 body.client_secret.as_deref(),
-            ) {
+            )
+            .await
+            {
                 Ok(id) => id,
                 Err(resp) => return resp,
             };
@@ -2511,7 +2545,7 @@ async fn token_revocation(
         Err(e) => return e.into_response(),
     };
 
-    let client_id = match verify_revocation_client(&state, &realm_id, &headers, &body) {
+    let client_id = match verify_revocation_client(&state, &realm_id, &headers, &body).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
@@ -2560,7 +2594,7 @@ async fn token_introspection(
         Err(e) => return e.into_response(),
     };
 
-    let client_id = match verify_introspection_client(&state, &realm_id, &headers, &body) {
+    let client_id = match verify_introspection_client(&state, &realm_id, &headers, &body).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
@@ -2700,7 +2734,9 @@ async fn device_authorization(
         &headers,
         &body.client_id,
         body.client_secret.as_deref(),
-    ) {
+    )
+    .await
+    {
         return resp;
     }
 
@@ -3180,7 +3216,9 @@ async fn realm_token_exchange(
                 &headers,
                 &body.client_id,
                 body.client_secret.as_deref(),
-            ) {
+            )
+            .await
+            {
                 return resp;
             }
             let (Some(code), Some(redirect_uri)) = (body.code, body.redirect_uri) else {
@@ -3242,7 +3280,9 @@ async fn realm_token_exchange(
                         &headers,
                         Some(body.client_id.as_str()),
                         body.client_secret.as_deref(),
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(cid) => Some(cid),
                         Err(resp) => return resp,
                     }
@@ -3305,7 +3345,13 @@ async fn realm_token_exchange(
             request.dpop_jkt = dpop_jkt.clone();
             request.client_assertion_type = body.client_assertion_type;
             request.client_assertion = body.client_assertion;
-            match state.identity.client_credentials_token(&realm_id, &request) {
+            match crate::identity::client_auth::client_credentials_token(
+                &state.identity,
+                &realm_id,
+                request,
+            )
+            .await
+            {
                 Ok(response) => {
                     let resp = pb::OidcTokenResponse {
                         access_token: response.access_token().to_string(),
@@ -3332,7 +3378,9 @@ async fn realm_token_exchange(
                 &headers,
                 &body.client_id,
                 body.client_secret.as_deref(),
-            ) {
+            )
+            .await
+            {
                 return resp;
             }
 
@@ -3485,7 +3533,9 @@ async fn realm_token_exchange(
                 &headers,
                 Some(body.client_id.as_str()),
                 body.client_secret.as_deref(),
-            ) {
+            )
+            .await
+            {
                 Ok(id) => id,
                 Err(resp) => return resp,
             };
@@ -3597,7 +3647,7 @@ async fn realm_token_revocation(
         Ok(id) => id,
         Err(e) => return e,
     };
-    let client_id = match verify_revocation_client(&state, &realm_id, &headers, &body) {
+    let client_id = match verify_revocation_client(&state, &realm_id, &headers, &body).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
@@ -3646,7 +3696,7 @@ async fn realm_token_introspection(
         Ok(id) => id,
         Err(e) => return e,
     };
-    let client_id = match verify_introspection_client(&state, &realm_id, &headers, &body) {
+    let client_id = match verify_introspection_client(&state, &realm_id, &headers, &body).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
@@ -3751,7 +3801,9 @@ async fn realm_device_authorization(
         &headers,
         &client_id_str,
         body.get("client_secret").and_then(|v| v.as_str()),
-    ) {
+    )
+    .await
+    {
         return resp;
     }
     let request = crate::identity::DeviceAuthorizationRequest {

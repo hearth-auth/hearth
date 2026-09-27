@@ -367,10 +367,10 @@ pub fn extract_grpc_user_auth(
 /// values and delegates to the identity engine for verification. Confidential
 /// clients require the secret; public clients are accepted with ID alone.
 /// Returns `UNAUTHENTICATED` for any auth failure.
-pub fn verify_grpc_client_auth(
+pub async fn verify_grpc_client_auth(
     md: &MetadataMap,
     realm_id: &RealmId,
-    identity: &dyn crate::identity::IdentityEngine,
+    identity: &std::sync::Arc<dyn crate::identity::IdentityEngine>,
 ) -> Result<crate::core::ClientId, Status> {
     let raw_id = md
         .get(CLIENT_ID_META_KEY)
@@ -385,8 +385,8 @@ pub fn verify_grpc_client_auth(
 
     let secret = md.get(CLIENT_SECRET_META_KEY).and_then(|v| v.to_str().ok());
 
-    identity
-        .authenticate_client(realm_id, &client_id, secret)
+    crate::identity::client_auth::authenticate_client(identity, realm_id, &client_id, secret)
+        .await
         .map(|()| client_id)
         .map_err(|e| client_auth_status(&e))
 }
@@ -410,10 +410,10 @@ pub fn client_auth_status(err: &crate::identity::IdentityError) -> Status {
 /// introspection caller: only a client whose stored secret matches
 /// `x-hearth-client-secret` is accepted. Returns `UNAUTHENTICATED` for any
 /// failure, with the same message as the permissive twin.
-pub fn verify_grpc_confidential_client_auth(
+pub async fn verify_grpc_confidential_client_auth(
     md: &MetadataMap,
     realm_id: &RealmId,
-    identity: &dyn crate::identity::IdentityEngine,
+    identity: &std::sync::Arc<dyn crate::identity::IdentityEngine>,
 ) -> Result<crate::core::ClientId, Status> {
     let raw_id = md
         .get(CLIENT_ID_META_KEY)
@@ -425,8 +425,10 @@ pub fn verify_grpc_confidential_client_auth(
         .map(crate::core::ClientId::new)
         .map_err(|_| Status::unauthenticated("invalid client credentials"))?;
     let secret = md.get(CLIENT_SECRET_META_KEY).and_then(|v| v.to_str().ok());
-    identity
-        .authenticate_confidential_client(realm_id, &client_id, secret)
-        .map(|()| client_id)
-        .map_err(|e| client_auth_status(&e))
+    crate::identity::client_auth::authenticate_confidential_client(
+        identity, realm_id, &client_id, secret,
+    )
+    .await
+    .map(|()| client_id)
+    .map_err(|e| client_auth_status(&e))
 }

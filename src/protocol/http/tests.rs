@@ -3180,6 +3180,15 @@ async fn api_json_does_not_gain_the_html_only_headers() {
 
 use crate::core::{ClientId, RealmId};
 
+/// Drives a client-auth future to completion from a synchronous test.
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(f)
+}
+
 /// Runs `f` and returns `(argon2_verifications, fast_verifications)`.
 fn hashes_during(f: impl FnOnce()) -> (u64, u64) {
     use crate::identity::credentials::{fast_secret_verification_count, hash_verification_count};
@@ -3262,23 +3271,23 @@ fn http_client_auth_hashes_the_same_for_unknown_and_registered_clients() {
     let unknown = ClientId::generate();
 
     let known_hashes = hashes_during(|| {
-        let r = super::oauth::enforce_confidential_client_auth(
+        let r = block_on(super::oauth::enforce_confidential_client_auth(
             &state,
             &realm_id,
             &headers,
             &conf_id.as_uuid().to_string(),
             Some("wrong-secret"),
-        );
+        ));
         assert!(r.is_err(), "a wrong secret must still be refused");
     });
     let unknown_hashes = hashes_during(|| {
-        drop(super::oauth::enforce_confidential_client_auth(
+        drop(block_on(super::oauth::enforce_confidential_client_auth(
             &state,
             &realm_id,
             &headers,
             &unknown.as_uuid().to_string(),
             Some("wrong-secret"),
-        ));
+        )));
     });
 
     assert_eq!(
@@ -3302,22 +3311,22 @@ fn http_client_auth_hashes_the_same_for_public_and_confidential_clients() {
     let headers = axum::http::HeaderMap::new();
 
     let public_hashes = hashes_during(|| {
-        drop(super::oauth::enforce_confidential_client_auth(
+        drop(block_on(super::oauth::enforce_confidential_client_auth(
             &state,
             &realm_id,
             &headers,
             &pub_id.as_uuid().to_string(),
             Some("stray-secret"),
-        ));
+        )));
     });
     let conf_hashes = hashes_during(|| {
-        drop(super::oauth::enforce_confidential_client_auth(
+        drop(block_on(super::oauth::enforce_confidential_client_auth(
             &state,
             &realm_id,
             &headers,
             &conf_id.as_uuid().to_string(),
             Some("stray-secret"),
-        ));
+        )));
     });
 
     assert_eq!(
@@ -3343,9 +3352,9 @@ fn http_client_auth_without_a_secret_costs_no_hashing() {
         ("unknown", unknown.as_uuid().to_string()),
     ] {
         let n = hashes_during(|| {
-            drop(super::oauth::enforce_confidential_client_auth(
+            drop(block_on(super::oauth::enforce_confidential_client_auth(
                 &state, &realm_id, &headers, &id, None,
-            ));
+            )));
         });
         assert_eq!(
             n,
@@ -3364,34 +3373,34 @@ fn http_client_auth_still_accepts_the_right_secret_and_refuses_the_wrong_one() {
     let cid = conf_id.as_uuid().to_string();
 
     assert!(
-        super::oauth::enforce_confidential_client_auth(
+        block_on(super::oauth::enforce_confidential_client_auth(
             &state,
             &realm_id,
             &headers,
             &cid,
             Some(secret.as_str()),
-        )
+        ))
         .is_ok(),
         "the registered secret must still authenticate"
     );
     assert!(
-        super::oauth::enforce_confidential_client_auth(
+        block_on(super::oauth::enforce_confidential_client_auth(
             &state,
             &realm_id,
             &headers,
             &cid,
             Some("nope"),
-        )
+        ))
         .is_err(),
         "a wrong secret must still be refused"
     );
     // A public client is authenticated by PKCE, not a secret: still Ok.
-    assert!(super::oauth::enforce_confidential_client_auth(
+    assert!(block_on(super::oauth::enforce_confidential_client_auth(
         &state,
         &realm_id,
         &headers,
         &pub_id.as_uuid().to_string(),
         Some("stray"),
-    )
+    ))
     .is_ok());
 }

@@ -3392,12 +3392,19 @@ impl EmbeddedIdentityEngine {
     /// on a missing client or missing hash is exactly the bug this closes.
     ///
     /// An Argon2id verification runs behind the process-wide KDF admission
-    /// gate, on the blocking pool, exactly like a password verification: the
-    /// client ids of `hearth.yaml` applications are UUID v5 values anyone can
-    /// compute, so without the gate an unauthenticated caller could force one
-    /// Argon2id run per request on a Tokio worker. When the gate sheds, this
-    /// returns [`IdentityError::KdfOverloaded`] and the protocol layer answers
-    /// `503` with `Retry-After`. The fast format never touches the gate.
+    /// gate: the client ids of `hearth.yaml` applications are UUID v5 values
+    /// anyone can compute, so without the gate an unauthenticated caller could
+    /// force one Argon2id run per request. The protocol layer reaches this
+    /// through the async entry points in [`crate::identity::client_auth`],
+    /// which WAIT for a permit asynchronously and run the whole engine call on
+    /// the blocking pool; this code then runs inside the admitted closure. A
+    /// direct synchronous call (a test, a caller that bypassed the entry point,
+    /// a secret rotated between the entry point's check and this one) takes a
+    /// permit only if one is free right now and otherwise sheds — it never
+    /// waits, because waiting from synchronous code on a runtime is what
+    /// deadlocked the runtime. When the gate sheds, this returns
+    /// [`IdentityError::KdfOverloaded`] and the protocol layer answers `503`
+    /// with `Retry-After`. The fast format never touches the gate.
     pub(super) fn verify_presented_client_secret(
         stored_hash: Option<&str>,
         presented: &str,
@@ -3410,7 +3417,7 @@ impl EmbeddedIdentityEngine {
                 let secret = zeroize::Zeroizing::new(presented.as_bytes().to_vec());
                 let hash = hash.to_string();
                 match crate::identity::gate()
-                    .run_blocking(move || credentials::verify_raw_secret(&secret, &hash))
+                    .try_run_inline(move || credentials::verify_raw_secret(&secret, &hash))
                 {
                     Ok(verified) => verified,
                     Err(crate::identity::KdfGateError::Overloaded { retry_after }) => {
@@ -3426,6 +3433,23 @@ impl EmbeddedIdentityEngine {
                 Ok(false)
             }
         }
+    }
+
+    /// Whether a secret presented for `client_id` would be verified with
+    /// Argon2id: the client exists and holds a stored hash that is not the
+    /// fast `$hearth-sha256$` format. An unknown client, a public client and a
+    /// fast-format client all answer `false` — their verification is one
+    /// SHA-256, run synchronously and ungated.
+    pub(super) fn client_secret_needs_kdf_inner(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+    ) -> Result<bool, IdentityError> {
+        Ok(self
+            .get_client_inner(realm_id, client_id)?
+            .as_ref()
+            .and_then(OAuthClient::client_secret_hash)
+            .is_some_and(|hash| !credentials::is_fast_client_secret_hash(hash)))
     }
 
     pub(super) fn list_clients_inner(

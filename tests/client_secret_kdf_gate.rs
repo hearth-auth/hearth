@@ -240,3 +240,87 @@ async fn argon2_client_secrets_are_verified_behind_the_kdf_gate() {
         "with a free permit the Argon2id client must authenticate"
     );
 }
+
+/// A burst of Argon2id client authentications LARGER than the Tokio blocking
+/// pool completes — every caller is served or shed — instead of hanging the
+/// runtime.
+///
+/// The first gated client-secret check parked each calling worker with
+/// `block_in_place` and waited for a permit on the thread it handed its core
+/// to. Every such caller took a blocking-pool thread BEFORE it waited, so once
+/// more callers arrived than `max_blocking_threads`, the handed-off cores got
+/// no thread, nothing drove the timer that sheds a waiter, and the runtime sat
+/// at 0 % CPU for ever (production: ~512+ concurrent Argon2id client auths on
+/// the default pool). The runtime here is deliberately small — 2 workers, 8
+/// blocking threads — and offered 64 concurrent `/introspect` calls.
+#[test]
+fn an_argon2_client_auth_burst_larger_than_the_blocking_pool_completes() {
+    const CALLERS: usize = 64;
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<Vec<u16>>();
+    // The runtime lives on its own thread so a hang is reported as a failure
+    // here instead of wedging the test process.
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(8)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let statuses = rt.block_on(async {
+            assert!(
+                hearth::identity::init_gate(KdfGateConfig {
+                    max_in_flight: 2,
+                    max_queue_wait: Duration::from_millis(250),
+                    retry_after: Duration::from_secs(1),
+                }),
+                "init_gate must win the process-global OnceLock"
+            );
+            let h = common::TestHarness::server().await.expect("server harness");
+            let base = h.base_url().expect("base_url").to_string();
+            let realm = h
+                .identity()
+                .create_realm(&CreateRealmRequest {
+                    name: format!("kdf-burst-{}", uuid::Uuid::new_v4()),
+                    config: None,
+                })
+                .expect("create realm")
+                .id()
+                .clone();
+            let client = register(&h, &realm, RegisterSecret::Argon2);
+            let mut tasks = Vec::with_capacity(CALLERS);
+            for _ in 0..CALLERS {
+                let (base, realm, client) = (base.clone(), realm.clone(), client.clone());
+                tasks.push(tokio::spawn(async move {
+                    post(
+                        format!("{base}/introspect"),
+                        Some(&realm),
+                        &client,
+                        ARGON2_SECRET,
+                        &[("token", "not-a-token")],
+                    )
+                    .await
+                    .status()
+                    .as_u16()
+                }));
+            }
+            let mut statuses = Vec::with_capacity(CALLERS);
+            for t in tasks {
+                statuses.push(t.await.expect("caller joins"));
+            }
+            statuses
+        });
+        let _ = done_tx.send(statuses);
+    });
+    let statuses = done_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the runtime hung: an Argon2id client-auth burst larger than the blocking pool never completed");
+    assert_eq!(statuses.len(), CALLERS);
+    assert!(
+        statuses.iter().all(|s| *s == 200 || *s == 503),
+        "every caller must be served (200) or shed (503): {statuses:?}"
+    );
+    assert!(
+        statuses.contains(&200),
+        "a bounded gate still serves some of the burst: {statuses:?}"
+    );
+}

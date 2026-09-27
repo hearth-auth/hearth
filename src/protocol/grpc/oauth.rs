@@ -110,7 +110,7 @@ impl OAuthService for OAuthSvc {
         {
             if client.is_confidential() {
                 let authenticated =
-                    verify_grpc_client_auth(&md, &realm_id, self.state.identity.as_ref())?;
+                    verify_grpc_client_auth(&md, &realm_id, &self.state.identity).await?;
                 if authenticated != domain_req.client_id {
                     return Err(Status::unauthenticated(
                         "client authentication does not match request client_id",
@@ -133,7 +133,7 @@ impl OAuthService for OAuthSvc {
     ) -> Result<Response<pb::OAuthEmpty>, Status> {
         let realm_id = extract_realm_id(req.metadata())?;
         let client_id =
-            verify_grpc_client_auth(req.metadata(), &realm_id, self.state.identity.as_ref())?;
+            verify_grpc_client_auth(req.metadata(), &realm_id, &self.state.identity).await?;
         // `verify_grpc_client_auth` accepts any secretless client on its
         // `client_id` alone. A `private_key_jwt` client is secretless but
         // confidential, and this RPC carries no assertion, so it cannot
@@ -168,11 +168,9 @@ impl OAuthService for OAuthSvc {
         // authenticated client is passed on so the RFC 7662 audience
         // restriction applies here exactly as on the HTTP routes — this path
         // used to pass `None`, which skipped it.
-        let client_id = verify_grpc_confidential_client_auth(
-            req.metadata(),
-            &realm_id,
-            self.state.identity.as_ref(),
-        )?;
+        let client_id =
+            verify_grpc_confidential_client_auth(req.metadata(), &realm_id, &self.state.identity)
+                .await?;
         let mut body: domain::TokenIntrospectionRequest = req.into_inner().into();
         body.introspecting_client_id = Some(client_id);
         let resp = self
@@ -219,7 +217,7 @@ impl OAuthService for OAuthSvc {
                 // Metadata credentials are the gRPC analogue of HTTP Basic and
                 // take precedence, as the proto comment states.
                 let authenticated =
-                    verify_grpc_client_auth(&md, &realm_id, self.state.identity.as_ref())?;
+                    verify_grpc_client_auth(&md, &realm_id, &self.state.identity).await?;
                 if authenticated != client_id {
                     return Err(Status::unauthenticated(
                         "client authentication does not match request client_id",
@@ -227,10 +225,14 @@ impl OAuthService for OAuthSvc {
                 }
             } else {
                 // `client_secret_post` fallback: the request body's own field.
-                self.state
-                    .identity
-                    .authenticate_client(&realm_id, &client_id, body.client_secret.as_deref())
-                    .map_err(|e| super::convert::client_auth_status(&e))?;
+                crate::identity::client_auth::authenticate_client(
+                    &self.state.identity,
+                    &realm_id,
+                    &client_id,
+                    body.client_secret.as_deref(),
+                )
+                .await
+                .map_err(|e| super::convert::client_auth_status(&e))?;
             }
         }
 
@@ -253,11 +255,13 @@ impl OAuthService for OAuthSvc {
         let realm_id = extract_realm_id(req.metadata())?;
         let body = req.into_inner();
         let domain_req = proto_client_creds_to_domain(&body).map_err(Status::invalid_argument)?;
-        let resp = self
-            .state
-            .identity
-            .client_credentials_token(&realm_id, &domain_req)
-            .map_err(identity_to_status)?;
+        let resp = crate::identity::client_auth::client_credentials_token(
+            &self.state.identity,
+            &realm_id,
+            domain_req,
+        )
+        .await
+        .map_err(identity_to_status)?;
         Ok(Response::new(pb::ClientCredentialsResponse::from(&resp)))
     }
 
