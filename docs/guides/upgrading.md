@@ -509,8 +509,8 @@ Check the `CHANGELOG.md` `## [Unreleased]` section for in-flight breaking change
 > - a new-build leader over a majority of older followers cannot commit anything, so every write
 >   times out;
 > - an older build cannot read a Raft log (`raft.db`) that contains the new command, so **rolling a
->   node back needs its data directory restored from a backup taken before the upgrade** — the
->   in-place rollback below does not apply to this release in cluster mode.
+>   node back needs a copy of its data directory taken before the upgrade** — the in-place
+>   rollback below does not apply to this release in cluster mode.
 >
 > A new-build node logs `peer cannot decode this node's Raft log: it runs an older Hearth build`
 > (once per peer) when it meets such a node. There is no safe fallback: the older write path read
@@ -518,10 +518,11 @@ Check the `CHANGELOG.md` `## [Unreleased]` section for in-flight breaking change
 > closes, so the new build does not fall back to it.
 >
 > To upgrade a **young** cluster — one whose Raft logs have not been purged yet: take a backup on
-> the leader, **stop every node**, install the new binary on every node, then start them all.
-> Expect a write outage for the length of the restart. Single-node deployments are unaffected. To
-> roll back, stop every node and restore each node's data directory (or restore the backup into a
-> fresh cluster) before starting the older binary.
+> the leader, **stop every node**, copy each node's whole data directory (including `raft.db`)
+> aside, install the new binary on every node, then start them all. Expect a write outage for the
+> length of the restart. Single-node deployments are unaffected. To roll back, stop every node,
+> put each node's copied data directory back, and start the older binary: a young node's log
+> still holds every entry, so the older build can restart it.
 >
 > **A cluster whose Raft logs were purged cannot be upgraded in place** — and that is nearly every
 > cluster in production: with the default snapshot policy a node takes its first snapshot, and
@@ -534,53 +535,113 @@ Check the `CHANGELOG.md` `## [Unreleased]` section for in-flight breaking change
 
 Releases up to v1.6.11 kept the Raft state machine's applied index and the cluster membership **in
 memory only**. Once a node's log has been purged, neither can be recovered from its data directory:
-the older build could not restart such a node either, and the new build refuses to start it
-(`this node's Raft log is purged through index N but its data directory holds no persisted applied
-state …`). Re-seeding one node (move its data directory aside and start it empty, so the leader
-sends it a snapshot) works only while the rest of the cluster still has a leader. In the
-full-cluster restart this release requires every node is in that state at once, so there is no
-leader: rebuild the cluster from a backup.
+the older build cannot restart such a node, and the new build refuses to start it (`this node's
+Raft log is purged through index N but its data directory holds no persisted applied state …`).
+Re-seeding one node (move its data directory aside and start it empty, so the leader sends it a
+snapshot) works only while the rest of the cluster still has a leader. In the full-cluster restart
+this release requires, every node is in that state at once, so there is no leader: rebuild the
+cluster from a backup.
 
-1. **Before stopping anything**, find a node that answers `/admin/cluster/status` as `leader`,
-   stop client writes (a maintenance window), and take a backup from it over HTTP — this also
-   avoids the offline CLI's data-directory lock:
+> **Stopping the old cluster is one-way.** A purged node cannot restart on **either** build, so
+> once you stop the nodes in step 2 the old cluster cannot be started again, and putting its data
+> directories back does not bring it back. The only rollback is to rebuild a cluster of the
+> **older** build from the same backup, by the same offline procedure (steps 3–6 with the older
+> binary and its own `hearth backup restore`). Such a cluster works until its logs are purged
+> again, and then has the same restart problem.
+
+> **Restore offline, before the new cluster first starts.** Realms come from `hearth.yaml`:
+> `POST /admin/realms` answers `405`, and at every start-up the server creates each declared realm
+> that is missing — with a **new** id and a **new** signing key. A restore into a cluster that has
+> already started therefore finds each realm's name taken, skips the archived realm record and its
+> signing key (reported as a conflict, not an error), and writes the realm's users and clients
+> under the archive's old realm id. The realms are then empty under their names, every token they
+> issued stops validating, and nothing fails. Restoring into an empty data directory before the
+> first start avoids this: start-up then finds each realm already there, under its archived id.
+
+**What the rebuild does not bring back.** Read this before you schedule the window:
+
+- **The system realm.** The HTTP export (`POST /admin/backup`) never includes it, so the rebuild
+  loses every **operator-console account**, every API token and grant issued in the system realm
+  (for example the system token used below), and the system realm's signing key. This release has
+  **no supported way to create the first operator-console account** on a restored store: the
+  setup URL is issued only while the store holds no realm, and a restored store holds them all. An
+  unfiltered `hearth backup create` of this release does include the system realm, but
+  `hearth backup restore` refuses to import it (`operation not permitted on the system realm:
+  import_realm`) and stops, so it is not a way around this. Tenant realms' own admins and API
+  tokens are restored and keep working against `/admin` with their realm's `X-Realm-ID`; the
+  cluster endpoints (`/admin/cluster/*`) need a system-realm token.
+- **Sessions.** They are never exported. Every token bound to a session — every user's access and
+  refresh token — stops validating, so **every user signs in again**.
+- **The revoked-token list.** It is excluded from backups. A token without a session (for example
+  a `client_credentials` access token) keeps validating until it expires — **including one that was
+  revoked before the backup**. If any such token was revoked and has not expired yet, rotate that
+  realm's signing key after the rebuild (default rotation stops every token signed with the old
+  key at once; see the [DR guide](./disaster-recovery.md#post-incident-signing-key-rotation)).
+- **Audit events**, unless the export passes `include_audit=true` (below does).
+
+The [Backup guide](./backup.md#what-a-backup-does-not-carry) lists the rest.
+
+**Keep `HEARTH_MASTER_KEY` and the key-encryption key.** The export wraps the archive's data key
+with the exporting node's `HEARTH_MASTER_KEY`, and `hearth backup restore` unwraps it with the
+`HEARTH_MASTER_KEY` in its own environment. With any other value the restore cannot read the
+archive at all and writes nothing — `--allow-missing-signing-key` does not change that, and the HTTP
+restore has no such override. The same variable is the new store's host key, and every node of a
+cluster must share one value anyway: run the restore and the new cluster with the old cluster's
+`HEARTH_MASTER_KEY`, and with a `hearth.yaml` that carries its `security.key_encryption_key`.
+
+1. **Before stopping anything**, stop client writes (a maintenance window) and take a backup from
+   the leader over HTTP, with a **system-realm** token (only the system realm may export every
+   realm — a realm-scoped admin token exports its own realm only) and the system realm's nil UUID
+   as `X-Realm-ID`:
 
    ```bash
-   curl -fsS -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
-     -H "X-Realm-ID: $ADMIN_REALM_ID" \
+   curl -fsS -X POST -H "Authorization: Bearer $SYSTEM_TOKEN" \
+     -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000" \
      "https://10.0.0.1:8420/admin/backup?include_audit=true" -o pre-upgrade.hearth-backup
-   hearth backup sign --input pre-upgrade.hearth-backup --key-file /etc/hearth/backup-signing.pem
    hearth backup verify --input pre-upgrade.hearth-backup
+   hearth backup sign --input pre-upgrade.hearth-backup --key-file /etc/hearth/backup-signing.pem
    ```
 
-   The token needs the `hearth.export` capability. See the [Backup guide](./backup.md) for the
-   options, for signing (the restore refuses an unsigned archive), and for what an archive does
-   **not** carry — sessions are not exported, so every user signs in again after the rebuild.
-2. **Stop every node.** Move each node's data directory (including `raft.db`) aside and keep it:
-   it is your rollback path to the older build.
-3. **Install the new binary on every node** and start the cluster with **empty** data directories,
-   exactly as a new cluster is bootstrapped ([Clustering guide](./clustering.md)). Wait until one
-   node reports `leader` and every node has joined.
-4. **Restore the backup through the leader**, so the restored data is written through Raft and
-   replicates to every node:
+   The token needs the `hearth.admin` and `hearth.export` capabilities. Check the archive lists
+   every tenant realm (`hearth backup inspect --input pre-upgrade.hearth-backup`); see the
+   [Backup guide](./backup.md) for signing (the restore refuses an unsigned archive).
+2. **Stop every node** — one-way, see above. Keep each node's data directory (including `raft.db`)
+   anyway, for investigation.
+3. **Install the new binary on every node.**
+4. **Restore offline into one empty data directory**, on one node, with the new binary, the old
+   cluster's `HEARTH_MASTER_KEY` in the environment and the new cluster's `hearth.yaml` (its
+   `security.backup.verify_key` must match the key the archive was signed with):
 
    ```bash
-   curl -fsS -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
-     -H "X-Realm-ID: $ADMIN_REALM_ID" \
-     -F file=@pre-upgrade.hearth-backup \
-     "https://10.0.0.1:8420/admin/backup/restore"
+   export HEARTH_MASTER_KEY=...   # the old cluster's value
+   mkdir -p /var/lib/hearth/data-new
+   hearth backup restore \
+     --input pre-upgrade.hearth-backup \
+     --config /etc/hearth/hearth.yaml \
+     --data-dir /var/lib/hearth/data-new
    ```
 
-   Use an admin token of the **new** cluster with the `hearth.export` capability; the new
-   cluster's `security.backup.verify_key` must match the key the archive was signed with.
+   Exit `0` means every record restored; read any conflicts and errors it prints before going
+   on. Do **not** start `hearth serve` on it yet.
+5. **Copy that directory to every node** before any node starts, to the path each node's
+   `storage.data_dir` names (and point the restoring node's own `storage.data_dir` at it):
 
-   Read the report (`errors`) before re-opening traffic, and run the
+   ```bash
+   rsync -a /var/lib/hearth/data-new/ node2:/var/lib/hearth/data/
+   rsync -a /var/lib/hearth/data-new/ node3:/var/lib/hearth/data/
+   ```
+
+   Every node must start from the **same bytes**. Do not run the restore once per node: each run
+   builds a fresh store and writes its own random keys and timestamps, so the nodes would start
+   with different state. The copy holds no `raft.db`, so each node starts a fresh Raft log on top
+   of identical state.
+6. **Start every node** with the new binary and a `hearth.yaml` that declares **the same realm
+   names** as before (start-up archives a realm the file does not declare). The cluster
+   bootstraps as a new cluster does ([Clustering guide](./clustering.md)); start-up finds every
+   realm already present under its archived id and signing key. Run the
    [post-restore checks](./disaster-recovery.md#test-restore-drill-checklist).
-5. **Re-open client traffic.** Tokens issued before the upgrade keep validating: the restore
-   preserves every realm's signing keys.
-
-To roll back, stop every node and put the data directories from step 2 back before starting the
-older binary.
+7. **Re-open client traffic.** Users sign in again (sessions were not restored); relying parties'
+   cached JWKS stays valid, because every realm kept its signing key.
 
 For releases that do not change the Raft log format, upgrade a Raft cluster (3 or 5 nodes) with
 minimal service interruption as follows:

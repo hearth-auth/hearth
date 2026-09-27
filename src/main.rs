@@ -6646,6 +6646,169 @@ mod tests {
         std::env::remove_var("HEARTH_MASTER_KEY");
     }
 
+    // ── Rebuilding a cluster from a backup (upgrading guide) ───────────────
+
+    /// Opens `data_dir` and runs what `serve` runs at start-up against the
+    /// store: engine construction, then `reconcile_realms` for `config`.
+    /// Returns the realm named `tenant`, its signing key, and whether
+    /// `survivor@example.test` is one of its users.
+    fn start_and_read_tenant(
+        data_dir: &std::path::Path,
+        config: &Config,
+    ) -> (hearth::core::RealmId, Vec<u8>, bool) {
+        let storage = Arc::new(
+            EmbeddedStorageEngine::open(cli_storage_config(data_dir)).expect("open storage"),
+        ) as Arc<dyn StorageEngine>;
+        let (identity, _audit, rbac) =
+            build_all_engines(Arc::clone(&storage), None).expect("engines");
+        hearth::identity::reconcile::reconcile_realms(identity.as_ref(), rbac.as_ref(), config)
+            .expect("reconcile");
+        let realm = identity
+            .get_realm_by_name("tenant")
+            .expect("lookup")
+            .expect("the declared realm exists after start-up");
+        let key = identity
+            .export_realm_signing_key_pkcs8(realm.id())
+            .expect("signing key");
+        let has_user = identity
+            .get_user_by_email(realm.id(), "survivor@example.test")
+            .expect("user lookup")
+            .is_some();
+        (realm.id().clone(), key, has_user)
+    }
+
+    /// The upgrading guide's rebuild of a purged cluster (D1).
+    ///
+    /// Realms come from `hearth.yaml`: a fresh server's start-up reconcile
+    /// creates every declared realm, with a NEW id and a new signing key, and a
+    /// restore then refuses the archived realm's name as a duplicate, skips it
+    /// and its signing key, and writes its users under the archive's old id —
+    /// so the realm is empty under its own name and its tokens stop
+    /// validating, with no error. The guide used to prescribe exactly that
+    /// order (start the new cluster, then restore through its leader).
+    ///
+    /// Restoring OFFLINE into an empty data directory BEFORE the first start
+    /// is the order that works: reconcile then finds each realm already there.
+    /// This test runs both orders over one archive, with the same master key
+    /// on both sides, and asserts the realm keeps its id, its users and its
+    /// signing key only in the second.
+    #[test]
+    fn a_rebuild_restores_offline_before_the_first_start() {
+        use hearth::identity::CreateUserRequest;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("HEARTH_MASTER_KEY", "a7".repeat(32));
+        let config = Config {
+            realms: Some(std::collections::HashMap::from([(
+                "tenant".to_string(),
+                hearth::config::RealmYamlConfig::default(),
+            )])),
+            ..Config::default()
+        };
+
+        // The old cluster's store: `tenant` declared in YAML, one user.
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).expect("source dir");
+        let (realm_id, key) = {
+            let storage = Arc::new(
+                EmbeddedStorageEngine::open(cli_storage_config(&source)).expect("open storage"),
+            ) as Arc<dyn StorageEngine>;
+            let (identity, _audit, rbac) =
+                build_all_engines(Arc::clone(&storage), None).expect("engines");
+            hearth::identity::reconcile::reconcile_realms(
+                identity.as_ref(),
+                rbac.as_ref(),
+                &config,
+            )
+            .expect("reconcile");
+            let realm = identity
+                .get_realm_by_name("tenant")
+                .expect("lookup")
+                .expect("tenant");
+            identity
+                .create_user(
+                    realm.id(),
+                    &CreateUserRequest {
+                        email: "survivor@example.test".to_string(),
+                        display_name: "Survivor".to_string(),
+                        ..Default::default()
+                    },
+                )
+                .expect("user");
+            let key = identity
+                .export_realm_signing_key_pkcs8(realm.id())
+                .expect("signing key");
+            (realm.id().clone(), key)
+        };
+        let copy = dir.path().join("copy");
+        copy_dir_recursive(&source, &copy).expect("copy data dir");
+        // The archive the guide takes: one without the system realm, as
+        // `POST /admin/backup` writes it (an unfiltered CLI export carries the
+        // system realm, which `backup restore` cannot import).
+        let archive = dir.path().join("pre-upgrade.hearth-backup");
+        run_backup_create(
+            Some(&archive),
+            Some("tenant"),
+            false,
+            false,
+            None,
+            &copy,
+            None,
+        )
+        .expect("export");
+        let flags = || RestoreFlags {
+            dry_run: false,
+            skip_verify: false,
+            allow_missing_signing_key: false,
+            // Not under test here: this archive is unsigned.
+            allow_unsigned: true,
+        };
+
+        // Each command below stands for a separate process: the CLI's engines
+        // hold each other (RBAC's session-version bumper is the identity
+        // engine), so in one process a store stays locked after its command
+        // returns. A copy of the quiescent directory is what the next process
+        // would open.
+        let next_process = |from: &std::path::Path, name: &str| {
+            let to = dir.path().join(name);
+            copy_dir_recursive(from, &to).expect("copy data dir");
+            to
+        };
+
+        // The order the guide used to give: start first, then restore.
+        let started_first = dir.path().join("started-first");
+        std::fs::create_dir_all(&started_first).expect("dir");
+        let (fresh_id, fresh_key, _) = start_and_read_tenant(&started_first, &config);
+        let restored_after = next_process(&started_first, "restored-after-start");
+        let _ = run_backup_restore(&archive, None, "skip", flags(), None, &restored_after, None);
+        let (id, restored_key, has_user) =
+            start_and_read_tenant(&next_process(&restored_after, "restarted"), &config);
+        assert_eq!(id, fresh_id, "the realm start-up created stays in place");
+        assert_ne!(
+            id, realm_id,
+            "precondition of the guide fix: restoring after the first start cannot bring \
+             back the realm's id"
+        );
+        assert_eq!(restored_key, fresh_key, "nor its signing key");
+        assert_ne!(restored_key, key);
+        assert!(!has_user, "nor its users, under its name");
+
+        // The order the guide now gives: restore offline, then start.
+        let target = dir.path().join("restored");
+        run_backup_restore(&archive, None, "skip", flags(), None, &target, None)
+            .expect("offline restore into an empty data directory");
+        let (id, restored_key, has_user) =
+            start_and_read_tenant(&next_process(&target, "first-start"), &config);
+        assert_eq!(id, realm_id, "the realm keeps its id");
+        assert_eq!(
+            restored_key, key,
+            "and its signing key, so its tokens still validate"
+        );
+        assert!(has_user, "and its users");
+
+        std::env::remove_var("HEARTH_MASTER_KEY");
+    }
+
     /// Copies `src` to `dst` recursively. Test-only.
     fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dst)?;

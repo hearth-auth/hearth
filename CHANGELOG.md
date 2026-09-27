@@ -104,15 +104,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   **Breaking** for clusters: this release needs a **full-cluster restart**, not a rolling upgrade —
   an older node cannot decode the new command, so replication to it stalls (and a new-build leader
   over older followers commits nothing), and an older binary cannot read the new Raft log, so
-  rolling a node back needs its data directory restored from a pre-upgrade backup. A new-build node
+  rolling a node back needs a copy of its data directory taken before the upgrade. A new-build node
   logs `peer cannot decode this node's Raft log` when it meets an older one. Single-node deployments
   are unaffected. A cluster whose Raft logs were purged — any node past about 5,000 applied
   entries, so nearly every production cluster — **cannot be upgraded in place at all**: releases up
   to v1.6.11 kept the applied index and membership in memory only, so such a node cannot restart on
-  either build, and with every node stopped there is no leader to re-seed from. Rebuild it from a
-  backup instead: take a backup over HTTP from the running old cluster, start the new build as a
-  fresh cluster with empty data directories, and restore the backup through its leader. See the
-  upgrading guide, *Cluster upgrades* and *Upgrading a cluster whose Raft logs were purged*.
+  either build, and with every node stopped there is no leader to re-seed from — so stopping it is
+  one-way, and the only rollback is rebuilding an older-build cluster from the same backup. Rebuild
+  it from a backup instead: take a backup over HTTP from the running old cluster with a
+  system-realm token, stop every node, restore the backup **offline** with `hearth backup restore`
+  into one empty data directory (with the old cluster's `HEARTH_MASTER_KEY`), copy that directory
+  to every node, and only then start the new cluster. Do not restore into a cluster that has
+  already started: start-up creates every realm `hearth.yaml` declares with a new id and signing
+  key, and the restore then skips each archived realm as a duplicate and leaves it empty under its
+  name. The rebuild does not bring back the system realm (operator-console accounts, system tokens
+  and grants, the system signing key — and this release cannot create a first console account on a
+  restored store), sessions (every user signs in again) or the revoked-token list (a revoked,
+  unexpired sessionless token validates again; rotate the realm's signing key if that matters).
+  See the upgrading guide, *Cluster upgrades* and *Upgrading a cluster whose Raft logs were
+  purged*.
 - **Cluster: a node restarts after its Raft log was purged** — the state machine kept its applied
   index in memory only, so on every restart openraft re-applied the log from index 0; once a
   snapshot had let the log be purged (with the default policy, after about 5,000 writes) the node

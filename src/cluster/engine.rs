@@ -983,10 +983,13 @@ fn refuse_restart_without_applied_state(
              the cluster still has a leader: stop it, move its data directory (including \
              raft.db) aside, and start it empty so the leader sends it a snapshot. If no node \
              can start (every node's log was purged, as in the full-cluster restart this \
-             release requires), there is no leader to send one: rebuild the cluster from a \
-             backup instead: start a fresh cluster with empty data directories and restore \
-             the backup taken before the upgrade into it (see the upgrading guide, \
-             \"Upgrading a cluster whose Raft logs were purged\")",
+             release requires), there is no leader to send one, and the older build cannot \
+             restart this node either: rebuild the cluster from the backup taken before the \
+             upgrade. Restore it offline with `hearth backup restore` into one empty data \
+             directory and copy that directory to every node before the new cluster first \
+             starts; restoring into a cluster that has already started leaves every realm \
+             empty under a new id (see the upgrading guide, \"Upgrading a cluster whose Raft \
+             logs were purged\")",
             purged.index
         ))),
     }
@@ -1420,6 +1423,20 @@ mod tests {
             msg.contains("no node") && msg.contains("backup") && msg.contains("upgrading guide"),
             "the refusal must give the procedure for when no node can start: {msg}"
         );
+        // Realms come from hearth.yaml, so a cluster that has started has
+        // already created every declared realm under a new id, and a restore
+        // into it leaves the realms empty under their names. The rebuild must
+        // restore OFFLINE, before the new cluster first starts.
+        assert!(
+            msg.contains("hearth backup restore") && msg.contains("before"),
+            "the refusal must name the offline restore, before the first start: {msg}"
+        );
+        assert!(
+            !msg.contains("start a fresh cluster with empty data directories and restore"),
+            "restoring into a started cluster loses every realm's id and keys: {msg}"
+        );
+        // Stopping a purged node is one-way on either build.
+        assert!(msg.contains("older build"), "{msg}");
     }
 
     fn open_engine(dir: &std::path::Path) -> Arc<EmbeddedStorageEngine> {

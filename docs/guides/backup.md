@@ -701,7 +701,7 @@ hearth backup restore \
 hearth serve -c /etc/hearth/hearth.yaml
 ```
 
-For cluster mode, after the restore completes, bootstrap the new node into the cluster normally (it starts with data already populated rather than replaying the entire Raft log from peers).
+For cluster mode, restore once into one empty data directory and copy that directory to **every** node before the cluster first starts; never restore into a cluster that has already started (its start-up has created every declared realm under a new id), and never run the restore once per node (each run writes its own keys, so the nodes would diverge). The upgrading guide's [rebuild procedure](./upgrading.md#cluster-purged-log-upgrade) gives the steps. To replace one node of a cluster that still has a leader, do not restore at all: start it with an empty data directory and the leader sends it a snapshot.
 
 ---
 

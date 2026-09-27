@@ -172,6 +172,17 @@ impl ThreeNodeCluster {
     /// As [`Self::build`], with each node's storage handle passed through
     /// `wrap` before its application stack is built.
     async fn build_with(clock: &Arc<FakeClock>, wrap: &StorageWrap) -> Self {
+        Self::build_inner(clock, wrap, None).await
+    }
+
+    /// As [`Self::build`], with every node's data directory a copy of `seed`
+    /// made before the node first starts (a data directory populated offline,
+    /// such as by `hearth backup restore`).
+    async fn build_seeded(clock: &Arc<FakeClock>, seed: &Path) -> Self {
+        Self::build_inner(clock, &|_, storage| storage, Some(seed)).await
+    }
+
+    async fn build_inner(clock: &Arc<FakeClock>, wrap: &StorageWrap, seed: Option<&Path>) -> Self {
         let tempdir = tempfile::tempdir().unwrap();
         let (ca_path, leaf_certs) = generate_cluster_certs(tempdir.path(), 3);
         let ports = pick_free_loopback_ports(3);
@@ -184,6 +195,9 @@ impl ThreeNodeCluster {
             let node_id = (i + 1) as u64;
             let data_dir = tempdir.path().join(format!("node-{node_id}-data"));
             std::fs::create_dir_all(&data_dir).unwrap();
+            if let Some(seed) = seed {
+                copy_dir(seed, &data_dir);
+            }
             let storage_cfg = StorageConfig::dev(data_dir);
             let storage = Arc::new(EmbeddedStorageEngine::open(storage_cfg.clone()).unwrap());
             let (cert_path, key_path) = leaf_certs[i].clone();
@@ -1280,6 +1294,135 @@ async fn a_control_whose_bump_failed_binds_everywhere_after_a_leader_change() {
         "the old leader still owes bumps it can never make: {}",
         owed_gauge()
     );
+
+    cluster.shutdown();
+}
+
+// ── Rebuilding a cluster from an offline-restored data directory ─────────────
+
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), to).unwrap();
+        }
+    }
+}
+
+/// The upgrading guide rebuilds a cluster whose Raft logs were purged by
+/// restoring the backup OFFLINE into one empty data directory and copying
+/// that directory to every node before the new cluster first starts.
+///
+/// Restoring into each node separately would not do: each restore builds its
+/// own engines on a cold store, and each writes its own random keys and
+/// timestamps, so the nodes would start with different state machines. A
+/// copy is byte-identical, and the fresh Raft log then applies the same
+/// entries on top of the same bytes everywhere. A restore through the new
+/// leader over HTTP is not a substitute either: realms come from
+/// `hearth.yaml`, so start-up has already created every declared realm under
+/// a new id (see `a_rebuild_restores_offline_before_the_first_start` in
+/// `src/main.rs`).
+///
+/// Here: a realm and a user written offline, the directory copied to three
+/// nodes, and the cluster started. Every node must start (a copied store has
+/// no persisted Raft state, which must not be mistaken for a purged log),
+/// see the realm under the same id, and validate a token the leader signs
+/// with that realm's key; a write after start-up must replicate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_cluster_seeded_from_one_offline_restored_directory_serves_it_on_every_node() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let seed_root = tempfile::tempdir().unwrap();
+    let seed = seed_root.path().join("restored");
+    std::fs::create_dir_all(&seed).unwrap();
+    let (realm_id, user_id) = {
+        let storage: Arc<dyn StorageEngine> =
+            Arc::new(EmbeddedStorageEngine::open(StorageConfig::dev(seed.clone())).unwrap());
+        let clock_dyn = Arc::clone(&clock) as Arc<dyn Clock>;
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock_dyn),
+        )) as Arc<dyn AuditEngine>;
+        let identity = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            clock_dyn,
+            IdentityConfig {
+                credential: CredentialConfig::fast_for_testing(),
+                ..IdentityConfig::default()
+            },
+            audit,
+        )
+        .unwrap();
+        let realm = identity
+            .create_realm(&CreateRealmRequest {
+                name: "rebuilt".to_string(),
+                config: Some(RealmConfig::default()),
+            })
+            .unwrap();
+        let user = identity
+            .create_user(
+                realm.id(),
+                &CreateUserRequest {
+                    email: "survivor@rebuilt.test".to_string(),
+                    display_name: "Survivor".to_string(),
+                    first_name: String::new(),
+                    last_name: String::new(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        (realm.id().clone(), user.id().clone())
+    };
+
+    let cluster = ThreeNodeCluster::build_seeded(&clock, &seed).await;
+    for node in &cluster.nodes {
+        let realm = node
+            .identity
+            .get_realm_by_name("rebuilt")
+            .unwrap()
+            .unwrap_or_else(|| panic!("node {} does not hold the restored realm", node.id()));
+        assert_eq!(realm.id(), &realm_id, "node {}", node.id());
+        assert!(
+            node.identity
+                .get_user(&realm_id, &user_id)
+                .unwrap()
+                .is_some(),
+            "node {} lost the restored user",
+            node.id()
+        );
+    }
+
+    // Sessions are not restored: sign in again on the leader.
+    let leader = cluster.leader();
+    let session = leader
+        .identity
+        .create_session(&realm_id, &user_id, &SessionContext::default())
+        .unwrap();
+    let token = leader
+        .identity
+        .issue_tokens(&realm_id, &user_id, session.id())
+        .unwrap()
+        .access_token()
+        .to_string();
+    clock.advance(1_000_000);
+    cluster.converge().await;
+    for node in cluster.followers() {
+        node.identity
+            .validate_token(&realm_id, &token)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "node {} rejected a token the leader signed with the restored realm's \
+                     key: {e:?}",
+                    node.id()
+                )
+            });
+    }
 
     cluster.shutdown();
 }
