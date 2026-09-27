@@ -219,6 +219,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `PATCH /admin/applications/{id}` ignored them, so no REST path could register a
   `private_key_jwt` client. They are now accepted (`jwks` as an object or a JSON string; `null`
   clears it on PATCH), as is `response_types: ["code"]`.
+- **FAPI 2.0 `private_key_jwt` assertions need a string `aud`** — an assertion was accepted when
+  its `aud` array merely contained the realm issuer. For a FAPI 2.0 client or any client of a realm
+  with a `fapi_profile`, `aud` must now be the issuer as a single string (FAPI 2.0 Security Profile
+  §5.3.2.1). Other clients may still send an array containing the issuer (RFC 7523 §3).
+  **Breaking** for FAPI clients that send `aud` as an array.
 - **Client JWKS are validated** — a client's `jwks` (used for `private_key_jwt` assertions and
   signed request objects) was stored unparsed, and at verification a key was picked by `kid` alone:
   an encryption key, a key whose `kty` did not match its algorithm (EdDSA checked only `crv`), or a
