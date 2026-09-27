@@ -395,6 +395,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   MX lookup is performed. Registration behaviour does not change.
 
 ### Fixed
+- **Argon2id costs above the verifier ceilings are refused at start-up** — `auth.password_memory_cost`
+  / `password_time_cost` and their `realms.<name>` overrides had lower bounds only. Above the
+  ceilings every stored-hash verifier enforces (1 GiB memory, 64 passes), Hearth minted client
+  secrets and recovery codes that verification always refused. Such a value is now a configuration
+  error naming the ceiling, in every mode.
 - **Backup/restore brings back operator-console access** — `hearth backup restore` refused the
   system realm (`operation not permitted on the system realm: import_realm`) and aborted, so an
   unfiltered `hearth backup create` archive could not be restored without `--realm`, and a rebuilt

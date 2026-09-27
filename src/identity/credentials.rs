@@ -226,6 +226,15 @@ pub const OWASP_ARGON2_MIN_MEMORY_KIB_T2: u32 = 19_456;
 /// parameter set (`m=47104, t=1, p=1`).
 pub const OWASP_ARGON2_MIN_MEMORY_KIB_T1: u32 = 47_104;
 
+/// The highest Argon2 memory cost (KiB) a stored hash may carry: 1 GiB. A
+/// hash above it is refused by every verifier (task 26.36), so no
+/// configuration may ask Hearth to mint one.
+pub const ARGON2_MAX_MEMORY_KIB: u32 = work_factor::MAX_ARGON2_M;
+/// The highest Argon2 time cost (passes) a stored hash may carry: 64.
+pub const ARGON2_MAX_TIME_COST: u32 = work_factor::MAX_ARGON2_T;
+/// The highest Argon2 parallelism (lanes) a stored hash may carry: 16.
+pub const ARGON2_MAX_PARALLELISM: u32 = work_factor::MAX_ARGON2_P;
+
 /// Checks an Argon2id `(memory_cost_kib, time_cost)` pair against the OWASP
 /// Password Storage Cheat Sheet floor.
 ///

@@ -634,6 +634,13 @@ raising a cost would change login latency with no diagnostic, and silently lower
 defect the floor exists to prevent. `--dev` is exempt and runs deliberately cheap parameters.
 Start-up logs the effective parameters, at `WARN` when they are below the floor.
 
+**Ceiling.** The same keys are also refused **above** the ceilings every stored-hash verifier
+enforces: `password_memory_cost` at most `1048576` (1 GiB) and `password_time_cost` at most `64`.
+A hash minted above them — a client secret, a recovery code, or a password a later restore imports
+— could never be verified, so the configuration is refused at start-up, naming the ceiling. The
+ceiling applies in `--dev` too. Argon2 parallelism has no configuration key; it is compiled in,
+below the verifier's ceiling of `16`.
+
 ### `onboarding`
 
 First-run setup flow configuration.

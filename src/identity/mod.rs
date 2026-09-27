@@ -73,7 +73,8 @@ pub mod keys_test_helpers {
 
 pub use credentials::{
     hash_password, validate_argon2_cost, verify_password_with_pepper, CleartextPassword,
-    CredentialConfig, PepperConfig, PepperKey, StoredCredential, OWASP_ARGON2_MIN_MEMORY_KIB_T1,
+    CredentialConfig, PepperConfig, PepperKey, StoredCredential, ARGON2_MAX_MEMORY_KIB,
+    ARGON2_MAX_PARALLELISM, ARGON2_MAX_TIME_COST, OWASP_ARGON2_MIN_MEMORY_KIB_T1,
     OWASP_ARGON2_MIN_MEMORY_KIB_T2,
 };
 pub use email::{

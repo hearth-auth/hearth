@@ -551,6 +551,7 @@ impl Config {
         }
 
         validate_auth_password_costs(&self.auth, &mut issues);
+        validate_argon2_ceilings(&self.auth, self.realms.as_ref(), &mut issues);
         validate_webauthn_preference(
             "auth.webauthn_resident_key",
             self.auth.webauthn_resident_key.as_deref(),
@@ -934,6 +935,63 @@ fn validate_auth_password_costs(auth: &AuthConfig, issues: &mut Vec<ValidationIs
                 ),
             });
         }
+    }
+}
+
+/// Refuses Argon2id costs above the ceilings every stored-hash verifier
+/// enforces (task 26.36: [`ARGON2_MAX_MEMORY_KIB`] and
+/// [`ARGON2_MAX_TIME_COST`]).
+///
+/// Above them `hash_raw_secret` would mint client secrets and recovery codes
+/// that `verify_raw_secret` always refuses, and user password hashes a restore
+/// refuses to import — a configuration that looks like "more secure" and
+/// silently locks every newly issued credential out. Applies in every mode:
+/// unlike the OWASP floor it is not a production-only policy. Parallelism has
+/// no configuration key (it is compiled in, below [`ARGON2_MAX_PARALLELISM`]).
+///
+/// [`ARGON2_MAX_MEMORY_KIB`]: crate::identity::ARGON2_MAX_MEMORY_KIB
+/// [`ARGON2_MAX_TIME_COST`]: crate::identity::ARGON2_MAX_TIME_COST
+/// [`ARGON2_MAX_PARALLELISM`]: crate::identity::ARGON2_MAX_PARALLELISM
+fn validate_argon2_ceilings(
+    auth: &AuthConfig,
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let mut check = |field: String, memory: Option<u32>, time: Option<u32>| {
+        if let Some(m) = memory.filter(|m| *m > crate::identity::ARGON2_MAX_MEMORY_KIB) {
+            issues.push(ValidationIssue {
+                field: format!("{field}.password_memory_cost"),
+                reason: format!(
+                    "{m} KiB is above the Argon2 memory ceiling of {} KiB (1 GiB) that every \
+                     stored-hash verifier enforces: credentials hashed with it could never be \
+                     verified",
+                    crate::identity::ARGON2_MAX_MEMORY_KIB
+                ),
+            });
+        }
+        if let Some(t) = time.filter(|t| *t > crate::identity::ARGON2_MAX_TIME_COST) {
+            issues.push(ValidationIssue {
+                field: format!("{field}.password_time_cost"),
+                reason: format!(
+                    "{t} is above the Argon2 time-cost ceiling of {} passes that every \
+                     stored-hash verifier enforces: credentials hashed with it could never be \
+                     verified",
+                    crate::identity::ARGON2_MAX_TIME_COST
+                ),
+            });
+        }
+    };
+    check(
+        "auth".to_string(),
+        auth.password_memory_cost,
+        auth.password_time_cost,
+    );
+    for (name, realm) in realms.into_iter().flatten() {
+        check(
+            format!("realms.{name}"),
+            realm.password_memory_cost,
+            realm.password_time_cost,
+        );
     }
 }
 
@@ -2951,6 +3009,80 @@ auth:
             "a zero Argon2 time cost must be refused by the algorithm-bounds check — the \
              OWASP floor is dev-mode-exempt, so this arm is the only one that covers it; \
              got: {issues:?}"
+        );
+    }
+
+    /// Above the Argon2 ceilings a stored-hash verifier enforces (task 26.36:
+    /// 1 GiB memory, 64 passes), `hash_raw_secret` would mint client secrets
+    /// and recovery codes that `verify_raw_secret` always refuses — and user
+    /// passwords a restore refuses to import. Refused at start-up, naming the
+    /// ceiling, in every mode (dev included: it is not an OWASP-style floor).
+    #[test]
+    fn argon2_costs_above_the_verifier_ceilings_are_refused() {
+        let cases = [
+            (
+                "auth:\n  password_time_cost: 65\n",
+                "auth.password_time_cost",
+                "64",
+            ),
+            (
+                "auth:\n  password_memory_cost: 1048577\n",
+                "auth.password_memory_cost",
+                "1048576",
+            ),
+            (
+                "realms:\n  acme:\n    password_time_cost: 100\n",
+                "realms.acme.password_time_cost",
+                "64",
+            ),
+            (
+                "realms:\n  acme:\n    password_memory_cost: 2097152\n",
+                "realms.acme.password_memory_cost",
+                "1048576",
+            ),
+        ];
+        for dev in [false, true] {
+            for (block, field, ceiling) in cases {
+                let yaml = format!(
+                    "{}storage:\n  data_dir: \"/tmp/hea-argon2-ceiling\"\n{block}",
+                    if dev { "dev_mode: true\n" } else { "" }
+                );
+                let config = Config::from_yaml_str_unchecked(&yaml).expect("parse");
+                let issues = config.validate_all();
+                assert!(
+                    issues
+                        .iter()
+                        .any(|i| i.field == field && i.reason.contains(ceiling)),
+                    "dev={dev}: {field} above the ceiling must be refused naming {ceiling}; \
+                     got: {issues:?}"
+                );
+            }
+        }
+    }
+
+    /// The ceilings themselves are accepted.
+    #[test]
+    fn argon2_costs_at_the_verifier_ceilings_are_accepted() {
+        let yaml = "\
+storage:
+  data_dir: \"/tmp/hea-argon2-ceiling-ok\"
+auth:
+  password_memory_cost: 1048576
+  password_time_cost: 64
+realms:
+  acme:
+    password_memory_cost: 1048576
+    password_time_cost: 64
+";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        let issues: Vec<_> = config
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field.contains("password_"))
+            .collect();
+        assert!(
+            issues.is_empty(),
+            "the ceilings are inclusive; got {issues:?}"
         );
     }
 
