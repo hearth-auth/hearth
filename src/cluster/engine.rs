@@ -846,6 +846,16 @@ impl ClusterEngine {
                     key: key.to_vec(),
                 })
                 .await?;
+            if !resp.success {
+                // The state machine refused the entry on every node: the
+                // stored counter does not decode.
+                return Err(ClusterError::Storage(
+                    crate::storage::StorageError::DeserializationFailed {
+                        reason: "the replicated counter is corrupted; the increment was refused"
+                            .to_string(),
+                    },
+                ));
+            }
             return crate::storage::decode_u64_counter(Some(&resp.payload))
                 .map_err(ClusterError::Storage);
         }

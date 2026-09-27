@@ -504,6 +504,12 @@ impl HearthStateMachine {
     ///
     /// Replay-safe: see [`increment_once`]. A replayed entry changes nothing
     /// and is not reported to the observer.
+    ///
+    /// A counter (or sidecar) row that does not decode refuses the entry with
+    /// `success: false` and writes nothing. That outcome is a function of the
+    /// replicated state alone, so every node gives the same answer; a fatal
+    /// storage error instead would halt this node's state machine, and the
+    /// entry would fail again on every restart.
     async fn apply_increment(
         &mut self,
         log_index: u64,
@@ -518,6 +524,17 @@ impl HearthStateMachine {
         .await
         .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
         let value = match outcome {
+            Increment::Undecodable(reason) => {
+                tracing::error!(
+                    realm = %realm,
+                    reason = %reason,
+                    "refused a replicated counter increment: the stored counter is corrupted"
+                );
+                return Ok(HearthLogResponse {
+                    success: false,
+                    payload: Vec::new(),
+                });
+            }
             Increment::Applied(next) => {
                 let value = next.to_le_bytes();
                 if let Some(obs) = self.observer.get() {
@@ -553,6 +570,8 @@ enum Increment {
     Applied(u64),
     /// The entry had already been applied; the counter still holds this value.
     Replayed(u64),
+    /// The counter or its sidecar row does not decode; nothing was written.
+    Undecodable(String),
 }
 
 /// Increments the counter at `key` for the log entry at `log_index`, exactly
@@ -572,9 +591,14 @@ fn increment_once(
     key: &[u8],
     log_index: u64,
 ) -> Result<Increment, crate::storage::StorageError> {
-    let current = crate::storage::decode_u64_counter(engine.get(realm, key)?.as_deref())?;
     let marker = applied_index_key(key);
-    let last_index = crate::storage::decode_u64_counter(engine.get(realm, &marker)?.as_deref())?;
+    let (current, last_index) = match (
+        crate::storage::decode_u64_counter(engine.get(realm, key)?.as_deref()),
+        crate::storage::decode_u64_counter(engine.get(realm, &marker)?.as_deref()),
+    ) {
+        (Ok(current), Ok(last_index)) => (current, last_index),
+        (Err(e), _) | (_, Err(e)) => return Ok(Increment::Undecodable(e.to_string())),
+    };
     if last_index >= log_index {
         return Ok(Increment::Replayed(current));
     }
@@ -840,6 +864,46 @@ mod tests {
         assert_eq!(
             sm.engine.get(&realm, b"ctr").unwrap(),
             Some(2_u64.to_le_bytes().to_vec())
+        );
+    }
+
+    /// A counter row that does not decode is refused deterministically — the
+    /// same answer on every node — with a failure response, not a fatal
+    /// storage error: a fatal error halts the state machine, and the entry is
+    /// re-applied (and fails again) on every restart, stopping the cluster.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn an_undecodable_counter_fails_the_entry_not_the_state_machine() {
+        let dir = tempdir().unwrap();
+        let mut sm = open_sm(dir.path().join("data").as_path());
+        let realm = make_realm();
+        sm.engine.put(&realm, b"ctr", b"bad").unwrap();
+        let incr = Entry {
+            log_id: make_log_id(1),
+            payload: EntryPayload::Normal(RaftCommand::IncrementU64 {
+                leader_timestamp: 0,
+                realm: realm.clone(),
+                key: b"ctr".to_vec(),
+            }),
+        };
+
+        let responses = sm
+            .apply([
+                incr,
+                make_put_entry(2, realm.clone(), b"k".to_vec(), b"v".to_vec()),
+            ])
+            .await
+            .expect("a corrupted counter must not fail the state machine");
+        assert!(!responses[0].success, "the increment is refused");
+        assert_eq!(
+            sm.engine.get(&realm, b"ctr").unwrap(),
+            Some(b"bad".to_vec()),
+            "a refused increment writes nothing"
+        );
+        assert_eq!(
+            sm.engine.get(&realm, b"k").unwrap(),
+            Some(b"v".to_vec()),
+            "later entries still apply"
         );
     }
 
