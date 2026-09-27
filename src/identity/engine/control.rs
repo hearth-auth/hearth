@@ -235,6 +235,9 @@ pub(super) struct ControlPlane {
     /// journal and swaps: the reload is held mid-flight.
     #[cfg(test)]
     scan_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Test counter: how many times the reloader was woken.
+    #[cfg(test)]
+    wakes: AtomicU64,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -266,6 +269,8 @@ impl ControlPlane {
             runtime: tokio::runtime::Handle::try_current().ok(),
             #[cfg(test)]
             scan_hook: Mutex::new(None),
+            #[cfg(test)]
+            wakes: AtomicU64::new(0),
         })
     }
 
@@ -308,14 +313,18 @@ impl ControlPlane {
     /// Tells the reloader the persisted epoch is at least `persisted`.
     ///
     /// Safe on the validation path: one atomic load, and when the epoch has
-    /// moved one `fetch_max` and an `unpark`. No lock, no allocation, never
-    /// waits for the reload.
+    /// moved one `fetch_max` — plus an `unpark` only when that raised the
+    /// target. A target already at or above `persisted` was signalled before,
+    /// and the reloader it woke is still bound to reach it (it re-checks the
+    /// target after every reload, and retries failed ones), so waking it again
+    /// would only spin it. No lock, no allocation, never waits for the reload.
     pub(super) fn signal(&self, persisted: u64) {
         if persisted <= self.applied.load(Ordering::Acquire) {
             return;
         }
-        self.target.fetch_max(persisted, Ordering::AcqRel);
-        self.wake();
+        if self.target.fetch_max(persisted, Ordering::AcqRel) < persisted {
+            self.wake();
+        }
     }
 
     /// Asks the reloader for a full reload whatever the epochs say.
@@ -325,6 +334,8 @@ impl ControlPlane {
     }
 
     fn wake(&self) {
+        #[cfg(test)]
+        self.wakes.fetch_add(1, Ordering::Relaxed);
         if let Some(worker) = self.worker.get() {
             worker.unpark();
         }
@@ -734,6 +745,12 @@ impl ControlPlane {
     #[cfg(test)]
     pub(super) fn lock_writers_for_test(&self) -> MutexGuard<'_, impl Sized> {
         lock(&self.journal)
+    }
+
+    /// How many times the reloader has been woken.
+    #[cfg(test)]
+    pub(super) fn wakes_for_test(&self) -> u64 {
+        self.wakes.load(Ordering::Relaxed)
     }
 
     /// Installs a hook every reload runs after its scan and before its swap

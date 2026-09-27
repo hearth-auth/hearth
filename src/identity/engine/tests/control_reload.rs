@@ -555,3 +555,33 @@ fn a_control_after_a_snapshot_lowered_the_epoch_still_binds() {
         "a suspension asserted after a snapshot lowered the control epoch never bound here"
     );
 }
+
+/// Validation signals on every debounced sync that sees the persisted epoch
+/// ahead; only a signal that raises the target should wake the reloader.
+/// Every call used to `unpark` it, so a node trailing by one epoch woke its
+/// reloader on every sync until the reload landed.
+#[test]
+fn only_a_signal_that_raises_the_target_wakes_the_reloader() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = open_storage(&dir);
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let engine = engine_over(&storage, &clock);
+    let plane = &engine.control;
+    let target = plane.applied_epoch() + 5;
+
+    let before = plane.wakes_for_test();
+    plane.signal(target);
+    plane.signal(target);
+    plane.signal(target - 1);
+    assert_eq!(
+        plane.wakes_for_test() - before,
+        1,
+        "repeating or lowering a signalled epoch must not wake the reloader again"
+    );
+    plane.signal(target + 1);
+    assert_eq!(
+        plane.wakes_for_test() - before,
+        2,
+        "a higher epoch wakes it"
+    );
+}
