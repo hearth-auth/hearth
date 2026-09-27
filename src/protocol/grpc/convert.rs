@@ -107,6 +107,7 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             (Code::InvalidArgument, err.to_string())
         }
         IdentityError::SilentAuthRateLimited => (Code::ResourceExhausted, err.to_string()),
+        IdentityError::KdfOverloaded { .. } => (Code::Unavailable, err.to_string()),
         IdentityError::MfaRequired
         | IdentityError::AuthorizationPending
         | IdentityError::SlowDown
@@ -387,7 +388,19 @@ pub fn verify_grpc_client_auth(
     identity
         .authenticate_client(realm_id, &client_id, secret)
         .map(|()| client_id)
-        .map_err(|_| Status::unauthenticated("invalid client credentials"))
+        .map_err(|e| client_auth_status(&e))
+}
+
+/// The status for a failed client authentication: `UNAVAILABLE` when the KDF
+/// admission gate shed an Argon2id secret verification (retry shortly),
+/// otherwise one opaque `UNAUTHENTICATED`.
+pub fn client_auth_status(err: &crate::identity::IdentityError) -> Status {
+    match err {
+        crate::identity::IdentityError::KdfOverloaded { .. } => {
+            Status::unavailable("server is busy verifying credentials; retry shortly")
+        }
+        _ => Status::unauthenticated("invalid client credentials"),
+    }
 }
 
 /// Confidential-only twin of [`verify_grpc_client_auth`] for `Introspect`
@@ -415,5 +428,5 @@ pub fn verify_grpc_confidential_client_auth(
     identity
         .authenticate_confidential_client(realm_id, &client_id, secret)
         .map(|()| client_id)
-        .map_err(|_| Status::unauthenticated("invalid client credentials"))
+        .map_err(|e| client_auth_status(&e))
 }

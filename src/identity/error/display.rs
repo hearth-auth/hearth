@@ -210,6 +210,9 @@ impl fmt::Display for IdentityError {
             Self::SilentAuthRateLimited => {
                 write!(f, "too many silent-auth requests; slow down")
             }
+            Self::KdfOverloaded { .. } => {
+                write!(f, "server is busy verifying credentials; retry shortly")
+            }
             Self::SessionLimitExceeded { limit, active } => write!(
                 f,
                 "session limit exceeded: {active} active sessions, limit is {limit}"

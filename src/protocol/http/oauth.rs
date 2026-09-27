@@ -22,9 +22,9 @@ use crate::protocol::proto::identity::v1 as pb;
 use super::now_micros;
 use super::{
     check_anonymous_token_rate_limit, check_token_rate_limit, extract_bearer_token,
-    extract_realm_id, extract_user_auth, identity_error_to_response, make_ip_rate_limit_response,
-    proto_to_rest_json, rbac_error_to_response, resolve_realm_by_name,
-    validate_user_token_with_dpop, AppState,
+    extract_realm_id, extract_user_auth, identity_error_response, identity_error_to_response,
+    kdf_shed_json_response, make_ip_rate_limit_response, proto_to_rest_json,
+    rbac_error_to_response, resolve_realm_by_name, validate_user_token_with_dpop, AppState,
 };
 
 /// Registers global OAuth/OIDC routes.
@@ -641,12 +641,16 @@ fn verify_endpoint_client(
         .identity
         .authenticate_client(realm_id, &client_id, secret.as_deref())
         .map(|()| client_id)
-        .map_err(|_| {
-            (
+        .map_err(|e| match e {
+            // An Argon2id secret whose verification the KDF gate shed.
+            crate::identity::IdentityError::KdfOverloaded { retry_after } => {
+                kdf_shed_json_response(retry_after)
+            }
+            _ => (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "invalid_client"})),
             )
-                .into_response()
+                .into_response(),
         })
 }
 
@@ -709,7 +713,12 @@ fn verify_introspection_client(
             .identity
             .authenticate_confidential_client(realm_id, &client_id, secret.as_deref())
             .map(|()| client_id)
-            .map_err(|_| invalid_client_response());
+            .map_err(|e| match e {
+                crate::identity::IdentityError::KdfOverloaded { retry_after } => {
+                    kdf_shed_json_response(retry_after)
+                }
+                _ => invalid_client_response(),
+            });
     }
     verify_assertion_client(
         state,
@@ -923,6 +932,11 @@ pub(super) fn enforce_confidential_client_auth(
             .authenticate_client(realm_id, &client_id, Some(s))
     });
 
+    // A shed Argon2id verification answers 503 on every arm: the caller's
+    // own request cost the gate a slot either way.
+    if let Some(Err(crate::identity::IdentityError::KdfOverloaded { retry_after })) = &verified {
+        return Err(kdf_shed_json_response(*retry_after));
+    }
     let Some(client) = client else {
         return Ok(());
     };
@@ -2100,7 +2114,7 @@ async fn token_exchange_impl(
                         .auth_attempts_total
                         .with_label_values(&[realm_str.as_str(), "failure"])
                         .inc();
-                    identity_error_to_response(&e).into_response()
+                    identity_error_response(&e)
                 }
             }
         }
@@ -3200,7 +3214,7 @@ async fn realm_token_exchange(
                     };
                     (StatusCode::OK, Json(proto_to_rest_json(&resp))).into_response()
                 }
-                Err(e) => identity_error_to_response(&e).into_response(),
+                Err(e) => identity_error_response(&e),
             }
         }
         "urn:ietf:params:oauth:grant-type:device_code" => {

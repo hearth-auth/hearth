@@ -230,7 +230,7 @@ impl OAuthService for OAuthSvc {
                 self.state
                     .identity
                     .authenticate_client(&realm_id, &client_id, body.client_secret.as_deref())
-                    .map_err(|_| Status::unauthenticated("invalid client credentials"))?;
+                    .map_err(|e| super::convert::client_auth_status(&e))?;
             }
         }
 

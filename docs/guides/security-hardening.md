@@ -155,6 +155,21 @@ OAuth client secrets are never stored in plaintext. How they are hashed depends 
   Authenticating such a client is slower than authenticating any other, which reveals that the
   client exists to anyone timing the endpoint; prefer Hearth-generated secrets.
 
+**The remaining Argon2id cost is an amplification vector, bounded by the KDF gate.** Anyone who
+knows an Argon2id-hashed client's `client_id` can make the server run one Argon2id verification
+per request by presenting any secret at `/token`, `/introspect`, `/revoke` or `/device_authorization`
+(their `/realms/{realm}/…` twins, and the gRPC OAuth service). Client ids are not secret: they
+travel in browser authorization requests, and a `hearth.yaml` application's id is a UUID v5 that
+anyone can compute from the realm and the application key. Every such verification therefore runs
+behind the same process-wide admission gate as password hashing
+(`security.password.kdf.max_in_flight`), on the blocking pool; when the gate is saturated the
+request is shed with `503` and `Retry-After` (gRPC: `UNAVAILABLE`), exactly like a login. The gate
+caps the CPU and memory this can consume, but under such a flood legitimate Argon2id clients and
+password logins share the shed. Rotate config-managed and legacy clients to Hearth-generated
+secrets (*Regenerate secret* on the client's page in the admin console), after which their
+verification is one SHA-256, never touches the gate, and cannot be used this way. An unknown or
+public `client_id` presenting a secret costs one SHA-256.
+
 Treat client secrets like passwords:
 - If you must supply your own, generate at least 32 bytes of cryptographically random material.
 - Rotate them immediately if compromised (Hearth supports multiple active secrets per client

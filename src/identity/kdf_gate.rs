@@ -46,6 +46,7 @@
 //! add queue latency. The *calibrated production default* is refined by the
 //! C7/HEA-1875 saturation sweep.
 
+use std::cell::Cell;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -249,7 +250,11 @@ impl KdfGate {
         // the blocking task joins.
         in_flight.inc();
         let compute_start = Instant::now();
-        let result = tokio::task::spawn_blocking(f).await;
+        let result = tokio::task::spawn_blocking(move || {
+            let _admitted = Admitted::enter();
+            f()
+        })
+        .await;
         metrics
             .kdf_compute_seconds
             .observe(compute_start.elapsed().as_secs_f64());
@@ -257,6 +262,109 @@ impl KdfGate {
         drop(permit);
 
         result.map_err(KdfGateError::Join)
+    }
+}
+
+impl KdfGate {
+    /// Runs a blocking KDF closure under this gate from SYNCHRONOUS code — an
+    /// engine method that finds it must run Argon2id (a caller-chosen client
+    /// secret) and cannot `.await`.
+    ///
+    /// Same admission and shed semantics as [`Self::run`]:
+    ///
+    /// * on a multi-threaded Tokio runtime (every server), the calling worker
+    ///   hands its core back with `block_in_place` and waits on [`Self::run`],
+    ///   so the closure runs on the blocking pool under a permit exactly as a
+    ///   password verification does;
+    /// * with no runtime, or on a current-thread runtime (tests, CLI), the
+    ///   permit is polled for up to `max_queue_wait` and the closure runs on
+    ///   the calling thread while holding it;
+    /// * inside a closure this gate already admitted, the closure runs inline:
+    ///   waiting for a second permit while holding one could exhaust the pool.
+    ///
+    /// # Errors
+    ///
+    /// [`KdfGateError::Overloaded`] when no permit freed in time (the closure
+    /// did not run); [`KdfGateError::Join`] when the blocking task failed.
+    pub fn run_blocking<F, T>(&self, f: F) -> Result<T, KdfGateError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        if ADMITTED.get() {
+            return Ok(f());
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+                return tokio::task::block_in_place(|| handle.block_on(self.run(f)));
+            }
+        }
+        self.run_on_this_thread(f)
+    }
+
+    /// [`Self::run_blocking`] without a runtime to wait on: poll for a permit
+    /// within the queue budget, then run `f` here while holding it.
+    fn run_on_this_thread<F, T>(&self, f: F) -> Result<T, KdfGateError>
+    where
+        F: FnOnce() -> T,
+    {
+        let metrics = crate::metrics::metrics();
+        let (in_flight, shed_total) = match self.pool {
+            Pool::Shared => (&metrics.kdf_in_flight, &metrics.kdf_shed_total),
+            Pool::Admin => (&metrics.kdf_admin_in_flight, &metrics.kdf_admin_shed_total),
+        };
+        let wait_start = Instant::now();
+        let permit = loop {
+            match self.semaphore.try_acquire() {
+                Ok(permit) => break permit,
+                Err(tokio::sync::TryAcquireError::NoPermits)
+                    if wait_start.elapsed() < self.max_queue_wait =>
+                {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(_) => {
+                    shed_total.inc();
+                    return Err(KdfGateError::Overloaded {
+                        retry_after: self.retry_after,
+                    });
+                }
+            }
+        };
+        metrics
+            .kdf_queue_wait_seconds
+            .observe(wait_start.elapsed().as_secs_f64());
+        in_flight.inc();
+        let compute_start = Instant::now();
+        let out = {
+            let _admitted = Admitted::enter();
+            f()
+        };
+        metrics
+            .kdf_compute_seconds
+            .observe(compute_start.elapsed().as_secs_f64());
+        in_flight.dec();
+        drop(permit);
+        Ok(out)
+    }
+}
+
+thread_local! {
+    /// Set while this thread runs a closure a [`KdfGate`] admitted.
+    static ADMITTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks the current thread as running an admitted KDF closure until dropped.
+struct Admitted(bool);
+
+impl Admitted {
+    fn enter() -> Self {
+        Self(ADMITTED.replace(true))
+    }
+}
+
+impl Drop for Admitted {
+    fn drop(&mut self) {
+        ADMITTED.set(self.0);
     }
 }
 

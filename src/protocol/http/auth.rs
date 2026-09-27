@@ -815,6 +815,9 @@ pub(crate) fn identity_error_to_response(
         IdentityError::SilentAuthRateLimited => {
             (StatusCode::TOO_MANY_REQUESTS, "silent_auth_rate_limited")
         }
+        // Shed by the KDF admission gate; callers that can set headers use
+        // `identity_error_response`, which adds `Retry-After`.
+        IdentityError::KdfOverloaded { .. } => (StatusCode::SERVICE_UNAVAILABLE, "kdf_overloaded"),
         // A-13: attestation policy violation (AAGUID not in allowlist, "none" rejected, etc.).
         IdentityError::AttestationPolicyViolation { .. } => {
             (StatusCode::FORBIDDEN, "attestation_policy_violation")

@@ -98,6 +98,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   control: a realm suspension, DPoP key block or session revocation stayed unenforced on that node
   until its next restart. The bump is now one atomic increment (a new Raft command whose value is
   computed at apply time). Upgrade every node together: a node on an older build cannot apply it.
+- **Argon2id client-secret verification is admission-controlled** — a caller-chosen or legacy client
+  secret (gRPC `RegisterClient`, `hearth.yaml` `applications[].client_secret`, migration import, or
+  any secret stored before generated secrets moved to SHA-256) was verified with Argon2id directly
+  on a request worker, outside the KDF gate that bounds password hashing. `hearth.yaml` client ids
+  are computable, so an unauthenticated caller could force one Argon2id run per request at `/token`,
+  `/introspect`, `/revoke`, `/device_authorization`, their realm twins and gRPC. These verifications
+  now take a permit from the same gate (`security.password.kdf.max_in_flight`) and run on the
+  blocking pool; when the gate is saturated the request gets `503` with `Retry-After`
+  (`kdf_overloaded`; gRPC `UNAVAILABLE`). Hearth-generated (SHA-256) secrets are unaffected. Rotate
+  config-managed and legacy clients to generated secrets to take them off this path entirely.
 - **Revocation only affects the caller's own tokens (RFC 7009 §2.1)** — `POST /revoke`, its realm twin
   and gRPC `Revoke` revoke a token only when it was issued to the authenticated client; any other token
   is left untouched and the endpoint still answers `200`. A `private_key_jwt` client must present its

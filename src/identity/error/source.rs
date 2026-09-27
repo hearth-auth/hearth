@@ -113,6 +113,7 @@ impl std::error::Error for IdentityError {
             | Self::EmailReserved
             | Self::EmailChangeTokenInvalid
             | Self::SilentAuthRateLimited
+            | Self::KdfOverloaded { .. }
             | Self::QuotaExceeded { .. }
             | Self::AttestationPolicyViolation { .. }
             | Self::AgentNotFound

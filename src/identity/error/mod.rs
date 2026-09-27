@@ -383,6 +383,14 @@ pub enum IdentityError {
     EmailChangeTokenInvalid,
     /// The `prompt=none` silent-auth probe rate limit was exceeded (A-37).
     SilentAuthRateLimited,
+    /// An Argon2id verification (a caller-chosen or legacy client secret) was
+    /// shed by the process-wide KDF admission gate: no permit freed within
+    /// its queue budget. Protocol layers answer `503` with `Retry-After`,
+    /// the password paths' convention.
+    KdfOverloaded {
+        /// How long the caller should wait before retrying.
+        retry_after: std::time::Duration,
+    },
     /// A per-realm resource quota was exceeded (A-24).
     QuotaExceeded {
         /// Resource type that hit the limit.

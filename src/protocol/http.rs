@@ -141,6 +141,17 @@ where
     }
 }
 
+/// [`identity_error_to_response`](auth::identity_error_to_response) as a full
+/// response, adding what the tuple form cannot carry: a KDF shed
+/// ([`crate::identity::IdentityError::KdfOverloaded`]) becomes the gate's
+/// `503` with `Retry-After`.
+pub(crate) fn identity_error_response(err: &crate::identity::IdentityError) -> Response {
+    if let crate::identity::IdentityError::KdfOverloaded { retry_after } = err {
+        return kdf_shed_json_response(*retry_after);
+    }
+    auth::identity_error_to_response(err).into_response()
+}
+
 /// Builds the `503 Service Unavailable` JSON shed response for an overloaded
 /// KDF gate, carrying a `Retry-After` header (seconds, floored to 1).
 pub(crate) fn kdf_shed_json_response(retry_after: std::time::Duration) -> Response {

@@ -107,6 +107,9 @@ impl IdentityError {
             Self::PasswordResetTokenInvalid => Some("HEARTH_PASSWORD_RESET_TOKEN_INVALID"),
             Self::EmailChangeTokenInvalid => Some("HEARTH_EMAIL_CHANGE_TOKEN_INVALID"),
             Self::SilentAuthRateLimited => Some("HEARTH_SILENT_AUTH_RATE_LIMITED"),
+            // Load shedding, reported with the rate-limit code clients already
+            // back off on; the response also carries `Retry-After`.
+            Self::KdfOverloaded { .. } => Some("HEARTH_RATE_LIMITED"),
 
             Self::ConsentRequired => Some("HEARTH_CONSENT_REQUIRED"),
             Self::ConsentTicketNotFound | Self::ConsentTicketExpired => {

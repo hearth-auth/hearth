@@ -3378,12 +3378,37 @@ impl EmbeddedIdentityEngine {
     ///
     /// Callers must decide the outcome *after* this returns; returning early
     /// on a missing client or missing hash is exactly the bug this closes.
+    ///
+    /// An Argon2id verification runs behind the process-wide KDF admission
+    /// gate, on the blocking pool, exactly like a password verification: the
+    /// client ids of `hearth.yaml` applications are UUID v5 values anyone can
+    /// compute, so without the gate an unauthenticated caller could force one
+    /// Argon2id run per request on a Tokio worker. When the gate sheds, this
+    /// returns [`IdentityError::KdfOverloaded`] and the protocol layer answers
+    /// `503` with `Retry-After`. The fast format never touches the gate.
     pub(super) fn verify_presented_client_secret(
         stored_hash: Option<&str>,
         presented: &str,
     ) -> Result<bool, IdentityError> {
         match stored_hash {
-            Some(hash) => credentials::verify_client_secret(presented.as_bytes(), hash),
+            Some(hash) if credentials::is_fast_client_secret_hash(hash) => {
+                credentials::verify_client_secret(presented.as_bytes(), hash)
+            }
+            Some(hash) => {
+                let secret = zeroize::Zeroizing::new(presented.as_bytes().to_vec());
+                let hash = hash.to_string();
+                match crate::identity::gate()
+                    .run_blocking(move || credentials::verify_raw_secret(&secret, &hash))
+                {
+                    Ok(verified) => verified,
+                    Err(crate::identity::KdfGateError::Overloaded { retry_after }) => {
+                        Err(IdentityError::KdfOverloaded { retry_after })
+                    }
+                    Err(e) => Err(IdentityError::Internal {
+                        reason: format!("client secret verification failed: {e}"),
+                    }),
+                }
+            }
             None => {
                 credentials::verify_dummy_client_secret(presented.as_bytes());
                 Ok(false)
