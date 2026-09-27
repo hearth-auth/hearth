@@ -160,44 +160,54 @@ curl -s -X POST "$ISSUER/admin/applications" \
   }'
 ```
 
-**Successful response (201 Created):**
+`jwks` may be the JWK Set object itself or a JSON string holding it. The same body works at
+`POST /clients`, and `PATCH /admin/applications/{id}` accepts `jwks` (`null` clears it) and
+`profile` to move an existing client onto FAPI 2.0. The set must hold public signing keys only
+(see `docs/specs/OIDC.md` §2.2.5).
+
+**Successful response (201 Created)** — the registered client (the stored `profile` and `jwks`
+are not echoed; read them back with `GET /admin/applications/{id}` or the console):
 
 ```json
 {
   "client_id": "<uuid>",
   "client_name": "My FAPI 2.0 Client",
-  "profile": "fapi2",
   "redirect_uris": ["https://app.example.com/callback"],
-  "jwks": "...",
-  "authorization_signed_response_alg": "EdDSA"
+  "grant_types": ["authorization_code"],
+  "id_token_signed_response_alg": "EdDSA"
 }
 ```
 
-**Rejected — `client_secret` present:**
+**Rejected — `client_secret` present, or no inline `jwks` (a `jwks_uri` alone is not fetched):**
 ```json
-{ "error": "invalid_client_metadata", "error_description": "FAPI 2.0 clients must use private_key_jwt" }
-```
-
-**Rejected — `jwks` missing:**
-```json
-{ "error": "invalid_client_metadata", "error_description": "FAPI 2.0 clients must register a JWKS" }
+{ "error": "invalid_request", "error_description": "FAPI 2.0 clients authenticate with private_key_jwt and must register their public keys inline (jwks); a jwks_uri is not fetched" }
 ```
 
 ### Dynamic Client Registration (RFC 7591)
 
-Alternatively, use the realm-scoped dynamic registration endpoint:
+Alternatively, use dynamic registration (`POST /register` with `X-Realm-ID`, or
+`POST /realms/<realm-name>/register`), passing `jwks` as the RFC 7591 JWK Set object:
 
 ```bash
 curl -s -X POST "$ISSUER/realms/<realm-name>/register" \
   -H "Content-Type: application/json" \
   -d '{
     "client_name": "My FAPI 2.0 Client",
-    "profile": "fapi2",
     "redirect_uris": ["https://app.example.com/callback"],
-    "jwks": "...",
-    "authorization_signed_response_alg": "EdDSA"
+    "token_endpoint_auth_method": "private_key_jwt",
+    "jwks": {"keys": [{"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig", "kid": "my-fapi-key-1", "x": "<base64url-public-key>"}]}
   }'
 ```
+
+A client that registers `jwks` defaults to `token_endpoint_auth_method: private_key_jwt`; no
+secret is minted, and the response states the method and echoes `jwks`. `client_secret_basic` /
+`client_secret_post` mint a secret (returned once); `none` registers a public client. The default
+without keys is `client_secret_basic` on `POST /register` and `none` on the realm route. In a
+realm with `fapi_profile: advanced`, only `private_key_jwt` with an inline `jwks` is accepted;
+anything else — including omitting `jwks` — is `400 invalid_client_metadata`, since a client
+registered with a secret or as public could never authenticate there. Invalid keys (private
+material, an encryption key, a duplicated `kid`), `jwks` together with `jwks_uri`, and
+`private_key_jwt` with only a `jwks_uri` are `invalid_client_metadata` too.
 
 ---
 

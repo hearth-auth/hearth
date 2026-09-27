@@ -3504,3 +3504,118 @@ async fn a_kdf_shed_rest_response_carries_the_rate_limited_error_code() {
         crate::protocol::error_codes::RATE_LIMITED
     );
 }
+
+/// The admin registration surfaces (`POST /admin/applications`, `POST
+/// /clients`) and `PATCH /admin/applications/{id}` accept `jwks` (the RFC 7591
+/// object or a JSON string holding one) and `profile`, as the FAPI 2.0 guide
+/// documents. They used to refuse or drop both, so an operator had no REST
+/// path to a `private_key_jwt` client.
+#[cfg(feature = "dev-endpoints")]
+#[tokio::test]
+async fn admin_registration_accepts_jwks_and_profile() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+    let (realm_id, token) = bootstrap_dev(&state).await;
+    let realm = crate::core::RealmId::new(realm_id.parse().expect("realm uuid"));
+    let jwks = serde_json::json!({"keys": [{
+        "kty": "OKP", "crv": "Ed25519", "kid": "admin-k1", "alg": "EdDSA", "use": "sig",
+        "x": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+    }]});
+    let send = |method: &'static str, uri: String, body: serde_json::Value| {
+        let state = Arc::clone(&state);
+        let realm_id = realm_id.clone();
+        let token = token.clone();
+        async move {
+            let resp = router(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("X-Realm-ID", &realm_id)
+                        .header("Authorization", format!("Bearer {token}"))
+                        .header("Content-Type", "application/json")
+                        .body(axum::body::Body::from(body.to_string()))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            let status = resp.status();
+            let b = axum::body::to_bytes(resp.into_body(), 64_000)
+                .await
+                .expect("body");
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default(),
+            )
+        }
+    };
+    let stored = |id: &str| {
+        state
+            .identity
+            .get_client(
+                &realm,
+                &crate::core::ClientId::new(id.parse().expect("client uuid")),
+            )
+            .expect("get client")
+            .expect("client exists")
+    };
+
+    for (uri, jwks_value) in [
+        ("/admin/applications", jwks.clone()),
+        ("/admin/applications", serde_json::json!(jwks.to_string())),
+        ("/clients", jwks.clone()),
+    ] {
+        let (status, body) = send(
+            "POST",
+            uri.to_string(),
+            serde_json::json!({
+                "client_name": "FAPI RP",
+                "redirect_uris": ["https://rp.example.com/cb"],
+                "grant_types": ["authorization_code"],
+                "response_types": ["code"],
+                "profile": "fapi2",
+                "jwks": jwks_value,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{uri}: {body}");
+        let client = stored(body["client_id"].as_str().expect("client_id"));
+        assert!(client.profile().is_fapi2(), "{uri}: profile stored");
+        assert!(
+            client.jwks().is_some_and(|j| j.contains("admin-k1")),
+            "{uri}: jwks stored"
+        );
+    }
+
+    // A FAPI 2.0 registration without keys is refused, not stored public.
+    let (status, body) = send(
+        "POST",
+        "/admin/applications".to_string(),
+        serde_json::json!({
+            "client_name": "keyless", "redirect_uris": ["https://rp.example.com/cb"],
+            "profile": "fapi2",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "keyless fapi2: {body}");
+
+    // PATCH: a standard client becomes FAPI 2.0 by adding its keys.
+    let (status, body) = send(
+        "POST",
+        "/admin/applications".to_string(),
+        serde_json::json!({"client_name": "plain", "redirect_uris": ["https://rp.example.com/cb"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["client_id"].as_str().expect("client_id").to_string();
+    let (status, body) = send(
+        "PATCH",
+        format!("/admin/applications/{id}"),
+        serde_json::json!({"profile": "fapi2", "jwks": jwks}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "patch profile + jwks: {body}");
+    let client = stored(&id);
+    assert!(client.profile().is_fapi2());
+    assert!(client.jwks().is_some());
+}

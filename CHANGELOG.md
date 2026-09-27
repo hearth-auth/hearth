@@ -200,6 +200,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   application without `jwks` or with a secret, and an unknown `profile` value (it used to be read
   as `standard`). **Breaking** for a `profile: fapi2` application without keys in `hearth.yaml`: add
   its `jwks`.
+- **Dynamic Client Registration registers clients that can authenticate** — `POST /register` always
+  minted a secret and answered `token_endpoint_auth_method: client_secret_basic`, the realm route
+  always registered a public client, and both ignored `jwks`; in a FAPI 2.0 Advanced realm (which
+  refuses secrets and public clients) every DCR client was unusable. Both routes now read `jwks`
+  (RFC 7591 JWK Set, validated) and `token_endpoint_auth_method` (`client_secret_basic`,
+  `client_secret_post`, `private_key_jwt`, `none`): registering `jwks` defaults to
+  `private_key_jwt` with no secret; the response states the method that works, returns
+  `client_secret` only when one was minted, and echoes `jwks`. A FAPI 2.0 Advanced realm refuses
+  anything but `private_key_jwt` with an inline `jwks` (`400 invalid_client_metadata`), as do
+  `jwks` with `jwks_uri`, `private_key_jwt` with only a `jwks_uri`, and invalid keys. Engine
+  refusals at DCR are now `invalid_client_metadata` instead of `invalid_request`. **Breaking** for
+  a `/realms/{realm}/register` client that sends `jwks` (it was registered public and the keys were
+  dropped; it is now `private_key_jwt`): send `token_endpoint_auth_method: none` to stay public.
+- **Admin client registration accepts `jwks` and `profile`** — `POST /admin/applications` and
+  `POST /clients` refused (`422`) the `jwks`, `jwks_uri`, `profile` and
+  `authorization_signed_response_alg` fields the FAPI 2.0 guide documented, and
+  `PATCH /admin/applications/{id}` ignored them, so no REST path could register a
+  `private_key_jwt` client. They are now accepted (`jwks` as an object or a JSON string; `null`
+  clears it on PATCH), as is `response_types: ["code"]`.
 - **Client JWKS are validated** — a client's `jwks` (used for `private_key_jwt` assertions and
   signed request objects) was stored unparsed, and at verification a key was picked by `kid` alone:
   an encryption key, a key whose `kty` did not match its algorithm (EdDSA checked only `crv`), or a

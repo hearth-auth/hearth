@@ -1457,6 +1457,210 @@ async fn realm_token_preflight(
     token_options_preflight(State(state), headers, realm_id).await
 }
 
+/// Registration metadata the proto `RegisterClientRequest` does not carry,
+/// taken out of a registration request's raw JSON body before the rest is
+/// decoded as the proto (which refuses unknown fields).
+#[derive(Default)]
+struct RegistrationExtras {
+    /// `jwks` (RFC 7591 §2) as the JSON the engine stores.
+    jwks: Option<String>,
+    /// `jwks_uri` (RFC 7591 §2).
+    jwks_uri: Option<String>,
+    /// `profile`: `"standard"` or `"fapi2"`.
+    profile: Option<crate::identity::ClientProfile>,
+    /// `authorization_signed_response_alg` (JARM).
+    authorization_signed_response_alg: Option<String>,
+    /// `token_endpoint_auth_method` (RFC 7591 §2).
+    token_endpoint_auth_method: Option<String>,
+}
+
+/// Splits a registration body into the proto request and the
+/// [`RegistrationExtras`]. `jwks` may be the RFC 7591 JSON object or a JSON
+/// string holding one (the form the admin API documented). `Err` is a
+/// description for the caller's error body.
+fn split_registration_body(
+    raw: serde_json::Value,
+) -> Result<(pb::RegisterClientRequest, RegistrationExtras), String> {
+    let serde_json::Value::Object(mut map) = raw else {
+        return Err("the registration body must be a JSON object".to_string());
+    };
+    let optional_string = |value: Option<serde_json::Value>, field: &str| match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s)),
+        Some(_) => Err(format!("{field} must be a string")),
+    };
+    let jwks = match map.remove("jwks") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s),
+        Some(object @ serde_json::Value::Object(_)) => Some(object.to_string()),
+        Some(_) => return Err("jwks must be a JSON Web Key Set object".to_string()),
+    };
+    let jwks_uri = optional_string(map.remove("jwks_uri"), "jwks_uri")?;
+    let profile = match optional_string(map.remove("profile"), "profile")?.as_deref() {
+        None => None,
+        Some("standard") => Some(crate::identity::ClientProfile::Standard),
+        Some("fapi2") => Some(crate::identity::ClientProfile::Fapi2),
+        Some(_) => return Err("profile must be \"standard\" or \"fapi2\"".to_string()),
+    };
+    let authorization_signed_response_alg = optional_string(
+        map.remove("authorization_signed_response_alg"),
+        "authorization_signed_response_alg",
+    )?;
+    let token_endpoint_auth_method = optional_string(
+        map.remove("token_endpoint_auth_method"),
+        "token_endpoint_auth_method",
+    )?;
+    // RFC 7591 `response_types`: only `code` is served; accept it (the FAPI
+    // guide's example sends it) and refuse anything else.
+    if let Some(types) = map.remove("response_types") {
+        let only_code = types
+            .as_array()
+            .is_some_and(|t| t.iter().all(|v| v.as_str() == Some("code")));
+        if !only_code {
+            return Err("response_types must be [\"code\"]".to_string());
+        }
+    }
+    let body: pb::RegisterClientRequest = serde_json::from_value(serde_json::Value::Object(map))
+        .map_err(|e| format!("invalid registration metadata: {e}"))?;
+    Ok((
+        body,
+        RegistrationExtras {
+            jwks,
+            jwks_uri,
+            profile,
+            authorization_signed_response_alg,
+            token_endpoint_auth_method,
+        },
+    ))
+}
+
+/// Decodes an administrative registration body (`POST /clients`, `POST
+/// /admin/applications`) into the domain request, including `jwks`,
+/// `jwks_uri`, `profile` and `authorization_signed_response_alg` — without
+/// which an operator could not register a FAPI 2.0 (`private_key_jwt`) client
+/// over REST. A secret in the body is dropped (Hearth mints secrets itself).
+///
+/// # Errors
+///
+/// `422` with a description when the body does not decode.
+pub(super) fn admin_registration_request(
+    raw: serde_json::Value,
+) -> Result<crate::identity::RegisterClientRequest, Response> {
+    let (body, extras) = split_registration_body(raw).map_err(|description| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": description})),
+        )
+            .into_response()
+    })?;
+    let mut request = crate::identity::RegisterClientRequest::from(body);
+    request.client_secret = None;
+    request.jwks = extras.jwks;
+    request.jwks_uri = extras.jwks_uri;
+    if let Some(profile) = extras.profile {
+        request.profile = profile;
+    }
+    request.authorization_signed_response_alg = extras.authorization_signed_response_alg;
+    Ok(request)
+}
+
+/// How a dynamically registered client authenticates at the token endpoint
+/// (RFC 7591 §2 `token_endpoint_auth_method`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DcrAuthMethod {
+    /// `client_secret_basic`: Hearth mints a secret.
+    SecretBasic,
+    /// `client_secret_post`: Hearth mints a secret.
+    SecretPost,
+    /// `private_key_jwt` with the registered inline `jwks`.
+    PrivateKeyJwt,
+    /// `none`: a public client (PKCE).
+    None,
+}
+
+impl DcrAuthMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SecretBasic => "client_secret_basic",
+            Self::SecretPost => "client_secret_post",
+            Self::PrivateKeyJwt => "private_key_jwt",
+            Self::None => "none",
+        }
+    }
+
+    fn mints_secret(self) -> bool {
+        matches!(self, Self::SecretBasic | Self::SecretPost)
+    }
+}
+
+/// Resolves and checks a dynamic registration's client authentication.
+///
+/// - `jwks` (validated: public signing keys only) and `jwks_uri` are mutually
+///   exclusive (RFC 7591 §2);
+/// - an omitted method is `private_key_jwt` when the client registered a
+///   `jwks`, else `default`;
+/// - `private_key_jwt` needs an inline `jwks` — a `jwks_uri` is never
+///   fetched, so such a client could never authenticate;
+/// - a FAPI 2.0 Advanced realm accepts `private_key_jwt` only
+///   (`docs/specs/OIDC.md` §2.1.2 item 6): a secret or public client
+///   registered there could never authenticate.
+///
+/// `Err` is the RFC 7591 §3.2.2 `invalid_client_metadata` response.
+fn resolve_dcr_auth_method(
+    extras: &RegistrationExtras,
+    default: DcrAuthMethod,
+    fapi_advanced: bool,
+) -> Result<DcrAuthMethod, Response> {
+    if extras.jwks.is_some() && extras.jwks_uri.is_some() {
+        return Err(dcr_invalid_metadata(
+            "jwks and jwks_uri must not both be present",
+        ));
+    }
+    if let Some(jwks) = extras.jwks.as_deref() {
+        if let Err(reason) = crate::identity::validate_client_jwks(jwks) {
+            return Err(dcr_invalid_metadata(&format!("invalid jwks: {reason}")));
+        }
+    }
+    let method = match extras.token_endpoint_auth_method.as_deref() {
+        None if extras.jwks.is_some() => DcrAuthMethod::PrivateKeyJwt,
+        None => default,
+        Some("client_secret_basic") => DcrAuthMethod::SecretBasic,
+        Some("client_secret_post") => DcrAuthMethod::SecretPost,
+        Some("private_key_jwt") => DcrAuthMethod::PrivateKeyJwt,
+        Some("none") => DcrAuthMethod::None,
+        Some(_) => {
+            return Err(dcr_invalid_metadata(
+                "token_endpoint_auth_method must be client_secret_basic, client_secret_post, \
+                 private_key_jwt or none",
+            ))
+        }
+    };
+    if method == DcrAuthMethod::PrivateKeyJwt && extras.jwks.is_none() {
+        return Err(dcr_invalid_metadata(
+            "private_key_jwt requires the client's public keys inline in jwks; \
+             jwks_uri is not fetched",
+        ));
+    }
+    if fapi_advanced && method != DcrAuthMethod::PrivateKeyJwt {
+        return Err(dcr_invalid_metadata(
+            "this realm uses the FAPI 2.0 Advanced profile and accepts only \
+             token_endpoint_auth_method private_key_jwt with jwks",
+        ));
+    }
+    Ok(method)
+}
+
+/// Maps an engine refusal of a dynamic registration: metadata the engine
+/// will not accept (invalid input, a FAPI rule) is RFC 7591 §3.2.2
+/// `invalid_client_metadata`; anything else keeps its usual response.
+fn dcr_engine_refusal(err: &crate::identity::IdentityError) -> Response {
+    match err {
+        crate::identity::IdentityError::InvalidInput { reason }
+        | crate::identity::IdentityError::FapiViolation { reason } => dcr_invalid_metadata(reason),
+        _ => identity_error_to_response(err).into_response(),
+    }
+}
+
 /// Register an OAuth 2.0 client (privileged admin API).
 ///
 /// Requires `X-Realm-ID` header and an admin bearer token carrying
@@ -1468,7 +1672,7 @@ async fn realm_token_preflight(
 async fn register_client(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(body): Json<pb::RegisterClientRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let auth = match super::extract_admin_auth(&headers, &state) {
         Ok(a) => a,
@@ -1478,8 +1682,10 @@ async fn register_client(
         return e.into_response();
     }
 
-    let mut request = crate::identity::RegisterClientRequest::from(body);
-    request.client_secret = None;
+    let request = match admin_registration_request(body) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
 
     match state.identity.register_client(&auth.realm_id, &request) {
         Ok(client) => {
@@ -1508,12 +1714,19 @@ async fn register_client(
 #[derive(Debug, Serialize)]
 struct DcrResponse {
     client_id: String,
-    client_secret: String,
+    /// Minted only for a `client_secret_*` method.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_secret: Option<String>,
     client_name: String,
     redirect_uris: Vec<String>,
     grant_types: Vec<String>,
-    client_secret_expires_at: u64,
+    /// Present with `client_secret` (RFC 7591 §3.2.1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_secret_expires_at: Option<u64>,
     token_endpoint_auth_method: String,
+    /// The registered key set, echoed (RFC 7591 §3.2.1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jwks: Option<serde_json::Value>,
     client_id_issued_at: i64,
     /// The registered ID-token algorithm — RFC 7591 §3.2.1 returns every
     /// registered value, including one the server defaulted (task 26.55).
@@ -1565,7 +1778,7 @@ async fn register_client_dynamic(
     method: axum::http::Method,
     uri: axum::http::Uri,
     headers: HeaderMap,
-    Json(body): Json<pb::RegisterClientRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
@@ -1634,11 +1847,32 @@ async fn register_client_dynamic(
         }
     }
 
+    let (body, extras) = match split_registration_body(body) {
+        Ok(split) => split,
+        Err(description) => return dcr_invalid_metadata(&description),
+    };
+    // RFC 7591 §2: the client says how it will authenticate; the default
+    // (no keys, no method) stays `client_secret_basic` on this route.
+    let auth_method = match resolve_dcr_auth_method(
+        &extras,
+        DcrAuthMethod::SecretBasic,
+        realm.config().fapi_profile == Some(crate::identity::FapiProfile::Advanced),
+    ) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+
     // Strip any client-supplied secret — the server generates its own.
     // RFC 7591 DCR is anonymous; callers cannot self-grant first-party trust.
     let mut request = crate::identity::RegisterClientRequest::from(body);
     request.client_secret = None;
     request.trust_level = crate::identity::ClientTrustLevel::ThirdParty;
+    request.jwks = extras.jwks.clone();
+    request.jwks_uri = extras.jwks_uri.clone();
+    if let Some(profile) = extras.profile {
+        request.profile = profile;
+    }
+    request.authorization_signed_response_alg = extras.authorization_signed_response_alg.clone();
 
     // OIDC Registration §2: omitted means RS256 — EdDSA in a FAPI realm,
     // where FAPI 2.0 forbids RS256 (task 26.55).
@@ -1650,12 +1884,18 @@ async fn register_client_dynamic(
         Err(description) => return dcr_invalid_metadata(description),
     }
 
-    // Generate a server-side random secret (256 CSPRNG bits). It travels as a
-    // `GeneratedClientSecret`, which is what lets the engine store it as a fast
-    // SHA-256 digest rather than an Argon2id hash.
-    let generated = crate::identity::GeneratedClientSecret::generate();
-    let generated_secret = generated.expose().to_string();
-    request.generated_client_secret = Some(generated);
+    // Generate a server-side random secret (256 CSPRNG bits) for a secret
+    // method only. It travels as a `GeneratedClientSecret`, which is what lets
+    // the engine store it as a fast SHA-256 digest rather than an Argon2id
+    // hash. A `private_key_jwt` or `none` client gets no secret.
+    let generated_secret = if auth_method.mints_secret() {
+        let generated = crate::identity::GeneratedClientSecret::generate();
+        let exposed = generated.expose().to_string();
+        request.generated_client_secret = Some(generated);
+        Some(exposed)
+    } else {
+        None
+    };
 
     // Force ThirdParty trust and consent for DCR-registered clients.
     request.trust_level = crate::identity::ClientTrustLevel::ThirdParty;
@@ -1682,12 +1922,13 @@ async fn register_client_dynamic(
 
             let response = DcrResponse {
                 client_id: client.client_id().as_uuid().to_string(),
+                client_secret_expires_at: generated_secret.as_ref().map(|_| 0),
                 client_secret: generated_secret,
                 client_name: client.client_name().to_string(),
                 redirect_uris: client.redirect_uris().to_vec(),
                 grant_types: client.grant_types().to_vec(),
-                client_secret_expires_at: 0,
-                token_endpoint_auth_method: "client_secret_basic".to_string(),
+                token_endpoint_auth_method: auth_method.as_str().to_string(),
+                jwks: client.jwks().and_then(|j| serde_json::from_str(j).ok()),
                 #[allow(clippy::cast_possible_truncation)]
                 client_id_issued_at: client.created_at().as_micros() / 1_000_000,
                 id_token_signed_response_alg: client
@@ -1702,7 +1943,7 @@ async fn register_client_dynamic(
             )
                 .into_response()
         }
-        Err(e) => identity_error_to_response(&e).into_response(),
+        Err(e) => dcr_engine_refusal(&e),
     }
 }
 
@@ -4259,6 +4500,41 @@ async fn realm_register_client_dynamic(
             }
         }
     }
+    // RFC 7591 §2 key and client-authentication metadata. This route
+    // registers a public (`none`) client by default, as it always has.
+    let mut body = body;
+    let extras = {
+        let mut keys_only = serde_json::Map::new();
+        if let serde_json::Value::Object(map) = &mut body {
+            for field in [
+                "jwks",
+                "jwks_uri",
+                "token_endpoint_auth_method",
+                "profile",
+                "authorization_signed_response_alg",
+            ] {
+                if let Some(v) = map.remove(field) {
+                    keys_only.insert(field.to_string(), v);
+                }
+            }
+        }
+        match split_registration_body(serde_json::Value::Object(keys_only)) {
+            Ok((_, extras)) => extras,
+            Err(description) => return dcr_invalid_metadata(&description),
+        }
+    };
+    let auth_method = match resolve_dcr_auth_method(
+        &extras,
+        DcrAuthMethod::None,
+        realm.config().fapi_profile == Some(crate::identity::FapiProfile::Advanced),
+    ) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let generated = auth_method
+        .mints_secret()
+        .then(crate::identity::GeneratedClientSecret::generate);
+    let generated_secret = generated.as_ref().map(|g| g.expose().to_string());
     let client_name = body
         .get("client_name")
         .and_then(|v| v.as_str())
@@ -4330,7 +4606,7 @@ async fn realm_register_client_dynamic(
         redirect_uris,
         cors_origins: Vec::new(),
         client_secret: None,
-        generated_client_secret: None,
+        generated_client_secret: generated,
         grant_types,
         require_consent: true,
         client_logo_url: None,
@@ -4343,11 +4619,13 @@ async fn realm_register_client_dynamic(
         ],
         consent_spans_orgs: false,
         access_token_authorization: crate::identity::AccessTokenAuthorization::Embedded,
-        jwks: None,
-        jwks_uri: None,
-        authorization_signed_response_alg: None,
+        jwks: extras.jwks.clone(),
+        jwks_uri: extras.jwks_uri.clone(),
+        authorization_signed_response_alg: extras.authorization_signed_response_alg.clone(),
         id_token_signed_response_alg: Some(id_token_signed_response_alg),
-        profile: crate::identity::ClientProfile::Standard,
+        profile: extras
+            .profile
+            .unwrap_or(crate::identity::ClientProfile::Standard),
         mfa_required: None,
     };
     match state.identity.register_client(&realm_id, &request) {
@@ -4357,16 +4635,27 @@ async fn realm_register_client_dynamic(
             // the UUID (`client_<uuid>`), so rendering it here handed back an
             // id that could never authenticate. Emit the bare UUID, matching
             // the global `POST /register` response.
-            let resp = serde_json::json!({
+            let mut resp = serde_json::json!({
                 "client_id": client.client_id().as_uuid().to_string(),
                 "client_name": client.client_name(),
                 "redirect_uris": client.redirect_uris(),
                 "grant_types": client.grant_types(),
                 // RFC 7591 §3.2.1: echo registered metadata, defaults included.
                 "id_token_signed_response_alg": client.id_token_signed_response_alg().as_str(),
+                "token_endpoint_auth_method": auth_method.as_str(),
             });
+            if let Some(secret) = generated_secret {
+                resp["client_secret"] = serde_json::json!(secret);
+                resp["client_secret_expires_at"] = serde_json::json!(0);
+            }
+            if let Some(jwks) = client
+                .jwks()
+                .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+            {
+                resp["jwks"] = jwks;
+            }
             (StatusCode::CREATED, Json(resp)).into_response()
         }
-        Err(e) => identity_error_to_response(&e).into_response(),
+        Err(e) => dcr_engine_refusal(&e),
     }
 }

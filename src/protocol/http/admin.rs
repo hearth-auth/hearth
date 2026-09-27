@@ -2433,7 +2433,7 @@ async fn admin_list_clients(
 async fn admin_register_client(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(body): Json<pb::RegisterClientRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let auth = match extract_admin_auth(&headers, &state) {
         Ok(a) => a,
@@ -2443,8 +2443,13 @@ async fn admin_register_client(
         return e.into_response();
     }
 
-    let mut request = crate::identity::RegisterClientRequest::from(body);
-    request.client_secret = None;
+    // `jwks`, `jwks_uri`, `profile` and `authorization_signed_response_alg`
+    // ride beside the proto fields, so an operator can register a FAPI 2.0
+    // `private_key_jwt` client over REST.
+    let request = match super::oauth::admin_registration_request(body) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
 
     match state.identity.register_client(&auth.realm_id, &request) {
         Ok(client) => {
@@ -2562,6 +2567,31 @@ struct AdminUpdateClientBody {
     /// Omit to leave unchanged; the engine refuses any other value. Without
     /// this field the body silently dropped the key and answered `200`.
     id_token_signed_response_alg: Option<String>,
+    /// The client's public JWK Set (RFC 7517): an object, or a JSON string
+    /// holding one. `null` clears it; omit to leave unchanged. Validated by
+    /// the engine (public signing keys only).
+    #[serde(default, deserialize_with = "deserialize_nullable_jwks")]
+    jwks: Option<Option<String>>,
+    /// Security profile: `"standard"` or `"fapi2"`. Omit to leave unchanged.
+    /// A FAPI 2.0 client must hold keys (`jwks` or an assertion key) and no
+    /// secret; the engine refuses the change otherwise.
+    profile: Option<String>,
+}
+
+/// Deserializes `jwks` for [`AdminUpdateClientBody`]: absent → `None`,
+/// `null` → `Some(None)`, an object or a string → `Some(Some(json))`.
+fn deserialize_nullable_jwks<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    use serde::Deserialize;
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Null => Ok(Some(None)),
+        serde_json::Value::String(s) => Ok(Some(Some(s))),
+        object @ serde_json::Value::Object(_) => Ok(Some(Some(object.to_string()))),
+        _ => Err(D::Error::custom("jwks must be a JSON Web Key Set object")),
+    }
 }
 
 /// Deserializes an optional nullable string field.
@@ -2620,6 +2650,18 @@ async fn admin_update_client(
         "first_party" => ClientTrustLevel::FirstParty,
         _ => ClientTrustLevel::ThirdParty,
     });
+    let profile = match body.profile.as_deref() {
+        None => None,
+        Some("standard") => Some(crate::identity::ClientProfile::Standard),
+        Some("fapi2") => Some(crate::identity::ClientProfile::Fapi2),
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "profile must be \"standard\" or \"fapi2\""})),
+            )
+                .into_response()
+        }
+    };
     let request = crate::identity::UpdateClientRequest {
         client_name: body.client_name,
         redirect_uris: if body.redirect_uris.is_empty() {
@@ -2647,6 +2689,10 @@ async fn admin_update_client(
         // Validated (RS256 | EdDSA) by `update_client_inner`, which also
         // provisions the realm's RSA ID-token key on a switch to RS256.
         id_token_signed_response_alg: body.id_token_signed_response_alg,
+        // Validated by `update_client_inner` (public signing keys; a FAPI 2.0
+        // client keeps a key and holds no secret).
+        jwks: body.jwks,
+        profile,
         ..Default::default()
     };
 
