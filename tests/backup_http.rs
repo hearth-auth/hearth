@@ -5,7 +5,7 @@
 //! - `POST /admin/backup/restore` — restore from a backup archive
 //! - Auth gating (403 for non-admin, 401 for missing token)
 //! - SEC-14: restore requires `hearth.export` capability (403 without it)
-//! - SEC-14: pre-restore audit event recorded before destructive write
+//! - SEC-14: every restore that runs is recorded in the audit log
 //! - Dry-run restore returns counts without writing
 //! - Round-trip: backup a realm, restore to a fresh realm
 
@@ -451,9 +451,10 @@ async fn backup_restore_requires_export_capability() {
     );
 }
 
-/// The restore endpoint emits a `BackupRestored` audit event BEFORE the
-/// destructive import begins (SEC-14). We verify this with a dry-run: even
-/// though no data is written, the audit record must be present.
+/// The restore endpoint records a `BackupRestored` audit event for every
+/// restore it runs (SEC-14) — AFTER the import, so the event never precedes
+/// the archived history the import adds to the same realm. We verify this with
+/// a dry-run: even though no data is written, the audit record must be present.
 #[tokio::test]
 async fn backup_restore_emits_pre_restore_audit_event() {
     set_master_key();
@@ -486,8 +487,7 @@ async fn backup_restore_emits_pre_restore_audit_event() {
         "dry-run with valid admin token must succeed"
     );
 
-    // The audit event must be present regardless of dry_run status — it is
-    // emitted before the import runs, not inside the success branch.
+    // The audit event must be present regardless of dry_run status.
     let events = h
         .audit()
         .query(&AuditQuery {
@@ -1729,5 +1729,75 @@ async fn a_system_realm_backup_or_restore_needs_hearth_admin_not_a_sub_admin() {
             .expect("lookup")
             .is_some(),
         "the archived operator is restored"
+    );
+}
+
+/// A tenant caller's restore is authorized against EVERY realm in the archive
+/// before anything is written. An archive listing the caller's own realm first
+/// and the system realm second used to restore the caller's realm (and record
+/// a `BackupRestored` event in it) before the system realm was refused.
+#[tokio::test]
+async fn a_tenant_restore_naming_the_system_realm_is_refused_before_any_write() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let tenant = h.create_realm();
+    h.rbac().seed_realm(&tenant).expect("seed");
+    let tenant_token = make_admin_token(&h, &tenant).await;
+    let victim = h
+        .identity()
+        .create_user(
+            &tenant,
+            &CreateUserRequest {
+                email: "victim@backup-test.example".into(),
+                display_name: "Victim".into(),
+                ..Default::default()
+            },
+        )
+        .expect("user");
+
+    // A full export by a system-realm caller: the tenant realm, then the
+    // system realm.
+    let system_token = make_system_token(&h, "operator@hearth.test");
+    let archive = sign_bytes(
+        &post_backup(&h, "/admin/backup", &system_token, &system_realm()).await,
+        &test_signing_key(),
+    );
+    let ids = archive_realm_ids(&archive);
+    assert_eq!(
+        ids,
+        vec![format!("realm_{}", tenant.as_uuid()), nil_realm_id_string()],
+        "precondition: the caller's realm comes first"
+    );
+
+    h.identity()
+        .delete_user(&tenant, victim.id())
+        .expect("delete the user the archive still carries");
+
+    let (status, body) = post_restore(
+        &h,
+        "/admin/backup/restore",
+        &tenant_token,
+        &tenant,
+        &archive,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        h.identity()
+            .get_user_by_email(&tenant, "victim@backup-test.example")
+            .expect("lookup")
+            .is_none(),
+        "the caller's own realm must be untouched by a refused restore"
+    );
+    let events = h
+        .audit()
+        .query(&AuditQuery {
+            action: Some(AuditAction::BackupRestored),
+            ..AuditQuery::for_realm(tenant.clone())
+        })
+        .expect("audit query");
+    assert!(
+        events.is_empty(),
+        "a refused restore records nothing in the caller's realm: {events:?}"
     );
 }

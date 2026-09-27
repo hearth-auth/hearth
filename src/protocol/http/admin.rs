@@ -5184,6 +5184,10 @@ struct RestoreRefusal {
     status: StatusCode,
     code: Option<&'static str>,
     message: String,
+    /// The restore got past every pre-write check (signature, integrity,
+    /// authorization of every realm) and started importing, so the failure
+    /// may have left some records written and is recorded in the audit log.
+    attempted: bool,
 }
 
 impl From<(StatusCode, String)> for RestoreRefusal {
@@ -5192,7 +5196,19 @@ impl From<(StatusCode, String)> for RestoreRefusal {
             status,
             code: None,
             message,
+            attempted: false,
         }
+    }
+}
+
+/// The HTTP status for an importer error: a realm outside the caller's scope
+/// is an authorization refusal and a live target realm a conflict — neither
+/// is a malformed request.
+fn restore_error_status(e: &crate::backup::BackupError) -> StatusCode {
+    match e {
+        crate::backup::BackupError::RealmNotPermitted { .. } => StatusCode::FORBIDDEN,
+        crate::backup::BackupError::RealmExists { .. } => StatusCode::CONFLICT,
+        _ => StatusCode::BAD_REQUEST,
     }
 }
 
@@ -5326,25 +5342,21 @@ async fn admin_backup_restore(
             .into_response();
     }
 
-    // SEC-14: emit audit event at restore start, before any destructive write.
-    crate::protocol::audit_log::record(
-        state.audit.as_ref(),
-        &CreateAuditEvent {
-            realm_id: auth.realm_id.clone(),
-            actor: auth.user_id.as_uuid().to_string(),
-            action: crate::audit::AuditAction::BackupRestored,
-            resource_type: "backup".to_string(),
-            resource_id: "restore".to_string(),
-            metadata: Some(serde_json::json!({
-                "dry_run": dry_run,
-                "mode": mode_str,
-                "realm_filter": realm_filter,
-            })),
-        },
-    );
+    // SEC-14: the restore is recorded in the caller's realm — AFTER it ran,
+    // not before. Recorded first, the event preceded every archived audit
+    // event the import then added to the same realm, and a caller refused by
+    // the authorization below had already written to its realm. It is
+    // recorded whenever the import started, whether it completed or failed
+    // partway, and never for a request refused before its first write.
+    let audit_metadata = serde_json::json!({
+        "dry_run": dry_run,
+        "mode": mode_str,
+        "realm_filter": realm_filter,
+    });
 
     let identity = Arc::clone(&state.identity);
     let rbac = Arc::clone(&state.rbac);
+    let import_audit = Arc::clone(&state.audit);
 
     // B1: the realm this restore may write comes from the caller's identity,
     // never from the query string or the archive's manifest. Only the system
@@ -5395,6 +5407,7 @@ async fn admin_backup_restore(
                     status: StatusCode::BAD_REQUEST,
                     code: restore_signature_error_code(&e),
                     message: e.to_string(),
+                    attempted: false,
                 })
             }
         }
@@ -5416,7 +5429,7 @@ async fn admin_backup_restore(
             )
         })?;
 
-        let importer = BackupImporter::new(identity, rbac, Arc::clone(&state.audit));
+        let importer = BackupImporter::new(identity, rbac, import_audit);
         let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
             let mk = std::env::var("HEARTH_MASTER_KEY").map_err(|_| {
                 (
@@ -5460,26 +5473,55 @@ async fn admin_backup_restore(
             reader.realms().iter().map(|r| r.slug.clone()).collect()
         };
 
+        // B1: authorize EVERY realm the restore will import before the first
+        // write. `import_realm` checks its own realm too, but an archive
+        // listing the caller's realm before a foreign one would otherwise
+        // have restored the caller's realm and then been refused.
+        importer
+            .authorize_realms(&slugs, &reader, &opts)
+            .map_err(|e| (restore_error_status(&e), format!("{e}")))?;
+
         let mut reports: std::collections::HashMap<String, ImportReport> =
             std::collections::HashMap::new();
         for slug in &slugs {
-            let report = importer.import_realm(slug, &reader, &opts).map_err(|e| {
-                // A realm outside the caller's scope is an authorization
-                // refusal, and a live target realm is a conflict — neither is
-                // a malformed request.
-                let status = match e {
-                    crate::backup::BackupError::RealmNotPermitted { .. } => StatusCode::FORBIDDEN,
-                    crate::backup::BackupError::RealmExists { .. } => StatusCode::CONFLICT,
-                    _ => StatusCode::BAD_REQUEST,
-                };
-                (status, format!("import_realm '{slug}': {e}"))
-            })?;
+            let report =
+                importer
+                    .import_realm(slug, &reader, &opts)
+                    .map_err(|e| RestoreRefusal {
+                        status: restore_error_status(&e),
+                        code: None,
+                        message: format!("import_realm '{slug}': {e}"),
+                        attempted: true,
+                    })?;
             reports.insert(slug.clone(), report);
         }
 
         Ok::<_, RestoreRefusal>(reports)
     })
     .await;
+
+    let outcome = match &result {
+        Ok(Ok(_)) => Some("completed"),
+        Ok(Err(RestoreRefusal {
+            attempted: true, ..
+        })) => Some("failed"),
+        _ => None,
+    };
+    if let Some(outcome) = outcome {
+        let mut metadata = audit_metadata;
+        metadata["outcome"] = serde_json::json!(outcome);
+        crate::protocol::audit_log::record(
+            state.audit.as_ref(),
+            &CreateAuditEvent {
+                realm_id: auth.realm_id.clone(),
+                actor: auth.user_id.as_uuid().to_string(),
+                action: crate::audit::AuditAction::BackupRestored,
+                resource_type: "backup".to_string(),
+                resource_id: "restore".to_string(),
+                metadata: Some(metadata),
+            },
+        );
+    }
 
     match result {
         Err(e) => (
@@ -5491,6 +5533,7 @@ async fn admin_backup_restore(
             status,
             code: Some(code),
             message,
+            ..
         })) => (
             status,
             Json(serde_json::json!({"error": code, "error_description": message})),
@@ -5500,6 +5543,7 @@ async fn admin_backup_restore(
             status,
             code: None,
             message,
+            ..
         })) => (status, Json(serde_json::json!({"error": message}))).into_response(),
         Ok(Ok(reports)) => {
             let mut realms_restored = 0u64;

@@ -394,6 +394,74 @@ impl BackupImporter {
         }
     }
 
+    /// Refuses, before anything is written, an archive that carries a realm
+    /// outside `opts.allowed_realm` among the realms `slugs` names.
+    ///
+    /// [`import_realm`](Self::import_realm) makes the same check for its own
+    /// realm, but a caller restoring several realms one `import_realm` at a
+    /// time would have written every realm listed before the refused one.
+    /// Call this first with every slug the restore will import. Each realm's
+    /// ID is read from its decrypted `realm.json`, never from the
+    /// caller-supplied manifest. A no-op when `opts.allowed_realm` is `None`.
+    pub fn authorize_realms(
+        &self,
+        slugs: &[String],
+        reader: &ArchiveReader,
+        opts: &ImportOptions,
+    ) -> Result<(), BackupError> {
+        let Some(allowed) = &opts.allowed_realm else {
+            return Ok(());
+        };
+        let dek = Self::archive_dek(reader, opts)?;
+        for slug in slugs {
+            let member = format!("realms/{slug}/realm.json");
+            let raw = reader.read_file(&member)?.ok_or_else(|| {
+                BackupError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("realm.json not found for slug '{slug}'"),
+                ))
+            })?;
+            let bytes = match &dek {
+                Some(d) => decrypt_bytes(&raw, d)?,
+                None => Zeroizing::new(raw),
+            };
+            let realm: Realm = serde_json::from_slice(&bytes)?;
+            if realm.id() != allowed {
+                return Err(BackupError::RealmNotPermitted { slug: slug.clone() });
+            }
+        }
+        Ok(())
+    }
+
+    /// Unwraps the archive's data-encryption key, or `None` for an archive
+    /// whose sections are not encrypted.
+    fn archive_dek(
+        reader: &ArchiveReader,
+        opts: &ImportOptions,
+    ) -> Result<Option<Zeroizing<[u8; 32]>>, BackupError> {
+        if !reader.manifest.sections_encrypted {
+            return Ok(None);
+        }
+        let passphrase = opts.dek_passphrase.as_ref().ok_or_else(|| {
+            BackupError::Crypto(
+                "archive has sections_encrypted=true but no dek_passphrase was provided".into(),
+            )
+        })?;
+        let wrapped_b64 = reader.manifest.wrapped_dek_b64.as_deref().ok_or_else(|| {
+            BackupError::Crypto("sections_encrypted=true but wrapped_dek_b64 is absent".into())
+        })?;
+        let params = reader
+            .manifest
+            .dek_wrapping_params
+            .as_ref()
+            .ok_or_else(|| {
+                BackupError::Crypto(
+                    "sections_encrypted=true but dek_wrapping_params is absent".into(),
+                )
+            })?;
+        Ok(Some(unwrap_dek(wrapped_b64, params, passphrase)?))
+    }
+
     /// Restores one realm from `reader` using the archive slug `realm_slug`.
     ///
     /// The realm slug identifies which directory inside the archive to read
@@ -414,28 +482,7 @@ impl BackupImporter {
         let mut report = ImportReport::default();
 
         // ── Unwrap DEK (v2+ archives) ─────────────────────────────────────
-        let dek: Option<Zeroizing<[u8; 32]>> = if reader.manifest.sections_encrypted {
-            let passphrase = opts.dek_passphrase.as_ref().ok_or_else(|| {
-                BackupError::Crypto(
-                    "archive has sections_encrypted=true but no dek_passphrase was provided".into(),
-                )
-            })?;
-            let wrapped_b64 = reader.manifest.wrapped_dek_b64.as_deref().ok_or_else(|| {
-                BackupError::Crypto("sections_encrypted=true but wrapped_dek_b64 is absent".into())
-            })?;
-            let params = reader
-                .manifest
-                .dek_wrapping_params
-                .as_ref()
-                .ok_or_else(|| {
-                    BackupError::Crypto(
-                        "sections_encrypted=true but dek_wrapping_params is absent".into(),
-                    )
-                })?;
-            Some(unwrap_dek(wrapped_b64, params, passphrase)?)
-        } else {
-            None
-        };
+        let dek = Self::archive_dek(reader, opts)?;
 
         // Convenience closure: decrypt a section if the archive is encrypted.
         let try_decrypt = |raw: &[u8]| -> Result<Zeroizing<Vec<u8>>, BackupError> {
