@@ -559,9 +559,20 @@ impl ControlPlane {
         if reset {
             // A control replicated after the snapshot and before the reset of
             // `target` may have signalled a value that the store above erased:
-            // re-read and signal, so it still causes a reload.
-            if let Ok(persisted) = self.read_persisted_epoch() {
-                self.signal(persisted);
+            // re-read and signal, so it still causes a reload. If the re-read
+            // fails that control could go unnoticed: queue another reset
+            // reload, which re-reads (and retries with backoff) in turn.
+            match self.read_persisted_epoch() {
+                Ok(persisted) => self.signal(persisted),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "could not re-read the control epoch after a reset; queued another reset \
+                         reload"
+                    );
+                    self.reset.store(true, Ordering::Release);
+                    self.request_full_reload();
+                }
             }
         }
         // `lookup_session` returns a cached live session without consulting
@@ -823,6 +834,12 @@ impl ControlPlane {
     #[cfg(test)]
     pub(super) fn parked_local_epochs_for_test(&self) -> usize {
         lock(&self.journal).local_epochs.len()
+    }
+
+    /// Whether a forced reset reload is queued for the background reloader.
+    #[cfg(test)]
+    pub(super) fn reset_reload_queued_for_test(&self) -> bool {
+        self.reset.load(Ordering::Acquire) && self.force.load(Ordering::Acquire)
     }
 
     /// How many times the reloader has been woken.

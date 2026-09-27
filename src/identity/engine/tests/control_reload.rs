@@ -739,3 +739,33 @@ fn deleting_a_user_on_another_node_ends_its_sessions_here() {
         "a node that had the session cached kept accepting a deleted user's token"
     );
 }
+
+/// L1: after a reset reload the persisted epoch is re-read and signalled, so
+/// a control replicated during the reset still causes a reload. A failed
+/// re-read was discarded (`if let Ok(..)`): the reload reported success and
+/// nothing re-queued it, so that control could stay unbound here until the
+/// next one. A failed re-read now queues another reset reload.
+#[test]
+fn a_failed_epoch_reread_after_a_reset_requeues_the_reset() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = open_storage(&dir);
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let node = engine_over(&storage, &clock);
+    let sys = keys::system_realm_id();
+    let epoch_key = keys::encode_control_epoch();
+    storage.increment_u64(&sys, &epoch_key).expect("bump");
+
+    // The row goes bad after the scan read it, before the re-read.
+    let corrupting = Arc::clone(&storage);
+    let (sys_h, key_h) = (sys.clone(), epoch_key.clone());
+    node.control.set_scan_hook(Some(Arc::new(move || {
+        corrupting.put(&sys_h, &key_h, b"bad").expect("corrupt");
+    })));
+    assert!(!node.control.reset_reload_queued_for_test());
+    let _ = node.control.reload_after_reset();
+    node.control.set_scan_hook(None);
+    assert!(
+        node.control.reset_reload_queued_for_test(),
+        "a failed epoch re-read after a reset must queue another reset reload"
+    );
+}
