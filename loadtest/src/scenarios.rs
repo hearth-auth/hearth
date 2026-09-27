@@ -320,8 +320,9 @@ async fn journey_issuance(user: &mut GooseUser) -> TransactionResult {
 
 // ===== Journey 5 — Revoke → re-validate =====
 
-/// Mints a fresh token, revokes it, then introspects expecting `active:false` —
-/// exercising the revocation blocklist end-to-end. A fresh token is minted (not
+/// Mints a fresh token, introspects it expecting `active:true`, revokes it,
+/// then introspects expecting `active:false` — exercising the revocation
+/// blocklist end-to-end. A fresh token is minted (not
 /// a seeded one) so the run does not deplete the validate journey's corpus.
 ///
 /// The token is a `client_credentials` token of the confidential client, not a
@@ -345,7 +346,21 @@ async fn journey_revoke_revalidate(user: &mut GooseUser) -> TransactionResult {
     let goose = request_timed(user, req, "revoke_mint").await?;
     let token = read_access_token(user, goose, "revoke_mint").await?;
 
-    // 2. Revoke it, as the client it was issued to.
+    // 2. Control: it introspects `active:true` before the revoke, so the
+    //    `active:false` of step 4 proves a revocation rather than a token that
+    //    never validated.
+    let rb = user
+        .get_request_builder(&GooseMethod::Post, "/introspect")?
+        .header(REALM_HEADER, &ctx.realm_id)
+        .json(&introspect_body(&token));
+    let req = GooseRequest::builder()
+        .set_request_builder(ctx.with_client_auth(rb))
+        .name("revoke_precheck")
+        .build();
+    let goose = request_timed(user, req, "revoke_precheck").await?;
+    expect_active(user, goose, true, "revoke_precheck").await?;
+
+    // 3. Revoke it, as the client it was issued to.
     let revoke_body = serde_json::json!({
         "token": token,
         "token_type_hint": "access_token",
@@ -361,7 +376,7 @@ async fn journey_revoke_revalidate(user: &mut GooseUser) -> TransactionResult {
     let goose = request_timed(user, req, "revoke").await?;
     expect_ok(user, goose, "revoke").await?;
 
-    // 3. Re-validate — the token must now read `active:false`.
+    // 4. Re-validate — the token must now read `active:false`.
     let rb = user
         .get_request_builder(&GooseMethod::Post, "/introspect")?
         .header(REALM_HEADER, &ctx.realm_id)

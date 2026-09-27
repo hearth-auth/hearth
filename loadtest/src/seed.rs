@@ -208,14 +208,28 @@ async fn seed_realm(
     //     revoking it answers `200` and changes nothing, and `--revoked-frac`
     //     would describe a corpus property that did not exist, again. A
     //     pre-revoked slot therefore holds a `client_credentials` token of the
-    //     confidential client, revoked by that client, and confirmed
-    //     `active:false` through introspection before the seed trusts it.
+    //     confidential client, confirmed `active:true` through introspection,
+    //     revoked by that client, and confirmed `active:false` before the seed
+    //     trusts it.
     let want_revoked = params.revoked_per_realm() as usize;
     let revoke_count = revoke_target_count(want_revoked, tokens.len());
     for token in tokens.iter_mut().take(revoke_count) {
         let owned = client
             .client_credentials_token(&cc_client_id, &cc_client_secret)
             .await?;
+        // Control: the token must introspect active BEFORE the revoke, or the
+        // `active:false` below would prove nothing (a token that never
+        // validated reads inactive too).
+        if !client
+            .introspect_active(&cc_client_id, &cc_client_secret, &owned)
+            .await?
+        {
+            return Err(SeedError::Api {
+                op: "pre-revoke",
+                status: 200,
+                body: "a freshly minted token does not introspect active:true".to_string(),
+            });
+        }
         client
             .revoke(&cc_client_id, &cc_client_secret, &owned)
             .await?;

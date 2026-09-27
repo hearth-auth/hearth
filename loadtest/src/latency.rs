@@ -25,12 +25,13 @@ use std::time::Duration;
 /// [`crate::scenarios`]. A name absent here is silently ignored by [`record`],
 /// so adding a journey without registering it degrades gracefully (no min/max)
 /// rather than panicking the run.
-const JOURNEY_NAMES: [&str; 9] = [
+const JOURNEY_NAMES: [&str; 10] = [
     "validate",
     "session_lookup",
     "user_lookup",
     "issuance",
     "revoke_mint",
+    "revoke_precheck",
     "revoke",
     "revoke_revalidate",
     // Tier-miss lookup profile (HEA-1801): resident hot working set vs uniform
@@ -47,7 +48,7 @@ const US_EXACT: usize = 4096;
 /// Argon2id-bound journeys (issuance, revoke — hundreds of ms to seconds) still
 /// get whole-ms percentiles, where sub-ms precision is irrelevant anyway.
 const MS_BUCKETS: usize = 60_000;
-/// Total histogram width. ~64 k `AtomicU64` per journey (~0.5 MB × 9 ≈ 4.6 MB) —
+/// Total histogram width. ~64 k `AtomicU64` per journey (~0.5 MB × 10 ≈ 5.1 MB) —
 /// trivial for the load *client* (this is not the Hearth server hot path).
 const TOTAL_BUCKETS: usize = US_EXACT + MS_BUCKETS;
 

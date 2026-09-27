@@ -1932,6 +1932,13 @@ mod tests {
         // An unknown version is not silently treated as v1.
         let v2 = stored.replacen("v=1", "v=2", 1);
         assert!(!is_fast_client_secret_hash(&v2));
-        assert!(!verify_client_secret(secret.expose().as_bytes(), &v2).unwrap_or(false));
+        // It falls through to the Argon2id verifier, which parses it as a PHC
+        // string for an algorithm it does not implement and refuses it — a
+        // precise `Ok(false)`, not an error swallowed into `false`.
+        let outcome = verify_client_secret(secret.expose().as_bytes(), &v2);
+        assert!(
+            matches!(outcome, Ok(false)),
+            "an unknown fast-hash version must never verify, got {outcome:?}"
+        );
     }
 }
