@@ -1503,11 +1503,9 @@ fn jar_authorize_uri(rig: &LoginRig) -> String {
 fn jar_authorize_uri_with(rig: &LoginRig, overrides: &serde_json::Value) -> (String, String) {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
-    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use ring::signature::KeyPair;
 
-    let rng = ring::rand::SystemRandom::new();
-    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
-    let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("pair");
+    let pair = jar_key();
     let x = URL_SAFE_NO_PAD.encode(pair.public_key().as_ref());
     let jwks = format!(
         r#"{{"keys":[{{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","kid":"{JAR_KID}","x":"{x}"}}]}}"#
@@ -1981,10 +1979,65 @@ fn query_param(location: &str, name: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
+/// The JAR clients' signing key (one per test process). A client that
+/// registers a JWKS is confidential, so it also signs its `private_key_jwt`
+/// assertions with this key.
+fn jar_key() -> &'static ring::signature::Ed25519KeyPair {
+    static KEY: std::sync::OnceLock<ring::signature::Ed25519KeyPair> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                .expect("keygen");
+        ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("pair")
+    })
+}
+
+/// A `private_key_jwt` assertion for the JAR client `client_id` (bare UUID).
+fn jar_client_assertion(rig: &LoginRig, client_id: &str) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let cid =
+        hearth::core::ClientId::new(uuid::Uuid::parse_str(client_id).expect("uuid")).to_string();
+    let realm_name = rig
+        .state
+        .identity
+        .get_realm(&rig.realm_id)
+        .expect("get_realm")
+        .expect("realm")
+        .name()
+        .to_string();
+    let now = i64::try_from(now_secs()).expect("now");
+    let h = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&serde_json::json!({ "alg": "EdDSA", "kid": JAR_KID })).expect("header"),
+    );
+    let c = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&serde_json::json!({
+            "iss": cid, "sub": cid,
+            "aud": format!("https://hearth.local/realms/{realm_name}"),
+            "exp": now + 60, "iat": now, "jti": uuid::Uuid::new_v4().to_string(),
+        }))
+        .expect("claims"),
+    );
+    let input = format!("{h}.{c}");
+    format!(
+        "{input}.{}",
+        URL_SAFE_NO_PAD.encode(jar_key().sign(input.as_bytes()).as_ref())
+    )
+}
+
 /// Exchanges the code in `location` and returns the access token's `aud`.
 fn exchanged_audience(rig: &LoginRig, client_id: &str, location: &str) -> Vec<String> {
     let code = query_param(location, "code")
         .unwrap_or_else(|| panic!("no code in the redirect: {location}"));
+    let holds_jwks = rig
+        .state
+        .identity
+        .get_client(
+            &rig.realm_id,
+            &hearth::core::ClientId::new(uuid::Uuid::parse_str(client_id).expect("client uuid")),
+        )
+        .expect("get_client")
+        .is_some_and(|c| c.jwks().is_some());
     let tokens = rig
         .state
         .identity
@@ -1998,8 +2051,11 @@ fn exchanged_audience(rig: &LoginRig, client_id: &str, location: &str) -> Vec<St
                 redirect_uri: REDIRECT.to_string(),
                 code_verifier: Some(PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
-                client_assertion_type: None,
-                client_assertion: None,
+                // A JAR client registered a JWKS: it authenticates with an
+                // assertion. A public (PAR) client authenticates by PKCE.
+                client_assertion_type: holds_jwks
+                    .then(|| "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string()),
+                client_assertion: holds_jwks.then(|| jar_client_assertion(rig, client_id)),
             },
         )
         .expect("exchange the code");

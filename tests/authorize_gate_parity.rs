@@ -397,8 +397,51 @@ fn jwt_claims(jwt: &str) -> serde_json::Value {
     .expect("claims json")
 }
 
-/// Exchanges `code` and returns the access token's `aud`.
-fn exchanged_audience(rig: &Rig, client: &OAuthClient, code: String) -> Vec<String> {
+/// A `private_key_jwt` assertion signed with the client's JWKS key: a
+/// client that registered a JWKS is confidential and authenticates with it.
+fn client_assertion(
+    rig: &Rig,
+    client: &OAuthClient,
+    pair: &ring::signature::Ed25519KeyPair,
+) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let cid = client.client_id().to_string();
+    let realm_name = rig
+        .identity
+        .get_realm(&rig.realm_id)
+        .expect("get_realm")
+        .expect("realm")
+        .name()
+        .to_string();
+    let now = i64::try_from(now_secs()).expect("now");
+    let h = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&serde_json::json!({ "alg": "EdDSA", "kid": JAR_KID })).expect("header"),
+    );
+    let c = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&serde_json::json!({
+            "iss": cid, "sub": cid,
+            "aud": format!("https://hearth.local/realms/{realm_name}"),
+            "exp": now + 60, "iat": now, "jti": uuid::Uuid::new_v4().to_string(),
+        }))
+        .expect("claims"),
+    );
+    let input = format!("{h}.{c}");
+    format!(
+        "{input}.{}",
+        URL_SAFE_NO_PAD.encode(pair.sign(input.as_bytes()).as_ref())
+    )
+}
+
+/// Exchanges `code` and returns the access token's `aud`. A client that
+/// registered a JWKS (`pair`) authenticates with an assertion signed by it; a
+/// public client (`None`) authenticates by PKCE alone.
+fn exchanged_audience(
+    rig: &Rig,
+    client: &OAuthClient,
+    pair: Option<&ring::signature::Ed25519KeyPair>,
+    code: String,
+) -> Vec<String> {
     let tokens = rig
         .identity
         .exchange_authorization_code(
@@ -409,8 +452,9 @@ fn exchanged_audience(rig: &Rig, client: &OAuthClient, code: String) -> Vec<Stri
                 redirect_uri: REDIRECT.to_string(),
                 code_verifier: Some(PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
-                client_assertion_type: None,
-                client_assertion: None,
+                client_assertion_type: pair
+                    .map(|_| "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string()),
+                client_assertion: pair.map(|pair| client_assertion(rig, client, pair)),
             },
         )
         .expect("exchange the code");
@@ -735,7 +779,7 @@ async fn jar_consent_approval_keeps_the_jar_response_mode_and_resource() {
         redirect_param(&loc, "state", true).as_deref(),
         Some("jar-state")
     );
-    let aud = exchanged_audience(&rig, &client, code);
+    let aud = exchanged_audience(&rig, &client, Some(&pair), code);
     assert!(aud.iter().any(|a| a == RESOURCE), "aud = {aud:?}");
 }
 
@@ -803,7 +847,7 @@ async fn par_consent_approval_keeps_the_pushed_response_mode_and_resource() {
     let loc = location(&resp);
     let code = redirect_param(&loc, "code", true)
         .unwrap_or_else(|| panic!("fragment response_mode must deliver #code=; got {loc}"));
-    let aud = exchanged_audience(&rig, &client, code);
+    let aud = exchanged_audience(&rig, &client, None, code);
     assert!(aud.iter().any(|a| a == RESOURCE), "aud = {aud:?}");
 }
 
@@ -1155,7 +1199,7 @@ async fn jar_through_sms_and_consent_keeps_resource_and_response_mode() {
     let loc = location(&resp);
     let code = redirect_param(&loc, "code", true)
         .unwrap_or_else(|| panic!("fragment response_mode must deliver #code=; got {loc}"));
-    let aud = exchanged_audience(&rig, &client, code);
+    let aud = exchanged_audience(&rig, &client, Some(&pair), code);
     assert!(aud.iter().any(|a| a == RESOURCE), "aud = {aud:?}");
 }
 
