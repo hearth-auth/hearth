@@ -21,6 +21,7 @@ full-stack application: Vite/React SPA (frontend) + Go + Gin API server (backend
 
 **Realm:** `demo`  
 **OAuth application:** `hearth-hub` — public client, PKCE, redirect `http://localhost:5173/callback`  
+**Backend client:** `notes-api` — confidential, used only by the Go backend to authenticate token introspection  
 **Roles:** `viewer` · `editor` · `admin` (mapped to `content.*` permissions)
 
 ## Prerequisites
@@ -147,9 +148,15 @@ token expires on its own. A resource server that stops at the signature will
 keep honoring a revoked-but-unexpired access token.
 
 To close that gap, `middleware/revocation.go` asks Hearth's realm-scoped
-introspection endpoint (`POST /realms/{realm}/introspect`, RFC 7662 — no client
-credentials required) whether the token is still `active`, *after* the signature
-check passes. Because a network round-trip on every request would put Hearth on
+introspection endpoint (`POST /realms/{realm}/introspect`, RFC 7662) whether the
+token is still `active`, *after* the signature check passes. Introspection is
+confidential-clients-only — a caller that presents only a `client_id` gets
+`401 invalid_client` — so the backend authenticates with its **own** confidential
+client, `notes-api` in `hearth.yaml`, via `client_secret_basic`
+(`INTROSPECT_CLIENT_ID` / `INTROSPECT_CLIENT_SECRET`; the defaults match the
+demo's `hearth.yaml`, and `DEMO_API_CLIENT_SECRET` overrides the secret on both
+sides). The SPA's `hearth-hub` client is public and cannot introspect. Because a
+network round-trip on every request would put Hearth on
 the request hot path, each verdict is cached for a short TTL
 (`INTROSPECT_CACHE_TTL`, default `3s`).
 
@@ -246,5 +253,6 @@ the full `hearth.yaml` schema.
 |-----|-------|-----|
 | `oidc.issuer` | `http://localhost:8420` | Dev-only localhost issuer |
 | `realms.demo.applications.hearth-hub.confidential` | `false` | Public client — no secret, PKCE required |
+| `realms.demo.applications.notes-api.confidential` | `true` | Backend's own client; introspection requires client authentication |
 | `storage.fsync` | `false` | In-memory dev mode — no durability needed |
 | `email.transport` | `mailcatcher` | Captures mail in-process; no SMTP required |

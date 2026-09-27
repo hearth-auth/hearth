@@ -248,6 +248,11 @@ REALM_ID=${REALM_ID}
 REALM_SLUG=demo
 PORT=${BACKEND_PORT}
 FRONTEND_ORIGIN=http://localhost:${FRONTEND_PORT}
+# The backend's confidential "notes-api" client (hearth.yaml) — introspection
+# is confidential-clients-only. Hearth reads the same DEMO_API_CLIENT_SECRET
+# (with the same demo fallback) when it loads hearth.yaml.
+INTROSPECT_CLIENT_ID=de58b2b9-5aad-5534-bfc6-fb57884e7c5b
+INTROSPECT_CLIENT_SECRET=${DEMO_API_CLIENT_SECRET:-hearth-demo-api-secret-not-for-production}
 EOF
 echo "  ✓ backend/.env"
 

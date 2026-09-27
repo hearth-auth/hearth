@@ -19,6 +19,14 @@ body:json {
   {
     "token": "{{accessToken}}",
     "token_type_hint": "access_token",
-    "client_id": "{{clientId}}"
+    "client_id": "{{clientId}}",
+    "client_secret": "{{clientSecret}}"
   }
+}
+
+docs {
+  Introspection is confidential-clients-only: `clientId`/`clientSecret` must be a
+  confidential client (e.g. run "Dynamic Client Registration", which stores the
+  server-generated secret). A public client's `client_id` alone gets
+  `401 invalid_client`.
 }

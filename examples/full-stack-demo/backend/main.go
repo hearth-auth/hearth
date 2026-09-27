@@ -6,6 +6,9 @@
 //	HEARTH_URL  — base URL of the running Hearth server (required)
 //	REALM_ID    — realm name configured in hearth.yaml (required)
 //	PORT        — TCP port to bind (default: 8421)
+//	INTROSPECT_CLIENT_ID / INTROSPECT_CLIENT_SECRET — the backend's confidential
+//	              client for token introspection (default: the demo "notes-api"
+//	              client from hearth.yaml)
 package main
 
 import (
@@ -21,6 +24,16 @@ import (
 	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/middleware"
 	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/store"
 	"github.com/hearth-auth/hearth/sdks/go/hearth"
+)
+
+// Demo defaults for the backend's confidential introspection client — the
+// "notes-api" application in ../hearth.yaml. The client_id is the deterministic
+// UUID v5 Hearth derives from "demo/notes-api"; the secret matches hearth.yaml's
+// `${DEMO_API_CLIENT_SECRET:-...}` fallback. Demo-only: a real deployment sets
+// INTROSPECT_CLIENT_ID / INTROSPECT_CLIENT_SECRET from its secret store.
+const (
+	demoAPIClientID     = "de58b2b9-5aad-5534-bfc6-fb57884e7c5b"
+	demoAPIClientSecret = "hearth-demo-api-secret-not-for-production"
 )
 
 func main() {
@@ -46,13 +59,19 @@ func main() {
 	// Layer revocation-aware validation on top of the signature check. Signature
 	// verification alone accepts a revoked-but-unexpired token (HEA-2094): a JWT
 	// cannot express that its session was killed at Hearth after issuance. We ask
-	// Hearth's realm-scoped introspection endpoint (RFC 7662) — which needs no
-	// client credentials — and cache each verdict for a short TTL so introspection
-	// is not a per-request network round-trip. See RevocationChecker for the
-	// latency/consistency tradeoff.
+	// Hearth's realm-scoped introspection endpoint (RFC 7662) and cache each
+	// verdict for a short TTL so introspection is not a per-request network
+	// round-trip. See RevocationChecker for the latency/consistency tradeoff.
+	//
+	// Introspection is confidential-clients-only, so the backend authenticates
+	// as its own confidential client ("notes-api" in hearth.yaml), never as the
+	// SPA's public client.
 	introspectURL := fmt.Sprintf("%s/realms/%s/introspect", hearthURL, realmSlug)
 	ttl := introspectCacheTTL()
-	validator = validator.WithRevocationCheck(middleware.NewRevocationChecker(introspectURL, ttl))
+	introspectClientID := getenv("INTROSPECT_CLIENT_ID", demoAPIClientID)
+	introspectClientSecret := getenv("INTROSPECT_CLIENT_SECRET", demoAPIClientSecret)
+	validator = validator.WithRevocationCheck(middleware.NewRevocationChecker(
+		introspectURL, introspectClientID, introspectClientSecret, ttl))
 	slog.Info("revocation introspection enabled", "url", introspectURL, "cache_ttl", ttl)
 
 	noteStore := store.NewNotes()

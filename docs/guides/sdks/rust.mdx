@@ -382,7 +382,7 @@ See the [Actix-web guide](./rust-actix.md) for `RequirePermission` as an extract
 | `in_group(token, group_slug).await` | Verifies, then reads the `groups` claim |
 | `in_org(token, org_id).await` | Verifies, then reads the `oid` claim |
 | `check_permission(token, perm, mode, opts)` | Async, mode-aware permission check |
-| `introspect(token)` | RFC 7662 introspection |
+| `introspect(token, client_id, client_secret).await` | RFC 7662 introspection — requires a confidential client (a public client gets `401 invalid_client`) |
 | `authorize(request)` | Begin OAuth authorization code flow |
 | `exchange_code(request)` | Exchange auth code for tokens |
 | `refresh_tokens(client_id, refresh_token)` | Refresh an access token |

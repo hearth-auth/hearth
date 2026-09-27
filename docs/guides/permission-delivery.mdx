@@ -183,7 +183,11 @@ if (!result.permissions?.includes('docs.edit')) return res.status(403).end();
 ```go
 import hearth "github.com/hearth-auth/hearth/sdks/go/hearth"
 
-result, err := client.Introspect(ctx, accessToken)
+result, err := client.Introspect(ctx, hearth.IntrospectRequest{
+    Token:        accessToken,
+    ClientID:     "<resource-server-client-id>",
+    ClientSecret: os.Getenv("HEARTH_CLIENT_SECRET"),
+})
 if err != nil || !result.Active {
     http.Error(w, "Unauthorized", http.StatusUnauthorized)
     return
@@ -230,7 +234,9 @@ if (!in_array('docs.edit', $result->permissions ?? [], strict: true)) {
 <TabItem value="rust" label="Rust">
 
 ```rust
-let result = client.introspect(&access_token).await?;
+let result = client
+    .introspect(&access_token, "<resource-server-client-id>", &client_secret)
+    .await?;
 if !result.active {
     return StatusCode::UNAUTHORIZED.into_response();
 }

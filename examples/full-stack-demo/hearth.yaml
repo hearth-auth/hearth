@@ -1,7 +1,8 @@
 # hearth.yaml — Full-stack demo configuration.
 #
 # Used by demo.sh to boot Hearth with a pre-wired "demo" realm and the
-# "hearth-hub" OAuth application (public client, PKCE).
+# "hearth-hub" OAuth application (public client, PKCE), plus the backend's
+# confidential "notes-api" client used for token introspection.
 #
 # NOT for production use — storage is ephemeral (in-memory via --dev),
 # oidc.issuer is localhost-only, and TLS is disabled.
@@ -52,6 +53,20 @@ realms:
         # post_logout_redirect_uri lets the frontend redirect cleanly after sign-out.
         post_logout_redirect_uris:
           - "http://localhost:5173"
+
+      # The Go backend's own credential. Token introspection (RFC 7662) is
+      # confidential-clients-only, so the resource server authenticates as this
+      # client (client_secret_basic) when it asks Hearth whether a bearer token
+      # is still active. Deterministic client_id (UUID v5 of "demo/notes-api"):
+      # de58b2b9-5aad-5534-bfc6-fb57884e7c5b. The fallback secret is a demo-only
+      # value, shared with backend/main.go's default; set
+      # DEMO_API_CLIENT_SECRET to override it (demo.sh passes it to both sides).
+      notes-api:
+        name: "Hearth Hub API"
+        confidential: true
+        client_secret: "${DEMO_API_CLIENT_SECRET:-hearth-demo-api-secret-not-for-production}"
+        grant_types:
+          - client_credentials
 
     permissions:
       - name: content.read

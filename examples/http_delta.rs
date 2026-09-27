@@ -43,12 +43,16 @@
 //! |---|---|---|
 //! | `null` | canned-response TCP server | — (generator calibration) |
 //! | `healthz` | `GET /healthz` | — (axum/tokio/TCP envelope floor, no engine work) |
-//! | `introspect` | `POST /realms/{r}/introspect` | `introspect_token` |
+//! | `introspect` | `POST /realms/{r}/introspect` | `authenticate_confidential_client` + `introspect_token` |
 //! | `userinfo` | `GET /realms/{r}/userinfo` | `validate_token` + `get_user` |
 //! | `login` | `POST /ui/realms/{r}/login` | `verify_password` + `create_session` |
 //!
 //! `introspect` is the direct comparator for Ory Hydra's published
 //! introspection figure — same operation, same wire shape, both end-to-end.
+//! Introspection is confidential-clients-only, so every `introspect` request
+//! authenticates (`client_secret_post`) as a confidential client the fixture
+//! registers with a Hearth-generated secret — one SHA-256 verification, not an
+//! Argon2id run — and the engine counterpart pays the same client check.
 //! `healthz` is the load-bearing control: it is the *same* HTTP stack with the
 //! engine removed, so `1/healthz_ops_s` is the per-request envelope cost that
 //! every other row pays before its engine call starts.
@@ -95,13 +99,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::core::{Clock, RealmId, SystemClock, UserId};
+use hearth::core::{ClientId, Clock, RealmId, SystemClock, UserId};
 use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
 use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::{
     CleartextPassword, CreateRealmRequest, CreateUserRequest, CredentialConfig,
-    EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, SessionContext,
-    TokenIntrospectionRequest,
+    EmbeddedIdentityEngine, GeneratedClientSecret, IdentityConfig, IdentityEngine,
+    RegisterClientRequest, SessionContext, TokenIntrospectionRequest,
 };
 use hearth::protocol::http::AppState;
 use hearth::protocol::web::{CookieSecret, WebState};
@@ -350,6 +354,12 @@ struct Fixture {
     realm_name: String,
     /// Warm access tokens whose hashes are resident in the claims cache.
     warm_tokens: Vec<String>,
+    /// Confidential client every `introspect` request authenticates as —
+    /// introspection refuses public (secret-less) callers with `401`.
+    introspect_client: ClientId,
+    /// Its Hearth-generated secret (fast SHA-256 verification, not Argon2id,
+    /// so the row measures introspection rather than a KDF).
+    introspect_secret: String,
     /// `warm_tokens[i]`'s subject, so the engine counterpart of `GET /userinfo`
     /// can do `validate_token` + `get_user` without re-parsing the subject —
     /// the handler resolves it from the claims, which is not a measurable cost.
@@ -450,6 +460,26 @@ impl Fixture {
             warm_token_users.push(uid.clone());
         }
 
+        // Introspection is confidential-clients-only. A Hearth-generated secret
+        // is stored as a SHA-256 digest, so authenticating the client costs one
+        // hash — a caller-chosen secret would put an Argon2id verify on every
+        // introspect request and turn the row into a KDF benchmark.
+        let generated_secret = GeneratedClientSecret::generate();
+        let introspect_secret = generated_secret.expose().to_string();
+        let introspect_client = engine
+            .register_client(
+                &realm,
+                &RegisterClientRequest {
+                    client_name: "c11 introspection client".to_string(),
+                    generated_client_secret: Some(generated_secret),
+                    grant_types: vec!["client_credentials".to_string()],
+                    require_consent: false,
+                    ..Default::default()
+                },
+            )?
+            .client_id()
+            .clone();
+
         println!(
             "provisioning {LOGIN_USERS} Argon2id password credentials \
              (m={} KiB — this is slow by design) …",
@@ -483,6 +513,8 @@ impl Fixture {
             realm,
             realm_name,
             warm_tokens,
+            introspect_client,
+            introspect_secret,
             warm_token_users,
             login_emails,
             argon2,
@@ -515,12 +547,21 @@ impl Fixture {
 
         out.push(self.sweep_engine("introspect_token", LADDER, |tid, n| {
             let tok = &self.warm_tokens[(tid * 7919 + n as usize) % self.warm_tokens.len()];
+            // Same work as the HTTP handler: authenticate the confidential
+            // caller, then introspect on its behalf.
             let req = TokenIntrospectionRequest {
                 token: tok.clone(),
                 token_type_hint: None,
-                introspecting_client_id: None,
+                introspecting_client_id: Some(self.introspect_client.clone()),
             };
-            self.engine.introspect_token(&self.realm, &req).is_ok()
+            self.engine
+                .authenticate_confidential_client(
+                    &self.realm,
+                    &self.introspect_client,
+                    Some(&self.introspect_secret),
+                )
+                .is_ok()
+                && self.engine.introspect_token(&self.realm, &req).is_ok()
         }));
 
         out.push(
@@ -700,7 +741,11 @@ impl Fixture {
                 .iter()
                 .take(256)
                 .map(|tok| {
-                    let body = format!("{{\"token\":\"{tok}\"}}");
+                    let body = format!(
+                        "{{\"token\":\"{tok}\",\"client_id\":\"{}\",\"client_secret\":\"{}\"}}",
+                        self.introspect_client.as_uuid(),
+                        self.introspect_secret
+                    );
                     format!(
                         "POST /realms/{}/introspect HTTP/1.1\r\nHost: h\r\n\
                          Content-Type: application/json\r\nContent-Length: {}\r\n\

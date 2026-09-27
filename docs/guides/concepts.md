@@ -151,7 +151,7 @@ that application each mark the family revoked; the next refresh on it fails with
 | `POST /token` | Exchanges code → tokens, or rotates a refresh token |
 | `GET  /userinfo` | Returns scope-filtered profile claims for a valid access token |
 | `POST /revoke` | Revokes a refresh token and its entire grant family — only for the client the token was issued to |
-| `POST /introspect` | Server-side token validation (RFC 7662); use when you can't verify Ed25519 locally |
+| `POST /introspect` | Server-side token validation (RFC 7662); use when you can't verify Ed25519 locally. Confidential clients only — a caller without a client secret or `private_key_jwt` assertion gets `401 invalid_client` |
 | `GET  /jwks` | Per-realm Ed25519 public keys for local JWT verification |
 
 ### JWKS and signing keys

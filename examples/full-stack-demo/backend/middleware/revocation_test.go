@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,12 +19,29 @@ type introspectStub struct {
 	server *httptest.Server
 }
 
+// Credentials the stub requires — mirroring Hearth, where introspection is
+// confidential-clients-only and an unauthenticated caller gets 401.
+const (
+	stubClientID     = "de58b2b9-5aad-5534-bfc6-fb57884e7c5b"
+	stubClientSecret = "s3cret:with%reserved"
+)
+
 func newIntrospectStub() *introspectStub {
 	s := &introspectStub{}
 	s.active.Store(true)
 	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
+		id, secret, ok := r.BasicAuth()
+		if ok {
+			id, _ = url.QueryUnescape(id)
+			secret, _ = url.QueryUnescape(secret)
+		}
+		if !ok || id != stubClientID || secret != stubClientSecret {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid_client"}`))
+			return
+		}
 		if s.active.Load() {
 			_, _ = w.Write([]byte(`{"active":true,"sub":"user_1"}`))
 		} else {
@@ -39,7 +57,7 @@ func TestRevocationChecker_ActiveToken(t *testing.T) {
 	stub := newIntrospectStub()
 	defer stub.close()
 
-	rc := NewRevocationChecker(stub.server.URL, 30*time.Second)
+	rc := NewRevocationChecker(stub.server.URL, stubClientID, stubClientSecret, 30*time.Second)
 	active, err := rc.IsActive(context.Background(), "tok-abc")
 	if err != nil {
 		t.Fatalf("IsActive returned error: %v", err)
@@ -55,7 +73,7 @@ func TestRevocationChecker_RevokedToken(t *testing.T) {
 	stub := newIntrospectStub()
 	defer stub.close()
 
-	rc := NewRevocationChecker(stub.server.URL, 0) // no cache — observe every verdict
+	rc := NewRevocationChecker(stub.server.URL, stubClientID, stubClientSecret, 0) // no cache — observe every verdict
 	stub.active.Store(false)
 
 	active, err := rc.IsActive(context.Background(), "tok-revoked")
@@ -73,7 +91,7 @@ func TestRevocationChecker_CachesWithinTTL(t *testing.T) {
 	stub := newIntrospectStub()
 	defer stub.close()
 
-	rc := NewRevocationChecker(stub.server.URL, time.Minute)
+	rc := NewRevocationChecker(stub.server.URL, stubClientID, stubClientSecret, time.Minute)
 	for i := 0; i < 5; i++ {
 		if _, err := rc.IsActive(context.Background(), "tok-cached"); err != nil {
 			t.Fatalf("IsActive[%d] error: %v", i, err)
@@ -96,7 +114,7 @@ func TestRevocationChecker_RevocationVisibleAfterTTL(t *testing.T) {
 	base := time.Unix(1_000_000, 0)
 	clock.Store(base.UnixNano())
 
-	rc := NewRevocationChecker(stub.server.URL, 3*time.Second)
+	rc := NewRevocationChecker(stub.server.URL, stubClientID, stubClientSecret, 3*time.Second)
 	rc.nowFunc = func() time.Time { return time.Unix(0, clock.Load()) }
 
 	// t0: active, cached.
@@ -125,12 +143,29 @@ func TestRevocationChecker_FailsClosedOnError(t *testing.T) {
 	stub := newIntrospectStub()
 	stub.close() // server is down → every introspection call errors
 
-	rc := NewRevocationChecker(stub.server.URL, time.Minute)
+	rc := NewRevocationChecker(stub.server.URL, stubClientID, stubClientSecret, time.Minute)
 	active, err := rc.IsActive(context.Background(), "tok-x")
 	if err == nil {
 		t.Fatal("expected an error when introspection is unreachable")
 	}
 	if active {
 		t.Fatal("a failed introspection must not report the token active")
+	}
+}
+
+// TestRevocationChecker_WrongCredentialsFailClosed proves the checker sends the
+// configured client credentials, and that Hearth refusing them (401
+// invalid_client) is an error — never an "active" verdict.
+func TestRevocationChecker_WrongCredentialsFailClosed(t *testing.T) {
+	stub := newIntrospectStub()
+	defer stub.close()
+
+	rc := NewRevocationChecker(stub.server.URL, stubClientID, "wrong-secret", 0)
+	active, err := rc.IsActive(context.Background(), "tok-y")
+	if err == nil {
+		t.Fatal("expected an error when Hearth rejects the client credentials")
+	}
+	if active {
+		t.Fatal("a rejected introspection must not report the token active")
 	}
 }
