@@ -208,11 +208,11 @@ make loadtest ARGS="run --weight-validate 40 --weight-issuance 40 --weight-revok
 
 | # | Journey | Weight flag (default) | HTTP calls |
 |---|---|---|---|
-| 1 | Validate | `--weight-validate` (70) | `POST /introspect` on a live token, asserts `active:true` |
+| 1 | Validate | `--weight-validate` (70) | `POST /introspect` on a live token as the seeded confidential client (`client_secret_basic`; public clients get `401`), asserts `active:true` |
 | 2 | Session lookup | `--weight-session` (12) | `GET /userinfo` (CTO-approved Option A proxy — no public get-session route) |
 | 3 | User lookup | `--weight-user` (8) | `GET /admin/users/{id}` with a seeded admin token |
 | 4 | Issuance | `--weight-issuance` (8) | `POST /token` (ROPC password grant) |
-| 5 | Revoke→re-validate | `--weight-revoke` (2) | `POST /token` → `POST /revoke` → `POST /introspect` asserts `active:false` (exercises the 64-shard revoke cache) |
+| 5 | Revoke→re-validate | `--weight-revoke` (2) | `POST /token` (`client_credentials`) → `POST /revoke` → `POST /introspect`, all as the confidential client, asserts `active:false` (exercises the revocation blocklist). The token is the client's own: a client may revoke only tokens issued to it (RFC 7009 §2.1) |
 
 Other run knobs: `--users`, `--run-time`, `--hatch-rate`, and `--throttle N`
 (pin total requests/sec to a **specific offered load** — omit it, or the

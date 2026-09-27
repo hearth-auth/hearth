@@ -113,7 +113,8 @@ pub async fn run_saturate(
         task_handles.push(tokio::spawn(async move {
             // Compute once per task (these don't change between requests).
             let realm_id = ctx.realm_id().to_string();
-            let client_id_val = ctx.client_id().to_string();
+            let cc_id = ctx.cc_client_id().to_string();
+            let cc_secret = ctx.cc_client_secret().to_string();
 
             loop {
                 if Instant::now() >= deadline {
@@ -126,7 +127,7 @@ pub async fn run_saturate(
                 let start = Instant::now();
                 let ok = match journey {
                     SaturateJourney::Validate => {
-                        fire_validate(&client, &host, &realm_id, &client_id_val, &token).await
+                        fire_validate(&client, &host, &realm_id, &cc_id, &cc_secret, &token).await
                     }
                     SaturateJourney::Session => {
                         fire_session(&client, &host, &realm_id, &token).await
@@ -266,7 +267,8 @@ pub async fn run_saturate(
 
 // ── HTTP request helpers ─────────────────────────────────────────────────────
 
-/// `POST /introspect {token, client_id}` — returns `true` on HTTP 2xx **whose
+/// `POST /introspect {token}` as the confidential client ([`validate_request`])
+/// — returns `true` on HTTP 2xx **whose
 /// body reports `active: true`**.
 ///
 /// The status check alone is not enough, and the Goose journey says why in as
@@ -288,12 +290,10 @@ async fn fire_validate(
     host: &str,
     realm_id: &str,
     client_id: &str,
+    client_secret: &str,
     token: &str,
 ) -> bool {
-    match client
-        .post(format!("{host}/introspect"))
-        .header("X-Realm-ID", realm_id)
-        .json(&serde_json::json!({"token": token, "client_id": client_id}))
+    match validate_request(client, host, realm_id, client_id, client_secret, token)
         .send()
         .await
     {
@@ -324,6 +324,25 @@ fn introspection_reports_active(body: &[u8]) -> bool {
     rest.trim_start()
         .strip_prefix(':')
         .is_some_and(|v| v.trim_start().starts_with("true"))
+}
+
+/// Builds the `POST /introspect` request, authenticated as the confidential
+/// client with `client_secret_basic`. `/introspect` refuses a public client
+/// (`{token, client_id}` in the body) with `401` since task 26.43, which made
+/// every validate call of the open-loop driver fail.
+fn validate_request(
+    client: &Client,
+    host: &str,
+    realm_id: &str,
+    client_id: &str,
+    client_secret: &str,
+    token: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .post(format!("{host}/introspect"))
+        .header("X-Realm-ID", realm_id)
+        .basic_auth(client_id, Some(client_secret))
+        .json(&serde_json::json!({ "token": token }))
 }
 
 /// `GET /userinfo` with Bearer token — returns `true` on HTTP 2xx.
@@ -463,6 +482,33 @@ mod tests {
         assert!(!introspection_reports_active(b"\xff\xfe not utf8"));
         // "active" appearing only as a value must not count.
         assert!(!introspection_reports_active(br#"{"status":"active"}"#));
+    }
+
+    /// Task 26.43: the open-loop validate driver introspected as the public
+    /// client and got `401` on every call. It must authenticate as the
+    /// confidential client with `client_secret_basic`.
+    #[test]
+    fn the_validate_request_authenticates_as_the_confidential_client() {
+        let req = super::validate_request(
+            &reqwest::Client::new(),
+            "http://127.0.0.1:9",
+            "realm-1",
+            "cc-1",
+            "cc-secret",
+            "tok",
+        )
+        .build()
+        .expect("request");
+        assert_eq!(req.url().as_str(), "http://127.0.0.1:9/introspect");
+        assert_eq!(
+            req.headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("Basic Y2MtMTpjYy1zZWNyZXQ="),
+        );
+        let body = req.body().and_then(reqwest::Body::as_bytes).expect("body");
+        let body: serde_json::Value = serde_json::from_slice(body).expect("json");
+        assert_eq!(body, serde_json::json!({ "token": "tok" }));
     }
 
     use super::*;

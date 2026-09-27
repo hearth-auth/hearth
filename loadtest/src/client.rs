@@ -7,11 +7,12 @@
 //! client lets us stay on `rustls-tls` (matching `goose`).
 //!
 //! Only the endpoints the seed flow needs are implemented:
-//! `POST /admin/bootstrap`, `POST /admin/users`, `POST /clients` (register the
-//! public introspect/revoke client), `POST /register` (register the confidential
-//! `client_credentials` client for the issuance plane — HEA-2003),
-//! `PATCH /admin/realms/{id}/config` (toggle DCR policy), `POST /token`, and
-//! `POST /revoke`.
+//! `POST /admin/bootstrap`, `POST /admin/users`, `POST /clients` (register a
+//! public client), `POST /register` (register the confidential
+//! `client_credentials` client — HEA-2003 — which also authenticates
+//! introspection and revocation, task 26.43),
+//! `PATCH /admin/realms/{id}/config` (toggle DCR policy), `POST /token`,
+//! `POST /revoke`, and `POST /introspect`.
 //!
 //! Secrets discipline: this module never logs token or password material. The
 //! admin bootstrap token lives only inside the [`SeedClient`] default headers.
@@ -129,6 +130,11 @@ struct DcrRegisteredClient {
 #[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
+}
+
+#[derive(Deserialize)]
+struct IntrospectionResponse {
+    active: bool,
 }
 
 #[derive(Deserialize)]
@@ -387,19 +393,53 @@ impl SeedClient {
         }
     }
 
-    /// Revokes a token via `POST /revoke` (RFC 7009). The public `client_id`
-    /// authenticates the call.
+    /// Mints a `client_credentials` access token for the confidential client
+    /// via `POST /token`, authenticating with `client_secret_basic`.
+    ///
+    /// The token is issued to that client, so — unlike a `/dev/seed-token`
+    /// user token, which was issued to no client — the client may revoke it
+    /// (RFC 7009 §2.1).
     ///
     /// # Errors
     /// Returns [`SeedError`] on transport failure or a non-2xx response.
-    pub async fn revoke(&self, client_id: &str, token: &str) -> Result<(), SeedError> {
+    pub async fn client_credentials_token(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<String, SeedError> {
+        let resp = self
+            .http
+            .post(format!("{}/token", self.base_url))
+            .basic_auth(client_id, Some(client_secret))
+            // A DCR client is third-party, and a third-party client must
+            // request at least one scope.
+            .form(&[("grant_type", "client_credentials"), ("scope", "openid")])
+            .send()
+            .await?;
+        let token: TokenResponse = json_or_err("client_credentials_token", resp).await?;
+        Ok(token.access_token)
+    }
+
+    /// Revokes a token via `POST /revoke` (RFC 7009) as the confidential
+    /// client (`client_secret_basic`). The server revokes only a token issued
+    /// to that client and answers `200` either way, so a caller that needs the
+    /// revocation to have happened must check with [`Self::introspect_active`].
+    ///
+    /// # Errors
+    /// Returns [`SeedError`] on transport failure or a non-2xx response.
+    pub async fn revoke(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+        token: &str,
+    ) -> Result<(), SeedError> {
         let resp = self
             .http
             .post(format!("{}/revoke", self.base_url))
+            .basic_auth(client_id, Some(client_secret))
             .json(&serde_json::json!({
                 "token": token,
                 "token_type_hint": "access_token",
-                "client_id": client_id,
             }))
             .send()
             .await?;
@@ -409,6 +449,29 @@ impl SeedClient {
         } else {
             Err(status_err("revoke", resp).await)
         }
+    }
+
+    /// Introspects `token` via `POST /introspect` as the confidential client
+    /// (`client_secret_basic`; the endpoint refuses public clients since task
+    /// 26.43) and returns its `active` flag.
+    ///
+    /// # Errors
+    /// Returns [`SeedError`] on transport failure or a non-2xx response.
+    pub async fn introspect_active(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+        token: &str,
+    ) -> Result<bool, SeedError> {
+        let resp = self
+            .http
+            .post(format!("{}/introspect", self.base_url))
+            .basic_auth(client_id, Some(client_secret))
+            .json(&serde_json::json!({ "token": token }))
+            .send()
+            .await?;
+        let body: IntrospectionResponse = json_or_err("introspect", resp).await?;
+        Ok(body.active)
     }
 }
 

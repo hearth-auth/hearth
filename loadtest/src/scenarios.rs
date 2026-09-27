@@ -12,7 +12,12 @@
 //! | 2 | Session lookup | 12 | `GET /userinfo` (session-lookup proxy, CTO Option A) |
 //! | 3 | User lookup | 8 | `GET /admin/users/{id}` |
 //! | 4 | Issuance | 8 | `POST /token` (ROPC password grant) |
-//! | 5 | Revoke→re-validate | 2 | `POST /token` → `POST /revoke` → `POST /introspect` (expect `active:false`) |
+//! | 5 | Revoke→re-validate | 2 | `POST /token` (`client_credentials`) → `POST /revoke` → `POST /introspect` (expect `active:false`) |
+//!
+//! `/introspect` serves confidential clients only (task 26.43) and `/revoke`
+//! only revokes a token issued to the calling client (RFC 7009 §2.1), so both
+//! authenticate as the seeded confidential client with `client_secret_basic`,
+//! and the revoke journey revokes a token that client minted itself.
 //!
 //! ## How the corpus reaches the journeys
 //!
@@ -47,8 +52,11 @@ static CONTEXT: OnceLock<Arc<LoadContext>> = OnceLock::new();
 pub struct LoadContext {
     /// Realm every journey targets (`X-Realm-ID`).
     realm_id: String,
-    /// Public OAuth client that authenticates the introspect and revoke calls.
-    client_id: String,
+    /// Confidential OAuth client that authenticates the introspect and revoke
+    /// calls (`client_secret_basic`) and mints the revoke journey's tokens.
+    cc_client_id: String,
+    /// That client's secret. SECRET — never logged.
+    cc_client_secret: String,
     /// Live (non-revoked) access tokens for the validate + session journeys.
     live_tokens: Vec<String>,
     /// Seeded user IDs for the admin user-lookup and dynamic token-mint journeys.
@@ -72,6 +80,9 @@ pub enum ContextError {
     NoUsers,
     /// The handle has no admin token — re-seed to populate (HEA-1995).
     NoAdminToken,
+    /// The realm has no confidential client — `/introspect` refuses public
+    /// clients (task 26.43), so the validate and revoke journeys cannot run.
+    NoConfidentialClient,
 }
 
 impl std::fmt::Display for ContextError {
@@ -86,6 +97,11 @@ impl std::fmt::Display for ContextError {
             Self::NoAdminToken => write!(
                 f,
                 "seed handle has no admin token; re-run the seed step to regenerate the handle"
+            ),
+            Self::NoConfidentialClient => write!(
+                f,
+                "seed handle has no confidential client (/introspect requires one); \
+                 re-run the seed step to regenerate the handle"
             ),
         }
     }
@@ -121,14 +137,26 @@ impl LoadContext {
         if handle.admin_token.is_empty() {
             return Err(ContextError::NoAdminToken);
         }
+        if realm.cc_client_id.is_empty() || realm.cc_client_secret.is_empty() {
+            return Err(ContextError::NoConfidentialClient);
+        }
         Ok(Self {
             realm_id: realm.realm_id.clone(),
-            client_id: realm.client_id.clone(),
+            cc_client_id: realm.cc_client_id.clone(),
+            cc_client_secret: realm.cc_client_secret.clone(),
             live_tokens,
             user_ids,
             admin_token: handle.admin_token.clone(),
             cursor: AtomicUsize::new(0),
         })
+    }
+
+    /// Authenticates `rb` as the confidential client with
+    /// `client_secret_basic` (RFC 6749 §2.3.1). The generated client id (a
+    /// UUID) and secret (base64url) contain only unreserved characters, so the
+    /// form-encoding step of §2.3.1 is the identity.
+    pub fn with_client_auth(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        rb.basic_auth(&self.cc_client_id, Some(&self.cc_client_secret))
     }
 
     /// Monotonic round-robin index, wrapped by the caller against a slice len.
@@ -153,9 +181,14 @@ impl LoadContext {
         &self.realm_id
     }
 
-    /// OAuth client ID registered for this realm.
-    pub fn client_id(&self) -> &str {
-        &self.client_id
+    /// Confidential client ID that authenticates introspection.
+    pub fn cc_client_id(&self) -> &str {
+        &self.cc_client_id
+    }
+
+    /// Confidential client secret that authenticates introspection. SECRET.
+    pub fn cc_client_secret(&self) -> &str {
+        &self.cc_client_secret
     }
 
     /// Number of live (non-revoked) access tokens in the pool.
@@ -211,6 +244,14 @@ async fn request_timed(
     result
 }
 
+/// The `/introspect` body: the token alone. The client authenticates in the
+/// `Authorization` header ([`LoadContext::with_client_auth`]); a bare
+/// `client_id` in the body is public-client authentication, which
+/// `/introspect` refuses with `401` (task 26.43).
+fn introspect_body(token: &str) -> serde_json::Value {
+    serde_json::json!({ "token": token })
+}
+
 // ===== Journey 1 — Validate (introspect a live token) =====
 
 /// `POST /introspect` on a pre-seeded live token, asserting `active:true`.
@@ -220,11 +261,11 @@ async fn request_timed(
 /// validate path rather than the reject path.
 async fn journey_validate(user: &mut GooseUser) -> TransactionResult {
     let ctx = ctx();
-    let body = serde_json::json!({ "token": ctx.live_token(), "client_id": ctx.client_id });
     let rb = user
         .get_request_builder(&GooseMethod::Post, "/introspect")?
         .header(REALM_HEADER, &ctx.realm_id)
-        .json(&body);
+        .json(&introspect_body(ctx.live_token()));
+    let rb = ctx.with_client_auth(rb);
     let req = GooseRequest::builder()
         .set_request_builder(rb)
         .name("validate")
@@ -280,39 +321,53 @@ async fn journey_issuance(user: &mut GooseUser) -> TransactionResult {
 // ===== Journey 5 — Revoke → re-validate =====
 
 /// Mints a fresh token, revokes it, then introspects expecting `active:false` —
-/// exercising the 64-shard revoke cache end-to-end. A fresh token is minted (not
+/// exercising the revocation blocklist end-to-end. A fresh token is minted (not
 /// a seeded one) so the run does not deplete the validate journey's corpus.
+///
+/// The token is a `client_credentials` token of the confidential client, not a
+/// `/dev/seed-token` user token: RFC 7009 §2.1 lets a client revoke only a token
+/// issued to it, and a dev-seeded user token was issued to no client, so no
+/// client can revoke it (the revoke answers `200` and changes nothing, and the
+/// re-validate would read `active:true`).
 async fn journey_revoke_revalidate(user: &mut GooseUser) -> TransactionResult {
     let ctx = ctx();
 
-    // 1. Mint a throwaway token (mint_token marks its own failure metric).
-    let token = mint_token(user, "revoke_mint").await?;
+    // 1. Mint a throwaway token the confidential client owns.
+    let rb = user
+        .get_request_builder(&GooseMethod::Post, "/token")?
+        .header(REALM_HEADER, &ctx.realm_id)
+        // The DCR-registered client is third-party, which must request a scope.
+        .form(&[("grant_type", "client_credentials"), ("scope", "openid")]);
+    let req = GooseRequest::builder()
+        .set_request_builder(ctx.with_client_auth(rb))
+        .name("revoke_mint")
+        .build();
+    let goose = request_timed(user, req, "revoke_mint").await?;
+    let token = read_access_token(user, goose, "revoke_mint").await?;
 
-    // 2. Revoke it.
+    // 2. Revoke it, as the client it was issued to.
     let revoke_body = serde_json::json!({
         "token": token,
         "token_type_hint": "access_token",
-        "client_id": ctx.client_id,
     });
     let rb = user
         .get_request_builder(&GooseMethod::Post, "/revoke")?
         .header(REALM_HEADER, &ctx.realm_id)
         .json(&revoke_body);
     let req = GooseRequest::builder()
-        .set_request_builder(rb)
+        .set_request_builder(ctx.with_client_auth(rb))
         .name("revoke")
         .build();
     let goose = request_timed(user, req, "revoke").await?;
     expect_ok(user, goose, "revoke").await?;
 
     // 3. Re-validate — the token must now read `active:false`.
-    let introspect_body = serde_json::json!({ "token": token, "client_id": ctx.client_id });
     let rb = user
         .get_request_builder(&GooseMethod::Post, "/introspect")?
         .header(REALM_HEADER, &ctx.realm_id)
-        .json(&introspect_body);
+        .json(&introspect_body(&token));
     let req = GooseRequest::builder()
-        .set_request_builder(rb)
+        .set_request_builder(ctx.with_client_auth(rb))
         .name("revoke_revalidate")
         .build();
     let goose = request_timed(user, req, "revoke_revalidate").await?;
@@ -325,8 +380,9 @@ async fn journey_revoke_revalidate(user: &mut GooseUser) -> TransactionResult {
 ///
 /// ROPC (`grant_type=password`) was removed by HEA-1862; this dev-only path
 /// creates a real session + issues a signed JWT for a round-robined seeded user
-/// so that issuance + revoke journeys exercise the full token lifecycle without
-/// re-introducing ROPC. (HEA-1991)
+/// so that the issuance journey exercises the full token lifecycle without
+/// re-introducing ROPC (HEA-1991). The revoke journey mints over
+/// `client_credentials` instead — see [`journey_revoke_revalidate`].
 ///
 /// The request's own success metric is recorded by Goose; on any non-2xx,
 /// missing token, or transport error this marks the metric failed (via
@@ -346,10 +402,23 @@ async fn mint_token(
         .set_request_builder(rb)
         .name(name)
         .build();
+    let goose = request_timed(user, req, name).await?;
+    read_access_token(user, goose, name).await
+}
+
+/// Reads `access_token` out of a token-minting response.
+///
+/// On any non-2xx, missing token, or transport error this marks the metric
+/// failed (via `set_failure`) and returns the resulting `Err`.
+async fn read_access_token(
+    user: &mut GooseUser,
+    goose: GooseResponse,
+    name: &'static str,
+) -> Result<String, Box<TransactionError>> {
     let GooseResponse {
         mut request,
         response,
-    } = request_timed(user, req, name).await?;
+    } = goose;
 
     let resp = match response {
         Ok(r) => r,
@@ -813,8 +882,8 @@ mod tests {
                 realm_id: "realm-1".into(),
                 realm_name: "dev-realm".into(),
                 client_id: "client-1".into(),
-                cc_client_id: String::new(),
-                cc_client_secret: String::new(),
+                cc_client_id: "cc-1".into(),
+                cc_client_secret: "cc-secret".into(),
                 users,
                 tokens,
                 sessions: Vec::new(),
@@ -880,6 +949,49 @@ mod tests {
             LoadContext::from_handle(&h),
             Err(ContextError::NoAdminToken)
         ));
+    }
+
+    /// Task 26.43 made `/introspect` confidential-clients-only; the harness
+    /// introspected as the PUBLIC client (`{token, client_id}`), so every
+    /// validate call got `401` and `loadtest-smoke` failed its error budget.
+    /// A handle without a confidential client cannot drive the validate or
+    /// revoke journeys, so it is refused up front with a clear error.
+    #[test]
+    fn context_requires_a_confidential_client() {
+        let mut h = handle_with(2, 0, 2);
+        h.realms[0].cc_client_id.clear();
+        h.realms[0].cc_client_secret.clear();
+        assert!(matches!(
+            LoadContext::from_handle(&h),
+            Err(ContextError::NoConfidentialClient)
+        ));
+    }
+
+    /// Introspection and revocation authenticate as the confidential client
+    /// with `client_secret_basic` (RFC 6749 §2.3.1).
+    #[test]
+    fn requests_authenticate_as_the_confidential_client() {
+        let ctx = LoadContext::from_handle(&handle_with(1, 0, 1)).expect("context");
+        let req = ctx
+            .with_client_auth(reqwest::Client::new().post("http://127.0.0.1:9/introspect"))
+            .build()
+            .expect("request");
+        let auth = req
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("an Authorization header")
+            .to_str()
+            .expect("ascii");
+        // base64("cc-1:cc-secret")
+        assert_eq!(auth, "Basic Y2MtMTpjYy1zZWNyZXQ=");
+    }
+
+    /// The introspect body carries the token and nothing that would make the
+    /// server treat the caller as a public client.
+    #[test]
+    fn the_introspect_body_carries_only_the_token() {
+        let body = introspect_body("tok");
+        assert_eq!(body, serde_json::json!({ "token": "tok" }));
     }
 
     #[test]

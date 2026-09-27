@@ -37,7 +37,9 @@ pub struct SeededSession {
 /// A live access token minted for the load run.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SeededToken {
-    /// The user this token authenticates as.
+    /// The user this token authenticates as. Empty for a pre-revoked token,
+    /// which is a `client_credentials` token of the realm's confidential
+    /// client (a client can revoke only its own tokens, RFC 7009 §2.1).
     pub user_email: String,
     /// The live access token. SECRET — redacted in `Debug`.
     pub access_token: String,
@@ -81,11 +83,14 @@ pub struct SeededRealm {
     /// field existed; the harness rejects those with a clear error.
     #[serde(default)]
     pub realm_name: String,
-    /// OAuth client registered for the ROPC/revoke journeys (public client).
-    /// Empty string when ROPC is not used (HEA-1907: ROPC removed by HEA-1862).
+    /// A public OAuth client. No journey authenticates with it any more:
+    /// `/introspect` refuses public clients and `/revoke` only revokes a
+    /// client's own tokens (task 26.43), so [`Self::cc_client_id`] does both.
     pub client_id: String,
     /// Confidential OAuth client that supports the `client_credentials` grant,
-    /// registered for the issuance saturation plane (HEA-2003). Empty string
+    /// registered for the issuance saturation plane (HEA-2003). It also
+    /// authenticates the load run's introspection and revocation calls and
+    /// mints the revoke journey's tokens (task 26.43). Empty string
     /// when not seeded (older handles, or a corpus seeded before this field
     /// existed). The harness mints tokens over `POST /token`
     /// (`grant_type=client_credentials`) with these credentials — a production

@@ -113,11 +113,11 @@ async fn seed_realm(
     params: &SeedParams,
     realm_index: u32,
 ) -> Result<SeededRealm, SeedError> {
-    // 1. Register a public OAuth client. Its client_id authenticates the
-    //    introspect and revoke calls during the load run. ROPC was removed by
-    //    HEA-1862 so we use authorization_code (no PKCE required; client is
-    //    public and never actually exchanges a code here — it only provides a
-    //    valid client_id for endpoint authentication). (HEA-1991)
+    // 1. Register a public OAuth client (HEA-1991). It used to authenticate the
+    //    introspect and revoke calls; since task 26.43 `/introspect` refuses
+    //    public clients and `/revoke` only revokes a client's own tokens, so
+    //    the confidential client below does both. The public client is kept so
+    //    the seed-handle shape (`client_id`) is unchanged.
     let client_id = client.register_client("hearth-loadtest").await?;
     println!("    registered OAuth client {}", &client_id[..8]);
 
@@ -202,10 +202,35 @@ async fn seed_realm(
     //
     //     Revocation is by construction the LAST seeding step for a token: the
     //     remaining tokens must stay live for the read-plane journeys.
+    //
+    //     A `/dev/seed-token` user token was issued to NO client, and RFC 7009
+    //     §2.1 (task 26.43) lets a client revoke only its own tokens — so
+    //     revoking it answers `200` and changes nothing, and `--revoked-frac`
+    //     would describe a corpus property that did not exist, again. A
+    //     pre-revoked slot therefore holds a `client_credentials` token of the
+    //     confidential client, revoked by that client, and confirmed
+    //     `active:false` through introspection before the seed trusts it.
     let want_revoked = params.revoked_per_realm() as usize;
     let revoke_count = revoke_target_count(want_revoked, tokens.len());
     for token in tokens.iter_mut().take(revoke_count) {
-        client.revoke(&client_id, &token.access_token).await?;
+        let owned = client
+            .client_credentials_token(&cc_client_id, &cc_client_secret)
+            .await?;
+        client
+            .revoke(&cc_client_id, &cc_client_secret, &owned)
+            .await?;
+        if client
+            .introspect_active(&cc_client_id, &cc_client_secret, &owned)
+            .await?
+        {
+            return Err(SeedError::Api {
+                op: "pre-revoke",
+                status: 200,
+                body: "a revoked token still introspects active:true".to_string(),
+            });
+        }
+        token.user_email = String::new();
+        token.access_token = owned;
         token.revoked = true;
     }
     if revoke_count > 0 {
