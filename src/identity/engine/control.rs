@@ -831,6 +831,13 @@ impl ControlPlane {
         self.wakes.load(Ordering::Relaxed)
     }
 
+    /// Holds the one-reload-at-a-time lock, for tests proving validation
+    /// never takes it.
+    #[cfg(test)]
+    pub(super) fn lock_reload_for_test(&self) -> MutexGuard<'_, impl Sized> {
+        lock(&self.reload_exclusive)
+    }
+
     /// Installs a hook every reload runs after its scan and before its swap
     /// (`None` removes it).
     #[cfg(test)]

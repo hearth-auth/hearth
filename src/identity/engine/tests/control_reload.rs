@@ -34,6 +34,8 @@ const CONVERGE: Duration = Duration::from_secs(10);
 struct FaultStorage {
     inner: Arc<dyn StorageEngine>,
     fail_scans: AtomicBool,
+    /// Scans refused while `fail_scans` was set.
+    failed_scans: AtomicUsize,
     writes: AtomicUsize,
     /// Runs after every successful `increment_u64`, with the new value,
     /// before the increment returns to its caller.
@@ -48,6 +50,7 @@ impl FaultStorage {
         Arc::new(Self {
             inner,
             fail_scans: AtomicBool::new(false),
+            failed_scans: AtomicUsize::new(0),
             writes: AtomicUsize::new(0),
             on_increment: std::sync::Mutex::new(None),
         })
@@ -80,6 +83,7 @@ impl StorageEngine for FaultStorage {
         end: &[u8],
     ) -> Result<Vec<ScanEntry>, StorageError> {
         if self.fail_scans.load(Ordering::SeqCst) {
+            self.failed_scans.fetch_add(1, Ordering::SeqCst);
             return Err(StorageError::Io(std::io::Error::other(
                 "injected scan failure",
             )));
@@ -240,8 +244,9 @@ fn binds_suspension(engine: &EmbeddedIdentityEngine, realm: &RealmId, token: &st
 /// Rule 3 of the hot path: `validate_token` takes no lock, even on the branch
 /// where it observes that another node moved the control epoch.
 ///
-/// The test holds the lock that orders control writers against the reloader
-/// and drives a validation down the epoch-moved branch. Before the fix that
+/// The test holds both control-plane locks — the one that orders control
+/// writers against the reloader, and the one-reload-at-a-time lock — and
+/// drives a validation down the epoch-moved branch. Before the fix that
 /// branch took the same lock to run the reload inline, so the validation
 /// blocked for as long as any writer or reload held it.
 #[test]
@@ -259,6 +264,10 @@ fn validation_on_a_moved_epoch_takes_no_lock() {
         .expect("bump the persisted epoch");
     clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
 
+    // Both locks the control plane has: writers/reloader, and one-reload-
+    // at-a-time.
+    let wakes_before = engine.control.wakes_for_test();
+    let reload_guard = engine.control.lock_reload_for_test();
     let guard = engine.control.lock_writers_for_test();
     let (tx, rx) = mpsc::channel();
     let validator = {
@@ -271,11 +280,17 @@ fn validation_on_a_moved_epoch_takes_no_lock() {
     };
     let outcome = rx.recv_timeout(Duration::from_secs(5));
     drop(guard);
+    drop(reload_guard);
     validator.join().expect("validator thread");
     assert!(
         matches!(outcome, Ok(Ok(()))),
         "validate_token did not complete while the control writer/reloader lock was held: \
          {outcome:?}"
+    );
+    assert_eq!(
+        engine.control.wakes_for_test() - wakes_before,
+        1,
+        "the validation must have taken the moved-epoch branch (signalled the reloader)"
     );
 }
 
@@ -300,7 +315,14 @@ fn a_failed_reload_does_not_consume_the_epoch() {
     clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
     // Observes the moved epoch; the reload it causes fails.
     let _ = validator.validate_token(&realm, &token);
-    std::thread::sleep(Duration::from_millis(300));
+    let deadline = Instant::now() + CONVERGE;
+    while fault.failed_scans.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        fault.failed_scans.load(Ordering::SeqCst) > 0,
+        "the reload never ran into the injected scan failure, so this test proves nothing"
+    );
 
     fault.fail_scans.store(false, Ordering::SeqCst);
     clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
@@ -440,17 +462,31 @@ fn validations_complete_while_a_reload_is_held_mid_flight() {
         .recv_timeout(CONVERGE)
         .expect("the background reload never started");
 
+    let wakes_before = engine.control.wakes_for_test();
     let started = Instant::now();
     for _ in 0..200 {
+        // Another node asserts a control, and the debounce has elapsed: this
+        // validation takes the moved-epoch branch while the reload (holding
+        // the reload lock) is parked mid-flight.
+        storage
+            .increment_u64(&keys::system_realm_id(), &keys::encode_control_epoch())
+            .expect("bump the persisted epoch");
+        clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
         engine
             .validate_token(&realm, &token)
             .expect("a validation during an in-flight reload");
     }
     let elapsed = started.elapsed();
+    let signalled = engine.control.wakes_for_test() - wakes_before;
     drop(held.release);
     assert!(
         elapsed < Duration::from_secs(2),
         "200 validations took {elapsed:?} while a reload was held mid-flight"
+    );
+    assert_eq!(
+        signalled, 200,
+        "every validation must have seen a moved epoch and signalled the reloader, or the loop \
+         never exercised the branch that could wait on the reload"
     );
 }
 
