@@ -51,7 +51,12 @@ start() {
   export -p | grep -v '^declare -[a-zA-Z]*r' > "$envf"
   printf '%q ' "$@" > "$cmdf"
   local body
-  body="set -a; source $(printf '%q' "$envf"); set +a; cd $(printf '%q' "$PWD");"
+  # A systemd user unit starts with the default soft RLIMIT_NOFILE (1024), not
+  # the caller's. The test suite opens far more (property tests build many
+  # storage engines), so it failed with EMFILE only when detached. Carry the
+  # caller's soft limit over; the unit's hard limit is normally high enough.
+  body="ulimit -Sn $(ulimit -Sn) 2> /dev/null || true;"
+  body+=" set -a; source $(printf '%q' "$envf"); set +a; cd $(printf '%q' "$PWD");"
   body+=" bash -c \"\$(cat $(printf '%q' "$cmdf"))\" > $(printf '%q' "$log") 2>&1;"
   body+=" echo \$? > $(printf '%q' "$rc")"
   if command -v systemd-run > /dev/null 2>&1 \
