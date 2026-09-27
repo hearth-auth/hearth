@@ -634,6 +634,25 @@ pub struct EmbeddedIdentityEngine {
     /// The epoch row replicates with the rows it describes, so observing it
     /// needs no new transport. See [`Self::sync_control_epoch`].
     control_epoch: AtomicU64,
+    /// Orders this node's control-cache writes against a control-cache reload.
+    ///
+    /// A local control write persists its row, bumps the persisted epoch, and
+    /// only then applies itself to the cache and records the epoch locally
+    /// ([`Self::publish_control`]). A validation that reads the persisted
+    /// epoch inside that window sees it ahead of the local one and reloads
+    /// the caches from storage with a `replace_all`. Without this lock a
+    /// second write whose row landed after the reload's scan but whose cache
+    /// insert landed before its replace was silently dropped: under 16
+    /// concurrent revokers about one revocation in forty stayed
+    /// `active:true` (task 26.43 follow-up,
+    /// `tests/revocation_reload_races.rs`). Holding it across the reload's
+    /// scan-and-replace, and across each write's cache mutation, means every
+    /// write is either in the scan or applied after the replace.
+    ///
+    /// Held only for in-memory work and the reload's local scan — never across
+    /// a storage write — and never on the validation fast path, which takes it
+    /// only when the persisted epoch has moved.
+    control_cache_lock: Mutex<()>,
     /// Micros timestamp before which the hot path skips epoch reconciliation.
     ///
     /// Reconciling both epochs costs two storage reads, and the validation hot
@@ -972,6 +991,7 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
     fn on_replicated_reset(&self) {
         self.rbac.on_replicated_snapshot();
         self.audit.on_replicated_snapshot();
+        let _reload = self.lock_control_caches();
         if let Err(e) = self.populate_revoked_jti_cache() {
             tracing::error!(
                 error = %e,
@@ -1278,6 +1298,7 @@ impl EmbeddedIdentityEngine {
             realm_id_token_rsa_retiring_keys: Arc::new(ShardedEpochMap::new()),
             realm_key_epoch: Arc::new(ShardedEpochMap::new()),
             control_epoch: AtomicU64::new(0),
+            control_cache_lock: Mutex::new(()),
             epoch_sync_after: AtomicI64::new(0),
             realm_status_cache: Arc::new(EpochCell::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
@@ -1773,12 +1794,13 @@ impl EmbeddedIdentityEngine {
     fn insert_revoked_jti_cache(&self, realm_id: &RealmId, jti: &str, exp_secs: i64) {
         let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
         let now_secs = self.clock.now().as_micros() / 1_000_000;
-        // Evict expired entries in the target shard while we hold the clone.
-        self.revoked_jti_cache
-            .insert_retaining(cache_key, exp_secs, |_, &exp| {
-                exp == i64::MAX || now_secs < exp
-            });
-        self.bump_control_epoch();
+        self.publish_control(|| {
+            // Evict expired entries in the target shard while we hold the clone.
+            self.revoked_jti_cache
+                .insert_retaining(cache_key, exp_secs, |_, &exp| {
+                    exp == i64::MAX || now_secs < exp
+                });
+        });
     }
 
     /// Adds a DPoP JWK thumbprint to the server-side blocklist (§10.4).
@@ -1795,9 +1817,8 @@ impl EmbeddedIdentityEngine {
         self.storage
             .put(realm_id, &key, b"")
             .map_err(Self::storage_err)?;
-        self.blocked_dpop_jkt_cache.insert(jkt.to_string(), ());
         // Every other node's blocklist is a separate cache (task 24.6).
-        self.bump_control_epoch();
+        self.publish_control(|| self.blocked_dpop_jkt_cache.insert(jkt.to_string(), ()));
         Ok(())
     }
 
@@ -1815,8 +1836,7 @@ impl EmbeddedIdentityEngine {
         self.storage
             .delete(realm_id, &key)
             .map_err(Self::storage_err)?;
-        self.blocked_dpop_jkt_cache.remove(jkt);
-        self.bump_control_epoch();
+        self.publish_control(|| self.blocked_dpop_jkt_cache.remove(jkt));
         Ok(())
     }
 
@@ -1852,6 +1872,7 @@ impl EmbeddedIdentityEngine {
             realm_id_token_rsa_retiring_keys: Arc::new(ShardedEpochMap::new()),
             realm_key_epoch: Arc::new(ShardedEpochMap::new()),
             control_epoch: AtomicU64::new(0),
+            control_cache_lock: Mutex::new(()),
             epoch_sync_after: AtomicI64::new(0),
             realm_status_cache: Arc::new(EpochCell::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
@@ -4635,6 +4656,39 @@ impl EmbeddedIdentityEngine {
     /// propagation delay for an outright denial of the control. The next
     /// successful bump, or a restart, still converges every node.
     fn bump_control_epoch(&self) {
+        self.publish_control(|| {});
+    }
+
+    /// Takes [`Self::control_cache_lock`]. Poisoning is ignored: the guarded
+    /// state is the caches themselves, which every holder leaves consistent.
+    fn lock_control_caches(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.control_cache_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Publishes a control whose durable row the caller has already written:
+    /// bumps the persisted control epoch, then applies `apply` to this node's
+    /// control caches and records the new epoch locally, both under
+    /// [`Self::control_cache_lock`] so that a concurrent reload cannot
+    /// overwrite the cache change (see the field's documentation).
+    ///
+    /// The storage write happens before the lock is taken, so the lock is
+    /// never held across I/O that could wait on replication.
+    fn publish_control<R>(&self, apply: impl FnOnce() -> R) -> R {
+        let next = self.persist_control_epoch_bump();
+        let _guard = self.lock_control_caches();
+        let out = apply();
+        if let Some(next) = next {
+            // `fetch_max`: two local writers may finish out of order.
+            self.control_epoch.fetch_max(next, Ordering::AcqRel);
+        }
+        out
+    }
+
+    /// Increments the persisted control epoch and returns the new value, or
+    /// `None` when the bump could not be persisted (best-effort, as below).
+    fn persist_control_epoch_bump(&self) -> Option<u64> {
         let sys_realm = keys::system_realm_id();
         let key = keys::encode_control_epoch();
         let next = match self.storage.get(&sys_realm, &key) {
@@ -4645,17 +4699,16 @@ impl EmbeddedIdentityEngine {
             Ok(None) => 1,
             Err(err) => {
                 tracing::warn!(error = %err, "could not read the control epoch to bump it");
-                return;
+                return None;
             }
         };
         if let Err(err) = self.storage.put(&sys_realm, &key, &next.to_le_bytes()) {
             tracing::warn!(error = %err, "could not persist the control epoch bump");
-            return;
+            return None;
         }
-        // This node already applied the change to its own caches, so record
-        // the epoch locally too; otherwise it would reload on its next read
-        // for no reason.
-        self.control_epoch.store(next, Ordering::Release);
+        // The caller records `next` locally once it has applied the change to
+        // its own caches; otherwise this node would reload for no reason.
+        Some(next)
     }
 
     /// Reconciles both cluster epochs, at most once per
@@ -4731,8 +4784,17 @@ impl EmbeddedIdentityEngine {
         if persisted <= self.control_epoch.load(Ordering::Acquire) {
             return;
         }
+        // Scan-and-replace under the control-cache lock, so no local control
+        // write can land between this reload's scan and its replace and be
+        // overwritten (see `control_cache_lock`). Re-check under the lock: a
+        // local writer finishing its publish, or another reloader, may have
+        // caught the local epoch up while this thread waited.
+        let _reload = self.lock_control_caches();
+        if persisted <= self.control_epoch.load(Ordering::Acquire) {
+            return;
+        }
         // Store first so a concurrent validation does not repeat the reload.
-        self.control_epoch.store(persisted, Ordering::Release);
+        self.control_epoch.fetch_max(persisted, Ordering::AcqRel);
         if let Err(err) = self.populate_realm_status_cache() {
             tracing::warn!(error = %err, "control epoch moved but the realm status cache did not reload");
         }
@@ -6345,15 +6407,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Cache realm status for lock-free validate_token reads.
         {
             let id = realm_id.clone();
-            self.realm_status_cache.rcu(|current| {
-                let mut new_map = HashMap::clone(current);
-                new_map.insert(id.clone(), RealmStatus::Active);
-                new_map
-            });
             // A status change decided here binds on every node only via the
             // control epoch: `realm_status_cache` answers "active" on a miss
             // and is written by the serving node alone (task 24.6).
-            self.bump_control_epoch();
+            self.publish_control(|| {
+                self.realm_status_cache.rcu(|current| {
+                    let mut new_map = HashMap::clone(current);
+                    new_map.insert(id.clone(), RealmStatus::Active);
+                    new_map
+                });
+            });
         }
 
         self.record_audit(
@@ -6511,15 +6574,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if request.status.is_some() {
             let id = realm_id.clone();
             let status = realm.status();
-            self.realm_status_cache.rcu(|current| {
-                let mut new_map = HashMap::clone(current);
-                new_map.insert(id.clone(), status);
-                new_map
-            });
             // A status change decided here binds on every node only via the
             // control epoch: `realm_status_cache` answers "active" on a miss
             // and is written by the serving node alone (task 24.6).
-            self.bump_control_epoch();
+            self.publish_control(|| {
+                self.realm_status_cache.rcu(|current| {
+                    let mut new_map = HashMap::clone(current);
+                    new_map.insert(id.clone(), status);
+                    new_map
+                });
+            });
         }
 
         self.record_audit(
@@ -6609,15 +6673,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .map_err(Self::storage_err)?;
                 // Reflect the status change in the in-memory cache immediately.
                 let id = realm_id.clone();
-                self.realm_status_cache.rcu(|current| {
-                    let mut new_map = HashMap::clone(current);
-                    new_map.insert(id.clone(), RealmStatus::DeletingInProgress);
-                    new_map
-                });
                 // A status change decided here binds on every node only via the
                 // control epoch: `realm_status_cache` answers "active" on a miss
                 // and is written by the serving node alone (task 24.6).
-                self.bump_control_epoch();
+                self.publish_control(|| {
+                    self.realm_status_cache.rcu(|current| {
+                        let mut new_map = HashMap::clone(current);
+                        new_map.insert(id.clone(), RealmStatus::DeletingInProgress);
+                        new_map
+                    });
+                });
             }
         }
 
@@ -6750,15 +6815,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             self.realm_retiring_keys.remove(&id);
             self.realm_id_token_rsa_keys.remove(&id);
             self.realm_id_token_rsa_retiring_keys.remove(&id);
-            self.realm_status_cache.rcu(|current| {
-                let mut new_map = HashMap::clone(current);
-                new_map.remove(&id);
-                new_map
-            });
             // A status change decided here binds on every node only via the
             // control epoch: `realm_status_cache` answers "active" on a miss
             // and is written by the serving node alone (task 24.6).
-            self.bump_control_epoch();
+            self.publish_control(|| {
+                self.realm_status_cache.rcu(|current| {
+                    let mut new_map = HashMap::clone(current);
+                    new_map.remove(&id);
+                    new_map
+                });
+            });
         }
         // Drop realm-scoped session and MFA caches the key-space sweep does
         // not reach; otherwise a deleted realm's session stays readable from
@@ -11510,15 +11576,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             let id = realm_id.clone();
             self.realm_signing_keys
                 .insert(id.clone(), Arc::new(realm_signing_key));
-            self.realm_status_cache.rcu(|current| {
-                let mut new_map = HashMap::clone(current);
-                new_map.insert(id.clone(), RealmStatus::Active);
-                new_map
-            });
             // A status change decided here binds on every node only via the
             // control epoch: `realm_status_cache` answers "active" on a miss
             // and is written by the serving node alone (task 24.6).
-            self.bump_control_epoch();
+            self.publish_control(|| {
+                self.realm_status_cache.rcu(|current| {
+                    let mut new_map = HashMap::clone(current);
+                    new_map.insert(id.clone(), RealmStatus::Active);
+                    new_map
+                });
+            });
         }
 
         self.record_audit(
@@ -17511,6 +17578,8 @@ mod tests {
 
     /// `private_key_jwt` assertion-JTI replay markers carry an expiry and are swept.
     mod client_assertion_jti;
+    /// Concurrent revocations survive a racing control-cache reload.
+    mod revocation_reload_races;
     /// PKCE challenge and refresh-token hash compare in constant time.
     mod secret_compare;
 

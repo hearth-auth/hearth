@@ -60,6 +60,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   existing Argon2id hashes keep verifying; regenerate a secret to move a client onto the fast format.
   An unknown or public `client_id` presenting a secret now costs one SHA-256, not an Argon2id run.
   The console's generated secret was a 122-bit UUID; it is now 256 bits (task 26.43 follow-up).
+- **Concurrent revocations are no longer lost** — a validation that saw the control epoch move while
+  another request on the same node was still publishing a revocation reloaded the revoked-token list
+  from storage and could overwrite a revocation that landed in between: `POST /revoke` answered `200`
+  but the token kept introspecting and validating as active until the next reload or its expiry
+  (about 1 in 11 under 20 concurrent revokers). The same race could drop a DPoP key block or a realm
+  status change. Local control writes and control-cache reloads are now ordered (task 26.43
+  follow-up).
 - **Revocation only affects the caller's own tokens (RFC 7009 §2.1)** — `POST /revoke`, its realm twin
   and gRPC `Revoke` revoke a token only when it was issued to the authenticated client; any other token
   is left untouched and the endpoint still answers `200`. A `private_key_jwt` client must present its
