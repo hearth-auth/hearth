@@ -1524,3 +1524,210 @@ async fn only_a_system_realm_caller_restores_the_system_realm_over_http() {
         "the live operator is untouched"
     );
 }
+
+/// Creates an operator in the system realm holding exactly `permissions`
+/// (through one custom role) and returns a system-realm access token for it.
+fn make_system_token_with(h: &common::TestHarness, email: &str, permissions: &[&str]) -> String {
+    use hearth::rbac::{CreateRoleRequest, Permission};
+    let sys = system_realm();
+    let user = h
+        .identity()
+        .create_admin_user(&CreateUserRequest {
+            email: email.to_string(),
+            display_name: "Delegated operator".into(),
+            ..Default::default()
+        })
+        .expect("operator");
+    h.rbac().seed_realm(&sys).expect("seed system roles");
+    let role = h
+        .rbac()
+        .create_role(
+            &sys,
+            &CreateRoleRequest {
+                name: format!("delegated-{}", uuid::Uuid::new_v4()),
+                description: None,
+                permissions: permissions
+                    .iter()
+                    .map(|p| Permission::new(*p).expect("permission"))
+                    .collect(),
+                parent_roles: vec![],
+                scope_kind: hearth::rbac::RoleScopeKind::Realm,
+                allow_reserved_permissions: true,
+            },
+        )
+        .expect("role");
+    h.rbac()
+        .assign_role(
+            &sys,
+            &AssignRoleRequest {
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("grant role");
+    let session = h
+        .identity()
+        .create_session(&sys, user.id(), &SessionContext::default())
+        .expect("session");
+    h.identity()
+        .issue_tokens(&sys, user.id(), session.id())
+        .expect("tokens")
+        .access_token()
+        .to_string()
+}
+
+async fn post_backup_status(
+    h: &common::TestHarness,
+    uri: &str,
+    token: &str,
+    realm: &RealmId,
+) -> StatusCode {
+    build_app(h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response")
+        .status()
+}
+
+/// A system-realm caller's backup reaches every realm — the system realm's
+/// operators and signing key included — so it needs `hearth.admin`, not just
+/// a sub-admin permission plus `hearth.export`. A delegated operator holding
+/// `hearth.users.admin` + `hearth.export` could otherwise resurrect deleted
+/// operators, overwrite every operator's password hash, or reinstall a rotated
+/// system signing key with a signed archive.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one scenario: four sub-admins refused, then the superuser
+async fn a_system_realm_backup_or_restore_needs_hearth_admin_not_a_sub_admin() {
+    set_master_key();
+    let src = common::TestHarness::embedded().await.expect("src");
+    let src_token = make_system_token(&src, "recovered@hearth.test");
+    let archive = sign_bytes(
+        &post_backup(
+            &src,
+            "/admin/backup?realm=system",
+            &src_token,
+            &system_realm(),
+        )
+        .await,
+        &test_signing_key(),
+    );
+
+    let dst = common::TestHarness::embedded().await.expect("dst");
+    let tenant = dst.create_realm();
+    dst.rbac().seed_realm(&tenant).expect("seed");
+    let tenant_archive = {
+        let tenant_token = make_admin_token(&dst, &tenant).await;
+        export_archive(&dst, &tenant, &tenant_token).await
+    };
+    let key_before = dst
+        .identity()
+        .export_realm_signing_key_pkcs8(&system_realm())
+        .expect("system key");
+
+    for sub_admin in [
+        "hearth.users.admin",
+        "hearth.realm.admin",
+        "hearth.clients.admin",
+        "hearth.agents.admin",
+    ] {
+        let token = make_system_token_with(
+            &dst,
+            &format!("{sub_admin}@hearth.test"),
+            &[sub_admin, "hearth.export"],
+        );
+        for uri in ["/admin/backup", "/admin/backup?realm=system"] {
+            assert_eq!(
+                post_backup_status(&dst, uri, &token, &system_realm()).await,
+                StatusCode::FORBIDDEN,
+                "{sub_admin} + hearth.export must not export {uri}"
+            );
+        }
+        for uri in [
+            "/admin/backup/restore",
+            "/admin/backup/restore?mode=merge",
+            "/admin/backup/restore?mode=overwrite",
+            "/admin/backup/restore?dry_run=true",
+        ] {
+            let (status, body) = post_restore(&dst, uri, &token, &system_realm(), &archive).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{sub_admin} + hearth.export must not restore the system realm ({uri}): {body}"
+            );
+            let (status, body) =
+                post_restore(&dst, uri, &token, &system_realm(), &tenant_archive).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{sub_admin} + hearth.export must not restore a tenant realm from the \
+                 system realm ({uri}): {body}"
+            );
+        }
+    }
+
+    // Nothing was written by any refused restore.
+    assert!(
+        dst.identity()
+            .get_user_by_email(&system_realm(), "recovered@hearth.test")
+            .expect("lookup")
+            .is_none(),
+        "a refused restore must not create the archived operator"
+    );
+    assert_eq!(
+        dst.identity()
+            .export_realm_signing_key_pkcs8(&system_realm())
+            .expect("system key"),
+        key_before,
+        "a refused restore must not touch the system signing key"
+    );
+    let restored_events = dst
+        .audit()
+        .query(&AuditQuery {
+            action: Some(AuditAction::BackupRestored),
+            ..AuditQuery::for_realm(system_realm())
+        })
+        .expect("audit query");
+    assert!(
+        restored_events.is_empty(),
+        "a refused restore records no BackupRestored event: {restored_events:?}"
+    );
+
+    // hearth.admin + hearth.export (and nothing else) is enough.
+    let admin = make_system_token_with(
+        &dst,
+        "superuser@hearth.test",
+        &["hearth.admin", "hearth.export"],
+    );
+    assert_eq!(
+        post_backup_status(&dst, "/admin/backup?realm=system", &admin, &system_realm()).await,
+        StatusCode::OK,
+        "hearth.admin + hearth.export exports the system realm"
+    );
+    let (status, body) = post_restore(
+        &dst,
+        "/admin/backup/restore",
+        &admin,
+        &system_realm(),
+        &archive,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "hearth.admin restores: {body}");
+    assert!(
+        dst.identity()
+            .get_user_by_email(&system_realm(), "recovered@hearth.test")
+            .expect("lookup")
+            .is_some(),
+        "the archived operator is restored"
+    );
+}

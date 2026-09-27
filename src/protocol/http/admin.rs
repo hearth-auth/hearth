@@ -34,7 +34,7 @@ use super::extract_realm_id;
 use super::{
     check_export_capability, check_export_rate_limit, emit_export_watermark, extract_admin_auth,
     identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
-    require_admin_permission, require_any_admin_permission, AdminAuth, AppState,
+    require_admin_permission, require_any_admin_permission, require_superuser, AdminAuth, AppState,
     BACKUP_RESTORE_BODY_LIMIT,
 };
 
@@ -499,6 +499,27 @@ fn list_all_realm_ids(
 ///   never becomes a realm-existence oracle.
 ///
 /// Blocking: call from inside `spawn_blocking`.
+/// A backup export or restore by a system-realm caller needs `hearth.admin`.
+///
+/// Such a caller's backup is not scoped to one realm: it exports every realm
+/// and restores any realm, the system realm included. `extract_admin_auth`
+/// admits every `hearth.*.admin` sub-admin, so without this a system-realm
+/// operator delegated only `hearth.users.admin` (plus `hearth.export`) could,
+/// with a signed archive, resurrect deleted operators and revoked grants,
+/// overwrite every operator's password hash and factors, reinstall an old
+/// system signing key, or rewrite any tenant realm — none of which its own
+/// permission reaches anywhere else. A tenant-scoped caller is untouched: its
+/// backup is confined to its own realm (B1), which its admin permission
+/// already governs.
+fn require_system_backup_superuser(
+    auth: &AdminAuth,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if auth.realm_id.as_uuid().is_nil() {
+        require_superuser(auth, "a system-realm backup export or restore")?;
+    }
+    Ok(())
+}
+
 fn authorize_export_realms(
     identity: &Arc<dyn crate::identity::IdentityEngine>,
     auth_realm: &RealmId,
@@ -4999,6 +5020,9 @@ async fn admin_backup_create(
     if let Err(e) = check_export_capability(&auth) {
         return e.into_response();
     }
+    if let Err(e) = require_system_backup_superuser(&auth) {
+        return e.into_response();
+    }
 
     // A-30: per-export rate limit (10/hour per user).
     if let Err(e) = check_export_rate_limit(&state, &auth.user_id) {
@@ -5208,6 +5232,9 @@ async fn admin_backup_restore(
 
     // SEC-14: require hearth.export capability for restore (destructive write operation).
     if let Err(e) = check_export_capability(&auth) {
+        return e.into_response();
+    }
+    if let Err(e) = require_system_backup_superuser(&auth) {
         return e.into_response();
     }
 

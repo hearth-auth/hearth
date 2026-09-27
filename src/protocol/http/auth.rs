@@ -246,16 +246,32 @@ pub(crate) fn extract_cluster_admin_auth(
             Json(serde_json::json!({"error": "cluster admin requires system realm"})),
         ));
     }
-    if !auth.permissions.iter().any(|p| p == "hearth.admin") {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": "forbidden",
-                "error_description": "hearth.admin permission required for cluster operations"
-            })),
-        ));
-    }
+    require_superuser(&auth, "cluster operations")?;
     Ok(auth)
+}
+
+/// Checks that the caller holds `hearth.admin` itself — not merely one of the
+/// `hearth.*.admin` sub-admin permissions [`extract_admin_auth`] also admits.
+///
+/// For operations whose reach exceeds any sub-admin domain: the cluster plane
+/// ([`extract_cluster_admin_auth`]) and a backup export or restore by a
+/// system-realm caller, which reaches every realm — the system realm's
+/// operator accounts and signing key included. `purpose` names the operation
+/// in the `403` body.
+pub(crate) fn require_superuser(
+    auth: &AdminAuth,
+    purpose: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if auth.permissions.iter().any(|p| p == "hearth.admin") {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "forbidden",
+            "error_description": format!("hearth.admin permission required for {purpose}")
+        })),
+    ))
 }
 
 // ── Rate-limiter attribution (HEA-2010) ──────────────────────────────────────
@@ -343,9 +359,11 @@ pub fn has_export_capability(permissions: &[String]) -> bool {
 /// Checks that the authenticated admin token carries the `hearth.export`
 /// permission required for backup/export endpoints (A-30).
 ///
-/// Returns `403 Forbidden` when the permission is absent. The check is separate
-/// from the normal `hearth.admin` gate so operators can grant export access to
-/// dedicated service accounts without granting full admin privileges.
+/// Returns `403 Forbidden` when the permission is absent. `hearth.export` is
+/// held *in addition to* an admin permission: a tenant realm may grant it with
+/// a sub-admin permission to a backup service account scoped to that realm.
+/// A backup export or restore by a **system-realm** caller reaches every realm
+/// and additionally requires `hearth.admin` ([`require_superuser`]).
 pub(crate) fn check_export_capability(
     auth: &AdminAuth,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {

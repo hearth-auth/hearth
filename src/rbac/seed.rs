@@ -48,7 +48,7 @@ pub(crate) const SEED_PERMISSIONS: &[(&str, &str)] = &[
     ),
     (
         "hearth.export",
-        "Export realm data (backup archives, user CSV, audit logs) — required in addition to hearth.admin for all data-export endpoints (A-30).",
+        "Export and restore realm data (backup archives, user CSV, audit logs) — required in addition to an admin permission on every data-export and backup-restore endpoint. A backup export or restore by a system-realm caller reaches every realm, operator accounts included, and also requires hearth.admin (A-30).",
     ),
     (
         "realm.read",
