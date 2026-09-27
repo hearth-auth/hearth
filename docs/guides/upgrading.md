@@ -545,9 +545,11 @@ cluster from a backup.
 > **Stopping the old cluster is one-way.** A purged node cannot restart on **either** build, so
 > once you stop the nodes in step 2 the old cluster cannot be started again, and putting its data
 > directories back does not bring it back. The only rollback is to rebuild a cluster of the
-> **older** build from the same backup, by the same offline procedure (steps 3–6 with the older
-> binary and its own `hearth backup restore`). Such a cluster works until its logs are purged
-> again, and then has the same restart problem.
+> **older** build from the same backup, by the same offline procedure (steps 4–6 with the older
+> binary and its own `hearth backup restore`, into new empty directories). An older restore refuses
+> the system realm, so that rebuild restores `pre-upgrade.hearth-backup` only and has no
+> operator-console account. Such a cluster works until its logs are purged again, and then has the
+> same restart problem.
 
 > **Restore offline, before the new cluster first starts.** Realms come from `hearth.yaml`:
 > `POST /admin/realms` answers `405`, and at every start-up the server creates each declared realm
@@ -609,16 +611,27 @@ cluster must share one value anyway: run the restore and the new cluster with th
    The token needs the `hearth.admin` and `hearth.export` capabilities. Check the archive lists
    every tenant realm (`hearth backup inspect --input pre-upgrade.hearth-backup`); see the
    [Backup guide](./backup.md) for signing (the restore refuses an unsigned archive).
-2. **Stop every node** — one-way, see above. Keep each node's data directory (including `raft.db`)
-   anyway, for investigation.
+2. **Stop every node** — one-way, see above — and **move each node's data directory aside** (keep
+   it, for investigation and for step 3; do not delete it):
+
+   ```bash
+   # on every node
+   systemctl stop hearth
+   mv /var/lib/hearth/data /var/lib/hearth/data-pre-upgrade
+   ```
+
+   Moving it aside is what makes the copy in step 5 land in an **empty** directory. A node must not
+   start on the new store with any of the old one's files still under it: the old `raft.db` (the
+   Raft log and vote, `{storage.data_dir}/raft.db`), WAL segments or SSTs left next to the copied
+   store make the node refuse to start or replay old state — differently on each node.
 3. **Install the new binary on every node, and export the system realm.** On the node that was
-   the leader in step 1 — stopped, so its data directory is not locked — export the system realm
-   with the **new** binary, the old cluster's `HEARTH_MASTER_KEY` and its `hearth.yaml` (for
+   the leader in step 1, export the system realm from its moved-aside data directory with the
+   **new** binary, the old cluster's `HEARTH_MASTER_KEY` and its `hearth.yaml` (for
    `security.key_encryption_key`). Work on a copy so the original stays untouched:
 
    ```bash
    export HEARTH_MASTER_KEY=...   # the old cluster's value
-   cp -a /var/lib/hearth/data /var/lib/hearth/data-export-copy
+   cp -a /var/lib/hearth/data-pre-upgrade /var/lib/hearth/data-export-copy
    hearth backup create \
      --data-dir /var/lib/hearth/data-export-copy \
      --config /etc/hearth/hearth.yaml \
@@ -629,13 +642,14 @@ cluster must share one value anyway: run the restore and the new cluster with th
    ```
 
    Skip this only if you accept rebuilding without operator-console access (see above).
-4. **Restore offline into one empty data directory**, on one node, with the new binary, the old
-   cluster's `HEARTH_MASTER_KEY` in the environment and the new cluster's `hearth.yaml` (its
-   `security.backup.verify_key` must match the key the archive was signed with):
+4. **Restore offline into one new, empty data directory**, on one node, with the new binary, the
+   old cluster's `HEARTH_MASTER_KEY` in the environment and the new cluster's `hearth.yaml` (its
+   `security.backup.verify_key` must match the key the archives were signed with). `mkdir`
+   without `-p` fails if the directory already exists, so the restore cannot land on old files:
 
    ```bash
    export HEARTH_MASTER_KEY=...   # the old cluster's value
-   mkdir -p /var/lib/hearth/data-new
+   mkdir /var/lib/hearth/data-new
    hearth backup restore \
      --input pre-upgrade.hearth-backup \
      --config /etc/hearth/hearth.yaml \
@@ -644,24 +658,35 @@ cluster must share one value anyway: run the restore and the new cluster with th
      --input system-realm.hearth-backup \
      --config /etc/hearth/hearth.yaml \
      --data-dir /var/lib/hearth/data-new
+   test ! -e /var/lib/hearth/data-new/raft.db && echo "no raft.db: OK"
    ```
 
    Exit `0` means every record restored; read any conflicts and errors it prints before going
    on. The second restore ends with `System realm restored: …`; the first one warns that its
-   archive does not contain the system realm, which is expected here. Do **not** start
-   `hearth serve` on it yet.
-5. **Copy that directory to every node** before any node starts, to the path each node's
-   `storage.data_dir` names (and point the restoring node's own `storage.data_dir` at it):
+   archive does not contain the system realm, which is expected here. `hearth backup restore`
+   writes only the store, never a Raft log, so a directory it restored into while empty holds no
+   `raft.db`. Do **not** start `hearth serve` on it yet.
+5. **Copy that directory to every node** before any node starts, into the path each node's
+   `storage.data_dir` names — which step 2 emptied. Create it fresh so the copy cannot merge into
+   leftovers, then copy:
 
    ```bash
-   rsync -a /var/lib/hearth/data-new/ node2:/var/lib/hearth/data/
-   rsync -a /var/lib/hearth/data-new/ node3:/var/lib/hearth/data/
+   for node in node2 node3; do
+     ssh "$node" 'mkdir /var/lib/hearth/data'   # fails if step 2 was skipped on that node
+     rsync -a /var/lib/hearth/data-new/ "$node":/var/lib/hearth/data/
+   done
+   # the restoring node itself: copy it too, so data-new stays as the reference copy
+   mkdir /var/lib/hearth/data
+   rsync -a /var/lib/hearth/data-new/ /var/lib/hearth/data/
    ```
 
    Every node must start from the **same bytes**. Do not run the restore once per node: each run
    builds a fresh store and writes its own random keys and timestamps, so the nodes would start
-   with different state. The copy holds no `raft.db`, so each node starts a fresh Raft log on top
-   of identical state.
+   with different state. Because each target directory is new, it holds exactly the restored store
+   and no `raft.db`, so each node starts a fresh Raft log on top of identical state. (Plain
+   `rsync -a` deletes nothing at the destination. If you must reuse a directory instead of creating
+   it, `rsync -a --delete` removes what the source lacks — but moving the old directory aside is
+   the procedure; `--delete` also removes whatever you meant to keep.)
 6. **Start every node** with the new binary and a `hearth.yaml` that declares **the same realm
    names** as before (start-up archives a realm the file does not declare). The cluster
    bootstraps as a new cluster does ([Clustering guide](./clustering.md)); start-up finds every
@@ -669,6 +694,17 @@ cluster must share one value anyway: run the restore and the new cluster with th
    [post-restore checks](./disaster-recovery.md#test-restore-drill-checklist).
 7. **Re-open client traffic.** Users sign in again (sessions were not restored); relying parties'
    cached JWKS stays valid, because every realm kept its signing key.
+
+> **What the test suite covers, and what it does not.**
+> `tests/cluster_three_node_control_coherence.rs::a_cluster_seeded_from_one_offline_restored_directory_serves_it_on_every_node`
+> runs the core of steps 4–6 with the real binary: `hearth backup create` of a store (unfiltered,
+> so the system realm is in it), `hearth backup restore` into a new empty directory with one shared
+> `HEARTH_MASTER_KEY` and no KEK file, a check that no `raft.db` was written, copies into three new
+> directories, and a three-node cluster started on them followed by realm reconciliation on the
+> leader. It asserts every node holds the realm under its archived id and the operator account,
+> and validates a token the leader signs. It does **not** cover: `hearth serve` processes (the
+> nodes are in-process cluster engines), a store or an HTTP export written by v1.6.11, the
+> system-realm export of step 3 from a stopped node's directory, or the `rsync` copy itself.
 
 For releases that do not change the Raft log format, upgrade a Raft cluster (3 or 5 nodes) with
 minimal service interruption as follows:

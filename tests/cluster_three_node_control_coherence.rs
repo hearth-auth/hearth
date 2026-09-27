@@ -1313,38 +1313,25 @@ fn copy_dir(src: &Path, dst: &Path) {
     }
 }
 
-/// The upgrading guide rebuilds a cluster whose Raft logs were purged by
-/// restoring the backup OFFLINE into one empty data directory and copying
-/// that directory to every node before the new cluster first starts.
-///
-/// Restoring into each node separately would not do: each restore builds its
-/// own engines on a cold store, and each writes its own random keys and
-/// timestamps, so the nodes would start with different state machines. A
-/// copy is byte-identical, and the fresh Raft log then applies the same
-/// entries on top of the same bytes everywhere. A restore through the new
-/// leader over HTTP is not a substitute either: realms come from
-/// `hearth.yaml`, so start-up has already created every declared realm under
-/// a new id (see `a_rebuild_restores_offline_before_the_first_start` in
-/// `src/main.rs`).
-///
-/// Here: a realm and a user written offline, the directory copied to three
-/// nodes, and the cluster started. Every node must start (a copied store has
-/// no persisted Raft state, which must not be mistaken for a purged log),
-/// see the realm under the same id, and validate a token the leader signs
-/// with that realm's key; a write after start-up must replicate.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn a_cluster_seeded_from_one_offline_restored_directory_serves_it_on_every_node() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
-        1_700_000_000_000_000,
-    )));
-    let seed_root = tempfile::tempdir().unwrap();
-    let seed = seed_root.path().join("restored");
-    std::fs::create_dir_all(&seed).unwrap();
+/// Seeds `{root}/restored` the way the upgrading guide does: a store holding
+/// a realm, a user and an operator, exported with `hearth backup create`
+/// (unfiltered, so the system realm is in it) and restored with `hearth backup
+/// restore` into a new empty directory — one shared `HEARTH_MASTER_KEY`, no
+/// KEK file. Returns the restored directory, the realm and the user.
+fn seed_by_offline_restore(clock: &Arc<FakeClock>, root: &Path) -> (PathBuf, RealmId, UserId) {
+    // One HEARTH_MASTER_KEY for the source store, the CLI children and the
+    // nodes, as the guide requires. nextest runs each test in its own process.
+    const MASTER_KEY: &str = "0b5e55ed0b5e55ed0b5e55ed0b5e55ed0b5e55ed0b5e55ed0b5e55ed0b5e55ed";
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("HEARTH_MASTER_KEY", MASTER_KEY);
+    }
+    let source = root.join("source");
+    std::fs::create_dir_all(&source).unwrap();
     let (realm_id, user_id) = {
         let storage: Arc<dyn StorageEngine> =
-            Arc::new(EmbeddedStorageEngine::open(StorageConfig::dev(seed.clone())).unwrap());
-        let clock_dyn = Arc::clone(&clock) as Arc<dyn Clock>;
+            Arc::new(EmbeddedStorageEngine::open(StorageConfig::dev(source.clone())).unwrap());
+        let clock_dyn = Arc::clone(clock) as Arc<dyn Clock>;
         let audit = Arc::new(EmbeddedAuditEngine::new(
             Arc::clone(&storage),
             Arc::clone(&clock_dyn),
@@ -1377,10 +1364,132 @@ async fn a_cluster_seeded_from_one_offline_restored_directory_serves_it_on_every
                 },
             )
             .unwrap();
+        identity
+            .create_admin_user(&CreateUserRequest {
+                email: "operator@rebuilt.test".to_string(),
+                display_name: "Operator".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
         (realm.id().clone(), user.id().clone())
     };
+    // The source's storage lock is per-process; the CLI reads a copy.
+    let source_copy = root.join("source-copy");
+    copy_dir(&source, &source_copy);
+
+    let hearth = |args: &[&std::ffi::OsStr]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_hearth"))
+            .args(args)
+            .env_remove("HEARTH_KEK")
+            .env("HEARTH_MASTER_KEY", MASTER_KEY)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "hearth {args:?} failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let os = std::ffi::OsStr::new;
+    let archive = root.join("pre-upgrade.hearth-backup");
+    hearth(&[
+        os("backup"),
+        os("create"),
+        os("--data-dir"),
+        source_copy.as_os_str(),
+        os("--output"),
+        archive.as_os_str(),
+    ]);
+    let seed = root.join("restored");
+    std::fs::create_dir(&seed).unwrap(); // new and empty, as the guide's `mkdir`
+    hearth(&[
+        os("backup"),
+        os("restore"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--data-dir"),
+        seed.as_os_str(),
+        os("--allow-unsigned"),
+    ]);
+    assert!(
+        !seed.join("raft.db").exists(),
+        "a restore into an empty directory must leave no raft.db for the copies to carry"
+    );
+
+    (seed, realm_id, user_id)
+}
+
+/// The upgrading guide rebuilds a cluster whose Raft logs were purged by
+/// restoring the backup OFFLINE into one empty data directory and copying
+/// that directory to every node before the new cluster first starts.
+///
+/// Restoring into each node separately would not do: each restore builds its
+/// own engines on a cold store, and each writes its own random keys and
+/// timestamps, so the nodes would start with different state machines. A
+/// copy is byte-identical, and the fresh Raft log then applies the same
+/// entries on top of the same bytes everywhere. A restore through the new
+/// leader over HTTP is not a substitute either: realms come from
+/// `hearth.yaml`, so start-up has already created every declared realm under
+/// a new id (see `a_rebuild_restores_offline_before_the_first_start` in
+/// `src/main.rs`).
+///
+/// Here the seed goes through the real binary, as the guide does: a store
+/// holding a realm, a user and an operator is exported with `hearth backup
+/// create` (unfiltered, so it carries the system realm) and restored with
+/// `hearth backup restore` into an EMPTY directory — one shared
+/// `HEARTH_MASTER_KEY`, no KEK file. That directory (which must hold no
+/// `raft.db`) is copied to three new directories and the cluster started.
+/// Every node must start (a copied store has no persisted Raft state, which
+/// must not be mistaken for a purged log), see the realm under the same id and
+/// the operator in the system realm, keep both through realm reconciliation
+/// from `hearth.yaml` (what `serve` runs at start-up), and validate a token
+/// the leader signs with that realm's key; a write after start-up must
+/// replicate.
+///
+/// Not covered: the nodes are in-process `ClusterEngine`s, not `hearth serve`
+/// processes, and the source store is this build's, not a v1.6.11 one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_cluster_seeded_from_one_offline_restored_directory_serves_it_on_every_node() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let seed_root = tempfile::tempdir().unwrap();
+    let (seed, realm_id, user_id) = seed_by_offline_restore(&clock, seed_root.path());
 
     let cluster = ThreeNodeCluster::build_seeded(&clock, &seed).await;
+
+    // Start-up reconciliation from `hearth.yaml`, which declares the same
+    // realm name: it must find the restored realm, not create a new one.
+    let config = hearth::config::Config {
+        realms: Some(std::collections::HashMap::from([(
+            "rebuilt".to_string(),
+            hearth::config::RealmYamlConfig::default(),
+        )])),
+        ..hearth::config::Config::default()
+    };
+    let leader = cluster.leader();
+    hearth::identity::reconcile::reconcile_realms(
+        leader.identity.as_ref(),
+        leader.rbac.as_ref(),
+        &config,
+    )
+    .unwrap();
+    clock.advance(1_000_000);
+    cluster.converge().await;
+
+    let system = RealmId::new(uuid::Uuid::nil());
+    for node in &cluster.nodes {
+        assert!(
+            node.identity
+                .get_user_by_email(&system, "operator@rebuilt.test")
+                .unwrap()
+                .is_some(),
+            "node {} lost the restored operator-console account",
+            node.id()
+        );
+    }
     for node in &cluster.nodes {
         let realm = node
             .identity

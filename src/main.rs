@@ -6778,9 +6778,9 @@ mod tests {
         };
         let copy = dir.path().join("copy");
         copy_dir_recursive(&source, &copy).expect("copy data dir");
-        // The archive the guide takes: one without the system realm, as
-        // `POST /admin/backup` writes it (an unfiltered CLI export carries the
-        // system realm, which `backup restore` cannot import).
+        // The tenant archive the guide takes: one without the system realm, as
+        // a v1.6.11 `POST /admin/backup` writes it (the guide exports the
+        // system realm separately).
         let archive = dir.path().join("pre-upgrade.hearth-backup");
         run_backup_create(
             Some(&archive),
