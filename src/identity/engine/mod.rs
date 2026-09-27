@@ -11179,6 +11179,33 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
+        // The YAML-managed gate for credentials and the security profile,
+        // enforced here so REST, gRPC and the console share it. Reconcile
+        // treats `hearth.yaml` as authoritative for these fields: a key added
+        // at runtime would be removed at the next restart or SIGHUP, and on a
+        // secretless client that makes it public.
+        let touches_credentials = request.jwks.is_some()
+            || request.assertion_public_key.is_some()
+            || request.profile.is_some();
+        if touches_credentials {
+            if let Some(client) = self.get_client(realm_id, client_id)? {
+                if client.is_yaml_managed() {
+                    return Err(IdentityError::YamlManagedResource {
+                        kind: "application",
+                    });
+                }
+            }
+        }
+        self.update_client_inner(realm_id, client_id, request)
+    }
+
+    fn update_client_from_config(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        request: &crate::identity::oidc::UpdateClientRequest,
+    ) -> Result<OAuthClient, IdentityError> {
+        self.require_active_realm(realm_id)?;
         self.update_client_inner(realm_id, client_id, request)
     }
 
@@ -11891,18 +11918,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         client.set_profile(request.profile);
         Self::check_fapi2_client_keys(&client)?;
         // ID-token signing algorithm (task 26.55), parsed and its RSA key
-        // provisioned as a registration does, but not refused under FAPI 2.0:
-        // an import records the algorithm the source held rather than choosing
-        // one. A realm that turned `fapi_profile` on after an RS256 client
-        // registered still holds that client, so its backup carries it, and a
-        // restore must not drop it. FAPI still governs what is issued:
-        // `id_token_signer` refuses the client's ID-token grants while FAPI
-        // applies to it. A backup restore installs the archived RSA key first,
-        // so an RS256 client finds that key rather than minting a new one.
+        // provisioned as a registration does, but not refused under a REALM's
+        // FAPI 2.0 profile: an import records the algorithm the source held
+        // rather than choosing one. A realm that turned `fapi_profile` on after
+        // an RS256 client registered still holds that client, so its backup
+        // carries it, and a restore must not drop it. FAPI still governs what
+        // is issued: `id_token_signer` refuses the client's ID-token grants
+        // while FAPI applies to it. A backup restore installs the archived RSA
+        // key first, so an RS256 client finds that key rather than minting a
+        // new one. A client whose OWN profile is FAPI 2.0 can never hold RS256
+        // (registration and update refuse it, §5.4.1), so that is refused.
         client.set_id_token_signed_response_alg(self.resolve_client_id_token_alg(
             realm_id,
             request.id_token_signed_response_alg.as_deref(),
-            false,
+            request.profile.is_fapi2(),
         )?);
 
         let client_bytes =

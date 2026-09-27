@@ -1420,10 +1420,26 @@ pub trait IdentityEngine: Send + Sync {
         client_secret: Option<&str>,
     ) -> Result<(), IdentityError>;
 
-    /// Updates an existing OAuth client's fields.
+    /// Updates an existing OAuth client's fields — the runtime surfaces
+    /// (REST, gRPC, admin console).
     ///
-    /// Only non-`None` fields in the request are applied.
+    /// Only non-`None` fields in the request are applied. A change to the
+    /// credentials or security profile (`jwks`, `assertion_public_key`,
+    /// `profile`) of a `hearth.yaml`-managed client is refused with
+    /// [`IdentityError::YamlManagedResource`]: YAML is authoritative for those
+    /// fields, so the next reconcile would silently undo it — and undoing
+    /// runtime-added keys on a secretless client would make it public.
     fn update_client(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        request: &UpdateClientRequest,
+    ) -> Result<OAuthClient, IdentityError>;
+
+    /// Applies a `hearth.yaml` reconcile to an existing client. Only
+    /// configuration reconciliation calls this: it is [`Self::update_client`]
+    /// without the YAML-managed gate (the YAML is the source of the change).
+    fn update_client_from_config(
         &self,
         realm_id: &RealmId,
         client_id: &crate::core::ClientId,

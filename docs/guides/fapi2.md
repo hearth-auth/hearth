@@ -162,7 +162,9 @@ curl -s -X POST "$ISSUER/admin/applications" \
 
 `jwks` may be the JWK Set object itself or a JSON string holding it. The same body works at
 `POST /clients`, and `PATCH /admin/applications/{id}` accepts `jwks` (`null` clears it) and
-`profile` to move an existing client onto FAPI 2.0. The set must hold public signing keys only
+`profile` to move an existing client onto FAPI 2.0 — except on an application declared in
+`hearth.yaml`, whose `jwks` and `profile` are changed in the YAML (a runtime change answers `409`
+`HEARTH_YAML_MANAGED_RESOURCE`). The set must hold public signing keys only
 (see `docs/specs/OIDC.md` §2.2.5).
 
 **Successful response (201 Created)** — the registered client (the stored `profile` and `jwks`

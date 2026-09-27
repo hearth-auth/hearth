@@ -643,7 +643,8 @@ pub(crate) fn identity_error_to_response(
         ),
         IdentityError::YamlManagedResource { .. } => (
             StatusCode::CONFLICT,
-            "this resource is managed by hearth.yaml and cannot be deleted at runtime",
+            "this resource is managed by hearth.yaml: it cannot be deleted, and its \
+             credentials and security profile cannot be changed, at runtime",
         ),
         IdentityError::DuplicateRealmName => (StatusCode::CONFLICT, "duplicate realm name"),
         IdentityError::DuplicateEmail => (StatusCode::CONFLICT, "duplicate email"),

@@ -208,8 +208,10 @@ pub enum IdentityError {
     /// A runtime mutation targeted a resource that `hearth.yaml` owns.
     ///
     /// Config-managed resources are reconciled from YAML at every startup, so
-    /// a runtime delete would be undone on the next boot. The operator removes
-    /// the declaration and restarts instead (audit 2026-08-28 §4.20#10).
+    /// a runtime delete — or a runtime change to an application's credentials
+    /// or security profile — would be undone on the next boot. The operator
+    /// changes or removes the declaration and restarts instead (audit
+    /// 2026-08-28 §4.20#10).
     YamlManagedResource {
         /// The kind of resource that was targeted (e.g. `"application"`).
         kind: &'static str,

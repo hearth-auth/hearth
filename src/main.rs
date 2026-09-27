@@ -3910,6 +3910,16 @@ fn run_config_reconciliation(
                 .iter()
                 .filter(|e| e.action == hearth::identity::reconcile::AppReconcileAction::Archived)
                 .count();
+            let app_refused = report
+                .applications
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.action,
+                        hearth::identity::reconcile::AppReconcileAction::Refused { .. }
+                    )
+                })
+                .count();
             info!(
                 realms_created = report.created.len(),
                 realms_updated = report.updated.len(),
@@ -3918,6 +3928,7 @@ fn run_config_reconciliation(
                 apps_created = app_created,
                 apps_updated = app_updated,
                 apps_archived = app_archived,
+                apps_refused = app_refused,
                 orgs = report.organizations.len(),
                 "configuration reconciliation complete"
             );

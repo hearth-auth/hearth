@@ -96,8 +96,9 @@ impl fmt::Display for IdentityError {
             ),
             Self::YamlManagedResource { kind } => write!(
                 f,
-                "this {kind} is managed by hearth.yaml and cannot be deleted at \
-                 runtime; remove its declaration and restart"
+                "this {kind} is managed by hearth.yaml: it cannot be deleted, and its \
+                 credentials and security profile cannot be changed, at runtime; change or \
+                 remove its declaration and restart"
             ),
             Self::RegistrationDisabled => write!(f, "self-service registration is disabled"),
             Self::RegistrationDomainNotAllowed { domain } => write!(

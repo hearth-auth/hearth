@@ -230,6 +230,13 @@ pub enum AppReconcileAction {
     Archived,
     /// Application was restored (reappeared in YAML after being archived).
     Restored,
+    /// The YAML change was refused and the application left unchanged,
+    /// because applying it would have made the client weaker than it is
+    /// (e.g. removed its last credential, turning it into a public client).
+    Refused {
+        /// Why the change was refused.
+        reason: String,
+    },
 }
 
 /// Reconciliation result for a single organization.
@@ -1103,6 +1110,40 @@ pub(crate) fn reconcile_applications(
                 let id_token_alg_changed =
                     existing.id_token_signed_response_alg().as_str() != cfg_id_token_alg;
 
+                // Reconcile never makes a client weaker than it is: a YAML
+                // change that would remove the last credential of a client
+                // that holds one (dropping `jwks`, or the FAPI 2.0 profile, of
+                // a secretless client) would turn it into a PUBLIC client that
+                // anyone knowing its client_id can act as. Refuse it, report
+                // it, and leave the client unchanged.
+                let jwks_after = if jwks_changed {
+                    cfg_jwks.as_deref()
+                } else {
+                    existing.jwks()
+                };
+                let public_after = existing.client_secret_hash().is_none()
+                    && existing.assertion_public_key().is_none()
+                    && existing.jwks_uri().is_none()
+                    && jwks_after.is_none()
+                    && !cfg_profile.is_fapi2();
+                if !existing.is_public() && public_after {
+                    let reason = "the change would remove the client's last credential \
+                                  (its jwks or FAPI 2.0 profile) and make it a public client; \
+                                  declare the jwks again, or give it a secret"
+                        .to_string();
+                    warn!(
+                        realm = realm_name,
+                        app = app_key,
+                        "refusing hearth.yaml change to application: {reason}"
+                    );
+                    report.applications.push(AppReconcileEntry {
+                        realm: realm_name.to_string(),
+                        app_key: app_key.clone(),
+                        action: AppReconcileAction::Refused { reason },
+                    });
+                    continue;
+                }
+
                 if was_archived
                     || name_changed
                     || uris_changed
@@ -1114,7 +1155,7 @@ pub(crate) fn reconcile_applications(
                     || post_logout_changed
                     || id_token_alg_changed
                 {
-                    engine.update_client(
+                    engine.update_client_from_config(
                         realm_id,
                         &client_id,
                         &UpdateClientRequest {
@@ -1202,6 +1243,15 @@ pub(crate) fn reconcile_applications(
                     None
                 };
 
+                // One write carrying the final profile, JWKS and consent
+                // settings. Creating a public Standard client first and
+                // applying the profile/JWKS in a second write left a public
+                // client behind whenever that second write failed.
+                let needs_consent_override = !cfg_require_consent
+                    || cfg_logo.is_some()
+                    || cfg_profile != ClientProfile::Standard
+                    || cfg_jwks.is_some()
+                    || !cfg_post_logout.is_empty();
                 engine.import_client(
                     realm_id,
                     &ImportClientRequest {
@@ -1217,38 +1267,19 @@ pub(crate) fn reconcile_applications(
                         declared_scopes: app_cfg.declared_scopes.clone().unwrap_or_default(),
                         consent_spans_orgs: app_cfg.consent_spans_orgs.unwrap_or(false),
                         id_token_signed_response_alg: Some(cfg_id_token_alg.clone()),
+                        // The consent flag the former two-write creation ended
+                        // with: derived from the trust level, except that the
+                        // follow-up write applied `require_consent` when the
+                        // YAML declared no trust level.
+                        require_consent: (needs_consent_override && app_cfg.trust_level.is_none())
+                            .then_some(cfg_require_consent),
+                        client_logo_url: cfg_logo.clone(),
+                        profile: cfg_profile,
+                        jwks: cfg_jwks.clone(),
+                        post_logout_redirect_uris: cfg_post_logout.clone(),
                         ..Default::default()
                     },
                 )?;
-                // Apply consent-policy and profile fields: the import path
-                // doesn't carry them, so a follow-up update_client puts the
-                // client in the intended state.
-                let needs_followup = !cfg_require_consent
-                    || cfg_logo.is_some()
-                    || cfg_profile != ClientProfile::Standard
-                    || cfg_jwks.is_some()
-                    || !cfg_post_logout.is_empty();
-                if needs_followup {
-                    engine.update_client(
-                        realm_id,
-                        &client_id,
-                        &UpdateClientRequest {
-                            client_name: None,
-                            redirect_uris: None,
-                            grant_types: None,
-                            require_consent: Some(cfg_require_consent),
-                            client_logo_url: Some(cfg_logo.clone()),
-                            profile: Some(cfg_profile),
-                            jwks: cfg_jwks.clone().map(Some),
-                            post_logout_redirect_uris: Some(cfg_post_logout.clone()),
-                            slug: app_cfg.slug.clone(),
-                            trust_level: app_cfg.trust_level,
-                            declared_scopes: app_cfg.declared_scopes.clone(),
-                            consent_spans_orgs: app_cfg.consent_spans_orgs,
-                            ..Default::default()
-                        },
-                    )?;
-                }
                 info!(
                     realm = realm_name,
                     app = app_key,
@@ -1289,7 +1320,7 @@ pub(crate) fn reconcile_applications(
                 {
                     continue;
                 }
-                engine.update_client(
+                engine.update_client_from_config(
                     realm_id,
                     &cid,
                     &UpdateClientRequest {

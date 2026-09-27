@@ -301,6 +301,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   partial Keycloak export masks them as `**********`) was imported with no secret, i.e. as a public
   client; a masked Keycloak secret was even hashed as the client's secret. Such a client is now
   skipped with a warning in the migration report; register it in Hearth instead.
+- **A `hearth.yaml` application can no longer be silently turned into a public client** — reconcile
+  treats YAML as authoritative for `jwks`, and `PATCH /admin/applications/{id}` accepted `jwks`,
+  `assertion_public_key` and `profile` on YAML-declared applications, so keys added over REST to a
+  secretless YAML application vanished at the next restart or SIGHUP and it became public. Now:
+  - **Breaking** for automation: `PATCH /admin/applications/{id}` answers `409`
+    `HEARTH_YAML_MANAGED_RESOURCE` to a change of `jwks`, `assertion_public_key` or `profile` on a
+    YAML-declared application (as the admin console and runtime delete already did); change them in
+    `hearth.yaml`. Other fields are unaffected.
+  - Reconcile refuses a YAML change that would remove the last credential of an application that
+    has one (dropping the `jwks` or the FAPI 2.0 profile of a secretless application), logs a
+    warning, reports it (`apps_refused` on reload) and leaves the application unchanged.
+  - Reconcile creates an application in one write with its profile and JWKS. It used to write a
+    public Standard client first and apply them in a second write, so a failed second write (for
+    example a FAPI 2.0 application asking for RS256 ID tokens) left a public client behind.
 
 ### Added
 - **Per-client RS256 ID tokens (OIDC interop, task 26.55)** — a client can set
