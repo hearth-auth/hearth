@@ -1007,12 +1007,13 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
         // The whole key-space was replaced: rebuild every control cache. This
         // runs on the blocking pool (see the state machine), so reloading
         // inline is fine; on failure the background reloader keeps retrying.
-        if let Err(e) = self.control.reload() {
+        // The snapshot may carry a lower control epoch than this node had
+        // recorded, so the reload re-bases the epoch bookkeeping on it.
+        if let Err(e) = self.control.reload_after_reset() {
             tracing::error!(
                 error = %e,
                 "failed to rebuild the control caches after snapshot install; retrying"
             );
-            self.control.request_full_reload();
         }
     }
 }

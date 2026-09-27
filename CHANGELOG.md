@@ -97,7 +97,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   move it backwards. A follower that had already reloaded at the higher value then ignored the later
   control: a realm suspension, DPoP key block or session revocation stayed unenforced on that node
   until its next restart. The bump is now one atomic increment (a new Raft command whose value is
-  computed at apply time). Upgrade every node together: a node on an older build cannot apply it.
+  computed at apply time), applied exactly once per log entry even when a restarted node replays its
+  log, and a node whose epoch a snapshot install lowered re-bases on it so later controls still bind.
+  Upgrade every node together: a node on an older build cannot apply it.
 - **Argon2id client-secret verification is admission-controlled** — a caller-chosen or legacy client
   secret (gRPC `RegisterClient`, `hearth.yaml` `applications[].client_secret`, migration import, or
   any secret stored before generated secrets moved to SHA-256) was verified with Argon2id directly

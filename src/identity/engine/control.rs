@@ -217,6 +217,9 @@ pub(super) struct ControlPlane {
     /// A full reload was requested regardless of epochs (snapshot install, or
     /// a retry after a failed forced reload).
     force: AtomicBool,
+    /// The pending forced reload follows a reset of the key space (snapshot
+    /// install) and must re-base the epoch bookkeeping on what it reads.
+    reset: AtomicBool,
     /// Set when the owning engine drops; the reloader exits.
     shutdown: AtomicBool,
     /// Taken only by control writers and the reloader — never by validation.
@@ -255,6 +258,7 @@ impl ControlPlane {
             applied: AtomicU64::new(0),
             target: AtomicU64::new(0),
             force: AtomicBool::new(false),
+            reset: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             journal: Mutex::new(Journal::default()),
             reload_exclusive: Mutex::new(()),
@@ -400,14 +404,46 @@ impl ControlPlane {
 
     /// Reloads every control cache from storage now, on the calling thread.
     ///
-    /// Used at start-up, after a snapshot install, and by the background
-    /// reloader. Concurrent control writes are preserved (module docs). On
-    /// error nothing is published and no epoch is recorded.
+    /// Used at start-up and by the background reloader. Concurrent control
+    /// writes are preserved (module docs). On error nothing is published and
+    /// no epoch is recorded.
     ///
     /// # Errors
     ///
     /// The first storage or decoding error of the scan.
     pub(super) fn reload(&self) -> Result<(), IdentityError> {
+        self.reload_inner(false)
+    }
+
+    /// [`Self::reload`] after the whole key space was replaced (a Raft
+    /// snapshot install). The persisted epoch may now be LOWER than the one
+    /// these caches recorded — the snapshot came from a node whose count was
+    /// behind this one's — so the bookkeeping is re-based on the epoch read:
+    /// `applied` and `target` are set to it and the parked local epochs are
+    /// dropped. Keeping the old, higher `applied` would make every later
+    /// control at or below it look already applied, and it would never bind
+    /// here until the counter caught up. On error a forced reset reload is
+    /// queued for the background reloader.
+    ///
+    /// A plain reload deliberately does not lower `applied` when it reads a
+    /// smaller epoch: a local control recorded during its scan legitimately
+    /// leaves `applied` above the epoch the reload read, and lowering it would
+    /// only cause a redundant reload. The persisted epoch moves backwards only
+    /// when the key space is replaced, which always comes through here.
+    ///
+    /// # Errors
+    ///
+    /// The first storage or decoding error of the scan.
+    pub(super) fn reload_after_reset(&self) -> Result<(), IdentityError> {
+        let outcome = self.reload_inner(true);
+        if outcome.is_err() {
+            self.reset.store(true, Ordering::Release);
+            self.request_full_reload();
+        }
+        outcome
+    }
+
+    fn reload_inner(&self, reset: bool) -> Result<(), IdentityError> {
         let _exclusive = lock(&self.reload_exclusive);
         let scan = self.scan_recording()?;
         let mut revoked = self.caches.revoked_jti.prepare(scan.revoked_jti);
@@ -452,7 +488,21 @@ impl ControlPlane {
             self.caches.revoked_jti.install(revoked);
             self.caches.blocked_jkt.install(blocked);
             self.caches.realm_status.store(Arc::new(statuses));
-            self.advance_applied(&mut journal, scan.epoch);
+            if reset {
+                journal.local_epochs.clear();
+                self.applied.store(scan.epoch, Ordering::Release);
+                self.target.store(scan.epoch, Ordering::Release);
+            } else {
+                self.advance_applied(&mut journal, scan.epoch);
+            }
+        }
+        if reset {
+            // A control replicated after the snapshot and before the reset of
+            // `target` may have signalled a value that the store above erased:
+            // re-read and signal, so it still causes a reload.
+            if let Ok(persisted) = self.read_persisted_epoch() {
+                self.signal(persisted);
+            }
         }
         // `lookup_session` returns a cached live session without consulting
         // storage, so a session revoked on another node stays live here until
@@ -639,12 +689,14 @@ impl ControlPlane {
                 continue;
             }
             let forced = self.force.swap(false, Ordering::AcqRel);
+            let reset = forced && self.reset.swap(false, Ordering::AcqRel);
             last_start = Some(Instant::now());
-            let outcome = catch_unwind(AssertUnwindSafe(|| self.reload())).unwrap_or_else(|_| {
-                Err(IdentityError::Internal {
-                    reason: "control-cache reload panicked".to_string(),
-                })
-            });
+            let outcome = catch_unwind(AssertUnwindSafe(|| self.reload_inner(reset)))
+                .unwrap_or_else(|_| {
+                    Err(IdentityError::Internal {
+                        reason: "control-cache reload panicked".to_string(),
+                    })
+                });
             match outcome {
                 Ok(()) => {
                     backoff = RETRY_MIN;
@@ -657,6 +709,9 @@ impl ControlPlane {
                     // Nothing was recorded, so the epoch still reads as ahead
                     // and the next pass retries. A forced reload re-arms.
                     if forced {
+                        if reset {
+                            self.reset.store(true, Ordering::Release);
+                        }
                         self.force.store(true, Ordering::Release);
                     }
                     tracing::warn!(

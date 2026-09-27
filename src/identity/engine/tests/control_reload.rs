@@ -512,3 +512,46 @@ fn writes_racing_a_reload_swap_are_not_lost() {
         "a replicated delete applied during the reload was undone by its swap"
     );
 }
+
+/// A snapshot install can LOWER the persisted control epoch — the leader's
+/// count was behind this node's (the replay double-count this cluster used to
+/// have, or any other divergence). The reload after the reset used to keep
+/// `applied` at the old, higher value, so every later control whose epoch was
+/// at or below it was ignored here: a realm suspended on another node stayed
+/// active on this one until the counter caught up.
+#[test]
+fn a_control_after_a_snapshot_lowered_the_epoch_still_binds() {
+    use crate::cluster::ReplicatedWriteObserver as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = open_storage(&dir);
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let node = engine_over(&storage, &clock);
+    let (realm, token) = seed_token(&node);
+    node.validate_token(&realm, &token).expect("warm");
+
+    // This node's count ran ahead: ten bumps it reloaded for.
+    let sys = keys::system_realm_id();
+    let epoch_key = keys::encode_control_epoch();
+    for _ in 0..10 {
+        storage.increment_u64(&sys, &epoch_key).expect("bump");
+    }
+    node.control.reload().expect("reload at the high epoch");
+    let high = node.control.applied_epoch();
+
+    // A snapshot from a leader whose count is lower replaces the key space.
+    storage
+        .put(&sys, &epoch_key, &(high - 5).to_le_bytes())
+        .expect("snapshot-installed epoch");
+    node.on_replicated_reset();
+
+    // Another node suspends the realm: one bump above the snapshot's epoch,
+    // still below the old high-water mark.
+    let other_node = engine_over(&storage, &clock);
+    suspend(&other_node, &realm);
+    clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
+    assert!(
+        binds_suspension(&node, &realm, &token),
+        "a suspension asserted after a snapshot lowered the control epoch never bound here"
+    );
+}

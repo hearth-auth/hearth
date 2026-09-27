@@ -242,7 +242,9 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
             let response = match &entry.payload {
                 EntryPayload::Blank => HearthLogResponse::default(),
 
-                EntryPayload::Normal(cmd) => self.apply_command(cmd.clone()).await?,
+                EntryPayload::Normal(cmd) => {
+                    self.apply_command(entry.log_id.index, cmd.clone()).await?
+                }
 
                 EntryPayload::Membership(membership) => {
                     self.last_membership =
@@ -360,8 +362,13 @@ impl HearthStateMachine {
     /// Returns the [`HearthLogResponse`] to propagate back to `client_write` callers.
     /// Unconditional commands always return `success: true`; `PutIfAbsent` returns
     /// `success: false` when the key was already present.
+    ///
+    /// `log_index` is the index of the entry being applied. openraft replays
+    /// committed entries on restart (the applied index is not persisted), so a
+    /// command that is not idempotent uses it to recognise a replay.
     async fn apply_command(
         &mut self,
+        log_index: u64,
         cmd: RaftCommand,
     ) -> Result<HearthLogResponse, StorageError<u64>> {
         let engine = Arc::clone(&self.engine);
@@ -451,7 +458,7 @@ impl HearthStateMachine {
                 leader_timestamp: _,
                 realm,
                 key,
-            } => return self.apply_increment(realm, key).await,
+            } => return self.apply_increment(log_index, realm, key).await,
         }
 
         Ok(HearthLogResponse::default())
@@ -488,33 +495,99 @@ impl HearthStateMachine {
         })
     }
 
-    /// Applies [`RaftCommand::IncrementU64`], returning the new value as the
-    /// response payload.
+    /// Applies [`RaftCommand::IncrementU64`], returning the counter's value
+    /// after this entry as the response payload.
     ///
-    /// Entries apply one at a time, so the read-modify-write inside
-    /// `increment_u64` cannot interleave with another entry's: every node
-    /// computes the same successor, and no two proposals ever receive the same
-    /// value.
+    /// Entries apply one at a time, so the read-modify-write cannot interleave
+    /// with another entry's: every node computes the same successor, and no
+    /// two proposals ever receive the same value.
+    ///
+    /// Replay-safe: see [`increment_once`]. A replayed entry changes nothing
+    /// and is not reported to the observer.
     async fn apply_increment(
         &mut self,
+        log_index: u64,
         realm: RealmId,
         key: Vec<u8>,
     ) -> Result<HearthLogResponse, StorageError<u64>> {
         let engine = Arc::clone(&self.engine);
         let (e_realm, e_key) = (realm.clone(), key.clone());
-        let next =
-            spawn_blocking(move || engine.increment_u64(&e_realm, &e_key).map_err(to_write_err))
-                .await
-                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
-        let value = next.to_le_bytes();
-        if let Some(obs) = self.observer.get() {
-            obs.on_replicated_put(&realm, &key, &value);
-        }
+        let outcome = spawn_blocking(move || {
+            increment_once(engine.as_ref(), &e_realm, &e_key, log_index).map_err(to_write_err)
+        })
+        .await
+        .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+        let value = match outcome {
+            Increment::Applied(next) => {
+                let value = next.to_le_bytes();
+                if let Some(obs) = self.observer.get() {
+                    obs.on_replicated_put(&realm, &key, &value);
+                }
+                value
+            }
+            Increment::Replayed(current) => current.to_le_bytes(),
+        };
         Ok(HearthLogResponse {
             success: true,
             payload: value.to_vec(),
         })
     }
+}
+
+/// Suffix of the row, next to a counter, that records the index of the last
+/// log entry that incremented it.
+const APPLIED_INDEX_SUFFIX: &[u8] = b"\0raft:applied-index";
+
+/// The row recording the last log index applied to the counter at `key`.
+fn applied_index_key(key: &[u8]) -> Vec<u8> {
+    let mut marker = Vec::with_capacity(key.len() + APPLIED_INDEX_SUFFIX.len());
+    marker.extend_from_slice(key);
+    marker.extend_from_slice(APPLIED_INDEX_SUFFIX);
+    marker
+}
+
+/// What [`increment_once`] did.
+#[derive(Debug, PartialEq, Eq)]
+enum Increment {
+    /// The counter moved to this value.
+    Applied(u64),
+    /// The entry had already been applied; the counter still holds this value.
+    Replayed(u64),
+}
+
+/// Increments the counter at `key` for the log entry at `log_index`, exactly
+/// once however often that entry is applied.
+///
+/// openraft 0.9 keeps the applied index in memory and re-applies every
+/// committed entry after the last purge on restart. Every other command is
+/// safe to replay — a replayed put, delete or conditional put converges on
+/// the same state — but an increment would count twice. So the counter carries
+/// a sidecar row with the index of the last entry that moved it, written in
+/// the same atomic batch: an entry at or below that index is a replay and
+/// changes nothing. The sidecar replicates with the counter (snapshots copy
+/// every row of the realm), so a snapshot install brings the leader's pair.
+fn increment_once(
+    engine: &dyn StorageEngine,
+    realm: &RealmId,
+    key: &[u8],
+    log_index: u64,
+) -> Result<Increment, crate::storage::StorageError> {
+    let current = crate::storage::decode_u64_counter(engine.get(realm, key)?.as_deref())?;
+    let marker = applied_index_key(key);
+    let last_index = crate::storage::decode_u64_counter(engine.get(realm, &marker)?.as_deref())?;
+    if last_index >= log_index {
+        return Ok(Increment::Replayed(current));
+    }
+    let next = current.saturating_add(1);
+    engine.write_batch(
+        realm,
+        &[
+            (key.to_vec(), next.to_le_bytes().to_vec()),
+            (marker, log_index.to_le_bytes().to_vec()),
+        ],
+        &[],
+    )?;
+    Ok(Increment::Applied(next))
 }
 
 /// Compress a [`SnapshotPayload`] to CBOR + gzip bytes.
@@ -767,6 +840,49 @@ mod tests {
         assert_eq!(
             sm.engine.get(&realm, b"ctr").unwrap(),
             Some(2_u64.to_le_bytes().to_vec())
+        );
+    }
+
+    /// openraft 0.9 re-applies every committed entry after the last purge on
+    /// restart (`get_initial_state`), because `last_applied` lives in memory.
+    /// Replaying an `IncrementU64` must not count it twice: a node that
+    /// restarted would otherwise run its control epoch ahead of every other
+    /// node's, and a later snapshot from a lower-count leader would lower it.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn a_replayed_increment_is_not_counted_twice() {
+        let dir = tempdir().unwrap();
+        let data = dir.path().join("data");
+        let realm = make_realm();
+        let incr = |index: u64| Entry {
+            log_id: make_log_id(index),
+            payload: EntryPayload::Normal(RaftCommand::IncrementU64 {
+                leader_timestamp: 0,
+                realm: realm.clone(),
+                key: b"ctr".to_vec(),
+            }),
+        };
+
+        let mut sm = open_sm(&data);
+        sm.apply([incr(1), incr(2)]).await.unwrap();
+        drop(sm);
+
+        // Restart: a fresh state machine over the same data, fed the same
+        // committed entries again, then one new entry.
+        let mut sm = open_sm(&data);
+        sm.apply([incr(1), incr(2)]).await.unwrap();
+        let fresh = sm.apply([incr(3)]).await.unwrap();
+
+        assert_eq!(
+            crate::storage::decode_u64_counter(Some(&fresh[0].payload)).unwrap(),
+            3,
+            "the first new increment after a replay returns 3"
+        );
+        assert_eq!(
+            crate::storage::decode_u64_counter(sm.engine.get(&realm, b"ctr").unwrap().as_deref())
+                .unwrap(),
+            3,
+            "three increments were committed; replaying two of them must not add two more"
         );
     }
 
