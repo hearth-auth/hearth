@@ -1742,9 +1742,20 @@ impl EmbeddedIdentityEngine {
             });
         }
 
-        // aud MUST contain this realm's token endpoint URL
+        // aud MUST name this realm's issuer. Under FAPI 2.0 — a FAPI 2.0
+        // client, or any client of a realm with a `fapi_profile` — it must BE
+        // the issuer, as a single string (FAPI 2.0 Security Profile
+        // §5.3.2.1); elsewhere RFC 7523 §3 lets the issuer be one value of an
+        // array.
         let expected_aud = self.realm_issuer_url(realm_id);
-        if !claims.aud.contains(&expected_aud) {
+        let aud_ok = match &claims.aud {
+            crate::identity::tokens::Audience::Single(aud) => *aud == expected_aud,
+            multi @ crate::identity::tokens::Audience::Multi(_) => {
+                !(client.profile().is_fapi2() || self.realm_enforces_fapi(realm_id)?)
+                    && multi.contains(&expected_aud)
+            }
+        };
+        if !aud_ok {
             return Err(IdentityError::InvalidClientAssertion {
                 reason: "aud claim does not match the token endpoint issuer".to_string(),
             });

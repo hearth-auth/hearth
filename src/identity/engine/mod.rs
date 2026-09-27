@@ -17469,6 +17469,8 @@ mod tests {
     /// Hot-path epoch reconciliation: debounced storage reads, bounded staleness.
     mod epoch_sync_debounce;
 
+    /// Under FAPI 2.0 an assertion's `aud` is the issuer as a single string.
+    mod client_assertion_audience;
     /// `private_key_jwt` assertion-JTI replay markers carry an expiry and are swept.
     mod client_assertion_jti;
     /// A presented assertion field is a `private_key_jwt` attempt, never ignored.
