@@ -218,10 +218,16 @@ settings. A restore writes them back in the same single write that re-creates
 the client, so a confidential or `private_key_jwt` client comes back exactly
 as strong as it was: it authenticates with the same secret or key, and is
 still refused without it. The secret hash is restored verbatim — only the two
-formats Hearth writes (`$argon2id$…` and `$hearth-sha256$v=1$…`) are accepted.
+formats Hearth writes (`$argon2id$…` and `$hearth-sha256$v=1$…`) are accepted,
+and an `$argon2id$` hash whose cost is above the ceilings password
+verification enforces (`m` 1 GiB, `t` 64, `p` 16) is refused: the stored hash
+chooses the work every authentication attempt costs, so an archive must not
+be able to choose a four-terabyte allocation. Client-secret verification
+refuses such a hash too (the secret does not match, and the KDF never runs).
 
 A restore never re-creates a client weaker than its source. A client whose
-record does not restore — a secret hash in an unknown format, a JWKS or
+record does not restore — a secret hash in an unknown format or above the
+cost ceilings, a JWKS or
 assertion key that no longer validates, or a FAPI 2.0 client without a
 verifiable key — is **not restored** and is listed, with the reason, in the
 restore report (`errors` in the HTTP response, `conflicts` in the CLI output),

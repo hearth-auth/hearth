@@ -305,7 +305,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   anyone who knew a `client_id` could push to `/as/par`, start `/device_authorization`, redeem codes
   with PKCE alone and refresh without client binding — including for FAPI 2.0 clients. A restore now
   writes every credential and security field back in the single write that re-creates the client:
-  the secret hash verbatim (`$argon2id$` or `$hearth-sha256$v=1$`; any other format is refused), the
+  the secret hash verbatim (`$argon2id$` or `$hearth-sha256$v=1$`; any other format is refused, and
+  so is an `$argon2id$` hash whose cost is above the password verifier's ceilings — `m` 1 GiB, `t`
+  64, `p` 16 — which client-secret verification now also refuses without running the KDF), the
   assertion key and JWKS (re-validated), `jwks_uri`, the profile, and the consent, logout, CORS, MFA,
   JARM and lifecycle settings. A client that cannot be restored as strong as its source — an
   unverifiable credential, or no credential although its grants need one — is not restored and is

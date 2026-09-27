@@ -2239,6 +2239,37 @@ mod tests {
         }
     }
 
+    /// A stored Argon2id hash chooses its own cost. One above the password
+    /// verifier's ceilings (a four-terabyte `m`, four billion passes) would
+    /// make every authentication attempt for the client an allocation request
+    /// the attacker sized, so the restore refuses it and reports why.
+    #[test]
+    fn a_client_record_with_an_extreme_argon2_cost_is_refused() {
+        let hash = "$argon2id$v=19$m=4294967295,t=4294967295,p=1\
+                    $c29tZXNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ";
+        let (rig, realm, cid, report) = restore_client_line(&client_line(
+            &serde_json::json!({"client_secret_hash": hash}),
+        ));
+        assert!(
+            rig.identity
+                .get_client(&realm, &cid)
+                .expect("get")
+                .is_none(),
+            "a client whose hash sets an extreme cost must not be restored"
+        );
+        assert_eq!(report.clients.errored, 1);
+        let conflict = report
+            .conflicts
+            .iter()
+            .find(|c| c.entity_type == "client")
+            .expect("the refusal must be reported");
+        assert!(
+            conflict.reason.contains("argon2 parameter"),
+            "the report must name the cost parameter: {}",
+            conflict.reason
+        );
+    }
+
     /// Both stored formats come back verbatim; the client is not public.
     #[test]
     fn a_client_record_with_a_supported_hash_is_restored_verbatim() {

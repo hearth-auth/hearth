@@ -559,6 +559,23 @@ fn phc_param_within(
     Ok(())
 }
 
+/// Refuses an Argon2 PHC string whose `m`, `t` or `p` is above the
+/// [`work_factor`] ceilings.
+///
+/// Shared by every Argon2 verifier and by the restore-time validation of a
+/// stored client-secret hash, so a password, a client secret and a backup
+/// record are all held to the same ceilings.
+fn argon2_params_within(parsed: &PasswordHash<'_>) -> Result<(), IdentityError> {
+    phc_param_within(parsed, "m", work_factor::MAX_ARGON2_M, "argon2")?;
+    phc_param_within(parsed, "t", work_factor::MAX_ARGON2_T, "argon2")?;
+    phc_param_within(parsed, "p", work_factor::MAX_ARGON2_P, "argon2")
+}
+
+/// Set once the first over-ceiling client-secret hash has been logged, so a
+/// client hammered with authentication attempts cannot flood the log.
+static OVER_CEILING_SECRET_HASH_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Refuses a bcrypt hash whose cost is above [`work_factor::MAX_BCRYPT_COST`].
 ///
 /// The cost is the two digits after the version tag: `$2b$<cost>$<salt+hash>`.
@@ -617,9 +634,7 @@ pub(crate) fn verify_hash(
     if alg_id == argon2::ARGON2ID_IDENT {
         // Refuse BEFORE the KDF runs (26.36). `m` is memory in KiB, so an
         // unbounded one is an allocation request, not merely slow.
-        phc_param_within(&parsed, "m", work_factor::MAX_ARGON2_M, "argon2")?;
-        phc_param_within(&parsed, "t", work_factor::MAX_ARGON2_T, "argon2")?;
-        phc_param_within(&parsed, "p", work_factor::MAX_ARGON2_P, "argon2")?;
+        argon2_params_within(&parsed)?;
         Ok(Argon2::default()
             .verify_password(password.as_bytes(), &parsed)
             .is_ok())
@@ -783,6 +798,23 @@ pub(crate) fn verify_raw_secret(secret: &[u8], hash_str: &str) -> Result<bool, I
     let parsed = PasswordHash::new(hash_str).map_err(|e| IdentityError::InvalidInput {
         reason: format!("invalid hash format: {e}"),
     })?;
+    // The stored hash chooses the Argon2 cost, and a restored one is taken
+    // verbatim. Refuse one above the password ceilings BEFORE the KDF runs:
+    // `m` is an allocation size (argon2 0.5 accepts u32::MAX KiB — 4 TiB).
+    // A refusal is a non-match, not an error, so the caller's behaviour is
+    // exactly that of a wrong secret.
+    if let Err(e) = argon2_params_within(&parsed) {
+        if OVER_CEILING_SECRET_HASH_LOGGED.swap(true, Ordering::Relaxed) {
+            tracing::debug!(reason = %e, "refused to verify a secret against an over-ceiling hash");
+        } else {
+            tracing::warn!(
+                reason = %e,
+                "refused to verify a secret against a stored Argon2 hash whose cost is above \
+                 the server's ceiling; the secret is treated as not matching (logged once)"
+            );
+        }
+        return Ok(false);
+    }
     Ok(Argon2::default().verify_password(secret, &parsed).is_ok())
 }
 
@@ -868,7 +900,8 @@ pub(crate) fn is_fast_client_secret_hash(stored: &str) -> bool {
 /// backup restore — so the hash is kept verbatim (never re-hashed: there is no
 /// plaintext) and anything else is refused. A value in an unknown format could
 /// never authenticate its client, and dropping it would leave the client
-/// public.
+/// public. An Argon2id hash whose `m`/`t`/`p` is above the verifier's
+/// ceilings is refused too: [`verify_raw_secret`] would refuse to verify it.
 pub(crate) fn validate_stored_client_secret_hash(stored: &str) -> Result<(), IdentityError> {
     if let Some(digest) = stored.strip_prefix(FAST_CLIENT_SECRET_PREFIX) {
         let decodes_to_a_digest = digest.len() == 43
@@ -882,10 +915,13 @@ pub(crate) fn validate_stored_client_secret_hash(stored: &str) -> Result<(), Ide
             reason: "malformed $hearth-sha256$v=1$ client secret hash".to_string(),
         });
     }
-    let argon2id = PasswordHash::new(stored)
-        .is_ok_and(|parsed| parsed.algorithm.as_str() == "argon2id" && parsed.hash.is_some());
-    if argon2id {
-        return Ok(());
+    if let Ok(parsed) = PasswordHash::new(stored) {
+        if parsed.algorithm.as_str() == "argon2id" && parsed.hash.is_some() {
+            // The same ceilings the verifier enforces: a hash above them could
+            // never authenticate its client, and would have let the archive
+            // choose the server's memory cost per attempt.
+            return argon2_params_within(&parsed);
+        }
     }
     Err(IdentityError::InvalidInput {
         reason: "unsupported client secret hash format: expected $argon2id$ or \
@@ -1941,6 +1977,80 @@ mod tests {
             assert!(!verify_client_secret(b"wrong", &stored).expect("verify"));
         });
         assert_eq!((slow, fast), (2, 0), "legacy hashes are detected by format");
+    }
+
+    /// Mints a real Argon2id PHC string for `secret` with explicit costs,
+    /// bypassing the server's own parameter choice — what a hand-edited or
+    /// hostile backup archive would carry.
+    fn argon2id_hash_with(secret: &[u8], m: u32, t: u32, p: u32) -> String {
+        let params = argon2::Params::new(m, t, p, None).expect("params");
+        let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+        argon2
+            .hash_password(secret, &SaltString::generate(&mut OsRng))
+            .expect("hash")
+            .to_string()
+    }
+
+    /// A stored client-secret hash chooses its own Argon2 cost, and a backup
+    /// restore takes it verbatim. The password verifier refuses costs above
+    /// the 26.36 ceilings; the client-secret verifier must refuse the same
+    /// hash, and must do so WITHOUT running the KDF.
+    ///
+    /// `t=65` with `m=8` is cheap to mint and to verify, so a verifier that
+    /// ignored the ceiling would answer `true` here: the secret is correct.
+    #[test]
+    fn client_secret_verification_refuses_argon2_costs_above_the_ceiling() {
+        let over_t = argon2id_hash_with(b"right-secret", 8, work_factor::MAX_ARGON2_T + 1, 1);
+        assert!(
+            !verify_raw_secret(b"right-secret", &over_t).expect("a refusal is a non-match"),
+            "a hash above the t ceiling must never verify, even with the right secret"
+        );
+        assert!(
+            !verify_client_secret(b"right-secret", &over_t).expect("a refusal is a non-match"),
+            "the client-secret dispatcher must inherit the refusal"
+        );
+
+        // Control: the same secret at a cost inside the ceiling verifies.
+        let within = argon2id_hash_with(b"right-secret", 8, work_factor::MAX_ARGON2_T, 1);
+        assert!(verify_raw_secret(b"right-secret", &within).expect("verify"));
+
+        // m is KiB: this is a four-terabyte allocation request, and t is
+        // four billion passes. It must return at once, not allocate.
+        let started = std::time::Instant::now();
+        let absurd = "$argon2id$v=19$m=4294967295,t=4294967295,p=1\
+                      $c29tZXNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ";
+        assert!(!verify_raw_secret(b"anything", absurd).expect("a refusal is a non-match"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the refusal must happen before the KDF runs"
+        );
+    }
+
+    /// A restore validates a stored hash before writing it; one whose cost is
+    /// above a ceiling is refused there, with the parameter named.
+    #[test]
+    fn stored_client_secret_hash_validation_refuses_argon2_costs_above_the_ceiling() {
+        for (hash, param) in [
+            (
+                "$argon2id$v=19$m=4294967295,t=4294967295,p=1\
+                 $c29tZXNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ",
+                "argon2 parameter m",
+            ),
+            (
+                "$argon2id$v=19$m=256,t=65,p=1$c29tZXNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ",
+                "argon2 parameter t",
+            ),
+            (
+                "$argon2id$v=19$m=256,t=1,p=17$c29tZXNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ",
+                "argon2 parameter p",
+            ),
+        ] {
+            let err = validate_stored_client_secret_hash(hash).expect_err(hash);
+            assert!(err.to_string().contains(param), "{hash}: got {err}");
+        }
+        // Control: the server's own parameters pass.
+        let ok = hash_raw_secret(b"s", &test_config()).expect("argon2");
+        validate_stored_client_secret_hash(&ok).expect("the server's own hash must pass");
     }
 
     #[test]
