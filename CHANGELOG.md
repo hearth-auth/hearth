@@ -77,6 +77,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `client_credentials` token and consent revocation answered an error after the revocation had already
   committed (measured on three nodes: 10.0 s against 10.3 ms for a normal write). The observer now only
   updates the in-memory blocklist.
+- **A revoked session could stay valid on a busy node** — a validation that missed the session cache
+  read the session from storage and cached it afterwards; a revocation that landed in between evicted
+  nothing (the entry was not cached yet), so the live session read before it was cached and every
+  later validation of its tokens succeeded after `POST /revoke` or a logout had answered `200`. A
+  cache fill is now discarded whenever a session write, eviction or cache flush happened since its
+  read.
 - **A failed control-cache reload no longer fails open** — a reload recorded the control epoch before
   it re-read storage and ignored read errors, so one failed scan left that node enforcing stale
   revocations, DPoP blocks and realm statuses until the next control was asserted. The epoch is now

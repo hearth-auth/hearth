@@ -821,6 +821,9 @@ pub struct EmbeddedIdentityEngine {
     /// Hot-path readers call `load()` — one epoch-pinned load, no lock, no I/O.
     /// Writers use `rcu()` on `persist_session`. Bounded to [`SESSION_CACHE_MAX`].
     session_cache: Arc<control::SessionCache>,
+    /// Generation guarding [`Self::session_cache`] cache-miss fills against a
+    /// racing revocation, eviction or flush; see [`Self::get_session_arc`].
+    session_cache_gen: Arc<AtomicU64>,
     /// In-process token claims cache for the `validate_token` hot path (S12-F2).
     ///
     /// Key: SHA-256(`token_bytes`) as `[u8; 32]`. Value: `Arc<TokenClaims>`.
@@ -1376,6 +1379,7 @@ impl EmbeddedIdentityEngine {
             device_fp,
             sv_store,
             session_cache: Arc::clone(&caches.sessions),
+            session_cache_gen: Arc::clone(&caches.session_gen),
             token_claims_cache: Arc::clone(&caches.claims),
             token_claims_cache_gen: Arc::clone(&caches.claims_gen),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
@@ -1803,6 +1807,7 @@ impl EmbeddedIdentityEngine {
             device_fp,
             sv_store,
             session_cache: Arc::clone(&caches.sessions),
+            session_cache_gen: Arc::clone(&caches.session_gen),
             token_claims_cache: Arc::clone(&caches.claims),
             token_claims_cache_gen: Arc::clone(&caches.claims_gen),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
@@ -3933,7 +3938,7 @@ impl EmbeddedIdentityEngine {
         if session.is_valid(self.clock.now()) {
             self.session_cache_insert(realm_id, session);
         } else {
-            self.session_cache_evict(realm_id, session.id());
+            self.session_cache_invalidate(realm_id, session.id());
         }
         Ok(())
     }
@@ -3954,6 +3959,46 @@ impl EmbeddedIdentityEngine {
             m.insert(key.clone(), Arc::clone(&val));
             m
         });
+    }
+
+    /// Cache-miss fill of a session read from storage, discarded if any
+    /// session write, eviction or flush happened since `gen_before_read` —
+    /// the generation snapshotted before the read. To bound a cached trust
+    /// decision, never write the entry if the generation moved (the HEA-2097
+    /// claims-cache rule, applied to sessions).
+    ///
+    /// Two checks, because an eviction that finds the key absent does not
+    /// touch the map, so the `rcu` compare-and-swap alone cannot see it: the
+    /// generation is re-read inside the `rcu`, and again after it behind a
+    /// `SeqCst` fence. Every invalidation bumps the generation, fences, then
+    /// looks at the map ([`Self::session_cache_invalidate`]). So either the
+    /// re-read here sees the bump and this fill removes its own entry, or the
+    /// invalidation sees the entry and removes it.
+    fn session_cache_fill(&self, realm_id: &RealmId, session: &Arc<Session>, gen_before_read: u64) {
+        if self.session_cache.load().len() >= SESSION_CACHE_MAX {
+            return;
+        }
+        let key = (realm_id.clone(), session.id().clone());
+        self.session_cache.rcu(|map| {
+            let mut m = HashMap::clone(map);
+            if self.session_cache_gen.load(Ordering::SeqCst) == gen_before_read {
+                m.insert(key.clone(), Arc::clone(session));
+            }
+            m
+        });
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.session_cache_gen.load(Ordering::SeqCst) != gen_before_read {
+            self.session_cache_evict(realm_id, session.id());
+        }
+    }
+
+    /// Evicts a session because a write changed it (revocation, expiry,
+    /// policy eviction), and fences off any cache-miss fill that read it
+    /// before the write (see [`Self::session_cache_fill`]).
+    fn session_cache_invalidate(&self, realm_id: &RealmId, session_id: &SessionId) {
+        self.session_cache_gen.fetch_add(1, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        self.session_cache_evict(realm_id, session_id);
     }
 
     /// Hot-path session lookup that returns the cached `Arc<Session>` without
@@ -4008,11 +4053,20 @@ impl EmbeddedIdentityEngine {
         }
 
         // Cache miss: load from storage and warm the cache on a valid result.
+        //
+        // Snapshot the cache generation BEFORE the read. A revocation that
+        // lands between the read and the insert writes its row and evicts a
+        // key that is not cached yet; inserting the live session read here
+        // afterwards would resurrect it for every later validation. The fill
+        // is dropped whenever the generation moved (see
+        // `session_cache_fill`).
+        let gen_before_read = self.session_cache_gen.load(Ordering::SeqCst);
         let session = self.load_session_raw(realm_id, session_id)?;
         match session {
             Some(s) if s.is_valid(now) && !s.is_policy_expired(now) => {
-                self.session_cache_insert(realm_id, &s);
-                Ok(Some(Arc::new(s)))
+                let arc = Arc::new(s);
+                self.session_cache_fill(realm_id, &arc, gen_before_read);
+                Ok(Some(arc))
             }
             Some(s) if s.is_valid(now) => {
                 // Policy-expired (A-18): reject fail-closed. Eviction is
@@ -4048,6 +4102,10 @@ impl EmbeddedIdentityEngine {
     /// of the process. Token-claims caches are handled separately by
     /// `flush_token_claims_cache`.
     fn purge_realm_caches(&self, realm_id: &RealmId) {
+        // Fence off any in-flight cache-miss fill of this realm's sessions
+        // (see `session_cache_fill`) before looking at the map.
+        self.session_cache_gen.fetch_add(1, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
         // Session cache: keyed by (realm, session). Rebuild without this realm.
         // An owned snapshot for the scan: it walks every cached session, and an
         // epoch pin held that long would stall reclamation process-wide.
@@ -4101,7 +4159,7 @@ impl EmbeddedIdentityEngine {
         let mut evicted = session.clone();
         evicted.revoke();
         self.persist_session(realm_id, &evicted)?;
-        self.session_cache_evict(realm_id, evicted.id());
+        self.session_cache_invalidate(realm_id, evicted.id());
         if let Ok(Some(realm)) = self.get_realm(realm_id) {
             if realm.config().session_version.enabled {
                 let retention = realm.config().session_version.delta_retention_seconds;
@@ -4848,7 +4906,7 @@ impl EmbeddedIdentityEngine {
                     }
                     // Drop the cached (still-valid) copy so subsequent
                     // get_session calls observe the revocation.
-                    self.session_cache_evict(realm_id, &session_id);
+                    self.session_cache_invalidate(realm_id, &session_id);
                 }
             }
         }
@@ -5909,7 +5967,7 @@ impl EmbeddedIdentityEngine {
                         .map_err(Self::storage_err)?;
                     // Evict from in-process cache so subsequent get_session
                     // calls see the deletion rather than a stale cache hit.
-                    self.session_cache_evict(realm_id, &session_id);
+                    self.session_cache_invalidate(realm_id, &session_id);
                 }
             }
 
@@ -7858,7 +7916,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     if session.is_valid(self.clock.now()) {
                         self.session_cache_insert(realm_id, &session);
                     } else {
-                        self.session_cache_evict(realm_id, session.id());
+                        self.session_cache_invalidate(realm_id, session.id());
                     }
                 }
                 dur.map_err(Self::storage_err)?;
@@ -17398,6 +17456,8 @@ mod tests {
     mod revocation_reload_races;
     /// PKCE challenge and refresh-token hash compare in constant time.
     mod secret_compare;
+    /// A session-cache fill never resurrects a session revoked while it ran.
+    mod session_fill_race;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.
