@@ -4603,7 +4603,12 @@ impl EmbeddedIdentityEngine {
     /// [`control::ControlPlane::apply`], which orders it against a concurrent
     /// reload so the reload cannot overwrite it. No lock is held across the
     /// storage write.
+    ///
+    /// The bump is marked in flight until it is recorded, so the reloader does
+    /// not reload for it when the Raft observer (or a validation) sees the new
+    /// epoch first.
     fn publish_control(&self, op: Option<control::ControlOp>) {
+        let _in_flight = self.control.begin_local_bump();
         let epoch = self.persist_control_epoch_bump();
         self.control.apply(op, epoch);
     }

@@ -69,7 +69,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   now run on a background thread and replay every change applied during their scan before they swap
   the caches in. Token validation no longer reloads inline or takes a lock when another node asserts
   a control; it signals the reloader, and the control binds on that node within the existing 200 ms
-  bound plus one reload (task 26.43 follow-up).
+  bound plus one reload (held back at most 100 ms while that node's own control writes are in
+  flight, so a node never reloads for a control it applied itself) (task 26.43 follow-up).
 - **Cluster: revoking a sessionless token on the leader took 10 s and then failed** — every node's
   Raft observer, the leader's included, projected a replicated revocation by re-running the local
   revocation path, which bumped the control epoch: a Raft proposal made from inside the state

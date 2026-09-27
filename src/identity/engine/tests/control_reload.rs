@@ -35,7 +35,13 @@ struct FaultStorage {
     inner: Arc<dyn StorageEngine>,
     fail_scans: AtomicBool,
     writes: AtomicUsize,
+    /// Runs after every successful `increment_u64`, with the new value,
+    /// before the increment returns to its caller.
+    on_increment: std::sync::Mutex<Option<IncrementHook>>,
 }
+
+/// See [`FaultStorage::on_increment`].
+type IncrementHook = Arc<dyn Fn(u64) + Send + Sync>;
 
 impl FaultStorage {
     fn over(inner: Arc<dyn StorageEngine>) -> Arc<Self> {
@@ -43,6 +49,7 @@ impl FaultStorage {
             inner,
             fail_scans: AtomicBool::new(false),
             writes: AtomicUsize::new(0),
+            on_increment: std::sync::Mutex::new(None),
         })
     }
 
@@ -114,7 +121,12 @@ impl StorageEngine for FaultStorage {
 
     fn increment_u64(&self, realm_id: &RealmId, key: &[u8]) -> Result<u64, StorageError> {
         self.wrote();
-        self.inner.increment_u64(realm_id, key)
+        let next = self.inner.increment_u64(realm_id, key)?;
+        let hook = self.on_increment.lock().expect("hook lock").clone();
+        if let Some(hook) = hook {
+            hook(next);
+        }
+        Ok(next)
     }
 
     fn write_batch(
@@ -583,5 +595,72 @@ fn only_a_signal_that_raises_the_target_wakes_the_reloader() {
         plane.wakes_for_test() - before,
         2,
         "a higher epoch wakes it"
+    );
+}
+
+/// On a cluster leader the Raft observer sees this node's own epoch bump
+/// replicate back and signals it BEFORE the writer that made the bump records
+/// it. A writer slower than the reloader's settle delay (5 ms) used to lose
+/// that race: the leader reloaded every control cache — and dropped its
+/// session and token-claims caches — for a control it had applied itself.
+/// Reloads now wait for this node's in-flight bumps to be recorded.
+#[test]
+fn a_node_does_not_reload_for_its_own_control() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fault = FaultStorage::over(open_storage(&dir));
+    let storage = Arc::clone(&fault) as Arc<dyn StorageEngine>;
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let engine = engine_over(&storage, &clock);
+
+    let reloads = Arc::new(AtomicUsize::new(0));
+    {
+        let reloads = Arc::clone(&reloads);
+        engine.control.set_scan_hook(Some(Arc::new(move || {
+            reloads.fetch_add(1, Ordering::SeqCst);
+        })));
+    }
+    // The observer's signal lands first; the writer then takes 50 ms — ten
+    // settle delays — to record the epoch its bump produced.
+    {
+        let plane = Arc::clone(&engine.control);
+        *fault.on_increment.lock().expect("hook lock") = Some(Arc::new(move |epoch| {
+            plane.signal(epoch);
+            std::thread::sleep(Duration::from_millis(50));
+        }));
+    }
+
+    engine.bump_control_epoch();
+    let bumped = engine.control.applied_epoch();
+    std::thread::sleep(Duration::from_millis(400));
+
+    assert_eq!(
+        reloads.load(Ordering::SeqCst),
+        0,
+        "the node reloaded its control caches for a control it applied itself"
+    );
+    assert_eq!(engine.control.applied_epoch(), bumped);
+}
+
+/// With no reloader running (its thread failed to start), nothing ever covers
+/// the gaps between this node's own epochs, so the epochs parked above
+/// `applied` must stay bounded instead of growing for the life of the process.
+#[test]
+fn parked_local_epochs_stay_bounded_without_a_reloader() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = open_storage(&dir);
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let plane = control::ControlPlane::new(
+        storage,
+        clock as Arc<dyn Clock>,
+        control::ControlCaches::new(),
+    );
+    // Every other epoch is another node's: none is contiguous with `applied`.
+    for epoch in (2..20_000_u64).step_by(2) {
+        plane.apply(None, Some(epoch));
+    }
+    assert!(
+        plane.parked_local_epochs_for_test() <= control::MAX_PARKED_LOCAL_EPOCHS,
+        "parked local epochs grew to {}",
+        plane.parked_local_epochs_for_test()
     );
 }

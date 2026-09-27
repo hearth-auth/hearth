@@ -94,6 +94,20 @@ const RETRY_MIN: Duration = Duration::from_millis(100);
 /// Longest retry delay after repeated reload failures.
 const RETRY_MAX: Duration = Duration::from_secs(5);
 
+/// Longest the reloader holds a reload back while this node's own control
+/// bumps are in flight (see [`ControlPlane::begin_local_bump`]).
+///
+/// A bump is normally recorded within milliseconds of being persisted; the
+/// bound only matters for a stalled write, and caps how much it can delay a
+/// reload for a control asserted elsewhere.
+const LOCAL_BUMP_HOLD_MAX: Duration = Duration::from_millis(100);
+
+/// Most epochs a node parks above `applied` waiting for the gap below them to
+/// close. A reload closes every gap, so the set only grows past a handful when
+/// no reload runs (the reloader thread failed to start); past this bound it is
+/// dropped, which costs at most a reload that nothing would run anyway.
+pub(super) const MAX_PARKED_LOCAL_EPOCHS: usize = 1024;
+
 /// How long the idle reloader parks before re-checking on its own, in case a
 /// signal raced the publication of its thread handle.
 const IDLE_RECHECK: Duration = Duration::from_secs(1);
@@ -222,6 +236,11 @@ pub(super) struct ControlPlane {
     reset: AtomicBool,
     /// Set when the owning engine drops; the reloader exits.
     shutdown: AtomicBool,
+    /// This node's control bumps persisted or being persisted but not yet
+    /// recorded by their writer.
+    local_bumps: std::sync::atomic::AtomicUsize,
+    /// The parked-epoch bound has been hit and reported.
+    parked_overflow_reported: AtomicBool,
     /// Taken only by control writers and the reloader — never by validation.
     journal: Mutex<Journal>,
     /// One reload at a time (the background thread and a snapshot install).
@@ -263,6 +282,8 @@ impl ControlPlane {
             force: AtomicBool::new(false),
             reset: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
+            local_bumps: std::sync::atomic::AtomicUsize::new(0),
+            parked_overflow_reported: AtomicBool::new(false),
             journal: Mutex::new(Journal::default()),
             reload_exclusive: Mutex::new(()),
             worker: OnceLock::new(),
@@ -325,6 +346,21 @@ impl ControlPlane {
         if self.target.fetch_max(persisted, Ordering::AcqRel) < persisted {
             self.wake();
         }
+    }
+
+    /// Marks one of this node's control bumps as in flight until the returned
+    /// guard drops. Take it before persisting the bump and drop it after
+    /// [`Self::apply`] recorded the epoch the bump produced.
+    ///
+    /// On a cluster leader the Raft observer signals this node's own bump as
+    /// it replicates back, before the writer records it; on a single node a
+    /// validation can read the fresh epoch in the same window. The reloader
+    /// holds a reload back while any bump is in flight (at most
+    /// [`LOCAL_BUMP_HOLD_MAX`]), so it does not reload — and drop the session
+    /// and token-claims caches — for a control this node applied itself.
+    pub(super) fn begin_local_bump(&self) -> LocalBump<'_> {
+        self.local_bumps.fetch_add(1, Ordering::AcqRel);
+        LocalBump { plane: self }
     }
 
     /// Asks the reloader for a full reload whatever the epochs say.
@@ -400,6 +436,19 @@ impl ControlPlane {
         }
         journal.local_epochs.insert(epoch);
         self.advance_applied(journal, applied);
+        if journal.local_epochs.len() > MAX_PARKED_LOCAL_EPOCHS {
+            // Only a reload closes the gaps below these epochs, and none has
+            // for this long: the reloader is not running. Dropping them only
+            // means a reload is needed to advance `applied`, which it was.
+            journal.local_epochs.clear();
+            if !self.parked_overflow_reported.swap(true, Ordering::Relaxed) {
+                tracing::error!(
+                    bound = MAX_PARKED_LOCAL_EPOCHS,
+                    "control epochs asserted on other nodes are not being reloaded here; \
+                     is the control-cache reloader running?"
+                );
+            }
+        }
     }
 
     /// Sets `applied` to `floor` (if higher), then through every contiguous
@@ -676,6 +725,26 @@ impl ControlPlane {
         }
     }
 
+    /// Waits until no local bump is in flight, or [`LOCAL_BUMP_HOLD_MAX`].
+    /// Returns `false` on shutdown.
+    fn hold_for_local_bumps(&self) -> bool {
+        let deadline = Instant::now() + LOCAL_BUMP_HOLD_MAX;
+        loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                return false;
+            }
+            if self.local_bumps.load(Ordering::Acquire) == 0 {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return true;
+            }
+            // The last guard to drop unparks this thread.
+            std::thread::park_timeout(deadline - now);
+        }
+    }
+
     /// The background reloader's loop.
     fn run(self: Arc<Self>) {
         let _runtime = self.runtime.as_ref().map(tokio::runtime::Handle::enter);
@@ -694,6 +763,9 @@ impl ControlPlane {
                 not_before = not_before.max(started + RELOAD_MIN_SPACING);
             }
             if !self.pause_until(not_before) {
+                return;
+            }
+            if !self.hold_for_local_bumps() {
                 return;
             }
             if !self.reload_wanted() {
@@ -747,6 +819,12 @@ impl ControlPlane {
         lock(&self.journal)
     }
 
+    /// How many local epochs are parked above `applied`.
+    #[cfg(test)]
+    pub(super) fn parked_local_epochs_for_test(&self) -> usize {
+        lock(&self.journal).local_epochs.len()
+    }
+
     /// How many times the reloader has been woken.
     #[cfg(test)]
     pub(super) fn wakes_for_test(&self) -> u64 {
@@ -770,4 +848,17 @@ pub(super) fn decode_revoked_jti_expiry(value: &[u8]) -> i64 {
 /// The revoked-JTI cache key: `{realm_uuid}:{jti}`.
 pub(super) fn revoked_jti_cache_key(realm: &RealmId, jti: &str) -> String {
     format!("{}:{}", realm.as_uuid(), jti)
+}
+
+/// One in-flight local control bump; see [`ControlPlane::begin_local_bump`].
+pub(super) struct LocalBump<'a> {
+    plane: &'a ControlPlane,
+}
+
+impl Drop for LocalBump<'_> {
+    fn drop(&mut self) {
+        if self.plane.local_bumps.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.plane.wake();
+        }
+    }
 }
