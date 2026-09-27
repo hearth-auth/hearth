@@ -4723,6 +4723,49 @@ impl EmbeddedIdentityEngine {
             .any(|e| keys::parse_retiring_key_id(&e.key).as_deref() == Some(key_id)))
     }
 
+    /// Decides what installing `archived` as the system realm's signing key
+    /// does, reading only: [`ImportOutcome::Skipped`] when it is already the
+    /// active key, or when the system realm holds operator accounts and
+    /// `overwrite` is `false` (a live system realm keeps the key its live
+    /// tokens are signed with); [`ImportOutcome::Created`] for a system realm
+    /// with no user (its seeded key has signed nothing);
+    /// [`ImportOutcome::Overwritten`] for a live key `overwrite` replaces. A
+    /// key the system realm rotated away from is refused whenever it would be
+    /// installed.
+    fn plan_system_key_import(
+        &self,
+        current: &SigningKey,
+        archived: &SigningKey,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        if current.key_id() == archived.key_id() {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let pristine = !self.system_realm_has_users()?;
+        if !pristine && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        // Never reinstall a key this system realm rotated away from — for
+        // instance one retired after a compromise. An archive older than the
+        // rotation still carries it, and installing it would re-arm every
+        // token its holder can mint.
+        if self.system_rotated_away_from(archived.key_id())? {
+            return Err(IdentityError::InvalidInput {
+                reason: format!(
+                    "the archived system signing key {} is one this system realm rotated away \
+                     from; a restore never reinstalls a retired key (restore a backup made \
+                     after the rotation)",
+                    archived.key_id()
+                ),
+            });
+        }
+        Ok(if pristine {
+            ImportOutcome::Created
+        } else {
+            ImportOutcome::Overwritten
+        })
+    }
+
     fn purge_realm_retiring_keys(
         storage: &Arc<dyn StorageEngine>,
         realm_id: &RealmId,
@@ -11953,29 +11996,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let _ops_guard = self.realm_ops_lock.lock().expect("realm ops lock");
 
         let current = self.get_or_load_realm_signing_key(&sys_realm)?;
-        if current.key_id() == archived.key_id() {
-            return Ok(ImportOutcome::Skipped);
+        let outcome = self.plan_system_key_import(&current, &archived, overwrite)?;
+        if outcome == ImportOutcome::Skipped {
+            return Ok(outcome);
         }
-        // A system realm with no user holds only the key seeded at engine
-        // construction, which has signed nothing: it is replaced as if the
-        // realm were absent. A live one keeps its key unless the caller asked
-        // for an overwrite — the key every live operator token is signed with.
-        let pristine = !self.system_realm_has_users()?;
-        if !pristine && !overwrite {
-            return Ok(ImportOutcome::Skipped);
-        }
-        // Never reinstall a key this system realm rotated away from — for
-        // instance one retired after a compromise. An archive older than the
-        // rotation still carries it, and installing it would re-arm every
-        // token its holder can mint.
-        if self.system_rotated_away_from(archived.key_id())? {
-            return Err(IdentityError::InvalidInput {
-                reason: format!(
-                    "the archived system signing key {} is one this system realm rotated away                      from; a restore never reinstalls a retired key (restore a backup made                      after the rotation)",
-                    archived.key_id()
-                ),
-            });
-        }
+        let pristine = outcome == ImportOutcome::Created;
 
         let kek = self
             .config
@@ -11998,11 +12023,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             pristine,
             "system realm signing key restored from a backup archive"
         );
-        Ok(if pristine {
-            ImportOutcome::Created
-        } else {
-            ImportOutcome::Overwritten
-        })
+        Ok(outcome)
+    }
+
+    fn preview_system_realm_signing_key(
+        &self,
+        pkcs8: &[u8],
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        let archived = SigningKey::from_pkcs8(pkcs8)?;
+        let current = self.get_or_load_realm_signing_key(&keys::system_realm_id())?;
+        self.plan_system_key_import(&current, &archived, overwrite)
     }
 
     #[allow(clippy::too_many_lines)]

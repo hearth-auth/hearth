@@ -1235,16 +1235,18 @@ impl BackupImporter {
             });
             return Ok(());
         };
-        if opts.dry_run {
-            report.realms.created += 1;
-            return Ok(());
-        }
         let replace_live =
             opts.mode == RestoreMode::Overwrite && opts.replace_live_system_signing_key;
-        match self
-            .identity
-            .import_system_realm_signing_key(pkcs8, replace_live)
-        {
+        // A dry run reports what the real run would do — the same outcome, or
+        // the same refusal — without writing.
+        let outcome = if opts.dry_run {
+            self.identity
+                .preview_system_realm_signing_key(pkcs8, replace_live)
+        } else {
+            self.identity
+                .import_system_realm_signing_key(pkcs8, replace_live)
+        };
+        match outcome {
             Ok(ImportOutcome::Skipped) => {
                 report.realms.skipped += 1;
                 report.conflicts.push(Conflict {

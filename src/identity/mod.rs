@@ -2037,6 +2037,17 @@ pub trait IdentityEngine: Send + Sync {
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError>;
 
+    /// Predicts, without writing anything, what
+    /// [`import_system_realm_signing_key`](Self::import_system_realm_signing_key)
+    /// would do with `pkcs8` and `overwrite` — the same outcome, or the same
+    /// refusal. A dry-run restore reports this rather than assuming the key
+    /// would be installed.
+    fn preview_system_realm_signing_key(
+        &self,
+        pkcs8: &[u8],
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
     /// Imports an OAuth 2.0 client: from an external system, a Hearth
     /// backup, or `hearth.yaml` reconciliation.
     ///

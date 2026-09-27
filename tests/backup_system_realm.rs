@@ -592,6 +592,70 @@ async fn a_dry_run_of_the_system_realm_writes_nothing() {
     );
 }
 
+/// A dry run reports what the real restore would do with the system signing
+/// key, not an unconditional "created": a live system realm keeps its key in
+/// skip and merge (and in overwrite without the opt-in), and a key the target
+/// rotated away from is refused.
+#[tokio::test]
+async fn a_dry_run_predicts_what_the_restore_does_with_the_system_key() {
+    let sys = system_realm();
+    let src = common::TestHarness::embedded().await.expect("src");
+    seed_operator(&src, "operator@hearth.test", "Operat0r-Pa55word!");
+    let archive = export(&src, std::slice::from_ref(&sys));
+
+    let dst = common::TestHarness::embedded().await.expect("dst");
+    seed_operator(&dst, "live@hearth.test", "Live-Pa55word!");
+    for options in [
+        opts(RestoreMode::Skip),
+        opts(RestoreMode::Merge),
+        opts(RestoreMode::Overwrite),
+    ] {
+        let dry = ImportOptions {
+            dry_run: true,
+            ..options.clone()
+        };
+        let predicted = restore(&dst, &archive, &dry).expect("dry run");
+        assert_eq!(
+            (predicted.realms.created, predicted.realms.skipped),
+            (0, 1),
+            "{:?}: a live system realm keeps its key, and the dry run says so",
+            options.mode
+        );
+        assert!(
+            predicted.conflicts.iter().any(|c| c.entity_type == "realm"),
+            "{:?}: the kept key is reported",
+            options.mode
+        );
+    }
+    let predicted = restore(
+        &dst,
+        &archive,
+        &ImportOptions {
+            dry_run: true,
+            ..replace_key(RestoreMode::Overwrite)
+        },
+    )
+    .expect("dry run");
+    assert_eq!(predicted.realms.overwritten, 1, "the opt-in replaces it");
+
+    // A key the target rotated away from: the dry run refuses as the restore
+    // would.
+    let own = export(&dst, std::slice::from_ref(&sys));
+    dst.identity()
+        .rotate_realm_signing_key(&sys, 0)
+        .expect("rotate");
+    let err = restore(
+        &dst,
+        &own,
+        &ImportOptions {
+            dry_run: true,
+            ..replace_key(RestoreMode::Overwrite)
+        },
+    )
+    .expect_err("the dry run predicts the refusal");
+    assert!(err.to_string().contains("rotated away"), "{err}");
+}
+
 // ── Authorization ─────────────────────────────────────────────────────────────
 
 /// A caller scoped to a tenant realm (`allowed_realm = Some(tenant)`, what the
