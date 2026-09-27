@@ -238,26 +238,10 @@ impl EmbeddedIdentityEngine {
             }
             client.set_authorization_signed_response_alg(Some(alg.clone()));
         }
-        // FAPI 2.0 registration constraints.
-        if request.profile.is_fapi2() {
-            // FAPI2 clients must not use client_secret — private_key_jwt only.
-            if request.client_secret.is_some() {
-                return Err(IdentityError::FapiViolation {
-                    reason: "FAPI 2.0 clients must not use client_secret; \
-                             register with jwks or jwks_uri for private_key_jwt authentication"
-                        .to_string(),
-                });
-            }
-            // FAPI2 clients must have a registered JWKS (inline or by URI).
-            if request.jwks.is_none() && request.jwks_uri.is_none() {
-                return Err(IdentityError::FapiViolation {
-                    reason: "FAPI 2.0 clients must register a JWKS (jwks or jwks_uri) \
-                             for private_key_jwt client authentication"
-                        .to_string(),
-                });
-            }
-        }
         client.set_profile(request.profile);
+        // FAPI 2.0 registration constraints: private_key_jwt only, with keys
+        // Hearth can verify (FAPI 2.0 Security Profile §5.3.2.1).
+        Self::check_fapi2_client_keys(&client)?;
         if request.mfa_required.is_some() {
             client.set_mfa_required(request.mfa_required);
         }
@@ -3514,6 +3498,31 @@ impl EmbeddedIdentityEngine {
             .map_or(Ok(()), Self::refuse_secret_for_fapi2_client)
     }
 
+    /// FAPI 2.0 clients authenticate with `private_key_jwt` only, so a FAPI
+    /// 2.0 client must hold no secret and must hold a key Hearth can verify
+    /// an assertion with — an inline `jwks` or an assertion key; a `jwks_uri`
+    /// is never fetched. A no-op for any other profile.
+    fn check_fapi2_client_keys(client: &OAuthClient) -> Result<(), IdentityError> {
+        if !client.profile().is_fapi2() {
+            return Ok(());
+        }
+        if client.client_secret_hash().is_some() {
+            return Err(IdentityError::FapiViolation {
+                reason: "FAPI 2.0 clients must not use a client secret; they authenticate with \
+                         private_key_jwt"
+                    .to_string(),
+            });
+        }
+        if !client.has_verifiable_assertion_keys() {
+            return Err(IdentityError::FapiViolation {
+                reason: "FAPI 2.0 clients authenticate with private_key_jwt and must register \
+                         their public keys inline (jwks); a jwks_uri is not fetched"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn update_client_inner(
         &self,
         realm_id: &RealmId,
@@ -3641,15 +3650,24 @@ impl EmbeddedIdentityEngine {
             }
             client.set_authorization_signed_response_alg(alg_opt.clone());
         }
+        if let Some(jwks) = &request.jwks {
+            client.set_jwks(jwks.clone());
+        }
         if let Some(profile) = request.profile {
-            if profile.is_fapi2() && client.client_secret_hash().is_some() {
-                return Err(IdentityError::FapiViolation {
-                    reason: "Cannot set FAPI 2.0 profile on a client with a client_secret; \
-                             remove the secret first or register a new FAPI2 client"
-                        .to_string(),
-                });
-            }
             client.set_profile(profile);
+        }
+        // Judged on the client as it will be written: turning FAPI 2.0 on for
+        // a client without keys (what `hearth.yaml` reconcile did for
+        // `profile: fapi2`), or removing a FAPI 2.0 client's last key, would
+        // leave a client that cannot authenticate. Only a change to the
+        // profile or the keys is judged, so an unrelated update (a rename) of
+        // a client stored before this rule still succeeds — and that client
+        // fails closed anyway (`OAuthClient::requires_client_assertion`).
+        if request.profile.is_some()
+            || request.jwks.is_some()
+            || request.assertion_public_key.is_some()
+        {
+            Self::check_fapi2_client_keys(&client)?;
         }
         if let Some(mfa_req) = request.mfa_required {
             client.set_mfa_required(mfa_req);

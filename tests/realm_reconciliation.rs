@@ -621,3 +621,73 @@ async fn reconcile_federation_carries_trust_asserted_email_to_the_idp() {
          lets the upstream IdP claim any address in the realm"
     );
 }
+
+/// `profile: fapi2` in `hearth.yaml` used to set the profile on a client with
+/// no keys, which then counted as PUBLIC (`/as/par` accepted it on its
+/// `client_id` alone). A FAPI 2.0 application now declares its `jwks`, which
+/// reconcile stores, and one without keys is refused before startup.
+#[tokio::test]
+async fn reconcile_fapi2_application_carries_its_jwks() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("hearth.yaml");
+    let write = |app_lines: &str| {
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+realms:
+  fapidemo:
+    applications:
+      bank-rp:
+        name: "Bank RP"
+        redirect_uris:
+          - "https://rp.example.com/callback"
+        grant_types:
+          - authorization_code
+        profile: fapi2
+{app_lines}
+"#
+            ),
+        )
+        .expect("write config");
+        Config::from_file_as_dev(&path)
+    };
+
+    let err = write("").expect_err("a keyless fapi2 application must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("jwks"), "the refusal must name jwks: {msg}");
+
+    let config = write(
+        r"        jwks:
+          keys:
+            - kty: OKP
+              crv: Ed25519
+              kid: k1
+              alg: EdDSA
+              use: sig
+              x: 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+    )
+    .expect("fapi2 with an inline JWKS is valid");
+    reconcile_realms(identity, harness.authz(), &config).expect("reconcile");
+    let realm = identity
+        .get_realm_by_name("fapidemo")
+        .expect("lookup realm")
+        .expect("realm exists");
+    let client = identity
+        .list_clients(realm.id(), &hearth::core::PageRequest::new(0, 10))
+        .expect("list clients")
+        .items
+        .into_iter()
+        .find(|c| c.client_name() == "Bank RP")
+        .expect("client exists");
+    assert!(client.profile().is_fapi2());
+    let jwks: serde_json::Value =
+        serde_json::from_str(client.jwks().expect("the JWKS is stored")).expect("JSON");
+    assert_eq!(jwks["keys"][0]["kid"], "k1");
+    assert!(!client.is_public(), "a FAPI 2.0 client is never public");
+
+    // Idempotent: a second reconcile changes nothing and does not fail.
+    reconcile_realms(identity, harness.authz(), &config).expect("reconcile again");
+}

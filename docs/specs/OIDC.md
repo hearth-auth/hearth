@@ -234,8 +234,11 @@ only. A `client_assertion` is verified against the client's registered keys:
 must register its keys inline. The assertion rules are those of §8.1 (`iss` = `sub` = the
 client, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min).
 
-**A client with keys is never public.** `OAuthClient::is_public` is true only for a client with no
-secret, no assertion key and no JWKS; every other client must authenticate. A FAPI 2.0 client —
+**A client with keys is never public, nor is a FAPI 2.0 client.** `OAuthClient::is_public` is true
+only for a client with no secret, no assertion key, no JWKS and a profile other than FAPI 2.0;
+every other client must authenticate. Registration, update and `hearth.yaml` reconcile refuse a
+FAPI 2.0 client that holds a secret or no key Hearth can verify an assertion with (inline `jwks`
+or an assertion key), so one stored without keys fails closed rather than counting as public. A FAPI 2.0 client —
 or any client that registered a JWKS or an assertion key and no secret — presenting only its
 `client_id` is `401 invalid_client` at `/as/par`, at every `/token` grant (including
 `authorization_code`, `refresh_token`, `device_code` and token exchange, each of which accepts a

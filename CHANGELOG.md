@@ -189,6 +189,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   gRPC client authentication is refused in such a realm. A FAPI 2.0 client that somehow holds a
   secret is refused the same way once the secret verifies. **Breaking** for clients of an Advanced
   realm that authenticate with a secret or as public clients.
+- **A FAPI 2.0 client is never public** — `profile: fapi2` in `hearth.yaml` (and an admin update to the
+  FAPI 2.0 profile) produced a client with no keys, which counted as public: `/as/par` and the
+  `/token` code exchange accepted it on its `client_id` alone. A FAPI 2.0 client now always requires
+  `private_key_jwt` (one stored without keys fails closed everywhere), and registration, update and
+  reconcile refuse a FAPI 2.0 client that holds a secret (a Hearth-generated one included) or no key
+  Hearth can verify an assertion with — an inline `jwks` or an assertion key; a `jwks_uri` alone is
+  refused since it is never fetched. `hearth.yaml` applications gain `jwks` (the public JWK Set,
+  inline), required with `profile: fapi2`; `hearth config validate` and startup refuse a `fapi2`
+  application without `jwks` or with a secret, and an unknown `profile` value (it used to be read
+  as `standard`). **Breaking** for a `profile: fapi2` application without keys in `hearth.yaml`: add
+  its `jwks`.
 - **A junk `client_assertion` no longer skips the client secret** — at the `authorization_code`
   exchange (`/token` and `/realms/{realm}/token`) a client that holds a secret could redeem its code
   with `client_assertion=junk` (no `client_assertion_type`, or a wrong one) and no secret, and got

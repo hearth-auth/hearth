@@ -94,8 +94,8 @@ only specific clients in a realm require FAPI 2.0 constraints; use realm-level `
 | Field | Required | Forbidden |
 |-------|----------|-----------|
 | `profile` | `"fapi2"` | |
-| `jwks` | JWKS JSON string with the client's public key | |
-| `client_secret` | | Must be absent — FAPI 2.0 clients authenticate with `private_key_jwt` |
+| `jwks` | JWKS JSON string with the client's public key (inline — a `jwks_uri` alone is refused: Hearth does not fetch key sets) | |
+| `client_secret` | | Must be absent (including a Hearth-generated one) — FAPI 2.0 clients authenticate with `private_key_jwt` |
 | `redirect_uris` | At least one HTTPS URI | `http://` (non-TLS) |
 | `response_type` | `"code"` only | `"token"`, `"id_token"` |
 | `id_token_signed_response_alg` | `"EdDSA"` (the default when omitted) | `"RS256"` — FAPI 2.0 §5.4.1 permits only PS256, ES256 and EdDSA |

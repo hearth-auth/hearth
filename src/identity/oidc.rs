@@ -718,24 +718,35 @@ impl OAuthClient {
 
     /// Returns whether this client authenticates ONLY with a `private_key_jwt`
     /// assertion (RFC 7523 §2.2): it holds no secret but has keys — an
-    /// assertion key, or a registered JWKS (`jwks` or `jwks_uri`), as every
-    /// FAPI 2.0 client must.
+    /// assertion key, or a registered JWKS (`jwks` or `jwks_uri`) — or it is a
+    /// FAPI 2.0 client, which may authenticate no other way.
     ///
     /// Such a client is confidential even though [`Self::is_confidential`]
     /// (which reads the secret hash) says otherwise, so a surface that accepts
     /// a secretless client on its `client_id` alone MUST refuse it unless it
     /// presented a verified assertion — otherwise anyone who knows its public
-    /// identifier can act as it.
+    /// identifier can act as it. A FAPI 2.0 client that somehow holds no key
+    /// (registered before registration required one) therefore fails closed
+    /// everywhere instead of counting as public.
     pub fn requires_client_assertion(&self) -> bool {
         self.client_secret_hash.is_none()
             && (self.assertion_public_key.is_some()
                 || self.jwks.is_some()
-                || self.jwks_uri.is_some())
+                || self.jwks_uri.is_some()
+                || self.profile.is_fapi2())
+    }
+
+    /// Returns whether this client holds a key Hearth can verify a
+    /// `private_key_jwt` assertion with: an assertion key or an inline JWKS.
+    /// A `jwks_uri` does not count — Hearth never fetches it.
+    pub fn has_verifiable_assertion_keys(&self) -> bool {
+        self.assertion_public_key.is_some() || self.jwks.is_some()
     }
 
     /// Returns whether this is a PUBLIC client — one that holds no credential
-    /// at all (no secret, no assertion key, no JWKS) and so is identified by
-    /// its `client_id` alone. Every other client must authenticate.
+    /// at all (no secret, no assertion key, no JWKS) and is not FAPI 2.0, and
+    /// so is identified by its `client_id` alone. Every other client must
+    /// authenticate.
     pub fn is_public(&self) -> bool {
         self.client_secret_hash.is_none() && !self.requires_client_assertion()
     }
@@ -890,6 +901,10 @@ pub struct UpdateClientRequest {
     pub id_token_signed_response_alg: Option<String>,
     /// Updated security profile. `None` leaves unchanged.
     pub profile: Option<ClientProfile>,
+    /// Inline JWKS JSON (`{"keys":[...]}`): the public keys the client signs
+    /// request objects and `private_key_jwt` assertions with. `None` leaves
+    /// unchanged; `Some(None)` clears it; `Some(Some(json))` replaces it.
+    pub jwks: Option<Option<String>>,
     /// Per-client MFA requirement.
     ///
     /// `None` leaves unchanged; `Some(Some(true))` enables; `Some(Some(false))`

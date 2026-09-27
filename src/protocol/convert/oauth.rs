@@ -154,6 +154,7 @@ impl From<pb::UpdateClientRequest> for domain::UpdateClientRequest {
             authorization_signed_response_alg: None,
             id_token_signed_response_alg: r.id_token_signed_response_alg,
             profile: None,
+            jwks: None,
             mfa_required: None,
         }
     }

@@ -1071,6 +1071,9 @@ pub(crate) fn reconcile_applications(
                     .as_str()
                     .to_string()
             });
+        // YAML is authoritative for the inline JWKS too: absent clears it. A
+        // `profile: fapi2` client needs it (the engine refuses one without).
+        let cfg_jwks = app_cfg.jwks_json();
         let cfg_profile = match app_cfg.profile.as_deref() {
             None | Some("standard") => ClientProfile::Standard,
             Some("fapi2") => ClientProfile::Fapi2,
@@ -1095,6 +1098,7 @@ pub(crate) fn reconcile_applications(
                 let consent_changed = existing.require_consent() != cfg_require_consent;
                 let logo_changed = existing.client_logo_url() != cfg_logo.as_deref();
                 let profile_changed = existing.profile() != cfg_profile;
+                let jwks_changed = existing.jwks() != cfg_jwks.as_deref();
                 let post_logout_changed = existing.post_logout_redirect_uris() != cfg_post_logout;
                 let id_token_alg_changed =
                     existing.id_token_signed_response_alg().as_str() != cfg_id_token_alg;
@@ -1106,6 +1110,7 @@ pub(crate) fn reconcile_applications(
                     || consent_changed
                     || logo_changed
                     || profile_changed
+                    || jwks_changed
                     || post_logout_changed
                     || id_token_alg_changed
                 {
@@ -1143,6 +1148,7 @@ pub(crate) fn reconcile_applications(
                             } else {
                                 None
                             },
+                            jwks: jwks_changed.then(|| cfg_jwks.clone()),
                             post_logout_redirect_uris: if post_logout_changed {
                                 Some(cfg_post_logout.clone())
                             } else {
@@ -1219,6 +1225,7 @@ pub(crate) fn reconcile_applications(
                 let needs_followup = !cfg_require_consent
                     || cfg_logo.is_some()
                     || cfg_profile != ClientProfile::Standard
+                    || cfg_jwks.is_some()
                     || !cfg_post_logout.is_empty();
                 if needs_followup {
                     engine.update_client(
@@ -1231,6 +1238,7 @@ pub(crate) fn reconcile_applications(
                             require_consent: Some(cfg_require_consent),
                             client_logo_url: Some(cfg_logo.clone()),
                             profile: Some(cfg_profile),
+                            jwks: cfg_jwks.clone().map(Some),
                             post_logout_redirect_uris: Some(cfg_post_logout.clone()),
                             slug: app_cfg.slug.clone(),
                             trust_level: app_cfg.trust_level,

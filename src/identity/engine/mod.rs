@@ -17479,6 +17479,8 @@ mod tests {
     mod control_epoch;
     /// Control-cache reloads: lock-free validation, retries, ordering, coverage.
     mod control_reload;
+    /// A FAPI 2.0 client is never public and always holds verifiable keys.
+    mod fapi2_client_keys;
     /// Concurrent revocations survive a racing control-cache reload.
     mod revocation_reload_races;
     /// PKCE challenge and refresh-token hash compare in constant time.

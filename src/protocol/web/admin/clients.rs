@@ -841,6 +841,7 @@ pub async fn admin_app_edit_submit(
                 .map(OAuthClient::id_token_signed_response_alg),
         ),
         profile: None,
+        jwks: None,
         mfa_required: None,
     };
 
