@@ -42,6 +42,9 @@ struct FaultStorage {
     /// Hold every `increment_u64` (block the caller) while set — a Raft
     /// proposal waiting out `write_timeout` on a leader that lost its quorum.
     hold_increments: AtomicBool,
+    /// Panic in this many `increment_u64` calls (then behave normally) — a
+    /// storage bug unwinding through the bump thread's `catch_unwind`.
+    panic_increments: AtomicUsize,
     /// Every `increment_u64` call, refused or not.
     increment_attempts: AtomicUsize,
     /// Scans refused while `fail_scans` was set.
@@ -63,6 +66,7 @@ impl FaultStorage {
             fail_increments: AtomicBool::new(false),
             not_leader_increments: AtomicBool::new(false),
             hold_increments: AtomicBool::new(false),
+            panic_increments: AtomicUsize::new(0),
             increment_attempts: AtomicUsize::new(0),
             failed_scans: AtomicUsize::new(0),
             writes: AtomicUsize::new(0),
@@ -141,6 +145,13 @@ impl StorageEngine for FaultStorage {
         self.increment_attempts.fetch_add(1, Ordering::SeqCst);
         while self.hold_increments.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(5));
+        }
+        if self
+            .panic_increments
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            panic!("injected panic in increment_u64");
         }
         if self.not_leader_increments.load(Ordering::SeqCst) {
             return Err(crate::cluster::engine::cluster_to_storage_err(
@@ -974,6 +985,45 @@ fn becoming_leader_bumps_the_epoch_once_and_every_node_reloads() {
         read_epoch(),
         before + 1,
         "one leadership acquisition is one epoch bump"
+    );
+}
+
+/// The bump thread runs each attempt under `catch_unwind`. An election bump
+/// clears its flag before the increment, and the flag used to be restored only
+/// on an `Err` — so a panic in the increment lost a pure election bump for
+/// good: nothing was owed, the flag was clear, and no node ever reloaded for
+/// the controls the previous leader's lost bumps covered.
+#[test]
+fn a_panicking_election_bump_is_retried_not_lost() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = open_storage(&dir);
+    let fault = FaultStorage::over(Arc::clone(&shared));
+    let faulty_storage = Arc::clone(&fault) as Arc<dyn StorageEngine>;
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let node = engine_over(&faulty_storage, &clock);
+
+    let sys = keys::system_realm_id();
+    let epoch_key = keys::encode_control_epoch();
+    let read_epoch = || {
+        crate::storage::decode_u64_counter(shared.get(&sys, &epoch_key).expect("get").as_deref())
+            .unwrap_or(0)
+    };
+    let before = read_epoch();
+    fault.panic_increments.store(1, Ordering::SeqCst);
+    node.on_leadership_acquired();
+
+    let deadline = Instant::now() + CONVERGE;
+    while read_epoch() == before && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        fault.increment_attempts.load(Ordering::SeqCst) >= 2,
+        "the panicking attempt must be followed by a retry"
+    );
+    assert_eq!(
+        read_epoch(),
+        before + 1,
+        "an election bump whose first attempt panicked must still be made, exactly once"
     );
 }
 

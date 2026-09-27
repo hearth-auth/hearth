@@ -299,6 +299,28 @@ pub(super) struct ControlPlane {
     wakes: AtomicU64,
 }
 
+/// Restores a taken election-bump flag on drop unless [`Self::settle`] was
+/// called — see `ControlPlane::pay_owed_bumps`.
+struct ElectionBumpGuard<'a> {
+    flag: &'a AtomicBool,
+    armed: bool,
+}
+
+impl ElectionBumpGuard<'_> {
+    /// The election bump was made (or is no longer this node's to make).
+    fn settle(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ElectionBumpGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.flag.store(true, Ordering::Release);
+        }
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // Every holder leaves the guarded state consistent (it is replaced
     // wholesale or appended to), so a poisoned lock is still usable.
@@ -458,6 +480,16 @@ impl ControlPlane {
         if owed == 0 && !election {
             return Ok(());
         }
+        // Puts a taken election bump back unless this attempt settles it —
+        // on an `Err` and also on a panic unwinding to the bump thread's
+        // `catch_unwind`, where nothing else knows the flag was taken. A pure
+        // election bump is owed nowhere else, so losing the flag loses the
+        // bump for good. A panic after the increment landed re-bumps once more,
+        // which costs every node one extra reload and is harmless.
+        let election_guard = ElectionBumpGuard {
+            flag: &self.election_bump_due,
+            armed: election,
+        };
         // Held only when the bump is recorded as this node's own (below), so
         // the reloader does not reload for it.
         let in_flight = (!election).then(|| self.begin_local_bump());
@@ -489,6 +521,7 @@ impl ControlPlane {
                     );
                 }
                 drop(in_flight);
+                election_guard.settle();
                 Ok(())
             }
             Err(err) if crate::cluster::is_not_leader(&err) => {
@@ -504,14 +537,13 @@ impl ControlPlane {
                          leader, and the new leader's election bump makes every node reload"
                     );
                 }
+                // Not the leader any more: the election bump is the next
+                // leader's to make.
+                election_guard.settle();
                 Ok(())
             }
-            Err(err) => {
-                if election {
-                    self.election_bump_due.store(true, Ordering::Release);
-                }
-                Err(err)
-            }
+            // The guard puts the election bump back for the retry.
+            Err(err) => Err(err),
         }
     }
 
