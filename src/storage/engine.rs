@@ -377,10 +377,12 @@ pub struct EmbeddedStorageEngine {
     /// as absent and both write. Holding this lock across the check-and-write
     /// closes that window (HEA-1767). This lock is used in both single-node and
     /// cluster mode — there is no Raft-mediated path for `put_if_absent`.
-    ///
-    /// [`increment_u64`](StorageEngine::increment_u64) takes it too, for the
-    /// same reason: its read and write must be one step.
     put_if_absent_lock: Mutex<()>,
+    /// Serialises [`StorageEngine::increment_u64`]'s read-modify-write. Its
+    /// own lock, not [`Self::put_if_absent_lock`]: the increment holds it
+    /// across a WAL write and fsync, and sharing would queue every
+    /// conditional put behind every control-epoch bump.
+    counter_lock: Mutex<()>,
     /// Monotonically increasing SST file counter.
     ///
     /// Wrapped in `Arc` so the WAL's pre-rotate flush callback can share it.
@@ -770,6 +772,7 @@ impl EmbeddedStorageEngine {
             backup_barrier: Arc::new(RwLock::new(())),
             compaction_lock: Mutex::new(()),
             put_if_absent_lock: Mutex::new(()),
+            counter_lock: Mutex::new(()),
             sst_counter,
             fs,
             key_registry,
@@ -1918,10 +1921,10 @@ impl StorageEngine for EmbeddedStorageEngine {
     }
 
     /// Atomic single-node increment: the read and the write happen under
-    /// [`put_if_absent_lock`](Self::put_if_absent_lock), so concurrent callers
-    /// never both write the same successor (see the trait documentation).
+    /// [`counter_lock`](Self::counter_lock), so concurrent callers never both
+    /// write the same successor (see the trait documentation).
     fn increment_u64(&self, realm_id: &RealmId, key: &[u8]) -> Result<u64, StorageError> {
-        let Ok(_guard) = self.put_if_absent_lock.lock() else {
+        let Ok(_guard) = self.counter_lock.lock() else {
             return Err(StorageError::Io(std::io::Error::other(
                 "increment_u64 mutex poisoned",
             )));
@@ -2486,6 +2489,37 @@ mod tests {
         assert_eq!(
             engine.get(&realm, b"ctr").expect("get"),
             Some(((THREADS * PER_THREAD) as u64).to_le_bytes().to_vec()),
+        );
+    }
+
+    /// Counter increments do not share `put_if_absent`'s lock: every control
+    /// write bumps the counter with a WAL write and fsync under its lock, and
+    /// holding the conditional-put lock across that serialised every
+    /// `put_if_absent` caller (replay markers, nonces, OTP single-use) behind
+    /// control writes. Proven from the other side: an increment completes
+    /// while the conditional-put lock is held.
+    #[test]
+    fn increment_u64_does_not_wait_for_the_put_if_absent_lock() {
+        use std::sync::Arc;
+
+        let (_dir, engine) = setup_engine();
+        let engine = Arc::new(engine);
+        let realm = RealmId::generate();
+        let held = engine.put_if_absent_lock.lock().expect("lock");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let incrementer = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                let _ = tx.send(engine.increment_u64(&realm, b"ctr").expect("increment"));
+            })
+        };
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        incrementer.join().expect("join");
+        assert_eq!(
+            outcome.ok(),
+            Some(1),
+            "increment_u64 waited on the put_if_absent lock"
         );
     }
 
