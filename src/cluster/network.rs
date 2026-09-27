@@ -191,6 +191,7 @@ impl RaftNetworkFactory<HearthRaftConfig> for HearthNetworkFactory {
             creds: Arc::clone(&self.creds),
             channel: Mutex::new(None),
             faults: self.faults.clone(),
+            reported_older_build: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -215,6 +216,8 @@ pub struct HearthPeerNetwork {
     channel: Mutex<Option<Channel>>,
     /// Test-only fault injector; `None` in production. See [`PeerFaults`].
     faults: Option<Arc<PeerFaults>>,
+    /// Set once this peer has been reported as unable to decode our log.
+    reported_older_build: std::sync::atomic::AtomicBool,
 }
 
 impl HearthPeerNetwork {
@@ -282,6 +285,27 @@ impl HearthPeerNetwork {
         Ok(())
     }
 
+    /// Logs, once per peer, that `status` shows the peer runs an older build
+    /// that cannot decode a Raft command this build writes. Replication to it
+    /// retries for ever and never succeeds; a rolling upgrade is not
+    /// supported (see `docs/guides/upgrading.md`).
+    fn report_older_build(&self, status: &tonic::Status) {
+        if is_unknown_command_refusal(status)
+            && !self
+                .reported_older_build
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::error!(
+                node_id = self.target,
+                addr = %self.addr,
+                "peer cannot decode this node's Raft log: it runs an older Hearth build. \
+                 Mixed-version clusters are not supported — replication to it is stalled. \
+                 Stop every node and start them all on the same build (full-cluster \
+                 restart); see the upgrading guide"
+            );
+        }
+    }
+
     /// Drops the cached channel so the next call reconnects.
     fn invalidate_channel(&self) {
         if let Ok(mut guard) = self.channel.lock() {
@@ -309,6 +333,7 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
             .await
             .map_err(|e| {
                 self.invalidate_channel();
+                self.report_older_build(&e);
                 net_err(TransportError::Rpc(e))
             })?;
 
@@ -369,6 +394,14 @@ fn json_dec<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, serde_json::Error> {
     serde_json::from_slice(bytes)
 }
 
+/// Whether `status` is a peer refusing an entry because it does not know one of
+/// its [`RaftCommand`](crate::cluster::types::RaftCommand) variants — the peer
+/// runs an older build. The receiving side maps its decode error to
+/// `Status::internal` carrying serde's message verbatim.
+fn is_unknown_command_refusal(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::Internal && status.message().contains("unknown variant")
+}
+
 /// Wraps a [`TransportError`] as `RPCError::Network` for non-snapshot RPCs.
 fn net_err<E: std::error::Error>(e: TransportError) -> RPCError<u64, HearthNode, E> {
     let io = io::Error::new(io::ErrorKind::BrokenPipe, e.to_string());
@@ -389,6 +422,24 @@ fn net_err_ise(
 mod tests {
     use super::*;
     use openraft::LogId;
+
+    /// A peer on an older build refuses an entry it cannot decode with serde's
+    /// "unknown variant" message; that is recognised so the operator is told
+    /// the cluster is mixed-version rather than seeing a bare RPC error.
+    #[test]
+    fn an_older_peer_refusing_an_unknown_command_is_recognised() {
+        let refused = tonic::Status::internal(
+            "unknown variant `IncrementU64`, expected one of `Put`, `Delete`, `Batch`, \
+             `WriteBatch`, `PutIfAbsent` at line 1 column 312",
+        );
+        assert!(is_unknown_command_refusal(&refused));
+        assert!(!is_unknown_command_refusal(&tonic::Status::internal(
+            "Raft not initialised"
+        )));
+        assert!(!is_unknown_command_refusal(&tonic::Status::unavailable(
+            "unknown variant"
+        )));
+    }
 
     /// Verifies factory produces a peer network with the expected address.
     #[tokio::test]

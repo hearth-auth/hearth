@@ -331,7 +331,7 @@ Run these checks immediately after bringing the new binary up, regardless of dep
 
 ### When rollback is safe without a backup
 
-Rollback to the previous binary is safe in place **if and only if the WAL format version did not change** between the old and new binary.
+Rollback to the previous binary is safe in place **if and only if the WAL format version did not change** between the old and new binary — and, in **cluster mode**, the Raft log format did not change either. The release after v1.6.11 changes the Raft log format: a cluster node cannot roll back to an older binary in place and needs its data directory restored ([Cluster upgrades](#cluster-full-restart)).
 
 **For every currently shipped v1.x release this is the case** — the WAL format version has been `1`
 throughout, so in-place rollback is the normal path:
@@ -499,7 +499,31 @@ Check the `CHANGELOG.md` `## [Unreleased]` section for in-flight breaking change
 
 ## Cluster upgrades
 
-To upgrade a Raft cluster (3 or 5 nodes) with minimal service interruption:
+<a id="cluster-full-restart"></a>
+
+> **The release after v1.6.11 needs a full-cluster restart, not a rolling upgrade.** It adds a Raft
+> log command (`IncrementU64`, the atomic control-epoch bump) that older builds cannot decode:
+>
+> - an older follower refuses every `AppendEntries` that carries the new command, so replication to
+>   it stalls for good (not just for that entry);
+> - a new-build leader over a majority of older followers cannot commit anything, so every write
+>   times out;
+> - an older build cannot read a Raft log (`raft.db`) that contains the new command, so **rolling a
+>   node back needs its data directory restored from a backup taken before the upgrade** — the
+>   in-place rollback below does not apply to this release in cluster mode.
+>
+> A new-build node logs `peer cannot decode this node's Raft log: it runs an older Hearth build`
+> (once per peer) when it meets such a node. There is no safe fallback: the older write path read
+> the counter on one node and wrote its successor, which is exactly the race the new command
+> closes, so the new build does not fall back to it.
+>
+> To upgrade: take a backup on the leader, **stop every node**, install the new binary on every
+> node, then start them all. Expect a write outage for the length of the restart. Single-node
+> deployments are unaffected. To roll back, stop every node and restore each node's data directory
+> (or restore the backup into a fresh cluster) before starting the older binary.
+
+For releases that do not change the Raft log format, upgrade a Raft cluster (3 or 5 nodes) with
+minimal service interruption as follows:
 
 > There is no `hearth cluster` CLI subcommand. Cluster state is inspected over HTTP via
 > `GET /admin/cluster/status`, which requires cluster-admin credentials. It returns `503` when the

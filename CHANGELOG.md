@@ -99,7 +99,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   until its next restart. The bump is now one atomic increment (a new Raft command whose value is
   computed at apply time), applied exactly once per log entry even when a restarted node replays its
   log, and a node whose epoch a snapshot install lowered re-bases on it so later controls still bind.
-  Upgrade every node together: a node on an older build cannot apply it.
+  **Breaking** for clusters: this release needs a **full-cluster restart**, not a rolling upgrade —
+  an older node cannot decode the new command, so replication to it stalls (and a new-build leader
+  over older followers commits nothing), and an older binary cannot read the new Raft log, so
+  rolling a node back needs its data directory restored from a pre-upgrade backup. A new-build node
+  logs `peer cannot decode this node's Raft log` when it meets an older one. Single-node deployments
+  are unaffected. See the upgrading guide, *Cluster upgrades*.
 - **Argon2id client-secret verification is admission-controlled** — a caller-chosen or legacy client
   secret (gRPC `RegisterClient`, `hearth.yaml` `applications[].client_secret`, migration import, or
   any secret stored before generated secrets moved to SHA-256) was verified with Argon2id directly
