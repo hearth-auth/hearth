@@ -301,6 +301,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   MX lookup is performed. Registration behaviour does not change.
 
 ### Fixed
+- `Authorization: Basic base64("<client_id>:")` (an empty password) now means "no secret" on every
+  endpoint. A public client identifying itself this way could redeem its code at `/token` but was
+  refused (`401`) at `/as/par` and `/revoke`, where the empty password read as a wrong secret.
 - A `503 kdf_overloaded` body (a password or client-secret hash shed by the KDF admission gate) now
   carries `error_code: "HEARTH_RATE_LIMITED"`, like every other error body.
 - **SDK client registration authenticates (Rust, Python, PHP)** — Rust and Python sent `POST /clients`

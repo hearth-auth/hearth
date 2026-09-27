@@ -580,11 +580,20 @@ fn resolve_client_credentials(
     let body_client_secret = body_client_secret.and_then(non_empty_credential);
 
     if let Some((id, sec)) = parse_basic_auth(headers) {
-        if body_client_id.is_some_and(|b| b != id) || !body_secret_agrees(body_client_secret, &sec)
-        {
+        // `Basic base64("<id>:")` carries an identifier and NO secret: an
+        // empty password is absent, as an empty body field is. Returned as
+        // `Some("")` it read as a (wrong) secret, so a public client that
+        // identified itself this way was refused at `/as/par` and `/revoke`
+        // while the code exchange accepted it.
+        let sec = non_empty_credential(&sec).map(str::to_string);
+        let agrees = match (&sec, body_client_secret) {
+            (Some(basic), body) => body_secret_agrees(body, basic),
+            (None, body) => body.is_none(),
+        };
+        if body_client_id.is_some_and(|b| b != id) || !agrees {
             return Err(basic_body_mismatch_response());
         }
-        return Ok((Some(id), Some(sec)));
+        return Ok((Some(id), sec));
     }
     Ok((
         body_client_id.map(str::to_string),
@@ -1104,13 +1113,17 @@ pub(super) async fn enforce_confidential_client_auth(
     // must name the same client as the body `client_id` (previously the
     // Basic secret was verified against the *body's* client id) and any
     // body `client_secret` must match the Basic one (HEA-2112).
-    let basic = parse_basic_auth(headers);
+    // An empty Basic password is no secret, as in `resolve_client_credentials`.
+    let basic = parse_basic_auth(headers)
+        .map(|(id, secret)| (id, non_empty_credential(&secret).map(str::to_string)));
     if let Some((basic_id, basic_secret)) = &basic {
         // An absent/empty body client_id is fine — RFC 6749 §4.1.3 only
         // requires it when the client is not otherwise authenticating.
-        if non_empty_credential(body_client_id).is_some_and(|b| basic_id != b)
-            || !body_secret_agrees(body_client_secret, basic_secret)
-        {
+        let secrets_agree = match basic_secret {
+            Some(basic_secret) => body_secret_agrees(body_client_secret, basic_secret),
+            None => body_client_secret.is_none(),
+        };
+        if non_empty_credential(body_client_id).is_some_and(|b| basic_id != b) || !secrets_agree {
             return Err(basic_body_mismatch_response());
         }
     }
@@ -1126,7 +1139,7 @@ pub(super) async fn enforce_confidential_client_auth(
     // Auth credentials (RFC 6749 §2.3.1), fall back to the body
     // `client_secret`.
     let secret = basic
-        .map(|(_, s)| s)
+        .and_then(|(_, s)| s)
         .or_else(|| body_client_secret.map(str::to_string));
 
     // 22.25: run the verification before the outcome is decided, on every arm,
