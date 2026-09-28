@@ -708,13 +708,52 @@ pub fn router_with(state: Arc<AppState>, extra: Router) -> Router {
         .layer(axum::middleware::from_fn(strip_server_header))
         // HEA-SEC-33: minimal security headers on every REST API response.
         .layer(axum::middleware::from_fn(minimal_security_headers))
-        // A-40: Host header allowlist — outermost layer so it runs before route
-        // dispatch. Uses from_fn_with_state so the middleware can read
-        // state.allowed_hosts without a separate Arc capture.
+        // A-40: Host header allowlist — runs before route dispatch. Uses
+        // from_fn_with_state so the middleware can read state.allowed_hosts
+        // without a separate Arc capture.
         .layer(axum::middleware::from_fn_with_state(
-            state,
+            Arc::clone(&state),
             enforce_host_allowlist,
         ))
+        // GA audit 2026-09-28 L4 — outermost, so nothing below can read an
+        // `X-Forwarded-Proto` that a trusted proxy did not send.
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            strip_untrusted_forwarded_proto,
+        ))
+}
+
+/// Removes `X-Forwarded-Proto` from any request whose TCP peer is not listed
+/// in `server.trusted_proxies`.
+///
+/// `server.trust_forwarded_proto` makes that header decide whether a request
+/// is treated as HTTPS: the `Secure` cookie attribute, HSTS, and the login
+/// Origin check. It used to be read from **any** peer, so a client that
+/// reached the listener directly, bypassing the proxy, chose the answer for
+/// itself (GA audit 2026-09-28 L4). A request with no known peer (an embedder
+/// serving the router without `ConnectInfo`) is treated as untrusted.
+async fn strip_untrusted_forwarded_proto(
+    State(state): State<Arc<AppState>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    const XFP: &str = "x-forwarded-proto";
+    if req.headers().contains_key(XFP) {
+        let from_trusted_proxy = req
+            .extensions()
+            .get::<ConnectInfo<std::net::SocketAddr>>()
+            .is_some_and(|ConnectInfo(peer)| {
+                let peer = peer.ip().to_canonical();
+                state
+                    .trusted_proxies
+                    .iter()
+                    .any(|proxy| proxy.to_canonical() == peer)
+            });
+        if !from_trusted_proxy {
+            req.headers_mut().remove(XFP);
+        }
+    }
+    next.run(req).await
 }
 
 /// Builds the per-request span with the query *values* removed.

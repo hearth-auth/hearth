@@ -591,7 +591,9 @@ impl WebState {
     /// Checks (in order):
     /// 1. Direct TLS (`tls_enabled`) — always secure.
     /// 2. `trust_forwarded_proto` + `X-Forwarded-Proto: https` — secure
-    ///    when the proxy signals HTTPS.
+    ///    when the proxy signals HTTPS. `protocol::http::router_with` removes
+    ///    the header from any peer not in `server.trusted_proxies` before the
+    ///    request gets here (GA audit 2026-09-28 L4).
     #[must_use]
     pub fn is_secure_request(&self, headers: &axum::http::HeaderMap) -> bool {
         if self.tls_enabled {

@@ -1147,20 +1147,23 @@ fn validate_argon2_costs_all(
 /// A-32: Validates `server.trusted_proxies` against known dangerous configurations.
 fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIssue>) {
     // 19.12: `trust_forwarded_proto` makes `X-Forwarded-Proto` decide whether a
-    // session cookie carries `Secure`. With an empty `trusted_proxies` the
-    // header is attacker-controlled, so the flag that is supposed to prove
-    // "TLS terminates upstream" proves nothing. Production validation used to
-    // push operators here — it demanded TLS **or** this flag, and this flag
+    // session cookie carries `Secure`. The runtime honours the header only from
+    // a peer listed in `trusted_proxies` (GA audit 2026-09-28 L4 — before that
+    // it was read from any peer, whatever this list said), so with an empty
+    // list the flag would be inert and the operator's "TLS terminates
+    // upstream" would never be recognised. Production validation used to push
+    // operators here — it demanded TLS **or** this flag, and this flag
     // defaulted to trusting every peer (audit 2026-08-28 §4.17#7).
     if server.trust_forwarded_proto && server.trusted_proxies.is_empty() {
         issues.push(ValidationIssue {
             field: "server.trust_forwarded_proto".to_string(),
             reason: "server.trust_forwarded_proto = true requires a non-empty \
-                     server.trusted_proxies. With no proxy list, X-Forwarded-Proto is \
-                     accepted from any peer, so any client can decide whether its own \
-                     session cookie carries the Secure attribute. List the reverse-proxy \
-                     IP(s) in server.trusted_proxies, or configure direct TLS with \
-                     server.tls_cert_path + server.tls_key_path instead."
+                     server.trusted_proxies. X-Forwarded-Proto is honoured only from a \
+                     peer in that list, so with no list the flag has no effect: session \
+                     cookies would never carry the Secure attribute and HSTS would never be \
+                     sent. List the reverse-proxy IP(s) in server.trusted_proxies, or \
+                     configure direct TLS with server.tls_cert_path + server.tls_key_path \
+                     instead."
                 .to_string(),
         });
     }
@@ -1200,9 +1203,8 @@ fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIs
         //
         // Refusing here is not pedantry. A list of ranges becomes an EMPTY
         // trusted-proxy list at runtime, which with `trust_forwarded_proto:
-        // true` is precisely the state the check above refuses: the header
-        // accepted from every peer, so any client decides whether its own
-        // session cookie carries `Secure`.
+        // true` is precisely the state the check above refuses: no peer's
+        // header is honoured, and the proxy's real client IPs are ignored.
         if entry.parse::<std::net::IpAddr>().is_err() {
             let looks_like_cidr = entry.contains('/');
             issues.push(ValidationIssue {
@@ -1212,9 +1214,9 @@ fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIs
                         "'{entry}' is CIDR notation, which is not supported here. The server \
                          parses each entry as a single IP address and silently DISCARDS \
                          anything else, so this entry would leave the trusted-proxy list \
-                         empty at runtime — and with server.trust_forwarded_proto = true that \
-                         means X-Forwarded-Proto is accepted from any peer. List the \
-                         reverse-proxy IP addresses individually."
+                         empty at runtime — X-Forwarded-For and X-Forwarded-Proto would then \
+                         be ignored from every peer. List the reverse-proxy IP addresses \
+                         individually."
                     )
                 } else {
                     format!(
