@@ -958,9 +958,11 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Consumes a stored PAR entry identified by its `request_uri`.
     ///
-    /// Returns the stored parameters on success. The entry is atomically
-    /// marked used; subsequent calls return `InvalidPushedAuthorizationRequest`.
-    #[allow(private_interfaces)]
+    /// Returns the stored parameters on success. Consumption is single-use
+    /// across the whole cluster: it is decided by one replicated
+    /// put-if-absent evaluated in the Raft state machine, so exactly one
+    /// caller on any node wins; every other call returns
+    /// `InvalidPushedAuthorizationRequest`.
     fn consume_par(
         &self,
         realm_id: &RealmId,

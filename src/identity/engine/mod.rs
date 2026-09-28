@@ -9917,7 +9917,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.push_authorization_request_inner(realm_id, request)
     }
 
-    #[allow(private_interfaces)]
     fn consume_par(
         &self,
         realm_id: &RealmId,
@@ -26560,7 +26559,7 @@ mod tests {
     }
 
     #[test]
-    fn par_consume_happy_path_marks_used() {
+    fn par_consume_happy_path_claims_the_single_use_marker() {
         let (_dir, engine, _clock, realm, client) = par_setup_engine_and_public_client();
         let (_, challenge) = par_pkce_challenge();
 
@@ -26575,9 +26574,17 @@ mod tests {
             .expect("first consume must succeed");
 
         assert_eq!(stored.state, "state-xyz");
+        let id = resp
+            .request_uri
+            .strip_prefix("urn:ietf:params:oauth:request_uri:")
+            .expect("urn");
         assert!(
-            stored.used,
-            "stored entry must be marked used after consume"
+            engine
+                .storage
+                .get(&realm, &keys::encode_consumed_par(id))
+                .expect("get marker")
+                .is_some(),
+            "consume must claim the request_uri's single-use marker"
         );
     }
 

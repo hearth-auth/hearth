@@ -2308,6 +2308,47 @@ pub(crate) fn par_scan_prefix() -> Vec<u8> {
     PAR_PREFIX.as_bytes().to_vec()
 }
 
+/// Prefix for single-use redemption markers.
+///
+/// One marker is claimed with a replicated `put_if_absent` when a single-use
+/// artifact — a PAR `request_uri`, an authorization code, a device code — is
+/// redeemed. In cluster mode the claim is a `PutIfAbsent` Raft command whose
+/// presence check runs in the state machine's apply, so exactly one
+/// redemption wins across every node. The value is an 8-byte little-endian
+/// `i64` expiry (Unix seconds); the periodic cleanup sweep reclaims a marker
+/// once it has passed.
+///
+/// Its own prefix, not a row under the artifact's: the PAR and code sweepers
+/// decode every row under theirs as a JSON record, and a marker there would
+/// fail that decode and abort the sweep.
+const CONSUMED_PREFIX: &str = "oauth:consumed:";
+
+/// Single-use marker for a PAR `request_uri`.
+///
+/// Format: `oauth:consumed:par:{request_uri_id}`
+pub(crate) fn encode_consumed_par(request_uri_id: &str) -> Vec<u8> {
+    format!("{CONSUMED_PREFIX}par:{request_uri_id}").into_bytes()
+}
+
+/// Single-use marker for an authorization code, keyed by its SHA-256 hex.
+///
+/// Format: `oauth:consumed:code:{sha256_hex}`
+pub(crate) fn encode_consumed_code(code_hash: &str) -> Vec<u8> {
+    format!("{CONSUMED_PREFIX}code:{code_hash}").into_bytes()
+}
+
+/// Single-use marker for a device code, keyed by its SHA-256 hex.
+///
+/// Format: `oauth:consumed:device:{sha256_hex}`
+pub(crate) fn encode_consumed_device_code(device_code_hash: &str) -> Vec<u8> {
+    format!("{CONSUMED_PREFIX}device:{device_code_hash}").into_bytes()
+}
+
+/// Scan prefix for every single-use redemption marker in a realm.
+pub(crate) fn consumed_marker_scan_prefix() -> Vec<u8> {
+    CONSUMED_PREFIX.as_bytes().to_vec()
+}
+
 // ===== Session-version key encoding =====
 
 /// Encodes the per-session version counter key.
