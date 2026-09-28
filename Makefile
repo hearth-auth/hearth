@@ -141,9 +141,17 @@ loadtest-check:
 ## Small corpus (500 users total), 20 concurrent Goose users, 15 s — enough to
 ## prove the harness is alive without taking CI minutes. Corpus knobs keep
 ## build+seed time short; USERS_PER_REALM=50 keeps the token pool small.
+##
+## Exit code (GA audit M20): the harness now exits non-zero whenever
+## report.json says "pass": false. The smoke sets
+## HEARTH_LOADTEST_LATENCY_ADVISORY=true (the `--latency-advisory` flag), so it
+## FAILS on an erroring journey (exit 1) but only REPORTS a latency-budget
+## breach: 15 s on a shared CI runner cannot hold the sub-ms HTTP budgets, and
+## a gate that flaps on runner noise gets ignored. `make loadtest` does not set
+## it — there a pass:false report exits 3.
 loadtest-smoke:
 ifeq ($(strip $(ARGS)),)
-	PROTOC=$(PROTOC) USERS=20 RUN_TIME=15s \
+	PROTOC=$(PROTOC) USERS=20 RUN_TIME=15s HEARTH_LOADTEST_LATENCY_ADVISORY=true \
 	  CORPUS_ACME=200 CORPUS_GLOBEX=150 CORPUS_INITECH=100 CORPUS_UMBRELLA=50 \
 	  USERS_PER_REALM=50 SEED_WAIT=120 \
 	  loadtest/scripts/run-loadtest.sh
