@@ -6,7 +6,7 @@
 //!   completes the round-trip. Outcome decides what happens next:
 //!   existing-link → new Hearth session; JIT → new user + session;
 //!   ConfirmLink → HMAC-bound cookie + redirect to confirm page.
-//! * `GET  /ui/realms/{realm}/federation/confirm-link?ticket={t}` — renders a
+//! * `GET  /ui/realms/{realm}/federation/confirm-link` — renders a
 //!   page asking the user to enter their local password. The unscoped
 //!   `/ui/federation/confirm-link` twin resolves the default realm and exists
 //!   only for single-realm deployments (22.19).
@@ -538,12 +538,12 @@ pub(super) fn complete_federation_outcome(
                 header::HeaderValue::from_str(&cookie)
                     .unwrap_or_else(|_| header::HeaderValue::from_static("")),
             );
+            // The ticket travels only in the cookie above, never in the
+            // redirect URL, where history, `Referer` and proxy logs keep it
+            // (GA audit L18).
             (
                 resp_headers,
-                Redirect::to(&format!(
-                    "/ui/realms/{realm_name}/federation/confirm-link?ticket={}",
-                    ticket.ticket
-                )),
+                Redirect::to(&format!("/ui/realms/{realm_name}/federation/confirm-link")),
             )
                 .into_response()
         }
@@ -551,11 +551,6 @@ pub(super) fn complete_federation_outcome(
 }
 
 // ------ confirm-link flow ------
-
-#[derive(Debug, Deserialize)]
-pub struct ConfirmLinkQuery {
-    pub ticket: String,
-}
 
 #[derive(Debug, Deserialize)]
 pub struct ConfirmLinkForm {
@@ -590,7 +585,10 @@ struct ConfirmLinkPage {
     inline_theme_css: Option<String>,
 }
 
-/// `GET /ui/realms/{realm}/federation/confirm-link?ticket=...`
+/// `GET /ui/realms/{realm}/federation/confirm-link`
+///
+/// The ticket is read from the HMAC-bound confirm cookie the callback set;
+/// the redirect that lands here carries none (GA audit L18).
 ///
 /// 22.19 (audit 2026-08-28 §4.22#11): the confirm-to-link ticket is stored
 /// under the realm the federated login **started** in. The bare route below
@@ -601,34 +599,33 @@ struct ConfirmLinkPage {
 pub async fn confirm_link_page_scoped(
     State(state): State<Arc<WebState>>,
     Path(realm_name): Path<String>,
-    Query(q): Query<ConfirmLinkQuery>,
     headers: HeaderMap,
 ) -> Response {
-    confirm_link_page_impl(state, Some(realm_name), q, headers).await
+    confirm_link_page_impl(state, Some(realm_name), headers).await
 }
 
-/// `GET /ui/federation/confirm-link?ticket=...` (bare — resolves default realm).
-pub async fn confirm_link_page(
-    State(state): State<Arc<WebState>>,
-    Query(q): Query<ConfirmLinkQuery>,
-    headers: HeaderMap,
-) -> Response {
-    confirm_link_page_impl(state, None, q, headers).await
+/// `GET /ui/federation/confirm-link` (bare — resolves default realm).
+pub async fn confirm_link_page(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    confirm_link_page_impl(state, None, headers).await
 }
 
 async fn confirm_link_page_impl(
     state: Arc<WebState>,
     realm_name: Option<String>,
-    q: ConfirmLinkQuery,
     headers: HeaderMap,
 ) -> Response {
-    // Non-destructive read + cookie MAC check.
+    // Non-destructive read + cookie MAC check. The cookie is
+    // `{ticket}.{mac}`; the MAC binds the ticket to its user and is verified
+    // below once the ticket record names that user.
     let Some(cookie_val) = auth::cookie_value_from_headers(&headers, CONFIRM_LINK_COOKIE) else {
         return Redirect::to("/ui/login").into_response();
     };
-    let Some(mac) = confirm_cookie_mac_for(cookie_val, &q.ticket) else {
+    let Some((ticket, mac)) = cookie_val.rsplit_once('.') else {
         return Redirect::to("/ui/login").into_response();
     };
+    if ticket.is_empty() || mac.is_empty() {
+        return Redirect::to("/ui/login").into_response();
+    }
     // We don't know user_id yet (peek without consuming the engine
     // ticket). Peek by scanning — we want the user_id for MAC
     // verification, so read-through the engine.
@@ -639,10 +636,7 @@ async fn confirm_link_page_impl(
     // Peek: get_pending isn't ideal (ticket is unrelated storage); we
     // do a second-path take-and-resave via a transient round-trip.
     // Simpler: call take, re-put immediately (idempotent write).
-    let ticket_rec = match state
-        .identity
-        .take_confirm_link_ticket(&realm_id, &q.ticket)
-    {
+    let ticket_rec = match state.identity.take_confirm_link_ticket(&realm_id, ticket) {
         Ok(r) => r,
         Err(_) => return Redirect::to("/ui/login").into_response(),
     };
