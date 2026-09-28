@@ -57,6 +57,7 @@ with the owning `RealmId`, except signing keys which live in the **system realm*
 | Refresh token (grant family) | `oauth:family:{family_id}` | JSON | `current_refresh_hash` (SHA-256 of current token) + `session_id`; plaintext refresh token never stored |
 | OAuth consent | `oauth:consent:{user_uuid}:{client_uuid}` | JSON | Granted scopes; no raw credentials |
 | Device code | `oauth:device:{device_code_hash}` | JSON | Hash of device code |
+| Single-use redemption marker | `oauth:consumed:{par\|code\|device}:{id_or_sha256}` | TTL marker | Records that a PAR `request_uri`, authorization code or device code was redeemed; the key carries the `request_uri` id or the SHA-256 of the code, never a plaintext code. Swept after the artifact's own expiry plus 60 s |
 | Revoked JTI blocklist | `oauth:revjti:{jti}` | TTL marker | For sessionless client-credentials revocation; no PII in value |
 | In-flight auth request | `oauth:pending_auth:{ticket_uuid}` | JSON | 10-min TTL; contains authorization parameters |
 
