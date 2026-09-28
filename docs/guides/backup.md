@@ -215,8 +215,17 @@ HTTP, a **system-realm caller holding `hearth.admin`** (plus `hearth.export`).
 A system-realm caller's backup export or restore reaches every realm — operator
 accounts and the system signing key included — so a system-realm operator
 delegated only a sub-admin permission (`hearth.users.admin`,
-`hearth.realm.admin`, …) is refused (`403`) even with `hearth.export`. A
-tenant-scoped caller's `POST /admin/backup/restore` is authorized against
+`hearth.realm.admin`, …) is refused (`403`) even with `hearth.export`.
+
+**Every HTTP restore needs `hearth.admin`.** A restore writes users and their
+credentials, clients, roles and role assignments, agents and retiring signing
+keys at once — every sub-admin domain — so `POST /admin/backup/restore`
+requires `hearth.admin` (which the seeded `realm.admin` role carries) plus
+`hearth.export`, for a tenant-scoped caller too. A tenant sub-admin
+(`hearth.users.admin`, `hearth.realm.admin`, `hearth.clients.admin`,
+`hearth.agents.admin`) holding `hearth.export` may still **export** its own
+realm, but its restore is refused (`403`) before anything is read, written or
+counted against the hourly quota. A tenant-scoped caller's `POST /admin/backup/restore` is authorized against
 **every** realm in the archive before its first write: an archive carrying the
 system realm, or any other realm but its own, is refused with `403`, in every
 mode, and nothing — not even the restore's own audit event — is written.

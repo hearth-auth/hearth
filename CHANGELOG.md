@@ -16,8 +16,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   resurrect deleted operators and revoked grants, overwrite every operator's password hash and
   factors, reinstall a rotated-away system signing key, or rewrite any tenant realm. A system-realm
   caller now needs `hearth.admin` itself (`403` otherwise, before anything is read or written).
-  Tenant-scoped callers are unchanged. The `hearth.export` description no longer claims
-  `hearth.admin` was already required.
+  The `hearth.export` description no longer claims `hearth.admin` was already required.
+- **Every backup restore requires `hearth.admin`** — a tenant sub-admin (`hearth.users.admin`,
+  `hearth.realm.admin`, `hearth.clients.admin`, `hearth.agents.admin`) holding `hearth.export`
+  could restore a signed archive of its own realm and bring back what its permission never
+  reaches: role assignments an administrator had revoked (live role assignment needs
+  `hearth.realm.admin`), clients, agents and retiring signing keys. `POST /admin/backup/restore`
+  now requires `hearth.admin` (carried by the seeded `realm.admin` role) plus `hearth.export`,
+  whatever realm the caller is scoped to, and answers `403` before the export rate limit, so a
+  refused caller spends no quota. Export is unchanged: a tenant sub-admin with `hearth.export`
+  still backs its realm up. **Breaking** for a backup account that restores with a sub-admin
+  permission: grant it `hearth.admin` in the realm (for example through `realm.admin`).
 - **A restore never reinstalls a system signing key the realm rotated away from** — an archive made
   before a key rotation (for instance after a compromise) could put the retired key back as the
   live system key, or reinstate a retiring key a revoking rotation had purged. Rotations of the

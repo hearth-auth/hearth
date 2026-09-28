@@ -254,8 +254,9 @@ pub(crate) fn extract_cluster_admin_auth(
 /// `hearth.*.admin` sub-admin permissions [`extract_admin_auth`] also admits.
 ///
 /// For operations whose reach exceeds any sub-admin domain: the cluster plane
-/// ([`extract_cluster_admin_auth`]) and a backup export or restore by a
-/// system-realm caller, which reaches every realm — the system realm's
+/// ([`extract_cluster_admin_auth`]), every backup restore (it writes users,
+/// clients, role assignments, agents and keys at once), and a backup export by
+/// a system-realm caller, which reaches every realm — the system realm's
 /// operator accounts and signing key included. `purpose` names the operation
 /// in the `403` body.
 pub(crate) fn require_superuser(
@@ -361,9 +362,10 @@ pub fn has_export_capability(permissions: &[String]) -> bool {
 ///
 /// Returns `403 Forbidden` when the permission is absent. `hearth.export` is
 /// held *in addition to* an admin permission: a tenant realm may grant it with
-/// a sub-admin permission to a backup service account scoped to that realm.
-/// A backup export or restore by a **system-realm** caller reaches every realm
-/// and additionally requires `hearth.admin` ([`require_superuser`]).
+/// a sub-admin permission to a backup service account that EXPORTS that realm.
+/// A backup restore — which writes across every sub-admin domain — and an
+/// export by a **system-realm** caller, which reaches every realm, also
+/// require `hearth.admin` ([`require_superuser`]).
 pub(crate) fn check_export_capability(
     auth: &AdminAuth,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {

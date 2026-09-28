@@ -1955,3 +1955,272 @@ async fn restoring_audit_history_into_a_live_realm_keeps_its_chain_verifiable() 
         "re-importing the same archive must not duplicate events"
     );
 }
+
+// ── Restore needs the realm's full admin (M2) ─────────────────────────────────
+
+/// Creates a user in `realm` (the system realm through `create_admin_user`)
+/// holding exactly `permissions` through one custom role, and returns the user
+/// id and the role assignment.
+fn delegate(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    email: &str,
+    permissions: &[&str],
+) -> (hearth::core::UserId, hearth::rbac::RoleAssignment) {
+    let request = CreateUserRequest {
+        email: email.to_string(),
+        display_name: "Delegated".into(),
+        ..Default::default()
+    };
+    let user = if realm.as_uuid().is_nil() {
+        h.identity().create_admin_user(&request)
+    } else {
+        h.identity().create_user(realm, &request)
+    }
+    .expect("user");
+    h.rbac().seed_realm(realm).expect("seed roles");
+    let assignment = grant(h, realm, user.id(), permissions);
+    (user.id().clone(), assignment)
+}
+
+/// Grants `user` exactly `permissions` through a fresh custom role.
+fn grant(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    user: &hearth::core::UserId,
+    permissions: &[&str],
+) -> hearth::rbac::RoleAssignment {
+    use hearth::rbac::{CreateRoleRequest, Permission};
+    let role = h
+        .rbac()
+        .create_role(
+            realm,
+            &CreateRoleRequest {
+                name: format!("delegated-{}", uuid::Uuid::new_v4()),
+                description: None,
+                permissions: permissions
+                    .iter()
+                    .map(|p| Permission::new(*p).expect("permission"))
+                    .collect(),
+                parent_roles: vec![],
+                scope_kind: hearth::rbac::RoleScopeKind::Realm,
+                allow_reserved_permissions: true,
+            },
+        )
+        .expect("role");
+    h.rbac()
+        .assign_role(
+            realm,
+            &AssignRoleRequest {
+                subject: Subject::User(user.clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("grant role")
+}
+
+/// A fresh access token for `user` in `realm`.
+fn token_for(h: &common::TestHarness, realm: &RealmId, user: &hearth::core::UserId) -> String {
+    let session = h
+        .identity()
+        .create_session(realm, user, &SessionContext::default())
+        .expect("session");
+    h.identity()
+        .issue_tokens(realm, user, session.id())
+        .expect("tokens")
+        .access_token()
+        .to_string()
+}
+
+/// A restore writes across every sub-admin domain — users and credentials,
+/// clients, roles and role assignments, agents, signing keys — so it needs the
+/// realm's full admin permission, `hearth.admin` (which the seeded
+/// `realm.admin` role carries). A tenant sub-admin with `hearth.export` could
+/// otherwise bring back a role assignment an administrator revoked, which live
+/// role management reserves to `hearth.realm.admin`, and a `hearth.realm.admin`
+/// sub-admin could bring back users and clients. Export is unchanged: a
+/// tenant sub-admin with `hearth.export` still backs its realm up.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one scenario: four sub-admins refused, then the realm admin
+async fn a_tenant_restore_needs_the_realm_admin_not_a_sub_admin() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let tenant = h.create_realm();
+    h.rbac().seed_realm(&tenant).expect("seed");
+    let admin_token = make_admin_token(&h, &tenant).await;
+
+    let (grantee, revoked) = delegate(
+        &h,
+        &tenant,
+        "grantee@backup-test.example",
+        &["hearth.realm.admin"],
+    );
+    let archive = export_archive(&h, &tenant, &admin_token).await;
+    h.rbac()
+        .unassign_role(&tenant, &revoked.id)
+        .expect("revoke the grant");
+
+    for sub_admin in [
+        "hearth.users.admin",
+        "hearth.realm.admin",
+        "hearth.clients.admin",
+        "hearth.agents.admin",
+    ] {
+        let (user, _) = delegate(
+            &h,
+            &tenant,
+            &format!("{sub_admin}@backup-test.example"),
+            &[sub_admin, "hearth.export"],
+        );
+        let token = token_for(&h, &tenant, &user);
+        for uri in [
+            "/admin/backup/restore",
+            "/admin/backup/restore?mode=merge",
+            "/admin/backup/restore?dry_run=true",
+        ] {
+            let (status, body) = post_restore(&h, uri, &token, &tenant, &archive).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{sub_admin} + hearth.export must not restore ({uri}): {body}"
+            );
+        }
+        assert_eq!(
+            post_backup_status(&h, "/admin/backup", &token, &tenant).await,
+            StatusCode::OK,
+            "{sub_admin} + hearth.export still exports its own realm"
+        );
+    }
+
+    assert!(
+        h.rbac()
+            .list_user_assignments(&tenant, &grantee)
+            .expect("assignments")
+            .is_empty(),
+        "a refused restore must not bring the revoked grant back"
+    );
+    let restored_events = h
+        .audit()
+        .query(&AuditQuery {
+            action: Some(AuditAction::BackupRestored),
+            ..AuditQuery::for_realm(tenant.clone())
+        })
+        .expect("audit query");
+    assert!(
+        restored_events.is_empty(),
+        "a refused restore records no BackupRestored event: {restored_events:?}"
+    );
+
+    let (status, body) = post_restore(
+        &h,
+        "/admin/backup/restore?mode=merge",
+        &admin_token,
+        &tenant,
+        &archive,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the realm admin restores: {body}");
+    assert_eq!(
+        h.rbac()
+            .list_user_assignments(&tenant, &grantee)
+            .expect("assignments")
+            .len(),
+        1,
+        "the realm admin's restore brings the archived grant back"
+    );
+}
+
+// ── Check order (L7) ──────────────────────────────────────────────────────────
+
+/// The permission checks answer before the export rate limit: a caller whose
+/// hourly quota is spent and who lacks the permission a backup operation
+/// needs gets `403`, never `429`. The quota is spent with a full-admin token
+/// of the SAME user, then the user is demoted to a sub-admin; with the rate
+/// limit checked first the demoted token would see `429`.
+#[tokio::test]
+async fn the_permission_checks_answer_before_the_export_rate_limit() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let tenant = h.create_realm();
+    h.rbac().seed_realm(&tenant).expect("seed");
+    let admin_token = make_admin_token(&h, &tenant).await;
+    let tenant_archive = export_archive(&h, &tenant, &admin_token).await;
+    let app = build_app(&h).await;
+
+    for (realm, uri) in [
+        (system_realm(), "/admin/backup?realm=system"),
+        (tenant.clone(), "/admin/backup"),
+    ] {
+        let (user, full) = delegate(
+            &h,
+            &realm,
+            &format!("quota-{}@hearth.test", uuid::Uuid::new_v4()),
+            &["hearth.admin", "hearth.export"],
+        );
+        let full_token = token_for(&h, &realm, &user);
+        let post = |token: String| {
+            let app = app.clone();
+            let realm = realm.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("Authorization", format!("Bearer {token}"))
+                        .header("X-Realm-ID", realm.as_uuid().to_string())
+                        .body(Body::empty())
+                        .expect("req"),
+                )
+                .await
+                .expect("response")
+                .status()
+            }
+        };
+        let mut status = StatusCode::OK;
+        for _ in 0..64 {
+            status = post(full_token.clone()).await;
+            if status != StatusCode::OK {
+                break;
+            }
+        }
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "precondition: {uri} spent the user's export quota"
+        );
+
+        h.rbac().unassign_role(&realm, &full.id).expect("demote");
+        grant(&h, &realm, &user, &["hearth.users.admin", "hearth.export"]);
+        let demoted = token_for(&h, &realm, &user);
+        if realm.as_uuid().is_nil() {
+            assert_eq!(
+                post(demoted.clone()).await,
+                StatusCode::FORBIDDEN,
+                "a system-realm export by a sub-admin is refused before the quota"
+            );
+        }
+        let (ct, body) = multipart_body(&tenant_archive);
+        let status = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/backup/restore")
+                    .header("Authorization", format!("Bearer {demoted}"))
+                    .header("X-Realm-ID", realm.as_uuid().to_string())
+                    .header("content-type", ct)
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("response")
+            .status();
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{realm:?}: a restore by a sub-admin is refused before the quota"
+        );
+    }
+}

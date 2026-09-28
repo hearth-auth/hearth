@@ -483,6 +483,49 @@ fn list_all_realm_ids(
     }
 }
 
+/// A backup export by a system-realm caller needs `hearth.admin`.
+///
+/// Such a caller's export is not scoped to one realm: it covers every realm,
+/// the system realm's operator accounts and signing key included.
+/// `extract_admin_auth` admits every `hearth.*.admin` sub-admin, so without
+/// this a system-realm operator delegated only `hearth.users.admin` (plus
+/// `hearth.export`) could export what none of its own permission reaches
+/// anywhere else. A tenant-scoped caller is untouched: its export is confined
+/// to its own realm (B1), and `hearth.export` granted to a tenant sub-admin is
+/// the documented way to run a DR pipeline without full `hearth.admin`
+/// (ABUSE.md A-30.1).
+fn require_system_backup_superuser(
+    auth: &AdminAuth,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if auth.realm_id.as_uuid().is_nil() {
+        require_superuser(auth, "a system-realm backup export")?;
+    }
+    Ok(())
+}
+
+/// A backup restore needs the realm's full admin permission, `hearth.admin`,
+/// whatever realm the caller is scoped to.
+///
+/// A restore writes across every sub-admin domain at once: users, credentials
+/// and factors (`hearth.users.admin`), clients (`hearth.clients.admin`),
+/// roles, role assignments and webhooks (`hearth.realm.admin`), agents
+/// (`hearth.agents.admin`) and retiring signing keys (a rotation needs
+/// `hearth.realm.admin`). No sub-admin permission is a superset of the others;
+/// `hearth.admin` is, and the seeded `realm.admin` role carries it. A tenant
+/// sub-admin holding `hearth.export` could otherwise bring back, from a signed
+/// archive of its own realm, a role assignment an administrator revoked — which
+/// live role management reserves to `hearth.realm.admin` — or clients and keys
+/// its own permission never reaches. A system-realm caller's restore reaches
+/// every realm and needed `hearth.admin` already.
+///
+/// Checked before the export rate limit, so a refused caller never spends
+/// quota and always sees `403`, never `429`.
+fn require_restore_superuser(
+    auth: &AdminAuth,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    require_superuser(auth, "a backup restore")
+}
+
 /// Resolves the realms a backup export may cover, from the caller's identity
 /// rather than the request's query string.
 ///
@@ -499,27 +542,6 @@ fn list_all_realm_ids(
 ///   never becomes a realm-existence oracle.
 ///
 /// Blocking: call from inside `spawn_blocking`.
-/// A backup export or restore by a system-realm caller needs `hearth.admin`.
-///
-/// Such a caller's backup is not scoped to one realm: it exports every realm
-/// and restores any realm, the system realm included. `extract_admin_auth`
-/// admits every `hearth.*.admin` sub-admin, so without this a system-realm
-/// operator delegated only `hearth.users.admin` (plus `hearth.export`) could,
-/// with a signed archive, resurrect deleted operators and revoked grants,
-/// overwrite every operator's password hash and factors, reinstall an old
-/// system signing key, or rewrite any tenant realm — none of which its own
-/// permission reaches anywhere else. A tenant-scoped caller is untouched: its
-/// backup is confined to its own realm (B1), which its admin permission
-/// already governs.
-fn require_system_backup_superuser(
-    auth: &AdminAuth,
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    if auth.realm_id.as_uuid().is_nil() {
-        require_superuser(auth, "a system-realm backup export or restore")?;
-    }
-    Ok(())
-}
-
 fn authorize_export_realms(
     identity: &Arc<dyn crate::identity::IdentityEngine>,
     auth_realm: &RealmId,
@@ -5250,7 +5272,7 @@ async fn admin_backup_restore(
     if let Err(e) = check_export_capability(&auth) {
         return e.into_response();
     }
-    if let Err(e) = require_system_backup_superuser(&auth) {
+    if let Err(e) = require_restore_superuser(&auth) {
         return e.into_response();
     }
 

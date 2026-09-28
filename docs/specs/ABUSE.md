@@ -2006,16 +2006,28 @@ All data-export endpoints (`POST /admin/backup`, `GET /admin/users/export`,
 `GET /admin/realms/{r}/audit/export`) and `POST /admin/backup/restore` require
 the caller's token to carry `hearth.export` **in addition to** an admin
 permission in the `permissions` claim — `hearth.admin`, or the sub-admin
-permission the endpoint accepts. A backup export or restore by a
-**system-realm** caller is not scoped to one realm (it reaches every realm,
-operator accounts and the system signing key included), so it requires
-`hearth.admin` itself; a sub-admin plus `hearth.export` is refused (`403`).
+permission the endpoint accepts. Two operations require `hearth.admin` itself,
+and refuse a sub-admin plus `hearth.export` (`403`):
+
+- **Every backup restore.** A restore writes users and credentials, clients,
+  roles and role assignments, agents and retiring signing keys at once — every
+  sub-admin domain, and no sub-admin permission is a superset of the others. A
+  tenant sub-admin could otherwise bring back, from a signed archive of its own
+  realm, a role assignment an administrator revoked (live role management needs
+  `hearth.realm.admin`), or clients and keys its permission never reaches.
+- **A backup export by a system-realm caller**, which is not scoped to one
+  realm (it reaches every realm, operator accounts and the system signing key
+  included).
+
+Both permission checks run before the per-export rate limit (A-30.2), so a
+refused caller sees `403`, never `429`, and spends no quota.
 
 - `hearth.export` is seeded in all realms and included in the `realm.admin` role
   by default.
-- Operators can grant it to dedicated service accounts (DR pipelines) scoped to
-  a tenant realm without granting full `hearth.admin`; a service account that
-  backs up every realm from the system realm needs `hearth.admin`.
+- Operators can grant it to dedicated service accounts (DR pipelines) that
+  **export** a tenant realm without granting full `hearth.admin`; a service
+  account that backs up every realm from the system realm, or that restores
+  any realm, needs `hearth.admin`.
 - Fail-closed: missing permission → `403 Forbidden`.
 
 #### A-30.2 Per-export rate limit
