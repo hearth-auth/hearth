@@ -1419,11 +1419,11 @@ impl BackupImporter {
                                     report.users.overwritten += 1;
                                 }
                                 Ok(None) => {
-                                    warn!(email = %req.email, "overwrite: user not found by email after DuplicateEmail");
+                                    warn!(email = %crate::identity::email::mask_email_address(&req.email), "overwrite: user not found by email after DuplicateEmail");
                                     report.users.errored += 1;
                                 }
                                 Err(e) => {
-                                    warn!(email = %req.email, err = %e, "overwrite: could not look up existing user");
+                                    warn!(email = %crate::identity::email::mask_email_address(&req.email), err = %e, "overwrite: could not look up existing user");
                                     report.users.errored += 1;
                                 }
                             }
@@ -1431,7 +1431,7 @@ impl BackupImporter {
                     }
                 }
                 Err(e) => {
-                    warn!(email = %req.email, err = %e, "import_user failed");
+                    warn!(email = %crate::identity::email::mask_email_address(&req.email), err = %e, "import_user failed");
                     report.users.errored += 1;
                 }
             }
