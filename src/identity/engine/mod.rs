@@ -226,7 +226,8 @@ fn audience_cutoff_hash_hex(aud: &str, out: &mut [u8; AUDIENCE_CUTOFF_HASH_HEX_L
     use sha2::Digest as _;
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let digest = sha2::Sha256::digest(aud.as_bytes());
-    for (pair, byte) in out.chunks_exact_mut(2).zip(digest.iter()) {
+    let (pairs, _) = out.as_chunks_mut::<2>();
+    for (pair, byte) in pairs.iter_mut().zip(digest.iter()) {
         pair[0] = HEX[usize::from(byte >> 4)];
         pair[1] = HEX[usize::from(byte & 0x0f)];
     }
