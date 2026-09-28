@@ -723,8 +723,10 @@ pub fn router_with(state: Arc<AppState>, extra: Router) -> Router {
         ))
 }
 
-/// Removes `X-Forwarded-Proto` from any request whose TCP peer is not listed
-/// in `server.trusted_proxies`.
+/// Removes `X-Forwarded-Proto` from any request whose TCP peer is not inside
+/// `server.trusted_proxies` (an address or CIDR range — the same
+/// [`crate::core::TrustedProxies::contains`] match the `X-Forwarded-For` walk
+/// uses).
 ///
 /// `server.trust_forwarded_proto` makes that header decide whether a request
 /// is treated as HTTPS: the `Secure` cookie attribute, HSTS, and the login
@@ -742,13 +744,7 @@ async fn strip_untrusted_forwarded_proto(
         let from_trusted_proxy = req
             .extensions()
             .get::<ConnectInfo<std::net::SocketAddr>>()
-            .is_some_and(|ConnectInfo(peer)| {
-                let peer = peer.ip().to_canonical();
-                state
-                    .trusted_proxies
-                    .iter()
-                    .any(|proxy| proxy.to_canonical() == peer)
-            });
+            .is_some_and(|ConnectInfo(peer)| state.trusted_proxies.contains(peer.ip()));
         if !from_trusted_proxy {
             req.headers_mut().remove(XFP);
         }

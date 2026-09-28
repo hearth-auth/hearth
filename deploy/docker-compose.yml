@@ -10,8 +10,8 @@
 #      deploy/hearth.env.example). The file is required; `up` fails without it.
 #   2. hearth.yaml picks an HTTPS posture: server.tls_cert_path +
 #      tls_key_path, OR server.trust_forwarded_proto: true with
-#      server.trusted_proxies listing your reverse proxy's IP(s) (individual
-#      IPs, no CIDR).
+#      server.trusted_proxies listing your reverse proxy's IP(s) or CIDR
+#      range(s).
 #   3. hearth.yaml sets oidc.issuer and a real email.transport (or
 #      email.allow_log_transport_in_production: true to evaluate with email
 #      dropped to the log).

@@ -113,13 +113,13 @@ each with its rationale.
 
 Encryption at rest is **active** in Hearth 1.0. All data written to disk — WAL records and SST file sections — is encrypted using a three-tier key hierarchy:
 
-1. **Host Key (32 B)** — loaded from the `HEARTH_MASTER_KEY` env var (64 hex chars, e.g. `openssl rand -hex 32`). If the variable is unset, Hearth reads an existing `hearth.host_key` file from the data directory; if there is none, production mode **refuses to start** — it never auto-generates a key (`src/storage/key_registry.rs`). Only `--dev` mode auto-generates a key and persists it to `hearth.host_key`. Protects the KEKs in `hearth.keys`.
+1. **Host Key (32 B)** — loaded from the `HEARTH_MASTER_KEY` env var (64 hex chars, e.g. `openssl rand -hex 32`). In production that variable is the **only** key source: if it is unset, Hearth **refuses to start**, and it never reads a `hearth.host_key` file from the data directory even when one exists (`src/storage/key_registry.rs`). Only `--dev` mode auto-generates a key, persists it to `hearth.host_key`, and reads that file back on a later `--dev` start. Protects the KEKs in `hearth.keys`.
 2. **KEK (32 B)** — stored encrypted in `hearth.keys`; wraps per-file DEKs. The key registry is realm-keyed, but only the system realm's KEK is provisioned, so **one KEK covers every realm**. Size your key-compromise blast radius accordingly: recovering that one KEK exposes every realm's data, not one tenant's.
 3. **File DEK (32 B per SST/WAL segment)** — randomly generated per file; stored in the 76-byte encryption header at the start of each file.
 
 Key rotation re-wraps only the DEK header in each file (O(file count), not O(data size)) — the ciphertext on disk is unchanged.
 
-If you self-host Hearth and need to rotate the host key, back up `HEARTH_MASTER_KEY` (or `hearth.host_key`, where one exists) and `hearth.keys` before any rotation operation. Loss of the host key makes all on-disk data permanently unrecoverable.
+If you self-host Hearth and need to rotate the host key, back up `HEARTH_MASTER_KEY` and `hearth.keys` before any rotation operation. Loss of the host key makes all on-disk data permanently unrecoverable.
 
 ## Release Signing
 

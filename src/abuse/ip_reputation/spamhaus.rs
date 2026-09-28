@@ -50,8 +50,9 @@ use std::time::Duration;
 
 use tracing::{debug, warn};
 
-use crate::abuse::cidr::{Cidr, CidrFilter};
+use crate::abuse::cidr::CidrFilter;
 use crate::abuse::ip_reputation::{IpReputationProvider, IpReputationVerdict};
+use crate::core::IpRange;
 use crate::core::SwapCell;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -208,9 +209,10 @@ impl IpReputationProvider for SpamhausDropProvider {
 ///
 /// Lines starting with `;` are comments and are skipped.  Blank lines are
 /// skipped.  For data lines, only the text before the first `;` is used as the
-/// CIDR.  Lines that cannot be parsed as a valid CIDR are silently skipped.
+/// CIDR.  Lines that are not a valid `core::IpRange` are skipped (logged at
+/// `debug`).
 fn build_filter(drop_text: &str, dropv6_text: &str) -> CidrFilter {
-    let mut deny: Vec<Cidr> = Vec::new();
+    let mut deny: Vec<IpRange> = Vec::new();
     for line in drop_text.lines().chain(dropv6_text.lines()) {
         parse_drop_line(line, &mut deny);
     }
@@ -219,7 +221,7 @@ fn build_filter(drop_text: &str, dropv6_text: &str) -> CidrFilter {
 }
 
 /// Parses a single DROP list line into `out`, ignoring comments and blanks.
-fn parse_drop_line(line: &str, out: &mut Vec<Cidr>) {
+fn parse_drop_line(line: &str, out: &mut Vec<IpRange>) {
     // Trim whitespace; skip blank lines.
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -234,11 +236,12 @@ fn parse_drop_line(line: &str, out: &mut Vec<Cidr>) {
     if cidr_part.is_empty() {
         return;
     }
-    match Cidr::parse(cidr_part) {
-        Ok(cidr) => out.push(cidr),
-        Err(_) => {
-            // Silently skip unparseable lines (fail-open for malformed input).
-        }
+    // Same strict grammar as every other network list (`core::IpRange`). An
+    // unparseable line is skipped — a remote feed must not stop the refresh —
+    // but it is logged, so a format change upstream is visible.
+    match cidr_part.parse::<IpRange>() {
+        Ok(range) => out.push(range),
+        Err(e) => debug!(line = cidr_part, error = %e, "skipping unparseable DROP line"),
     }
 }
 

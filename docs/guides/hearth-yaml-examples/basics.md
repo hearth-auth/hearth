@@ -53,7 +53,8 @@ server:
   tls_cert_path: "/etc/hearth/tls/server.crt"
   tls_key_path:  "/etc/hearth/tls/server.key"
   trusted_proxies:
-    - "10.0.0.0/8"          # CIDR ranges are not yet supported; list individual IPs
+    - "10.0.0.7"            # a single proxy address
+    - "10.42.0.0/16"        # or a CIDR range (no host bits; nothing broader than /8 or /16 for IPv6)
   trust_forwarded_proto: true
 
 storage:

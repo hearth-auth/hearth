@@ -19,6 +19,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::Request;
+use hearth::core::TrustedProxies;
 use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
 use hearth::identity::onboarding::OnboardingService;
 use hearth::protocol::http::{router_with, AppState};
@@ -29,6 +30,12 @@ const PROXY: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7));
 const DIRECT_CLIENT: IpAddr = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
 
 async fn app(h: &common::TestHarness) -> axum::Router {
+    app_trusting(h, &["10.0.0.7"]).await
+}
+
+/// The app with `server.trusted_proxies` set to `trusted`.
+async fn app_trusting(h: &common::TestHarness, trusted: &[&str]) -> axum::Router {
+    let trusted = TrustedProxies::parse(trusted).expect("valid trusted_proxies");
     let email = Arc::new(
         EmailService::new(
             Arc::new(LoggingEmailSender::new()),
@@ -56,9 +63,9 @@ async fn app(h: &common::TestHarness) -> axum::Router {
         None,
     )
     .with_trust_forwarded_proto(true)
-    .with_trusted_proxies(vec![PROXY]);
-    let app_state = AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
-        .with_trusted_proxies(vec![PROXY]);
+    .with_trusted_proxies(trusted.clone());
+    let app_state =
+        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()).with_trusted_proxies(trusted);
     router_with(Arc::new(app_state), web::router(web_state))
 }
 
@@ -95,4 +102,44 @@ async fn forwarded_proto_from_a_trusted_proxy_is_honoured() {
         hsts_for(app(&h).await, PROXY).await,
         "X-Forwarded-Proto: https from a trusted proxy must still be honoured"
     );
+}
+
+// ── CIDR trusted_proxies (G3) ───────────────────────────────────────────────
+//
+// Ingress-controller pod IPs change on reschedule, so operators list a range.
+// The header check must use the same range match as the X-Forwarded-For walk.
+
+/// A peer anywhere inside a trusted CIDR is a proxy: its header is honoured.
+#[tokio::test]
+async fn forwarded_proto_from_a_peer_inside_a_trusted_cidr_is_honoured() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let app = app_trusting(&h, &["10.42.0.0/16"]).await;
+    assert!(
+        hsts_for(app, IpAddr::V4(Ipv4Addr::new(10, 42, 200, 3))).await,
+        "a peer inside server.trusted_proxies' CIDR range is a trusted proxy"
+    );
+}
+
+/// One address past the range is an ordinary client: its header is removed.
+#[tokio::test]
+async fn forwarded_proto_from_a_peer_outside_a_trusted_cidr_is_ignored() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let app = app_trusting(&h, &["10.42.0.0/16"]).await;
+    assert!(
+        !hsts_for(app, IpAddr::V4(Ipv4Addr::new(10, 43, 0, 0))).await,
+        "a peer outside the trusted range set X-Forwarded-Proto: https and got HSTS"
+    );
+}
+
+/// IPv6 ranges and dual-stack (`::ffff:a.b.c.d`) peers use the same match.
+#[tokio::test]
+async fn forwarded_proto_honours_ipv6_and_v4_mapped_peers_by_range() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let trusted = ["2001:db8:42::/48", "10.42.0.0/16"];
+    let v6_in: IpAddr = "2001:db8:42::9".parse().expect("ip");
+    let v6_out: IpAddr = "2001:db8:43::9".parse().expect("ip");
+    let mapped_in: IpAddr = "::ffff:10.42.0.9".parse().expect("ip");
+    assert!(hsts_for(app_trusting(&h, &trusted).await, v6_in).await);
+    assert!(!hsts_for(app_trusting(&h, &trusted).await, v6_out).await);
+    assert!(hsts_for(app_trusting(&h, &trusted).await, mapped_in).await);
 }

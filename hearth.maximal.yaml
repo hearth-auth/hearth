@@ -557,9 +557,10 @@ realms:
         support_email: "it@example.com"
     scim:
       bearer_token: "${SCIM_BEARER_INTERNAL}"
-    # A-9 tenant-managed CIDR policy. Evaluation is deny-then-allow: a `deny`
-    # match rejects outright, and a NON-EMPTY `allow` rejects everything it does
-    # not contain — so `allow` is left empty here to keep the local demo usable.
+    # A-9 tenant-managed CIDR policy. Evaluation is deny first, then allow: a
+    # `deny` match refuses outright; otherwise a non-empty `allow` list refuses
+    # every address it does not contain. Both lists empty means no network
+    # restriction. `allow` is left empty here to keep the local demo usable.
     security:
       cidr_policy:
         allow: []                           # e.g. ["10.0.0.0/8", "192.0.2.0/24"]

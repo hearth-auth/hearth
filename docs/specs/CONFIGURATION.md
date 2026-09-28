@@ -41,7 +41,7 @@ key:
 
 | Env var | Required? | Purpose |
 |---------|-----------|---------|
-| `HEARTH_MASTER_KEY` | Required in production | 32-byte host key that wraps every realm KEK on disk, and the passphrase for `hearth backup export` / `restore`. When unset, production startup fails rather than auto-generating a world-readable `hearth.host_key` file. |
+| `HEARTH_MASTER_KEY` | Required in production | 32-byte host key that wraps every realm KEK on disk, and the passphrase for `hearth backup export` / `restore`. It is the only host-key source in production: when unset, startup fails, and a `{data_dir}/hearth.host_key` file is never read (only `--dev` generates and reads one). `hearth config validate` warns when it is unset. |
 | `HEARTH_PREVIOUS_MASTER_KEY` | Only during a host-key rotation | Previous host key value. Set it when startup fails with `HostKeyMismatch` after rotating `HEARTH_MASTER_KEY`; remove it once every realm KEK has been re-wrapped. |
 | `HEARTH_KEK` | One of this or `security.key_encryption_key` | Key-encryption key for realm signing keys at rest. 64 lowercase hex characters (`openssl rand -hex 32`). |
 | `HEARTH_SMS_OTP_HMAC_KEY` | Required whenever `sms.transport` is not `"log"` | At least 32 bytes. Cryptographically binds an SMS OTP to this server; startup fails without it once a real SMS transport is configured. |
@@ -121,7 +121,7 @@ Network binding and TLS configuration.
 | `tls_key_path` | string | — | Path to the PEM-encoded private key for the TLS certificate. |
 | `tls_client_ca_path` | string | — | Path to a CA certificate for client certificate verification (mTLS). |
 | `tls_require_client_cert` | bool | `false` | When `true`, all connections must present a valid client certificate signed by `tls_client_ca_path`. |
-| `trusted_proxies` | list of strings | `[]` | IP addresses of trusted reverse proxies. When non-empty, the real client IP is extracted from `X-Forwarded-For` using the rightmost-non-trusted algorithm. When empty (the default), the peer socket address is used and `X-Forwarded-For` is ignored — the safe default for direct-to-internet deployments. CIDR notation is not yet supported; supply individual IPs. |
+| `trusted_proxies` | list of strings | `[]` | Trusted reverse proxies, each a single IP address (`10.0.0.7`, `2001:db8::7`) or a CIDR range (`10.42.0.0/16`, `2001:db8:42::/48`) — use a range when proxy addresses change, e.g. Kubernetes ingress-controller pods. When non-empty, the real client IP is extracted from `X-Forwarded-For` using the rightmost-non-trusted algorithm (a hop inside any listed range counts as trusted), `X-Forwarded-Proto` is honoured from a peer inside the list, and such peers are exempt from `operational.max_connections_per_ip`. When empty (the default), the peer socket address is used and both headers are ignored — the safe default for direct-to-internet deployments. Every entry is checked the same way by `hearth config validate` and at start-up; one bad entry refuses the whole config (nothing is silently dropped). Refused: anything that is not an address or `address/prefix`; a range with **host bits set** (`10.0.0.7/8` — write `10.0.0.0/8` for the range or `10.0.0.7` for the address; Hearth refuses rather than guess which you meant); the unspecified address or a range starting at it (`0.0.0.0`, `::`, `0.0.0.0/0`, `::/0`); and a range broader than `/8` (IPv4) or `/16` (IPv6), which would trust a large share of the internet. A loopback entry is refused on a non-loopback `bind_address`. An IPv4-mapped IPv6 entry (`::ffff:10.0.0.7`) is treated as its IPv4 form. |
 | `trust_forwarded_proto` | bool | `false` | Trust the `X-Forwarded-Proto: https` header when deciding whether a request arrived over HTTPS (session cookies carry `Secure`, HSTS is sent, the login Origin check). The header is honoured **only when the connection's TCP peer is listed in `trusted_proxies`**; from any other peer it is removed before the request is handled. **Requires a non-empty `trusted_proxies`** — setting it to `true` with an empty proxy list is refused at start-up and by `hearth config validate`, because the flag would then have no effect. |
 
 | `grpc_port` | integer | — (disabled) | TCP port for the gRPC management API. When unset, no gRPC listener is started. |
@@ -1336,14 +1336,29 @@ Per-realm security policy.
 #### `realms.<name>.security.cidr_policy` (A-9)
 
 Tenant-managed network allow/deny lists, consulted on the login form before any
-password hashing. Evaluation is **deny first, then allow**: a `deny` match
-refuses outright, and a non-empty `allow` list refuses everything it does not
-contain. Both lists empty (the default) means no network restriction.
+password hashing. Evaluation is deny first, then allow: a `deny` match refuses
+outright; otherwise a non-empty `allow` list refuses every address it does not
+contain. Both lists empty means no network restriction. (Both lists are empty by
+default.) A `deny` entry inside an allowed range therefore carves an exception
+out of it: `allow: ["10.0.0.0/8"]` with `deny: ["10.1.2.3"]` admits
+`10.1.2.4` and refuses `10.1.2.3`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `allow` | list of CIDRs | `[]` | Sources permitted to authenticate. Empty = no allow-list restriction. |
 | `deny` | list of CIDRs | `[]` | Sources refused outright. Evaluated before `allow`. |
+
+Each entry is a single IP address (`192.0.2.7`, `2001:db8::7`) or a CIDR range
+(`10.0.0.0/8`, `2001:db8::/32`), in the same strict grammar as
+`server.trusted_proxies`. `hearth config validate` and start-up refuse any
+other entry, naming the realm and position (e.g.
+`realms.acme.security.cidr_policy.allow[1]`) — nothing is silently dropped.
+Refused: a range with **host bits set** (`10.1.2.255/24` — write `10.1.2.0/24`
+or `10.1.2.255`), a signed or zero-padded prefix (`/+8`, `/08`), a zone id
+(`fe80::1%eth0`), brackets, a port, and surrounding whitespace. Unlike
+`trusted_proxies` there is no breadth limit: `deny: ["0.0.0.0/0"]` is a valid
+policy. An IPv4 client reaching a dual-stack listener as `::ffff:a.b.c.d` is
+matched as its IPv4 address.
 
 ```yaml
 realms:

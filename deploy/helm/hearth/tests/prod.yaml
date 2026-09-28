@@ -67,7 +67,7 @@ data:
       port: 8420
       trust_forwarded_proto: true
       trusted_proxies:
-      - REPLACE_WITH_INGRESS_CONTROLLER_IP
+      - REPLACE_WITH_INGRESS_CONTROLLER_IP_OR_CIDR
     storage:
       data_dir: /var/lib/hearth
       fsync: true
@@ -141,7 +141,7 @@ spec:
     metadata:
       annotations:
         # Force pod restart when config changes
-        checksum/config: 78709d6748ee22ddfd8d4d046230e3676795b86b0062357a0de9601e8001f237
+        checksum/config: b109bedee6648985af36bd743e4f88e081e934f6fc138d3281d0de73d0d2445c
       labels:
         app.kubernetes.io/name: hearth
         app.kubernetes.io/instance: hearth

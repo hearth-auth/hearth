@@ -32,7 +32,6 @@
 //!    [`ServerLimits::http2_max_pending_reset_streams`] are handed to the
 //!    hyper connection builder on *both* listeners.
 
-use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -96,8 +95,9 @@ pub struct ServerLimits {
     /// (`operational.max_connections_per_ip`); `0` disables the cap.
     pub max_connections_per_ip: u32,
     /// Peers exempt from [`Self::max_connections_per_ip`] — the operator's
-    /// `server.trusted_proxies`, which carry every client behind them.
-    pub per_ip_exempt: Vec<IpAddr>,
+    /// `server.trusted_proxies` (addresses and CIDR ranges), which carry every
+    /// client behind them.
+    pub per_ip_exempt: crate::core::TrustedProxies,
     /// HTTP/2 keep-alive `PING` interval; `None` disables pings.
     pub http2_keepalive_interval: Option<Duration>,
 }
@@ -113,7 +113,7 @@ impl Default for ServerLimits {
             header_read_timeout: Duration::from_secs(DEFAULT_HEADER_READ_TIMEOUT_SECS),
             tls_handshake_timeout: Duration::from_secs(DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS),
             max_connections_per_ip: DEFAULT_MAX_CONNECTIONS_PER_IP,
-            per_ip_exempt: Vec::new(),
+            per_ip_exempt: crate::core::TrustedProxies::default(),
             http2_keepalive_interval: Some(Duration::from_secs(
                 DEFAULT_HTTP2_KEEPALIVE_INTERVAL_SECS,
             )),
