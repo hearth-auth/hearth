@@ -30,3 +30,36 @@ vulnerabilities:
     paths:
       - "sdks/go/go.mod"
     statement: "No openpgp import anywhere in the Go SDK build graph; the advisory has no fixed version."
+  # ip-address 10.5.0 and undici 6.28.0 BUNDLED inside the npm CLI
+  # (node_modules/npm/node_modules/...) in the release-tooling lockfile only.
+  # npm ships bundleDependencies inside its tarball, so no lockfile update or
+  # override can change them; npm 11.20.0 (newest 11.x, required by
+  # @semantic-release/npm ^11.6.2) still bundles these versions. The top-level
+  # copies are patched. Same assessment as the osv-scanner.toml entries; listed
+  # under both GHSA and CVE ids because the two databases key them differently.
+  # Revisit when an npm 11.x release bundles ip-address >= 10.5.1 and
+  # undici >= 6.28.1.
+  - id: GHSA-2vr4-cq9g-pvrc
+    paths:
+      - "package-lock.json"
+    statement: "ip-address bundled in the npm CLI (release tooling); no npm 11.x bundles the fix yet."
+  - id: CVE-2026-101913
+    paths:
+      - "package-lock.json"
+    statement: "ip-address bundled in the npm CLI (release tooling); no npm 11.x bundles the fix yet."
+  - id: GHSA-rpw4-54j3-4h4q
+    paths:
+      - "package-lock.json"
+    statement: "ip-address bundled in the npm CLI (release tooling); no npm 11.x bundles the fix yet."
+  - id: CVE-2026-101910
+    paths:
+      - "package-lock.json"
+    statement: "ip-address bundled in the npm CLI (release tooling); no npm 11.x bundles the fix yet."
+  - id: GHSA-3wwx-pv8p-q78v
+    paths:
+      - "package-lock.json"
+    statement: "undici bundled in the npm CLI for node-gyp (release tooling); WebSocket DoS unused; no npm 11.x bundles the fix yet."
+  - id: CVE-2026-85024
+    paths:
+      - "package-lock.json"
+    statement: "undici bundled in the npm CLI for node-gyp (release tooling); WebSocket DoS unused; no npm 11.x bundles the fix yet."

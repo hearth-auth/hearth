@@ -49,6 +49,31 @@ reason = "Marvin Attack timing side-channel in the rsa crate. Scope correction (
 id = "GO-2026-5932"
 reason = "golang.org/x/crypto/openpgp is unmaintained and unsafe by design. The advisory covers every x/crypto version (introduced 0, no fix) but only code that imports the openpgp packages. The Go SDK never does: `go list -deps -test ./...` in sdks/go shows x/crypto only as acme, acme/autocert (via labstack/echo), chacha20, chacha20poly1305, hkdf, sha3 and internals — no openpgp path (checked 2026-09-28, x/crypto v0.56.0). Revisit if any SDK dependency starts importing golang.org/x/crypto/openpgp; `go list -deps -test ./... | grep openpgp` must stay empty."
 
+# The next three entries cover copies BUNDLED inside the npm CLI package
+# (node_modules/npm/node_modules/...), pulled in by @semantic-release/npm 13
+# (requires npm ^11.6.2) for the release workflow only (dev scope). npm ships
+# bundleDependencies inside its tarball, so a lockfile update or an
+# `overrides` entry cannot change them. npm 11.20.0 is the newest 11.x and still
+# bundles ip-address 10.5.0 / undici 6.28.0; npm 12 needs Node 22 and is outside
+# @semantic-release/npm's range. The top-level copies are already patched
+# (ip-address 10.7.2, undici 6.29.0 / 7.30.0). Revisit when an npm 11.x release
+# bundles ip-address >= 10.5.1 and undici >= 6.28.1 (checked 2026-09-28).
+
+# guard: package=ip-address lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-2vr4-cq9g-pvrc"
+reason = "ip-address 10.5.0 bundled inside the npm CLI (node_modules/npm/node_modules/ip-address, via npm's socks proxy support) in the release-tooling lockfile; no npm 11.x release bundles 10.5.1 yet. Address6 classification flaw; the release workflow's npm publish uses no IPv6 range classification. Revisit when npm 11.x bundles ip-address >= 10.5.1."
+
+# guard: package=ip-address lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-rpw4-54j3-4h4q"
+reason = "Same bundled ip-address 10.5.0 inside the npm CLI (release tooling, dev scope); NAT64 local-use range classification flaw, unused by npm publish. Revisit when npm 11.x bundles ip-address >= 10.5.1."
+
+# guard: package=undici lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-3wwx-pv8p-q78v"
+reason = "undici 6.28.0 bundled inside the npm CLI (node_modules/npm/node_modules/undici, via node-gyp header downloads) in the release-tooling lockfile; no npm 11.x release bundles 6.28.1 yet. The flaw is a DoS in undici's WebSocket handling; npm/node-gyp make plain HTTPS requests, no WebSocket. docs-site's undici was upgraded to 7.29.1 instead. Revisit when npm 11.x bundles undici >= 6.28.1."
+
 # CVE-2026-42507, CVE-2026-42504 and CVE-2026-27145 were removed on 2026-09-28
 # (GA audit supply-chain fix). Their reasons blamed google.golang.org/protobuf
 # and genproto, but osv.dev aliases them to GO-2026-5039 (net/textproto),
