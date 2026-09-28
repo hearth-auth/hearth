@@ -34,6 +34,7 @@ use crate::rbac::error::RbacError;
 
 use super::validate_claim_payload;
 use super::EmbeddedIdentityEngine;
+use super::CLIENT_TOKEN_CUTOFF_PREFIX;
 use super::CLOCK_SKEW_SECS;
 
 impl EmbeddedIdentityEngine {
@@ -831,6 +832,8 @@ impl EmbeddedIdentityEngine {
         let client = self
             .get_client(realm_id, &request.client_id)?
             .ok_or(IdentityError::ClientNotFound)?;
+        // B9: a code minted before the client was archived is not redeemable.
+        Self::refuse_inactive_client(&client)?;
 
         // 8b. FAPI 2.0: DPoP sender-constrained tokens are mandatory.
         // Check both per-client profile flag AND realm-level fapi_profile so that
@@ -1443,6 +1446,11 @@ impl EmbeddedIdentityEngine {
         let Some(client) = existing else {
             return Err(IdentityError::InvalidClientSecret);
         };
+        // B9: an archived client's credentials authenticate nothing; refused
+        // with the same answer as a wrong secret.
+        if Self::refuse_inactive_client(&client).is_err() {
+            return Err(IdentityError::InvalidClientSecret);
+        }
 
         // 3. Only an authenticated client learns that it lacks the grant.
         if !client
@@ -1550,6 +1558,7 @@ impl EmbeddedIdentityEngine {
             serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
+        Self::refuse_inactive_client(&client)?;
 
         // 2. Verify grant type is allowed for this client
         if !client
@@ -1708,6 +1717,7 @@ impl EmbeddedIdentityEngine {
             serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
+        Self::refuse_inactive_client(&client)?;
 
         let claims = Self::verify_client_assertion_signature(&client, assertion)?;
 
@@ -2009,23 +2019,23 @@ impl EmbeddedIdentityEngine {
                 reason: "jti claim is required in signed request objects".to_string(),
             })?;
         let jti_key = keys::encode_jar_jti(jti);
-        if self
+        // Store expiry as 8-byte little-endian i64 (Unix seconds) so the
+        // background sweeper in cleanup::sweep_jar_jtis() can purge entries
+        // once they can no longer represent a valid JWT (exp + clock skew).
+        //
+        // One atomic step (GA audit L9): the old read-then-write let
+        // concurrent requests carrying the same request object all pass.
+        // `put_if_absent` is atomic here and Raft-routed in cluster mode.
+        let jar_jti_expires_at = claims.exp.saturating_add(CLOCK_SKEW_SECS);
+        let fresh = self
             .storage
-            .get(realm_id, &jti_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
+            .put_if_absent(realm_id, &jti_key, &jar_jti_expires_at.to_le_bytes())
+            .map_err(Self::storage_err)?;
+        if !fresh {
             return Err(IdentityError::InvalidJar {
                 reason: "jti has already been used (replay)".to_string(),
             });
         }
-        // Store expiry as 8-byte little-endian i64 (Unix seconds) so the
-        // background sweeper in cleanup::sweep_jar_jtis() can purge entries
-        // once they can no longer represent a valid JWT (exp + clock skew).
-        let jar_jti_expires_at = claims.exp.saturating_add(CLOCK_SKEW_SECS);
-        self.storage
-            .put(realm_id, &jti_key, &jar_jti_expires_at.to_le_bytes())
-            .map_err(Self::storage_err)?;
 
         Ok(claims)
     }
@@ -2048,6 +2058,7 @@ impl EmbeddedIdentityEngine {
             serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
+        Self::refuse_inactive_client(&client)?;
 
         self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
 
@@ -2228,6 +2239,13 @@ impl EmbeddedIdentityEngine {
         // 2. Verify client matches
         if stored.client_id != *client_id {
             return Err(IdentityError::InvalidClient);
+        }
+        // B9: a client archived (or deleted) since it started the flow gets no
+        // tokens. Checked before the code is consumed, so a restore lets a
+        // still-live code complete.
+        match self.get_client(realm_id, client_id)? {
+            Some(c) => Self::refuse_inactive_client(&c)?,
+            None => return Err(IdentityError::InvalidClient),
         }
 
         let now = self.clock.now();
@@ -2492,6 +2510,7 @@ impl EmbeddedIdentityEngine {
         let client = self
             .get_client(realm_id, &request.client_id)?
             .ok_or(IdentityError::ClientNotFound)?;
+        Self::refuse_inactive_client(&client)?;
 
         if !client.redirect_uris().contains(&effective_redirect_uri) {
             return Err(IdentityError::InvalidRedirectUri);
@@ -2567,6 +2586,15 @@ impl EmbeddedIdentityEngine {
             .ok_or(IdentityError::InvalidPushedAuthorizationRequest)?;
 
         let key = keys::encode_par_request(request_uri_id);
+        // GA audit L9: read → check `used` → write back was unserialised, so
+        // concurrent authorizations presenting one `request_uri` could each
+        // consume it. The per-key advisory lock the code and device-code
+        // redemptions use makes the sequence one step on this node (the
+        // `request_uri` is 128+ random bits, so the lock map is not shared
+        // meaningfully with code hashes). Held only across this sync block.
+        let lock = self.code_exchange_lock(&format!("par:{request_uri_id}"));
+        // INVARIANT: guard held only across the sync read-check-write below; no .await in scope.
+        let _consume_guard = lock.lock().expect("code_exchange_lock poisoned");
         let raw = self
             .storage
             .get(realm_id, &key)
@@ -2877,8 +2905,10 @@ impl EmbeddedIdentityEngine {
         // - `azp` set (delegated/bound token): only azp-match or aud-match allowed.
         // - `azp` absent, `sid == "none"` (M2M/client_credentials): only the
         //   owning client (`sub == cid`) or an audience member may self-introspect.
-        // - `azp` absent, `sid != "none"` (unbound user session token): any
-        //   authenticated client may introspect (no restriction).
+        // - `azp` absent, `sid != "none"` (unbound user session token): an
+        //   audience member, the client the token's grant family was issued
+        //   to, or a declared resource server (GA audit L11 — it used to be
+        //   any authenticated client, which then received live RBAC data).
         if let Some(ref cid) = request.introspecting_client_id {
             let cid_str = cid.to_string();
             if let Some(token_azp) = claims.azp.as_deref() {
@@ -2891,8 +2921,11 @@ impl EmbeddedIdentityEngine {
                 if claims.sub != cid_str && !claims.aud.contains(cid_str.as_str()) {
                     return Ok(IntrospectionResponse::inactive());
                 }
+            } else if !claims.aud.contains(cid_str.as_str())
+                && !self.may_introspect_unbound_user_token(realm_id, cid, &claims)?
+            {
+                return Ok(IntrospectionResponse::inactive());
             }
-            // Unbound user-session tokens: any authenticated client may introspect.
         }
 
         // 3. Check expiration and iat sanity
@@ -3017,6 +3050,54 @@ impl EmbeddedIdentityEngine {
             roles: live_roles,
             groups: live_groups,
         })
+    }
+
+    /// Whether `caller` may introspect a session-bound access token that
+    /// carries no `azp` (GA audit L11): only the client the token's grant
+    /// family was issued to, the client that obtained it by token exchange
+    /// (its `act.sub`), or a declared resource server — a client whose
+    /// `access_token_authorization` is `Introspection` or `Decision`, which
+    /// only an administrator can set (dynamic registration always yields
+    /// `Embedded`). An unknown or archived caller is neither.
+    fn may_introspect_unbound_user_token(
+        &self,
+        realm_id: &RealmId,
+        caller: &ClientId,
+        claims: &TokenClaims,
+    ) -> Result<bool, IdentityError> {
+        use crate::identity::oidc::AccessTokenAuthorization;
+        let Some(client) = self.get_client(realm_id, caller)? else {
+            return Ok(false);
+        };
+        if Self::refuse_inactive_client(&client).is_err() {
+            return Ok(false);
+        }
+        if client.access_token_authorization() != AccessTokenAuthorization::Embedded {
+            return Ok(true);
+        }
+        // An RFC 8693 exchanged token was issued to the exchanging client,
+        // which its outermost `act.sub` records (as the bare UUID, or as the
+        // `client_…` subject of an actor token).
+        if let Some(act) = claims.act.as_ref() {
+            if act.sub == caller.to_string() || act.sub == caller.as_uuid().to_string() {
+                return Ok(true);
+            }
+        }
+        let Some(fid) = claims.fid.as_deref() else {
+            return Ok(false);
+        };
+        let Some(bytes) = self
+            .storage
+            .get(realm_id, &keys::encode_grant_family(fid))
+            .map_err(Self::storage_err)?
+        else {
+            return Ok(false);
+        };
+        let family: StoredGrantFamily =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        Ok(family.client_id.as_ref() == Some(caller))
     }
 
     pub(super) fn decide_token_permission_inner(
@@ -3427,6 +3508,82 @@ impl EmbeddedIdentityEngine {
         }
     }
 
+    /// Refuses a client that is not [`ApplicationStatus::Active`] with
+    /// [`IdentityError::InvalidClient`].
+    ///
+    /// GA audit B9: a client archived by removal from `hearth.yaml` must stop
+    /// working on every grant, not only `/authorize`. Every path that loads a
+    /// client to act for it calls this (or refuses an archived client in its
+    /// own uniform error), so an archived client is indistinguishable from an
+    /// unknown one.
+    pub(super) fn refuse_inactive_client(client: &OAuthClient) -> Result<(), IdentityError> {
+        if client.status() == ApplicationStatus::Active {
+            Ok(())
+        } else {
+            Err(IdentityError::InvalidClient)
+        }
+    }
+
+    /// RFC 8693 per-client policy (GA audit M8): the exchanging client must be
+    /// a registered [`ApplicationStatus::Active`] client (else
+    /// `invalid_client`), must list the token-exchange grant in its
+    /// `grant_types`, and must be confidential (else `unauthorized_client`).
+    ///
+    /// A public client "authenticates" by its `client_id` alone, which is
+    /// public by construction, so letting one exchange let anyone holding a
+    /// subject token re-mint it under that client's name.
+    pub(super) fn require_token_exchange_client(
+        &self,
+        realm_id: &RealmId,
+        client_id: &ClientId,
+    ) -> Result<(), IdentityError> {
+        const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+        let client = self
+            .get_client(realm_id, client_id)?
+            .ok_or(IdentityError::InvalidClient)?;
+        Self::refuse_inactive_client(&client)?;
+        if client.is_public() {
+            return Err(IdentityError::TokenExchangeRejected {
+                reason: "token exchange requires a confidential client".to_string(),
+                oauth_error: "unauthorized_client",
+            });
+        }
+        if !client
+            .grant_types()
+            .iter()
+            .any(|g| g == TOKEN_EXCHANGE_GRANT)
+        {
+            return Err(IdentityError::TokenExchangeRejected {
+                reason: "client is not registered for the token-exchange grant".to_string(),
+                oauth_error: "unauthorized_client",
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuses an RFC 8693 `audience` or `resource` that is not the URI of a
+    /// protected resource registered in the realm (GA audit M8): RFC 8693
+    /// §2.2.2 `invalid_target`.
+    pub(super) fn require_registered_exchange_target(
+        &self,
+        realm_id: &RealmId,
+        target: &str,
+    ) -> Result<(), IdentityError> {
+        let registered = self
+            .storage
+            .get(realm_id, &keys::encode_resource_server_uri_index(target))
+            .map_err(Self::storage_err)?
+            .is_some();
+        if registered {
+            Ok(())
+        } else {
+            Err(IdentityError::TokenExchangeRejected {
+                reason: "audience/resource is not a registered protected resource".to_string(),
+                oauth_error: "invalid_target",
+            })
+        }
+    }
+
     pub(super) fn authenticate_client_inner(
         &self,
         realm_id: &RealmId,
@@ -3458,12 +3615,19 @@ impl EmbeddedIdentityEngine {
         self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;
         let client = self.get_client(realm_id, client_id)?;
 
+        // B9: an archived client authenticates as nothing. The flag is read
+        // here but acted on only after the (input-determined) hashing work,
+        // so the refusal costs what any other refusal costs.
+        let archived = client
+            .as_ref()
+            .is_some_and(|c| Self::refuse_inactive_client(c).is_err());
+
         let Some(secret) = client_secret else {
             return match client.as_ref() {
                 // Public client: no secret needed, client_id alone suffices.
                 // A secretless client with an assertion key or a JWKS is not
                 // public — it authenticates with `private_key_jwt` only.
-                Some(c) if c.is_public() => Ok(()),
+                Some(c) if c.is_public() && !archived => Ok(()),
                 _ => Err(IdentityError::InvalidClientSecret),
             };
         };
@@ -3471,6 +3635,9 @@ impl EmbeddedIdentityEngine {
         let stored_hash = client.as_ref().and_then(OAuthClient::client_secret_hash);
         let is_public = client.as_ref().is_some_and(OAuthClient::is_public);
         let matched = Self::verify_presented_client_secret(stored_hash, secret)?;
+        if archived {
+            return Err(IdentityError::InvalidClientSecret);
+        }
         if is_public {
             // A stray secret on a public client is ignored, as before.
             return Ok(());
@@ -3507,8 +3674,12 @@ impl EmbeddedIdentityEngine {
         let stored_hash = client.as_ref().and_then(OAuthClient::client_secret_hash);
         let matched = Self::verify_presented_client_secret(stored_hash, secret)?;
         // `matched` is false whenever there is no stored hash (the dummy never
-        // matches), so an unknown or public client is refused here too.
-        if stored_hash.is_none() || !matched {
+        // matches), so an unknown or public client is refused here too. An
+        // archived client (B9) is refused like an unknown one.
+        let archived = client
+            .as_ref()
+            .is_some_and(|c| Self::refuse_inactive_client(c).is_err());
+        if stored_hash.is_none() || !matched || archived {
             return Err(IdentityError::InvalidClientSecret);
         }
         client
@@ -3658,6 +3829,13 @@ impl EmbeddedIdentityEngine {
         if let Some(uris) = &request.post_logout_redirect_uris {
             client.set_post_logout_redirect_uris(uris.clone());
         }
+        // B9 / L5: the transition into `Archived` revokes what the client
+        // holds. Judged before the status is overwritten; acted on after the
+        // record is written, so a rotation racing this sees the new status.
+        let archiving = request
+            .status
+            .is_some_and(|s| s != ApplicationStatus::Active)
+            && client.status() == ApplicationStatus::Active;
         if let Some(status) = request.status {
             client.set_status(status);
         }
@@ -3734,6 +3912,9 @@ impl EmbeddedIdentityEngine {
         self.storage
             .put(realm_id, &key, &updated_bytes)
             .map_err(Self::storage_err)?;
+        if archiving {
+            self.revoke_client_grants(realm_id, client_id)?;
+        }
 
         self.record_audit(
             realm_id,
@@ -3847,6 +4028,56 @@ impl EmbeddedIdentityEngine {
         // confidential-client and FAPI DPoP gates from, so a deleted client's
         // refresh tokens kept rotating with LESS authentication than before
         // the deletion (audit 2026-08-28 §4.16#3).
+        self.revoke_client_grants(realm_id, client_id)?;
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::ClientDeleted,
+            "client",
+            &client_id.as_uuid().to_string(),
+        )?;
+        Ok(())
+    }
+
+    /// The revoked-JTI projection id under which a client's `client_credentials`
+    /// cutoff is stored (GA audit L5). Real `jti`s are UUIDs, so the prefix
+    /// cannot collide with one.
+    pub(super) fn client_token_cutoff_id(client_id: &crate::core::ClientId) -> String {
+        format!("{CLIENT_TOKEN_CUTOFF_PREFIX}{}", client_id.as_uuid())
+    }
+
+    /// Kills everything a client holds when it is archived or deleted:
+    ///
+    /// 1. every grant family issued to it is marked revoked (its refresh
+    ///    tokens stop rotating — GA audit B9, audit 2026-08-28 §4.16#3);
+    /// 2. a client-wide cutoff is projected into the revoked-JTI cache, so
+    ///    every sessionless access token issued to it so far (the
+    ///    `client_credentials` and jwt-bearer grants, whose `sub` is the
+    ///    client) stops validating immediately instead of at expiry (GA audit
+    ///    L5). The cutoff's value is the latest `exp` any such token can
+    ///    carry; `validate_token` refuses a token whose `exp` is not after it,
+    ///    so a token issued after a restore is unaffected, and the row
+    ///    self-evicts once every covered token has expired.
+    pub(super) fn revoke_client_grants(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+    ) -> Result<(), IdentityError> {
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        let cutoff_exp = now_secs.saturating_add(self.config.token.access_token_ttl_secs);
+        let cutoff_id = Self::client_token_cutoff_id(client_id);
+        // Durable first: the cache insert would otherwise mask a failed write
+        // (the cutoff would vanish on restart while the operator believed the
+        // tokens were dead). Same order as the sessionless revoke arm.
+        self.storage
+            .put(
+                realm_id,
+                &keys::encode_revoked_jti(&cutoff_id),
+                &cutoff_exp.to_le_bytes(),
+            )
+            .map_err(Self::storage_err)?;
+        self.insert_revoked_jti_cache(realm_id, &cutoff_id, cutoff_exp);
+
         let family_prefix = keys::grant_family_scan_prefix();
         let family_end = keys::prefix_end(&family_prefix);
         let family_entries = self
@@ -3890,13 +4121,6 @@ impl EmbeddedIdentityEngine {
                 .put(realm_id, &entry.key, &updated)
                 .map_err(Self::storage_err)?;
         }
-        self.record_audit(
-            realm_id,
-            None,
-            AuditAction::ClientDeleted,
-            "client",
-            &client_id.as_uuid().to_string(),
-        )?;
         Ok(())
     }
 

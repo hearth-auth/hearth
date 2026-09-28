@@ -106,10 +106,15 @@ impl OAuthService for OAuthSvc {
         // except that a FAPI 2.0 Advanced realm accepts no public client.
         // A client with keys instead of a secret is not public; this RPC
         // carries no assertion, so it is refused (it exchanges over HTTP).
-        if let Ok(Some(client)) = self
+        //
+        // A lookup ERROR fails closed (GA audit L12): matching only `Ok(Some)`
+        // skipped client authentication on a storage error and ran the
+        // exchange unauthenticated.
+        if let Some(client) = self
             .state
             .identity
             .get_client(&realm_id, &domain_req.client_id)
+            .map_err(identity_to_status)?
         {
             if client.is_public() {
                 crate::identity::client_auth::authenticate_client(

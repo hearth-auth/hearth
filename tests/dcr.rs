@@ -489,7 +489,10 @@ async fn dcr_authenticated_policy_rejects_anonymous() {
 
 // ===== Scenario D10: Authenticated DCR policy accepts a valid bearer token (HEA-1671) =====
 
-/// RFC 7591 §3.1 positive path: a valid realm bearer token must be accepted.
+/// RFC 7591 §3.1 positive path: a valid initial access token must be
+/// accepted. Since GA audit M9 an initial access token is a realm token that
+/// carries `hearth.clients.admin` (an ordinary user token is refused — see
+/// `tests/ga_dcr_initial_access.rs`), so the user here holds that role.
 #[tokio::test]
 async fn dcr_authenticated_policy_accepts_valid_token() {
     let h = common::TestHarness::embedded().await.expect("harness");
@@ -519,6 +522,23 @@ async fn dcr_authenticated_policy_accepts_valid_token() {
             },
         )
         .expect("create user");
+    h.rbac().seed_realm(&realm_id).expect("seed realm");
+    let clients_admin = h
+        .rbac()
+        .get_role_by_name(&realm_id, "hearth.clients.admin")
+        .expect("role lookup")
+        .expect("seeded hearth.clients.admin role");
+    h.rbac()
+        .assign_role(
+            &realm_id,
+            &hearth::rbac::AssignRoleRequest {
+                subject: hearth::rbac::Subject::User(user.id().clone()),
+                role_id: clients_admin.id,
+                scope: hearth::rbac::Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign hearth.clients.admin");
     h.identity()
         .set_password(
             &realm_id,

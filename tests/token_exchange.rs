@@ -50,6 +50,31 @@ fn make_user(identity: &dyn IdentityEngine, realm_id: &RealmId) -> UserId {
         .clone()
 }
 
+/// Register a confidential client allowed to perform token exchange, for tests
+/// whose subject of interest is not the client itself.
+///
+/// GA audit M8: the exchanging client must be a registered, Active,
+/// confidential client holding the token-exchange grant, so a random,
+/// unregistered `ClientId` is refused with `invalid_client` before the
+/// behaviour these tests exercise is reached.
+fn make_exchange_client(identity: &dyn IdentityEngine, realm_id: &RealmId) -> ClientId {
+    identity
+        .register_client(
+            realm_id,
+            &RegisterClientRequest {
+                client_name: format!("exchange-client-{}", uuid::Uuid::new_v4()),
+                client_secret: Some("exchange-client-secret!".to_string()),
+                redirect_uris: vec!["https://client.example.com/cb".to_string()],
+                grant_types: vec!["urn:ietf:params:oauth:grant-type:token-exchange".to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register exchange client")
+        .client_id()
+        .clone()
+}
+
 /// Register a confidential OAuth client and issue a real `client_credentials` access token.
 ///
 /// Returns `(client_id, access_token)`. The `client_id` MUST be used as `Rfc8693Request.client_id`
@@ -74,7 +99,11 @@ fn make_actor_token(
             &RegisterClientRequest {
                 client_name: format!("actor-client-{}", uuid::Uuid::new_v4()),
                 client_secret: Some(SECRET.to_string()),
-                grant_types: vec!["client_credentials".to_string()],
+                // GA audit M8: an exchanging client must hold the grant.
+                grant_types: vec![
+                    "client_credentials".to_string(),
+                    "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+                ],
                 require_consent: false,
                 trust_level: ClientTrustLevel::FirstParty,
                 declared_scopes: declared,
@@ -311,7 +340,7 @@ async fn token_exchange_requires_access_token_type() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
+    let client_id = make_exchange_client(identity, &realm_id);
 
     let subject_token = build_mock_jwt(
         &user_id.as_uuid().to_string(),
@@ -362,7 +391,7 @@ async fn token_exchange_rejects_expired_subject_token() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
+    let client_id = make_exchange_client(identity, &realm_id);
 
     // Token expired 60 seconds ago
     let now = std::time::SystemTime::now()
@@ -416,7 +445,7 @@ async fn token_exchange_empty_scope_intersection_rejected() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
+    let client_id = make_exchange_client(identity, &realm_id);
 
     // subject has only "openid", but we request "mcp:tools:invoke"
     let subject_token = make_subject_token(identity, &realm_id, &user_id, "openid");
@@ -632,7 +661,7 @@ async fn token_exchange_lifetime_bounded_by_subject() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
+    let client_id = make_exchange_client(identity, &realm_id);
 
     // Issue a real signed subject token, then immediately measure its remaining lifetime.
     let subject_token = make_subject_token(identity, &realm_id, &user_id, "mcp:tools:invoke");
@@ -885,7 +914,7 @@ async fn token_exchange_rejects_cross_realm_subject_tid() {
     let realm_a = make_realm(identity);
     let realm_b = make_realm(identity);
     let user_id = make_user(identity, &realm_a);
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
+    let client_id = make_exchange_client(identity, &realm_b);
 
     // Subject token is a real realm_a-signed token — presented to realm_b's exchange.
     // validate_token(realm_b, token) fails because the token was signed by realm_a's key.
@@ -984,7 +1013,7 @@ async fn token_exchange_overrides_iss_and_tid_to_serving_realm() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
+    let client_id = make_exchange_client(identity, &realm_id);
 
     // Issue a real signed subject token — the exchange must override its iss/tid.
     let subject_token = make_subject_token(identity, &realm_id, &user_id, "mcp:tools:invoke");
@@ -1040,7 +1069,7 @@ async fn token_exchange_rejects_forged_subject_token_bogus_signature() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
+    let client_id = make_exchange_client(identity, &realm_id);
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

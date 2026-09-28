@@ -204,6 +204,12 @@ const PROMPT_NONE_MAX_PROBES: u32 = 50;
 /// opening a meaningful replay window.
 const CLOCK_SKEW_SECS: i64 = 60;
 
+/// Revoked-JTI projection id prefix for a client-wide `client_credentials`
+/// cutoff (GA audit L5). The entry `{realm}:client-cutoff:{client_uuid}` holds
+/// the latest `exp` any sessionless token issued to that client before it was
+/// archived or deleted can carry. Real `jti`s are UUIDs, so it cannot collide.
+const CLIENT_TOKEN_CUTOFF_PREFIX: &str = "client-cutoff:";
+
 /// How long the token-validation hot path may reuse its last epoch
 /// reconciliation before reading the rows again.
 ///
@@ -3492,6 +3498,9 @@ impl EmbeddedIdentityEngine {
             let Some(client) = self.get_client(realm_id, client_id)? else {
                 return Err(IdentityError::TokenRevoked);
             };
+            // B9: an archived client's families are revoked on archival; this
+            // gate also covers a family written while archival was running.
+            Self::refuse_inactive_client(&client)?;
             let realm_fapi = self
                 .get_realm(realm_id)?
                 .ok_or(IdentityError::RealmNotFound)?
@@ -3517,11 +3526,16 @@ impl EmbeddedIdentityEngine {
             // are already constrained by rotation + DPoP binding. A secretless
             // client with an assertion key or a JWKS is not public: it binds
             // like a secret holder (it authenticates with `private_key_jwt`).
+            let authenticated = bind_ctx.and_then(|c| c.authenticated_client_id.as_ref());
             if !client.is_public() {
-                let authenticated = bind_ctx.and_then(|c| c.authenticated_client_id.as_ref());
                 if authenticated != Some(client_id) {
                     return Err(IdentityError::InvalidClient);
                 }
+            } else if authenticated.is_some_and(|presented| presented != client_id) {
+                // GA audit L10: a public client proves nothing, but a request
+                // that NAMES a client must name the family's own. Otherwise
+                // one public client could redeem another's refresh token.
+                return Err(IdentityError::InvalidClient);
             }
         }
 
@@ -5346,10 +5360,49 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         claims: &TokenClaims,
     ) -> Result<(), IdentityError> {
-        if self.is_token_jti_revoked(realm_id, claims) {
+        if self.is_token_jti_revoked(realm_id, claims) || self.is_client_cut_off(realm_id, claims) {
             return Err(IdentityError::InvalidToken);
         }
         Ok(())
+    }
+
+    /// Returns `true` when a sessionless token was issued to a client that has
+    /// since been archived or deleted (GA audit L5): the revoked-JTI
+    /// projection holds a `client-cutoff:{client}` entry whose value is the
+    /// latest `exp` any pre-cutoff token can carry, and this token's `exp` is
+    /// not after it.
+    ///
+    /// Hot-path safe: the key is formatted into a stack buffer and looked up
+    /// with a single epoch-pinned `load()` — no allocation, lock or syscall.
+    fn is_client_cut_off(&self, realm_id: &RealmId, claims: &TokenClaims) -> bool {
+        use std::fmt::Write as _;
+        let Some(client_uuid) = claims.sub.strip_prefix("client_") else {
+            return false;
+        };
+        let mut key = StackKeyBuf::new();
+        if write!(
+            key,
+            "{}:{CLIENT_TOKEN_CUTOFF_PREFIX}{client_uuid}",
+            realm_id.as_uuid()
+        )
+        .is_ok()
+        {
+            if let Some(k) = key.as_str() {
+                return self
+                    .revoked_jti_cache
+                    .get(k)
+                    .is_some_and(|cutoff| claims.exp <= cutoff);
+            }
+        }
+        // Oversized `sub` (never one Hearth issued to a client): off the warm
+        // path, one allocation keeps the check correct.
+        let heap_key = format!(
+            "{}:{CLIENT_TOKEN_CUTOFF_PREFIX}{client_uuid}",
+            realm_id.as_uuid()
+        );
+        self.revoked_jti_cache
+            .get(heap_key.as_str())
+            .is_some_and(|cutoff| claims.exp <= cutoff)
     }
 
     /// Returns `true` when the token's `jti` appears in the revocation
@@ -17143,6 +17196,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // suspension control that reaches it (audit 2026-08-28 §4.19#6).
         self.require_active_realm(realm_id)?;
 
+        // 0. Per-client exchange policy (GA audit M8, B9). The protocol layer
+        //    authenticated `client_id`; this decides whether that client may
+        //    exchange at all: it must be a registered Active client, hold the
+        //    token-exchange grant, and be confidential — a public client's
+        //    `client_id` is public, so "authenticating" it proves nothing.
+        self.require_token_exchange_client(realm_id, &request.client_id)?;
+
         let now_micros = self.clock.now().as_micros();
         let now_secs = now_micros / 1_000_000;
 
@@ -17327,7 +17387,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             act: subject_claims.act.clone().map(Box::new),
         };
 
-        // 8. Audience.
+        // 8. Audience. A requested `resource` or `audience` must either be an
+        //    audience the subject token already carries (narrowing) or name a
+        //    protected resource registered in this realm (GA audit M8): taken
+        //    verbatim, it let the holder of a token for one resource server
+        //    mint a token another would accept.
+        for target in [request.resource.as_deref(), request.audience.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if !subject_claims.aud.contains(target) {
+                self.require_registered_exchange_target(realm_id, target)?;
+            }
+        }
         let aud = if let Some(ref resource_uri) = request.resource {
             crate::identity::tokens::Audience::Multi(vec![
                 subject_claims.aud.base().to_string(),
@@ -17450,17 +17522,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         exp_secs: i64,
     ) -> Result<(), IdentityError> {
         let key = keys::encode_actor_jti(jti);
-        if self
+        // One atomic step (GA audit L9): the old read-then-write let
+        // concurrent exchanges presenting one actor token all pass.
+        // `put_if_absent` is atomic here and Raft-routed in cluster mode.
+        let fresh = self
             .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
+            .put_if_absent(realm_id, &key, &exp_secs.to_le_bytes())
+            .map_err(Self::storage_err)?;
+        if !fresh {
             return Err(IdentityError::ActorTokenReplayed);
         }
-        self.storage
-            .put(realm_id, &key, &exp_secs.to_le_bytes())
-            .map_err(Self::storage_err)?;
         Ok(())
     }
 
@@ -17944,6 +18015,8 @@ mod tests {
     mod fapi2_client_keys;
     /// An RS256 client's realm key is checked before an overwrite deletes it.
     mod import_client_rs256_key;
+    /// A PAR `request_uri` is consumed exactly once under concurrency.
+    mod par_consume_race;
     /// Concurrent revocations survive a racing control-cache reload.
     mod revocation_reload_races;
     /// A signing-key rotation lands in one atomic storage batch.
@@ -26513,7 +26586,6 @@ mod tests {
 
     #[test]
     fn token_exchange_rejects_revoked_agent_in_act_chain() {
-        use crate::core::ClientId;
         use crate::identity::tokens::{decode_claims_unverified, ActClaim};
         use crate::identity::{
             AgentOwner, CreateAgentRequest, Rfc8693Request, SessionContext, TokenIssuanceContext,
@@ -26572,7 +26644,26 @@ mod tests {
             .issue_token(&claims)
             .expect("re-sign subject token with act chain");
 
-        let client_id = ClientId::new(uuid::Uuid::new_v4());
+        // GA audit M8: the exchanging client must be a registered,
+        // confidential client holding the token-exchange grant.
+        let client_id =
+            engine
+                .register_client(
+                    &realm,
+                    &crate::identity::RegisterClientRequest {
+                        client_name: "act-chain-exchanger".to_string(),
+                        redirect_uris: vec!["https://client.example.com/cb".to_string()],
+                        client_secret: Some("act-chain-exchanger-secret!".to_string()),
+                        grant_types: vec![
+                            "urn:ietf:params:oauth:grant-type:token-exchange".to_string()
+                        ],
+                        require_consent: false,
+                        ..Default::default()
+                    },
+                )
+                .expect("register exchange client")
+                .client_id()
+                .clone();
         let make_req = || Rfc8693Request {
             client_id: client_id.clone(),
             subject_token: subject_token.clone(),
