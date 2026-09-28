@@ -8,6 +8,7 @@ pub mod pagination;
 pub mod secrets;
 mod swap_cell;
 mod time;
+mod trusted_proxy;
 mod types;
 
 pub use epoch_cell::{EpochCell, EpochCellOption, EpochGuard};
@@ -21,6 +22,10 @@ pub use secrets::{
 };
 pub use swap_cell::SwapCell;
 pub use time::{Clock, FakeClock, SystemClock, Timestamp};
+pub use trusted_proxy::{
+    TrustedProxies, TrustedProxy, TrustedProxyError, TrustedProxyListError, MIN_IPV4_PREFIX,
+    MIN_IPV6_PREFIX,
+};
 pub use types::{
     AgentCredentialId, AgentId, AuditEventId, ClientId, IdpId, ImportOutcome, InvitationId,
     OrganizationId, RealmId, ResourceServerId, SessionId, Uri, UriError, UserId, WebhookDeliveryId,
