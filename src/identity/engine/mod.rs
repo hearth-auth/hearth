@@ -375,6 +375,7 @@ mod advisory_lock;
 pub(super) mod approval;
 pub(crate) mod client_jwks;
 mod control;
+mod grant_family_revocation;
 mod id_token_keys;
 pub(super) mod oauth;
 mod retired_keys;
@@ -3894,7 +3895,9 @@ impl EmbeddedIdentityEngine {
                 reason: e.to_string(),
             })?;
 
-        if family.revoked {
+        // The tombstone, not just the row flag: a rotation elsewhere that read
+        // the row before a revocation can have written it back un-revoked (G6).
+        if self.grant_family_is_revoked(realm_id, &family)? {
             return Err(IdentityError::TokenRevoked);
         }
 
@@ -4289,6 +4292,14 @@ impl EmbeddedIdentityEngine {
             &keys::encode_consumed_refresh(&presented_hash),
             crate::core::Timestamp::from_micros(claims.exp.saturating_mul(1_000_000)),
         )? {
+            // A revocation spends the family's current token too
+            // (`mark_grant_family_revoked`), writing its tombstone first. The
+            // claim was decided in the Raft log after that tombstone, so this
+            // node has applied it: a revoked family is refused as revoked, not
+            // answered as a theft that would also end the session.
+            if self.grant_family_is_revoked(realm_id, &family)? {
+                return Err(IdentityError::TokenRevoked);
+            }
             return Err(self.revoke_replayed_family(
                 realm_id,
                 &family_key,
@@ -4329,6 +4340,9 @@ impl EmbeddedIdentityEngine {
         rotation_guard: std::sync::MutexGuard<'_, ()>,
         session_id: &SessionId,
     ) -> IdentityError {
+        if let Err(e) = self.mark_grant_family_revoked(realm_id, &family) {
+            return e;
+        }
         family.revoked = true;
         let written = serde_json::to_vec(&family)
             .map_err(|e| IdentityError::Serialization {
@@ -8988,6 +9002,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 if let Ok(Some(fbytes)) = self.storage.get(realm_id, &family_key) {
                     if let Ok(mut fam) = serde_json::from_slice::<StoredGrantFamily>(&fbytes) {
                         if !fam.revoked {
+                            if let Err(e) = self.mark_grant_family_revoked(realm_id, &fam) {
+                                tracing::warn!(
+                                    error = %e,
+                                    "session revoke: grant family tombstone not written"
+                                );
+                            }
                             fam.revoked = true;
                             if let Ok(updated) = serde_json::to_vec(&fam) {
                                 let _ = self.storage.put(realm_id, &family_key, &updated);

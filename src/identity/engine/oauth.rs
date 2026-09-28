@@ -3070,6 +3070,7 @@ impl EmbeddedIdentityEngine {
                                 reason: e.to_string(),
                             }
                         })?;
+                        self.mark_grant_family_revoked(realm_id, &family)?;
                         family.revoked = true;
                         let updated = serde_json::to_vec(&family).map_err(|e| {
                             IdentityError::Serialization {
@@ -3242,7 +3243,7 @@ impl EmbeddedIdentityEngine {
                                 reason: e.to_string(),
                             }
                         })?;
-                    if family.revoked {
+                    if self.grant_family_is_revoked(realm_id, &family)? {
                         return Ok(IntrospectionResponse::inactive());
                     }
                 }
@@ -4512,9 +4513,10 @@ impl EmbeddedIdentityEngine {
                 serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
                 })?;
-            if family.revoked {
+            if self.grant_family_is_revoked(realm_id, &family)? {
                 continue;
             }
+            self.mark_grant_family_revoked(realm_id, &family)?;
             family.revoked = true;
             let updated =
                 serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
@@ -4816,9 +4818,10 @@ impl EmbeddedIdentityEngine {
                 serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
                 })?;
-            if family.revoked {
+            if self.grant_family_is_revoked(realm_id, &family)? {
                 continue;
             }
+            self.mark_grant_family_revoked(realm_id, &family)?;
             family.revoked = true;
             let updated =
                 serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {

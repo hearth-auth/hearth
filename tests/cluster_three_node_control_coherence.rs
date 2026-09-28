@@ -2031,25 +2031,14 @@ async fn an_email_verification_link_is_redeemed_once_across_a_leader_change() {
     cluster.shutdown();
 }
 
-/// A refresh token rotates once across the cluster: a presentation that read
-/// the grant family before another node rotated it must not mint a second
-/// pair after leadership moves to its own node.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn a_refresh_token_rotates_once_across_a_leader_change() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
-        1_700_000_000_000_000,
-    )));
-    let (cluster, gates) = gated_cluster(&clock).await;
-    let seeded = seed_realm_user_and_token(&cluster, &clock, "refresh-single-use").await;
-    let leader = cluster.leader();
-    let client = register_client(
-        leader,
-        &seeded.realm_id,
-        "refresh-racer",
-        &["authorization_code", "refresh_token"],
-    );
-    let code = leader
+/// Runs the authorization-code flow for `client` on `node` and returns the
+/// refresh token it issued.
+fn issue_refresh_token(
+    node: &Node,
+    seeded: &SeededRealm,
+    client: &hearth::core::ClientId,
+) -> String {
+    let code = node
         .identity
         .authorize(
             &seeded.realm_id,
@@ -2073,8 +2062,7 @@ async fn a_refresh_token_rotates_once_across_a_leader_change() {
         .unwrap()
         .code()
         .to_string();
-    let refresh_token = leader
-        .identity
+    node.identity
         .exchange_authorization_code(
             &seeded.realm_id,
             &hearth::identity::TokenExchangeRequest {
@@ -2089,7 +2077,28 @@ async fn a_refresh_token_rotates_once_across_a_leader_change() {
         )
         .unwrap()
         .refresh_token()
-        .to_string();
+        .to_string()
+}
+
+/// A refresh token rotates once across the cluster: a presentation that read
+/// the grant family before another node rotated it must not mint a second
+/// pair after leadership moves to its own node.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_refresh_token_rotates_once_across_a_leader_change() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let (cluster, gates) = gated_cluster(&clock).await;
+    let seeded = seed_realm_user_and_token(&cluster, &clock, "refresh-single-use").await;
+    let leader = cluster.leader();
+    let client = register_client(
+        leader,
+        &seeded.realm_id,
+        "refresh-racer",
+        &["authorization_code", "refresh_token"],
+    );
+    let refresh_token = issue_refresh_token(leader, &seeded, &client);
     assert!(!refresh_token.is_empty(), "precondition: a refresh token");
     clock.advance(1_000_000);
     cluster.converge().await;
@@ -2111,6 +2120,154 @@ async fn a_refresh_token_rotates_once_across_a_leader_change() {
     let wins =
         redemptions_across_a_leader_change(&cluster, &gates, b"oauth:family:", &redeem).await;
     assert_eq!(wins, 1, "one refresh token was rotated {wins} times");
+
+    cluster.shutdown();
+}
+
+// ── Monotonic state across a leader change (G6) ──────────────────────────────
+
+type Racer<T> = Arc<dyn Fn(&EmbeddedIdentityEngine) -> T + Send + Sync>;
+
+/// Races `racer` on both followers against `on_leader` across a leader change,
+/// and returns the new leader's id with each racer's outcome.
+///
+/// Both followers run `racer` until it has read a key under `key_prefix`, and
+/// park there. The leader then runs `on_leader`. Leadership moves to one of
+/// the followers and the parked racers resume: the one on the new leader can
+/// now write through Raft with whatever it read before `on_leader` ran.
+async fn raced_against_the_leader_across_a_leader_change<T: Send + 'static>(
+    cluster: &ThreeNodeCluster,
+    gates: &GateRegistry,
+    key_prefix: &[u8],
+    racer: &Racer<T>,
+    on_leader: impl FnOnce(&EmbeddedIdentityEngine),
+) -> (u64, Vec<T>) {
+    let old_leader_id = cluster.leader_id;
+    let mut parked = Vec::new();
+    for node in cluster.followers() {
+        let gate = Arc::clone(&gates.lock().unwrap()[&node.id()]);
+        gate.arm(key_prefix);
+        let identity = Arc::clone(&node.identity);
+        let racer = Arc::clone(racer);
+        let task = tokio::task::spawn_blocking(move || racer(&identity));
+        let waiter = Arc::clone(&gate);
+        let loaded =
+            tokio::task::spawn_blocking(move || waiter.wait_parked(1, Duration::from_secs(20)))
+                .await
+                .unwrap();
+        assert!(loaded, "node {} never read the raced key", node.id());
+        parked.push((gate, task));
+    }
+
+    on_leader(&cluster.leader().identity);
+
+    let new_leader_id = cluster
+        .leader()
+        .cluster
+        .transfer_leadership()
+        .await
+        .expect("step down");
+    assert_ne!(new_leader_id, old_leader_id);
+
+    let mut outcomes = Vec::new();
+    for (gate, task) in parked {
+        gate.open();
+        outcomes.push(task.await.unwrap());
+    }
+    (new_leader_id, outcomes)
+}
+
+fn node_by_id(cluster: &ThreeNodeCluster, id: u64) -> &Node {
+    cluster.nodes.iter().find(|n| n.id() == id).unwrap()
+}
+
+/// Withdrawing consent revokes the grant family for good: a rotation that read
+/// the family before the revocation and resumes after leadership moved to its
+/// own node must neither mint a pair nor write the family back live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_consent_revocation_is_not_undone_by_a_rotation_across_a_leader_change() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let (cluster, gates) = gated_cluster(&clock).await;
+    let seeded = seed_realm_user_and_token(&cluster, &clock, "consent-unrevoke").await;
+    let leader = cluster.leader();
+    let client = register_client(
+        leader,
+        &seeded.realm_id,
+        "consent-racer",
+        &["authorization_code", "refresh_token"],
+    );
+    leader
+        .identity
+        .grant_consent(
+            &seeded.realm_id,
+            &seeded.user_id,
+            &client,
+            &["openid".to_string(), "offline_access".to_string()],
+        )
+        .unwrap();
+    let refresh_token = issue_refresh_token(leader, &seeded, &client);
+    clock.advance(1_000_000);
+    cluster.converge().await;
+
+    let realm = seeded.realm_id.clone();
+    let bound_client = client.clone();
+    let rotate: Racer<Option<String>> = Arc::new(move |identity: &EmbeddedIdentityEngine| {
+        identity
+            .refresh_tokens(
+                &realm,
+                &refresh_token,
+                None,
+                Some(&hearth::identity::RefreshBindContext {
+                    authenticated_client_id: Some(bound_client.clone()),
+                    ..Default::default()
+                }),
+            )
+            .ok()
+            .map(|pair| pair.refresh_token().to_string())
+    });
+    let (new_leader_id, rotated) = raced_against_the_leader_across_a_leader_change(
+        &cluster,
+        &gates,
+        b"oauth:family:",
+        &rotate,
+        |identity| {
+            identity
+                .revoke_consent(&seeded.realm_id, &seeded.user_id, &client)
+                .unwrap();
+        },
+    )
+    .await;
+    cluster.converge().await;
+
+    let new_leader = node_by_id(&cluster, new_leader_id);
+    for minted in rotated.iter().flatten() {
+        let still_live = new_leader
+            .identity
+            .refresh_tokens(
+                &seeded.realm_id,
+                minted,
+                None,
+                Some(&hearth::identity::RefreshBindContext {
+                    authenticated_client_id: Some(client.clone()),
+                    ..Default::default()
+                }),
+            )
+            .is_ok();
+        assert!(
+            !still_live,
+            "a rotation that read the family before the consent revocation \
+             wrote it back live: its refresh token still rotates"
+        );
+    }
+    let minted = rotated.iter().flatten().count();
+    assert_eq!(
+        minted, 0,
+        "a rotation that read the family before the consent revocation minted \
+         {minted} pair(s) after it"
+    );
 
     cluster.shutdown();
 }

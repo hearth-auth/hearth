@@ -901,6 +901,25 @@ pub(crate) fn grant_family_scan_prefix() -> Vec<u8> {
     GRANT_FAMILY_PREFIX.as_bytes().to_vec()
 }
 
+/// Prefix for grant-family revocation tombstones.
+///
+/// Deliberately not under `oauth:family:`: the family sweeper decodes every
+/// row under that prefix as a [`StoredGrantFamily`](crate::identity::oidc::StoredGrantFamily).
+const GRANT_FAMILY_REVOKED_PREFIX: &str = "oauth:family-revoked:";
+
+/// Encodes the write-once revocation tombstone of a grant family.
+///
+/// Revoking a family writes it, and nothing but the family sweep (which
+/// deletes it together with the family row) ever removes it. A rotation writes
+/// the whole family row back, so a rotation that read the row before a
+/// revocation and wrote after a leader change could set `revoked = false`
+/// again; it never writes this key, so the revocation survives that write.
+///
+/// Format: `oauth:family-revoked:{family_id}`
+pub(crate) fn encode_grant_family_revoked(family_id: &str) -> Vec<u8> {
+    format!("{GRANT_FAMILY_REVOKED_PREFIX}{family_id}").into_bytes()
+}
+
 /// Encodes the storage key for a device authorization code.
 ///
 /// Format: `oauth:device:{device_code_hash}`
