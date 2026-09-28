@@ -2451,6 +2451,50 @@ pub(crate) fn encode_consumed_otp(channel: &str, nonce: &str) -> Vec<u8> {
     encode_consumed("otp", &format!("{channel}:{nonce}"))
 }
 
+/// Single-use marker for one TOTP time step of one user: a code is accepted
+/// once cluster-wide, whichever node verifies it.
+///
+/// Format: `consumed:totp:{user_uuid}:{step}`
+pub(crate) fn encode_consumed_totp_step(user_id: &UserId, step: u64) -> Vec<u8> {
+    encode_consumed("totp", &format!("{}:{step}", user_id.as_uuid()))
+}
+
+/// Single-use marker for one recovery code of one user, keyed by the SHA-256
+/// hex of the code's stored (salted) hash, so a regenerated code never
+/// collides with a spent one.
+///
+/// Format: `consumed:recovery:{user_uuid}:{sha256_hex}`
+pub(crate) fn encode_consumed_recovery_code(user_id: &UserId, stored_hash_digest: &str) -> Vec<u8> {
+    encode_consumed(
+        "recovery",
+        &format!("{}:{stored_hash_digest}", user_id.as_uuid()),
+    )
+}
+
+/// Single-use marker for an email-change confirmation token, keyed by the
+/// token's SHA-256 hex.
+///
+/// Format: `consumed:email-change:{sha256_hex}`
+pub(crate) fn encode_consumed_email_change(token_hash: &str) -> Vec<u8> {
+    encode_consumed("email-change", token_hash)
+}
+
+/// Decision marker for a device authorization: whichever of approve or deny
+/// claims it first decides the device code.
+///
+/// Format: `consumed:device-decision:{device_code_sha256_hex}`
+pub(crate) fn encode_consumed_device_decision(device_code_hash: &str) -> Vec<u8> {
+    encode_consumed("device-decision", device_code_hash)
+}
+
+/// Prefix of the guess slots of one guess budget (`kind` names the budget,
+/// `id` its subject). Slot `n` is `{prefix}{n}`.
+///
+/// Format: `consumed:guess:{kind}:{id}:`
+pub(crate) fn encode_guess_slot_prefix(kind: &str, id: &str) -> Vec<u8> {
+    encode_consumed("guess", &format!("{kind}:{id}:"))
+}
+
 /// Scan prefix for every single-use redemption marker in a realm.
 pub(crate) fn consumed_marker_scan_prefix() -> Vec<u8> {
     CONSUMED_PREFIX.as_bytes().to_vec()

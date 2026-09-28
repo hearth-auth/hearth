@@ -2275,6 +2275,13 @@ impl EmbeddedIdentityEngine {
         let dc_hash = String::from_utf8(dc_hash_bytes)
             .map_err(|_| IdentityError::InvalidAuthorizationCode)?;
 
+        // The poll takes this lock across its read-modify-write of the row;
+        // without it a poll on this node could write back the `Pending` it
+        // read over this approval.
+        let lock = self.code_exchange_lock(&dc_hash);
+        // INVARIANT: sync window only — no `.await` between here and return.
+        let _decision_guard = lock.lock().expect("code_exchange_lock poisoned");
+
         // 2. Load device code
         let dc_key = keys::encode_device_code(&dc_hash);
         let dc_bytes = self
@@ -2298,7 +2305,17 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidAuthorizationCode);
         }
 
-        // 5. Approve
+        // 5. Claim the decision, then approve (G6). The status check above is
+        //    a local read: an approval on a node that had not applied another
+        //    node's denial (or approval) overwrote it. Approve and deny claim
+        //    the same replicated marker, so exactly one decides.
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_device_decision(&dc_hash),
+            stored.expires_at,
+        )? {
+            return Err(IdentityError::InvalidAuthorizationCode);
+        }
         stored.status = DeviceCodeStatus::Approved {
             user_id: user_id.clone(),
         };
@@ -2324,17 +2341,13 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Loads the still-pending device code `user_code` names, with its
-    /// storage key. `Ok(None)` when no device code carries that user code;
-    /// `DeviceCodeExpired` when it has expired; `InvalidAuthorizationCode`
-    /// when it was already approved or denied.
-    fn load_pending_device_code(
+    /// The device-code hash and row key `user_code` points at, without
+    /// loading the row. `Ok(None)` when no device code carries that user code.
+    fn device_code_key_for_user_code(
         &self,
         realm_id: &RealmId,
         user_code: &str,
-    ) -> Result<Option<(Vec<u8>, StoredDeviceCode)>, IdentityError> {
-        use crate::identity::oidc::DeviceCodeStatus;
-
+    ) -> Result<Option<(String, Vec<u8>)>, IdentityError> {
         let Some(dc_hash_bytes) = self
             .storage
             .get(realm_id, &keys::encode_user_code(user_code))
@@ -2346,6 +2359,23 @@ impl EmbeddedIdentityEngine {
             return Ok(None);
         };
         let dc_key = keys::encode_device_code(&dc_hash);
+        Ok(Some((dc_hash, dc_key)))
+    }
+
+    /// Loads the still-pending device code `user_code` names, with its
+    /// storage key. `Ok(None)` when no device code carries that user code;
+    /// `DeviceCodeExpired` when it has expired; `InvalidAuthorizationCode`
+    /// when it was already approved or denied.
+    fn load_pending_device_code(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+    ) -> Result<Option<(Vec<u8>, StoredDeviceCode)>, IdentityError> {
+        use crate::identity::oidc::DeviceCodeStatus;
+
+        let Some((_, dc_key)) = self.device_code_key_for_user_code(realm_id, user_code)? else {
+            return Ok(None);
+        };
         let Some(dc_bytes) = self
             .storage
             .get(realm_id, &dc_key)
@@ -2394,9 +2424,27 @@ impl EmbeddedIdentityEngine {
     ) -> Result<(), IdentityError> {
         use crate::identity::oidc::DeviceCodeStatus;
 
-        let (dc_key, mut stored) = self
+        let (dc_hash, dc_key) = self
+            .device_code_key_for_user_code(realm_id, user_code)?
+            .ok_or(IdentityError::DeviceCodeExpired)?;
+        // Same lock and the same decision marker as `approve_device_inner`.
+        let lock = self.code_exchange_lock(&dc_hash);
+        // INVARIANT: sync window only — no `.await` between here and return.
+        let _decision_guard = lock.lock().expect("code_exchange_lock poisoned");
+        let (dc_key_loaded, mut stored) = self
             .load_pending_device_code(realm_id, user_code)?
             .ok_or(IdentityError::DeviceCodeExpired)?;
+        if dc_key_loaded != dc_key {
+            // The user code was re-pointed between the two reads.
+            return Err(IdentityError::DeviceCodeExpired);
+        }
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_device_decision(&dc_hash),
+            stored.expires_at,
+        )? {
+            return Err(IdentityError::InvalidAuthorizationCode);
+        }
         stored.status = DeviceCodeStatus::Denied;
         let updated_bytes =
             serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
@@ -2491,6 +2539,20 @@ impl EmbeddedIdentityEngine {
         //    before another node redeemed it, re-created a row that node had
         //    already deleted (G4).
         if !matches!(stored.status, DeviceCodeStatus::Approved { .. }) {
+            // A row read as `Pending` after the user decided (on another
+            // node, not yet applied here) must not be written back: that
+            // would put `Pending` over the decision, and the decision marker
+            // then refuses a second one, stranding the device until expiry
+            // (G6). The next poll reads the decision.
+            if stored.status == DeviceCodeStatus::Pending
+                && self
+                    .storage
+                    .get(realm_id, &keys::encode_consumed_device_decision(&dc_hash))
+                    .map_err(Self::storage_err)?
+                    .is_some()
+            {
+                return Err(IdentityError::AuthorizationPending);
+            }
             stored.last_polled_at = Some(now);
             let updated_bytes =
                 serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {

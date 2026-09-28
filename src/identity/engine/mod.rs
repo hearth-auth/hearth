@@ -377,6 +377,7 @@ pub(crate) mod client_jwks;
 mod control;
 mod grant_family_revocation;
 mod id_token_keys;
+mod mfa_single_use;
 pub(super) mod oauth;
 mod retired_keys;
 mod sharded_cache;
@@ -10264,10 +10265,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::MfaAlreadyEnabled);
         }
 
+        // The guess budget is cluster-wide (G6): the node-local tracker above
+        // only counts this node's guesses.
+        self.claim_mfa_guess(realm_id, user_id)?;
+
         // Validate code against the stored secret
         let secret = TotpSecret::from_base32(&state.secret_base32)?;
         let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
-        let matched_step = totp::validate_totp(secret.as_bytes(), code, now_secs, None);
+        let matched_step = totp::validate_totp(secret.as_bytes(), code, now_secs, None)
+            .map(|step| {
+                self.claim_totp_step(realm_id, user_id, step)
+                    .map(|won| won.then_some(step))
+            })
+            .transpose()?
+            .flatten();
 
         if let Some(step) = matched_step {
             // Hash the pending plaintext recovery codes now (deferred from
@@ -10286,6 +10297,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             state.pending_recovery_codes = None;
             self.save_mfa_state(realm_id, user_id, &state)?;
             self.clear_mfa_attempts(realm_id, user_id);
+            self.release_mfa_guesses(realm_id, user_id);
             self.record_audit(
                 realm_id,
                 Some(&AuditContext {
@@ -10337,15 +10349,30 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::MfaNotEnabled);
         }
 
+        // The guess budget is cluster-wide (G6): the node-local tracker above
+        // only counts this node's guesses.
+        self.claim_mfa_guess(realm_id, user_id)?;
+
         let secret = TotpSecret::from_base32(&state.secret_base32)?;
         let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
+        // `last_used_step` is read from a record another node may have
+        // advanced since this node read it, so it cannot decide the single
+        // use across a cluster. The replicated step claim does: a code that
+        // lost it was already accepted — on any node — and is a replay (G6).
         let matched_step =
-            totp::validate_totp(secret.as_bytes(), code, now_secs, state.last_used_step);
+            totp::validate_totp(secret.as_bytes(), code, now_secs, state.last_used_step)
+                .map(|step| {
+                    self.claim_totp_step(realm_id, user_id, step)
+                        .map(|won| won.then_some(step))
+                })
+                .transpose()?
+                .flatten();
 
         if let Some(step) = matched_step {
             state.last_used_step = Some(step);
             self.save_mfa_state(realm_id, user_id, &state)?;
             self.clear_mfa_attempts(realm_id, user_id);
+            self.release_mfa_guesses(realm_id, user_id);
             self.record_audit(
                 realm_id,
                 Some(&AuditContext {
@@ -10394,13 +10421,31 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::MfaNotEnabled);
         }
 
-        let idx = totp::verify_recovery_code(code, &state.recovery_code_hashes)?;
+        // The guess budget is cluster-wide (G6).
+        self.claim_mfa_guess(realm_id, user_id)?;
+
+        // The spend is decided by a replicated claim on the code, not by the
+        // record: a node whose read of the record predates another node's
+        // spend would accept the code again, and a stale write of the whole
+        // record can put a spent code's hash back (G6).
+        let idx = match totp::verify_recovery_code(code, &state.recovery_code_hashes)? {
+            Some(i) => match state.recovery_code_hashes[i].as_deref() {
+                Some(stored_hash)
+                    if self.claim_recovery_code(realm_id, user_id, stored_hash)? =>
+                {
+                    Some(i)
+                }
+                _ => None,
+            },
+            None => None,
+        };
         match idx {
             Some(i) => {
                 // Mark recovery code as used
                 state.recovery_code_hashes[i] = None;
                 self.save_mfa_state(realm_id, user_id, &state)?;
                 self.clear_mfa_attempts(realm_id, user_id);
+                self.release_mfa_guesses(realm_id, user_id);
                 self.record_audit(
                     realm_id,
                     Some(&AuditContext {
@@ -11879,6 +11924,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if user.email() != stored.old_email {
             // The address was already changed by another path; invalidate.
             let _ = self.storage.delete(realm_id, &key);
+            return Err(IdentityError::EmailChangeTokenInvalid);
+        }
+
+        // Claim the token's single use before the first write. Every check
+        // above is a local read, and the delete below cannot decide it (a
+        // delete of an absent key succeeds): a confirmation on a node that had
+        // not applied another node's would swap the indexes and rewrite the
+        // user record a second time (G6).
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_email_change(&token_hash),
+            Timestamp::from_micros(
+                stored
+                    .created_at_micros
+                    .saturating_add(EMAIL_CHANGE_TOKEN_EXPIRY_MICROS),
+            ),
+        )? {
             return Err(IdentityError::EmailChangeTokenInvalid);
         }
 
@@ -17375,7 +17437,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?
             .ok_or(IdentityError::InvalidSmsOtp)?;
 
-        let mut stored: StoredOtp =
+        let stored: StoredOtp =
             serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
@@ -17386,22 +17448,21 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidSmsOtp);
         }
 
-        // 3. Check attempt count (delete exhausted record and fail vaguely).
-        if stored.is_exhausted() {
+        // 3-4. Spend one guess of the code's budget BEFORE checking it. The
+        //    budget is replicated guess slots, not a count in the record: a
+        //    node whose read of the record was stale wrote back a count that
+        //    had not seen the other nodes' guesses, so every node granted the
+        //    full budget (G6). Exhausted: delete the record and fail vaguely.
+        let Some(slot) = self.claim_guess_slot(
+            realm_id,
+            &keys::encode_guess_slot_prefix("sms-otp", nonce),
+            stored.max_attempts,
+            Self::otp_expiry(&stored),
+        )?
+        else {
             let _ = self.storage.delete(realm_id, &otp_key);
             return Err(IdentityError::InvalidSmsOtp);
-        }
-
-        // 4. Increment attempt count and persist before verification —
-        //    prevents a race where two concurrent requests both pass the check.
-        stored.attempt_count = stored.attempt_count.saturating_add(1);
-        let updated_bytes =
-            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
-        self.storage
-            .put(realm_id, &otp_key, &updated_bytes)
-            .map_err(Self::storage_err)?;
+        };
 
         // 5. Constant-time HMAC verification, bound to the expected phone.
         let result = stored.verify(candidate_code, phone, otp_hmac_key_bytes);
@@ -17425,8 +17486,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 Ok(())
             }
             Err(e) => {
-                // 6b. If now exhausted, delete the record.
-                if stored.is_exhausted() {
+                // 6b. If that was the last guess, delete the record.
+                if slot >= stored.max_attempts {
                     let _ = self.storage.delete(realm_id, &otp_key);
                 }
                 Err(e)
@@ -17536,7 +17597,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?
             .ok_or(IdentityError::InvalidEmailOtp)?;
 
-        let mut stored: StoredOtp =
+        let stored: StoredOtp =
             serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
@@ -17546,19 +17607,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidEmailOtp);
         }
 
-        if stored.is_exhausted() {
+        // One guess of the code's cluster-wide budget, spent before the check
+        // (G6; see `verify_sms_otp`).
+        let Some(slot) = self.claim_guess_slot(
+            realm_id,
+            &keys::encode_guess_slot_prefix("email-otp", nonce),
+            stored.max_attempts,
+            Self::otp_expiry(&stored),
+        )?
+        else {
             let _ = self.storage.delete(realm_id, &otp_key);
             return Err(IdentityError::InvalidEmailOtp);
-        }
-
-        stored.attempt_count = stored.attempt_count.saturating_add(1);
-        let updated_bytes =
-            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
-        self.storage
-            .put(realm_id, &otp_key, &updated_bytes)
-            .map_err(Self::storage_err)?;
+        };
 
         let result = stored.verify(candidate_code, email, otp_hmac_key_bytes);
 
@@ -17579,7 +17639,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 Ok(())
             }
             Err(_) => {
-                if stored.is_exhausted() {
+                if slot >= stored.max_attempts {
                     let _ = self.storage.delete(realm_id, &otp_key);
                 }
                 Err(IdentityError::InvalidEmailOtp)

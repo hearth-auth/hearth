@@ -43,6 +43,12 @@ impl StickyReads {
             .expect("prefixes")
             .push(prefix.as_bytes().to_vec());
     }
+
+    /// Stops serving stale reads: every later read sees the real store.
+    fn disarm(&self) {
+        self.prefixes.lock().expect("prefixes").clear();
+        self.seen.lock().expect("seen").clear();
+    }
 }
 
 impl StorageEngine for StickyReads {
@@ -141,7 +147,28 @@ struct Fixture {
     _dir: tempfile::TempDir,
     engine: EmbeddedIdentityEngine,
     storage: Arc<StickyReads>,
+    clock: Arc<FakeClock>,
     realm: RealmId,
+}
+
+/// An identity engine over `storage` — a second one over the same store
+/// stands in for a second node (its in-process state is its own).
+fn engine_over(storage: &Arc<StickyReads>, clock: &Arc<FakeClock>) -> EmbeddedIdentityEngine {
+    let dyn_storage = Arc::clone(storage) as Arc<dyn StorageEngine>;
+    let audit = Arc::new(crate::audit::EmbeddedAuditEngine::new(
+        Arc::clone(&dyn_storage),
+        Arc::clone(clock) as Arc<dyn Clock>,
+    ));
+    EmbeddedIdentityEngine::new(
+        dyn_storage,
+        Arc::clone(clock) as Arc<dyn Clock>,
+        IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        },
+        audit as Arc<dyn AuditEngine>,
+    )
+    .expect("engine")
 }
 
 fn fixture() -> Fixture {
@@ -150,29 +177,19 @@ fn fixture() -> Fixture {
         EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf())).expect("open"),
     ) as Arc<dyn StorageEngine>;
     let storage = Arc::new(StickyReads::new(real));
-    let dyn_storage = Arc::clone(&storage) as Arc<dyn StorageEngine>;
     let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
         1_700_000_000_000_000,
     )));
-    let audit = Arc::new(crate::audit::EmbeddedAuditEngine::new(
-        Arc::clone(&dyn_storage),
-        Arc::clone(&clock) as Arc<dyn Clock>,
-    ));
-    let engine = EmbeddedIdentityEngine::new(
-        dyn_storage,
-        Arc::clone(&clock) as Arc<dyn Clock>,
-        IdentityConfig {
-            credential: CredentialConfig::fast_for_testing(),
-            ..IdentityConfig::default()
-        },
-        audit as Arc<dyn AuditEngine>,
-    )
-    .expect("engine");
+    let engine = engine_over(&storage, &clock);
     let realm = engine
         .create_realm(&CreateRealmRequest {
             name: format!("stale-{}", uuid::Uuid::new_v4()),
             config: Some(crate::identity::RealmConfig {
-                mfa_methods: Some(vec!["sms".to_string(), "email_otp".to_string()]),
+                mfa_methods: Some(vec![
+                    "sms".to_string(),
+                    "email_otp".to_string(),
+                    "totp".to_string(),
+                ]),
                 ..crate::identity::RealmConfig::default()
             }),
         })
@@ -183,6 +200,7 @@ fn fixture() -> Fixture {
         _dir: dir,
         engine,
         storage,
+        clock,
         realm,
     }
 }
@@ -576,5 +594,325 @@ fn an_email_otp_is_redeemed_once_despite_a_stale_read() {
             .verify_email_otp(&f.realm, &nonce, ADDRESS, &code, KEY, now)
             .is_err(),
         "a stale read of the pending OTP let one email code be redeemed twice"
+    );
+}
+
+// ── G6: MFA factors, OTP guess budgets, email change, device decisions ──────
+
+fn make_user(f: &Fixture, email: &str) -> UserId {
+    f.engine
+        .create_user(
+            &f.realm,
+            &CreateUserRequest {
+                email: email.to_string(),
+                display_name: "Stale".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("user")
+        .id()
+        .clone()
+}
+
+#[allow(clippy::cast_sign_loss)] // Test timestamps are always positive
+fn current_totp(f: &Fixture, secret: &[u8]) -> String {
+    crate::identity::totp::compute_totp(secret, now_secs(f) as u64 / 30)
+}
+
+/// Enrols and activates TOTP for `user`; returns the secret and the recovery
+/// codes. The clock is then moved one step on, so the activation code's step
+/// is behind it.
+fn enrol_totp(f: &Fixture, user: &UserId) -> (Vec<u8>, Vec<String>) {
+    let enrollment = f.engine.enroll_totp(&f.realm, user).expect("enroll");
+    let secret = data_encoding::BASE32_NOPAD
+        .decode(enrollment.secret_base32.as_bytes())
+        .expect("decode");
+    f.engine
+        .verify_totp_enrollment(&f.realm, user, &current_totp(f, &secret))
+        .expect("activate");
+    f.clock.advance(30_000_000);
+    (secret, enrollment.recovery_codes.as_slice().to_vec())
+}
+
+fn mfa_key(user: &UserId) -> String {
+    String::from_utf8(keys::encode_mfa_totp_key(user)).expect("utf8 key")
+}
+
+#[test]
+fn a_totp_code_is_accepted_once_despite_a_stale_read() {
+    let f = fixture();
+    let user = make_user(&f, "totp-replay@example.com");
+    let (secret, _) = enrol_totp(&f, &user);
+    let code = current_totp(&f, &secret);
+    f.storage.arm(&mfa_key(&user));
+    f.engine
+        .verify_totp(&f.realm, &user, &code)
+        .expect("first use of the code");
+    assert!(
+        matches!(
+            f.engine.verify_totp(&f.realm, &user, &code),
+            Err(IdentityError::InvalidMfaCode)
+        ),
+        "a stale read of the TOTP state accepted one code twice"
+    );
+}
+
+#[test]
+fn a_recovery_code_is_spent_once_despite_a_stale_read() {
+    let f = fixture();
+    let user = make_user(&f, "recovery-twice@example.com");
+    let (_, recovery) = enrol_totp(&f, &user);
+    f.storage.arm(&mfa_key(&user));
+    f.engine
+        .verify_recovery_code(&f.realm, &user, &recovery[0])
+        .expect("first use of the recovery code");
+    assert!(
+        matches!(
+            f.engine.verify_recovery_code(&f.realm, &user, &recovery[0]),
+            Err(IdentityError::InvalidMfaCode)
+        ),
+        "a stale read of the MFA state let one recovery code be spent twice"
+    );
+}
+
+#[test]
+fn a_stale_totp_verify_cannot_bring_back_a_spent_recovery_code() {
+    let f = fixture();
+    let user = make_user(&f, "recovery-resurrect@example.com");
+    let (secret, recovery) = enrol_totp(&f, &user);
+    let code = current_totp(&f, &secret);
+    // This node reads the MFA state before the recovery code is spent...
+    f.storage.arm(&mfa_key(&user));
+    f.storage
+        .get(&f.realm, &keys::encode_mfa_totp_key(&user))
+        .expect("stale read");
+    // ...the code is spent (its write reaches the real store)...
+    f.engine
+        .verify_recovery_code(&f.realm, &user, &recovery[0])
+        .expect("spend the recovery code");
+    // ...and a TOTP verify from the stale copy writes the whole record back.
+    f.engine
+        .verify_totp(&f.realm, &user, &code)
+        .expect("the TOTP code itself is good");
+    f.storage.disarm();
+    assert!(
+        matches!(
+            f.engine.verify_recovery_code(&f.realm, &user, &recovery[0]),
+            Err(IdentityError::InvalidMfaCode)
+        ),
+        "a stale MFA-state write brought a spent recovery code back"
+    );
+}
+
+#[test]
+fn the_totp_guess_budget_is_shared_by_every_node() {
+    let f = fixture();
+    let user = make_user(&f, "totp-budget@example.com");
+    let (secret, _) = enrol_totp(&f, &user);
+    let second_node = engine_over(&f.storage, &f.clock);
+    for _ in 0..EmbeddedIdentityEngine::MFA_MAX_ATTEMPTS {
+        assert!(
+            matches!(
+                f.engine.verify_totp(&f.realm, &user, "000000"),
+                Err(IdentityError::InvalidMfaCode)
+            ),
+            "a wrong guess inside the budget is answered as a wrong code"
+        );
+    }
+    assert!(
+        matches!(
+            second_node.verify_totp(&f.realm, &user, &current_totp(&f, &secret)),
+            Err(IdentityError::RateLimited)
+        ),
+        "a second node granted a fresh TOTP guess budget after the first spent it"
+    );
+}
+
+/// The code an SMS body carries.
+fn sms_code(sender: &CapturingSms) -> String {
+    let body = sender.0.lock().expect("sms").last().cloned().expect("sent");
+    body.rsplit_once(": ")
+        .map(|(_, c)| c.trim().to_string())
+        .expect("code")
+}
+
+/// A six-digit guess that is not `code`.
+fn wrong_guess(code: &str) -> &'static str {
+    if code == "000000" {
+        "111111"
+    } else {
+        "000000"
+    }
+}
+
+#[test]
+fn an_sms_otp_guess_budget_holds_despite_a_stale_read() {
+    const KEY: &[u8] = b"stale-read-sms-budget-hmac-key";
+    const PHONE: &str = "+15555550143";
+    let f = fixture();
+    let sender = CapturingSms(Mutex::new(Vec::new()));
+    let now = u64::try_from(now_secs(&f)).expect("now");
+    let nonce = f
+        .engine
+        .issue_sms_otp(&f.realm, PHONE, KEY, &sender, now)
+        .expect("issue");
+    let code = sms_code(&sender);
+    f.storage.arm("sms:pending_otp:");
+    for _ in 0..crate::identity::sms::otp::OTP_MAX_ATTEMPTS {
+        assert!(f
+            .engine
+            .verify_sms_otp(&f.realm, &nonce, PHONE, wrong_guess(&code), KEY, now)
+            .is_err());
+    }
+    assert!(
+        f.engine
+            .verify_sms_otp(&f.realm, &nonce, PHONE, &code, KEY, now)
+            .is_err(),
+        "a stale read of the attempt count granted a guess past the SMS OTP budget"
+    );
+}
+
+#[test]
+fn an_email_otp_guess_budget_holds_despite_a_stale_read() {
+    const KEY: &[u8] = b"stale-read-email-budget-hmac-key";
+    const ADDRESS: &str = "budget@example.com";
+    let f = fixture();
+    let sender = Arc::new(CapturingEmail(Mutex::new(Vec::new())));
+    let service = crate::identity::EmailService::new(
+        Arc::clone(&sender) as Arc<dyn crate::identity::EmailSender>,
+        "Hearth Test".to_string(),
+        None,
+        crate::identity::EmailBranding::default(),
+        String::new(),
+        None,
+    )
+    .expect("email service");
+    let now = u64::try_from(now_secs(&f)).expect("now");
+    let nonce = f
+        .engine
+        .issue_email_otp(&f.realm, ADDRESS, KEY, &service, None, now)
+        .expect("issue");
+    let body = sender
+        .0
+        .lock()
+        .expect("email")
+        .last()
+        .cloned()
+        .expect("sent");
+    let code: String = body
+        .rsplit_once(": ")
+        .map(|(_, rest)| rest.trim().chars().take(6).collect())
+        .expect("code");
+    f.storage.arm("email:pending_otp:");
+    for _ in 0..crate::identity::sms::otp::OTP_MAX_ATTEMPTS {
+        assert!(f
+            .engine
+            .verify_email_otp(&f.realm, &nonce, ADDRESS, wrong_guess(&code), KEY, now)
+            .is_err());
+    }
+    assert!(
+        f.engine
+            .verify_email_otp(&f.realm, &nonce, ADDRESS, &code, KEY, now)
+            .is_err(),
+        "a stale read of the attempt count granted a guess past the email OTP budget"
+    );
+}
+
+#[test]
+fn an_email_change_is_confirmed_once_despite_a_stale_read() {
+    let f = fixture();
+    let user = make_user(&f, "change-from@example.com");
+    let token = f
+        .engine
+        .initiate_email_change(&f.realm, &user, "change-to@example.com")
+        .expect("initiate");
+    f.storage.arm("email:change:");
+    f.storage.arm("usr:id:");
+    f.storage.arm("usr:email:");
+    f.engine
+        .confirm_email_change(&f.realm, &token)
+        .expect("first confirmation");
+    assert!(
+        matches!(
+            f.engine.confirm_email_change(&f.realm, &token),
+            Err(IdentityError::EmailChangeTokenInvalid)
+        ),
+        "a stale read of the email-change token let it be confirmed twice"
+    );
+}
+
+/// A pending device authorization for a fresh device client: its user code.
+fn pending_device_code(f: &Fixture) -> (ClientId, String, String) {
+    let client = f
+        .engine
+        .register_client(
+            &f.realm,
+            &crate::identity::RegisterClientRequest {
+                client_name: "stale-device".to_string(),
+                redirect_uris: vec!["https://app.example.com/cb".to_string()],
+                grant_types: vec![crate::identity::oidc::GRANT_DEVICE_CODE.to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("client")
+        .client_id()
+        .clone();
+    let issued = f
+        .engine
+        .device_authorize(
+            &f.realm,
+            &crate::identity::oidc::DeviceAuthorizationRequest {
+                client_id: client.clone(),
+                scope: Some("openid".to_string()),
+            },
+        )
+        .expect("device authorize");
+    (client, issued.user_code, issued.device_code)
+}
+
+#[test]
+fn a_device_approval_is_not_overwritten_by_a_stale_deny() {
+    let f = fixture();
+    let user = make_user(&f, "device-approve@example.com");
+    let (client, user_code, device_code) = pending_device_code(&f);
+    f.storage.arm("oauth:device:");
+    f.storage.arm("oauth:ucode:");
+    f.engine
+        .approve_device(&f.realm, &user_code, &user)
+        .expect("approve");
+    assert!(
+        f.engine.deny_device(&f.realm, &user_code, &user).is_err(),
+        "a stale read of the device code let a deny overwrite the approval"
+    );
+    f.storage.disarm();
+    f.engine
+        .poll_device_token(&f.realm, &device_code, &client)
+        .expect("the approved device is served its tokens");
+}
+
+#[test]
+fn a_device_denial_is_not_overwritten_by_a_stale_approve() {
+    let f = fixture();
+    let user = make_user(&f, "device-deny@example.com");
+    let (client, user_code, device_code) = pending_device_code(&f);
+    f.storage.arm("oauth:device:");
+    f.storage.arm("oauth:ucode:");
+    f.engine
+        .deny_device(&f.realm, &user_code, &user)
+        .expect("deny");
+    assert!(
+        f.engine
+            .approve_device(&f.realm, &user_code, &user)
+            .is_err(),
+        "a stale read of the device code let an approval overwrite the denial"
+    );
+    f.storage.disarm();
+    assert!(
+        matches!(
+            f.engine.poll_device_token(&f.realm, &device_code, &client),
+            Err(IdentityError::DeviceCodeDenied)
+        ),
+        "the denied device was not told access_denied"
     );
 }
