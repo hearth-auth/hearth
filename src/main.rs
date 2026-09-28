@@ -1242,6 +1242,17 @@ async fn run_serve(
     // all writes (put / delete / put_batch) go through Raft quorum commit
     // in cluster mode.  In single-node mode ClusterEngine is a zero-overhead
     // passthrough and the peer server is not started.
+    //
+    // L24 (GA audit 2026-09-28): one shutdown signal for every listener. The
+    // sender is armed by the signal task spawned just before serving; each
+    // listener — HTTP(S), redirect, gRPC, the Raft peer server — starts
+    // draining the moment it fires, and all of them share one deadline
+    // measured from the signal. gRPC used to be told only after HTTP had
+    // drained (so shutdown could take twice the timeout), and the Raft peer
+    // server was never told at all.
+    let (shutdown_signal_tx, shutdown_signal_rx) =
+        tokio::sync::watch::channel::<Option<tokio::time::Instant>>(None);
+    let mut raft_server: Option<tokio::task::JoinHandle<()>> = None;
     let cluster_engine: Arc<hearth::cluster::ClusterEngine> =
         if let Some(cluster_cfg) = &config.cluster {
             match hearth::cluster::ClusterEngine::build_clustered(
@@ -1255,11 +1266,15 @@ async fn run_serve(
                     let engine = Arc::new(engine);
                     let serve_cfg = cluster_cfg.clone();
                     let serve_engine = Arc::clone(&engine);
-                    tokio::spawn(async move {
-                        if let Err(e) = hearth::cluster::serve(&serve_cfg, serve_engine).await {
+                    let shutdown = shutdown_requested(shutdown_signal_rx.clone());
+                    raft_server = Some(tokio::spawn(async move {
+                        if let Err(e) =
+                            hearth::cluster::serve_with_shutdown(&serve_cfg, serve_engine, shutdown)
+                                .await
+                        {
                             error!(error = %e, "Raft peer gRPC server terminated");
                         }
-                    });
+                    }));
                     // HEA-2154: multi-node clustering is EXPERIMENTAL in 1.x.
                     // Known defects: followers never invalidate RBAC/session
                     // caches (C-5), membership is immutable after bootstrap
@@ -3061,9 +3076,20 @@ async fn run_serve(
         });
     }
 
+    // M14 (GA audit 2026-09-28): one certificate for HTTPS and gRPC. Built
+    // here, before either listener, so the gRPC listener can terminate TLS
+    // with the same (hot-reloadable) certificate; it used to be plaintext
+    // unconditionally.
+    let tls = match (&config.server.tls_cert_path, &config.server.tls_key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            Some(build_tls_acceptor(&config, cert_path, key_path)?)
+        }
+        _ => None,
+    };
+
     // Spawn the gRPC management API alongside the HTTP server. Both share
     // the `AdminRateLimiter` so rate limits apply across protocols.
-    let grpc_shutdown = if let Some(grpc_port) = config.server.grpc_port {
+    let grpc_server = if let Some(grpc_port) = config.server.grpc_port {
         let bind = config
             .server
             .grpc_bind_address
@@ -3081,20 +3107,31 @@ async fn run_serve(
         // A-2: share the same RequestShaper so HTTP + gRPC per-IP counts
         // accumulate in the same sliding window.
         .with_shaper(Arc::clone(&request_shaper));
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let grpc_tls = tls.as_ref().map(|(_, acceptor)| acceptor.clone());
+        let grpc_tls_enabled = grpc_tls.is_some();
+        let shutdown = shutdown_requested(shutdown_signal_rx.clone());
         let handle = tokio::spawn(async move {
-            let shutdown = async {
-                let _ = shutdown_rx.await;
-            };
-            if let Err(e) =
-                protocol::grpc::serve(grpc_addr, grpc_state, reflection_enabled, None, shutdown)
-                    .await
+            if let Err(e) = protocol::grpc::serve(
+                grpc_addr,
+                grpc_state,
+                reflection_enabled,
+                grpc_tls,
+                shutdown,
+            )
+            .await
             {
                 error!(error = %e, "gRPC server exited with error");
             }
         });
-        info!(address = %grpc_addr, "gRPC management API enabled");
-        Some((shutdown_tx, handle))
+        info!(address = %grpc_addr, tls = grpc_tls_enabled, "gRPC management API enabled");
+        if !grpc_tls_enabled && !config.dev_mode {
+            warn!(
+                address = %grpc_addr,
+                "gRPC management API is PLAINTEXT (no server.tls_cert_path): admin tokens and \
+                 client secrets are not encrypted on this listener"
+            );
+        }
+        Some(handle)
     } else {
         None
     };
@@ -3147,16 +3184,28 @@ async fn run_serve(
     // flight. Reported at the very end so every cleanup step still runs.
     let mut drain_incomplete = false;
 
+    // Wire SIGINT + SIGTERM to the one shutdown signal every listener watches
+    // (HEA-2161, L24). The timestamp starts the shared drain deadline exactly
+    // when the signal fires rather than at process startup.
+    let drain_secs = config.operational.shutdown_timeout_secs;
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        info!(
+            drain_deadline_secs = drain_secs,
+            "shutdown signal received, draining in-flight requests on every listener"
+        );
+        let _ = shutdown_signal_tx.send(Some(tokio::time::Instant::now()));
+    });
+
     // Check for TLS configuration
-    if let (Some(cert_path), Some(key_path)) =
-        (&config.server.tls_cert_path, &config.server.tls_key_path)
-    {
+    if let Some((reloadable, acceptor)) = tls {
         let tls_drain_incomplete = run_serve_tls(
             addr,
             &config,
             app_router,
-            cert_path,
-            key_path,
+            reloadable,
+            acceptor,
+            shutdown_signal_rx.clone(),
             Arc::clone(&identity_engine),
             Arc::clone(&rbac_engine),
             Arc::clone(&permission_registry),
@@ -3200,25 +3249,14 @@ async fn run_serve(
             });
         }
 
-        // Wire SIGINT + SIGTERM to the same graceful drain.  The channel lets
-        // the drain-deadline timer start exactly when the signal fires rather
-        // than at process startup.
-        let drain_secs = config.operational.shutdown_timeout_secs;
-        let (drain_start_tx, drain_start_rx) = tokio::sync::oneshot::channel::<()>();
-        let shutdown = async move {
-            wait_for_shutdown_signal().await;
-            info!(
-                drain_deadline_secs = drain_secs,
-                "shutdown signal received, draining in-flight requests"
-            );
-            let _ = drain_start_tx.send(());
-        };
+        let shutdown = shutdown_requested(shutdown_signal_rx.clone());
+        let deadline_rx = shutdown_signal_rx.clone();
         tokio::select! {
             result = http::serve_router(addr, app_router, shutdown) => {
                 result?;
             }
-            _ = async {
-                let _ = drain_start_rx.await;
+            () = async {
+                shutdown_requested(deadline_rx).await;
                 tokio::time::sleep(Duration::from_secs(drain_secs)).await;
             } => {
                 warn!(
@@ -3230,21 +3268,21 @@ async fn run_serve(
         }
     }
 
-    // Signal the gRPC task to shut down and wait for it within the drain deadline.
-    if let Some((tx, handle)) = grpc_shutdown {
-        let _ = tx.send(());
-        let drain_secs = config.operational.shutdown_timeout_secs;
-        match tokio::time::timeout(Duration::from_secs(drain_secs), handle).await {
-            Ok(_) => {}
-            Err(_) => {
-                warn!(
-                    drain_deadline_secs = drain_secs,
-                    "gRPC graceful drain deadline exceeded, forcing shutdown"
-                );
-                drain_incomplete = true;
-            }
+    // gRPC and the Raft peer server began draining at the signal, alongside
+    // HTTP; wait for them only until the SAME deadline (L24).
+    let deadline = shared_drain_deadline(&shutdown_signal_rx, Duration::from_secs(drain_secs));
+    for (listener, handle) in [("gRPC", grpc_server), ("Raft peer", raft_server)] {
+        let Some(handle) = handle else { continue };
+        if tokio::time::timeout_at(deadline, handle).await.is_err() {
+            warn!(
+                listener,
+                drain_deadline_secs = drain_secs,
+                "graceful drain deadline exceeded, forcing shutdown"
+            );
+            drain_incomplete = true;
         }
     }
+    cluster_engine.shutdown().await;
 
     // Signal the webhook dispatcher to stop.
     let _ = wh_shutdown_tx.send(());
@@ -3698,6 +3736,52 @@ async fn wait_for_shutdown_signal() {
         .expect("failed to install SIGINT handler");
 }
 
+/// Resolves once the shared shutdown signal has fired (or its sender is gone).
+///
+/// Every listener awaits one of these, so all of them begin draining at the
+/// same moment (GA audit 2026-09-28 L24).
+async fn shutdown_requested(
+    mut signal: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
+) {
+    let _ = signal.wait_for(Option::is_some).await;
+}
+
+/// The one drain deadline every listener shares: `drain` after the shutdown
+/// signal fired (or after now, if it has not been recorded).
+fn shared_drain_deadline(
+    signal: &tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
+    drain: Duration,
+) -> tokio::time::Instant {
+    let fired_at = *signal.borrow();
+    fired_at.unwrap_or_else(tokio::time::Instant::now) + drain
+}
+
+/// Builds the TLS acceptor shared by the HTTPS and gRPC listeners (M14).
+///
+/// The returned [`ReloadableTlsConfig`] backs the acceptor's certificate
+/// resolver, so a SIGHUP certificate reload reaches both listeners.
+fn build_tls_acceptor(
+    config: &Config,
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<(ReloadableTlsConfig, tokio_rustls::TlsAcceptor), Box<dyn std::error::Error>> {
+    let reloadable = ReloadableTlsConfig::load(cert_path.to_path_buf(), key_path.to_path_buf())
+        .map_err(|e| format!("failed to load TLS certificates: {e}"))?;
+    let params = TlsConfigParams {
+        resolver: Arc::new(reloadable.resolver()),
+        client_ca_path: config.server.tls_client_ca_path.clone(),
+        require_client_cert: config.server.tls_require_client_cert,
+        crl_paths: config.security.tls.crl_paths.clone(),
+        tls13_only: config.security.tls.min_version == TlsMinVersionYaml::Tls13,
+    };
+    let server_config =
+        build_server_config(params).map_err(|e| format!("failed to build TLS config: {e}"))?;
+    Ok((
+        reloadable,
+        tokio_rustls::TlsAcceptor::from(Arc::new(server_config)),
+    ))
+}
+
 /// Runs the HTTPS server with TLS, redirect listener, and SIGHUP cert + config reload.
 ///
 /// Returns `true` when the graceful drain ran out of deadline with requests
@@ -3712,8 +3796,9 @@ async fn run_serve_tls(
     addr: SocketAddr,
     config: &Config,
     app_router: axum::Router,
-    cert_path: &std::path::Path,
-    key_path: &std::path::Path,
+    reloadable: ReloadableTlsConfig,
+    acceptor: tokio_rustls::TlsAcceptor,
+    shutdown_signal: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
     identity_engine: Arc<dyn IdentityEngine>,
     rbac_engine: Arc<dyn RbacEngine>,
     permission_registry: RegistrySwap,
@@ -3721,21 +3806,14 @@ async fn run_serve_tls(
     dev: bool,
     reload_notify: Arc<Notify>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let reloadable = ReloadableTlsConfig::load(cert_path.to_path_buf(), key_path.to_path_buf())
-        .map_err(|e| format!("failed to load TLS certificates: {e}"))?;
-
-    let params = TlsConfigParams {
-        resolver: Arc::new(reloadable.resolver()),
-        client_ca_path: config.server.tls_client_ca_path.clone(),
-        require_client_cert: config.server.tls_require_client_cert,
-        crl_paths: config.security.tls.crl_paths.clone(),
-        tls13_only: config.security.tls.min_version == TlsMinVersionYaml::Tls13,
-    };
-    let server_config =
-        build_server_config(params).map_err(|e| format!("failed to build TLS config: {e}"))?;
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
-
+    // The HTTPS and redirect listeners watch a `watch::Receiver<()>` that
+    // fires when its sender drops; drop it at the shared shutdown signal.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    let signal = shutdown_requested(shutdown_signal);
+    tokio::spawn(async move {
+        signal.await;
+        drop(shutdown_tx);
+    });
 
     // Spawn HTTP→HTTPS redirect listener
     let redirect_port = if config.server.port == 443 {
@@ -3798,24 +3876,11 @@ async fn run_serve_tls(
         });
     }
 
-    // Wire SIGINT + SIGTERM to the same graceful drain (HEA-2161).
-    let drain_secs = config.operational.shutdown_timeout_secs;
-    let (drain_start_tx, drain_start_rx) = tokio::sync::oneshot::channel::<()>();
-    tokio::spawn(async move {
-        wait_for_shutdown_signal().await;
-        info!(
-            drain_deadline_secs = drain_secs,
-            "shutdown signal received, draining in-flight requests"
-        );
-        let _ = drain_start_tx.send(());
-        drop(shutdown_tx);
-    });
-
     // Start the HTTPS server. It owns the drain and its deadline: an outer
     // `select!` here would win the race the instant the accept loop returned,
     // which is exactly how a drain that never happened looked clean
-    // (audit 2026-08-28 §4.11#9). `drain_start_rx` is no longer needed.
-    drop(drain_start_rx);
+    // (audit 2026-08-28 §4.11#9).
+    let drain_secs = config.operational.shutdown_timeout_secs;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let drain_outcome = http::serve_tls_router(
         listener,

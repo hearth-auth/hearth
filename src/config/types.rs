@@ -64,6 +64,17 @@ pub struct ServerConfig {
     /// `bind_address` when unset.
     #[serde(default)]
     pub grpc_bind_address: Option<String>,
+    /// Allow a plaintext gRPC listener on a non-loopback address outside
+    /// `--dev`.
+    ///
+    /// When `tls_cert_path` / `tls_key_path` are set, gRPC is served over TLS
+    /// with the same certificate as HTTPS and this key has no effect. Without
+    /// them gRPC is plaintext, and production validation refuses a
+    /// non-loopback gRPC bind — admin bearer tokens and client secrets would
+    /// cross the network in clear text — unless this is `true`, for a
+    /// deployment whose gRPC traffic is TLS-terminated by a proxy or mesh.
+    #[serde(default)]
+    pub grpc_allow_plaintext: bool,
     /// Filesystem directory containing the admin UI's mutable static
     /// assets — currently only `app.css` (the Tailwind build output).
     ///
@@ -114,6 +125,7 @@ impl Default for ServerConfig {
             default_realm: None,
             grpc_port: None,
             grpc_bind_address: None,
+            grpc_allow_plaintext: false,
             assets_dir: None,
             trust_forwarded_proto: false,
         }

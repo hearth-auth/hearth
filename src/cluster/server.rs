@@ -125,6 +125,25 @@ pub async fn serve<D: IncomingRpcDispatch>(
     config: &ClusterConfig,
     dispatch: Arc<D>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    serve_with_shutdown(config, dispatch, std::future::pending()).await
+}
+
+/// Variant of [`serve`] that stops accepting peer RPCs and returns once
+/// `shutdown` resolves (GA audit 2026-09-28 L24: the peer server used to run
+/// until the process exited, outside the graceful drain).
+///
+/// # Errors
+///
+/// Returns an error when the TLS material cannot be read or the server fails.
+pub async fn serve_with_shutdown<D, F>(
+    config: &ClusterConfig,
+    dispatch: Arc<D>,
+    shutdown: F,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    D: IncomingRpcDispatch,
+    F: std::future::Future<Output = ()>,
+{
     let cert = tokio::fs::read(&config.tls_cert_path).await?;
     let key = tokio::fs::read(&config.tls_key_path).await?;
     let ca = tokio::fs::read(&config.tls_ca_cert_path).await?;
@@ -150,7 +169,7 @@ pub async fn serve<D: IncomingRpcDispatch>(
     Server::builder()
         .tls_config(tls)?
         .add_service(RaftServiceServer::new(RaftRpcHandler::new(dispatch)))
-        .serve(addr)
+        .serve_with_shutdown(addr, shutdown)
         .await?;
 
     Ok(())

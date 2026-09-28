@@ -124,7 +124,13 @@ Network binding and TLS configuration.
 | `trusted_proxies` | list of strings | `[]` | IP addresses of trusted reverse proxies. When non-empty, the real client IP is extracted from `X-Forwarded-For` using the rightmost-non-trusted algorithm. When empty (the default), the peer socket address is used and `X-Forwarded-For` is ignored — the safe default for direct-to-internet deployments. CIDR notation is not yet supported; supply individual IPs. |
 | `trust_forwarded_proto` | bool | `false` | Trust the `X-Forwarded-Proto: https` header when deciding whether session cookies carry `Secure`. **Requires a non-empty `trusted_proxies`** — setting it to `true` with an empty proxy list is refused at start-up and by `hearth config validate`, because the header would then be accepted from any peer and a client could choose whether its own cookie is `Secure`. |
 
+| `grpc_port` | integer | — (disabled) | TCP port for the gRPC management API. When unset, no gRPC listener is started. |
+| `grpc_bind_address` | string | `bind_address` | IP address for the gRPC listener. `127.0.0.1` keeps the management API host-local. |
+| `grpc_allow_plaintext` | bool | `false` | Outside `--dev`, a gRPC listener on a non-loopback address with no `tls_cert_path` is refused at start-up (it would carry admin bearer tokens, OAuth client secrets and agent API keys in clear text). Set `true` only when a proxy or service mesh terminates TLS for gRPC. Has no effect when `tls_cert_path` is set. |
+
 When TLS is enabled, Hearth also spawns an HTTP → HTTPS redirect listener on `port - 1` (or port 80 when `port: 443`). Send `SIGHUP` to hot-reload the certificate and key without downtime.
+
+When `tls_cert_path` / `tls_key_path` are set, the gRPC listener (`grpc_port`) serves **TLS with the same certificate** (ALPN `h2`), and inherits `tls_client_ca_path` / `tls_require_client_cert` and `security.tls.*`; a SIGHUP certificate reload reaches both listeners. Clients must connect with `https://`. Without a certificate, gRPC is plaintext — see `grpc_allow_plaintext`.
 
 ```yaml
 server:
@@ -340,14 +346,21 @@ Operational limits and timeouts.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `request_timeout_secs` | integer | `30` | Maximum time in seconds for a single HTTP request. |
-| `shutdown_timeout_secs` | integer | `10` | Drain deadline in seconds after a shutdown signal (SIGINT or SIGTERM). In-flight HTTP and gRPC requests are given this long to complete before the process forces exit. **Must be less than `terminationGracePeriodSeconds`** in Kubernetes; the Helm chart default is 60 s, leaving a 30 s buffer above the recommended production value of 30 s. |
-| `max_connections` | integer | `1024` | Maximum concurrent TCP connections. |
-| `queue_depth` | integer | `4096` | Internal work queue depth. |
+| `shutdown_timeout_secs` | integer | `10` | Drain deadline in seconds after a shutdown signal (SIGINT or SIGTERM). Every listener — HTTP(S), the HTTP→HTTPS redirect, gRPC and the Raft peer server — stops accepting and starts draining at the signal, and all of them share this one deadline, so the whole drain takes at most this long. **Must be less than `terminationGracePeriodSeconds`** in Kubernetes; the Helm chart default is 60 s, leaving a 30 s buffer above the recommended production value of 30 s. |
+| `max_connections` | integer | `1024` | Maximum concurrent connections served per listener (the HTTP(S) listener, the redirect listener and the gRPC listener each have their own allowance). |
+| `queue_depth` | integer | `4096` | Connections allowed to wait for one of the `max_connections` slots; past that, new connections are closed immediately. |
+| `max_connections_per_ip` | integer | `64` | Concurrent connections one client may hold — per IPv4 address, or per IPv6 `/64`. Further connections are closed immediately. `0` disables the cap. Peers listed in `server.trusted_proxies` are exempt, because every client behind a proxy shares its address; the cap is on the TCP peer, so `X-Forwarded-For` does not affect it. |
+| `header_read_timeout_secs` | integer | `10` | Seconds a client has to send its first bytes and each complete set of HTTP/1.1 request headers. Also closes an HTTP/1.1 keep-alive connection left idle this long, and a gRPC connection that does not send the HTTP/2 preface in time. Must be greater than 0. |
+| `tls_handshake_timeout_secs` | integer | `10` | Seconds a client has to complete the TLS handshake on the HTTPS and gRPC listeners. Must be greater than 0. |
+| `http2_keepalive_interval_secs` | integer | `30` | Seconds between HTTP/2 keep-alive `PING`s (HTTP and gRPC listeners); a peer that does not acknowledge within 20 s is disconnected. `0` disables pings. |
+
+Together, `max_connections_per_ip`, `header_read_timeout_secs` and `tls_handshake_timeout_secs` stop one client from holding every connection slot with requests it never finishes (GA audit 2026-09-28, B6).
 
 ```yaml
 operational:
   request_timeout_secs: 60
   max_connections: 2048
+  max_connections_per_ip: 128
 ```
 
 ### `branding`
@@ -2258,6 +2271,10 @@ Every field's default value at a glance.
 | `operational` | `shutdown_timeout_secs` | `10` |
 | `operational` | `max_connections` | `1024` |
 | `operational` | `queue_depth` | `4096` |
+| `operational` | `max_connections_per_ip` | `64` |
+| `operational` | `header_read_timeout_secs` | `10` |
+| `operational` | `tls_handshake_timeout_secs` | `10` |
+| `operational` | `http2_keepalive_interval_secs` | `30` |
 | `branding` | `product_name` | `"Hearth"` |
 | `branding` | `theme` | `"ember"` |
 | `email` | `transport` | `"log"` |

@@ -259,6 +259,7 @@ impl Config {
                 default_realm: None,
                 grpc_port: None,
                 grpc_bind_address: None,
+                grpc_allow_plaintext: false,
                 assets_dir: None,
                 trust_forwarded_proto: false,
             },
@@ -433,6 +434,34 @@ impl Config {
                     field: "demo.enabled".to_string(),
                     reason: DEMO_FORBIDDEN_IN_PROD.to_string(),
                 });
+            }
+            // GA audit 2026-09-28 M14: gRPC is served over TLS with the HTTPS
+            // certificate when one is configured. Without one it is plaintext,
+            // and the HTTPS gate above says nothing about it.
+            if let Some(port) = self.server.grpc_port {
+                let grpc_bind = self
+                    .server
+                    .grpc_bind_address
+                    .as_deref()
+                    .unwrap_or(self.server.bind_address.as_str());
+                if self.server.tls_cert_path.is_none()
+                    && is_public_listener(grpc_bind)
+                    && !self.server.grpc_allow_plaintext
+                {
+                    issues.push(ValidationIssue {
+                        field: "server.grpc_port".to_string(),
+                        reason: format!(
+                            "the gRPC management API would listen in plaintext on \
+                             {grpc_bind}:{port}: with no server.tls_cert_path there is no \
+                             certificate to serve it with, so admin bearer tokens, OAuth client \
+                             secrets and agent API keys would cross the network in clear text. \
+                             Configure server.tls_cert_path + server.tls_key_path (gRPC then \
+                             uses the same certificate), bind gRPC to loopback with \
+                             server.grpc_bind_address: 127.0.0.1, or — only when a proxy or \
+                             mesh terminates TLS for gRPC — set server.grpc_allow_plaintext: true."
+                        ),
+                    });
+                }
             }
         }
 
@@ -3878,6 +3907,60 @@ realms:
                 "{field} = 0 must be refused; issues: {fields:?}"
             );
         }
+    }
+
+    // ── GA audit 2026-09-28 M14: plaintext gRPC in production ───────────────
+
+    fn grpc_issues(yaml: &str) -> Vec<ValidationIssue> {
+        Config::from_yaml_str_unchecked(yaml)
+            .expect("parse")
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field.starts_with("server.grpc"))
+            .collect()
+    }
+
+    /// Without an HTTPS certificate there is no TLS to serve gRPC with, so a
+    /// gRPC listener reachable off-host would carry admin tokens in clear text.
+    #[test]
+    fn a_public_plaintext_grpc_listener_is_refused_in_production() {
+        let issues = grpc_issues(
+            "server:\n  bind_address: 0.0.0.0\n  trust_forwarded_proto: true\n  grpc_port: 9090\n",
+        );
+        assert!(
+            issues.iter().any(|i| i.field == "server.grpc_port"),
+            "a non-loopback gRPC bind with no TLS must be refused; got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn plaintext_grpc_is_allowed_on_loopback_with_tls_or_with_the_opt_in() {
+        for yaml in [
+            // Loopback gRPC bind, public HTTP bind.
+            "server:\n  bind_address: 0.0.0.0\n  grpc_port: 9090\n  grpc_bind_address: 127.0.0.1\n",
+            // gRPC served with the HTTPS certificate.
+            "server:\n  bind_address: 0.0.0.0\n  grpc_port: 9090\n  tls_cert_path: /c.pem\n  tls_key_path: /k.pem\n",
+            // TLS terminated by a proxy in front of gRPC too.
+            "server:\n  bind_address: 0.0.0.0\n  grpc_port: 9090\n  grpc_allow_plaintext: true\n",
+            // No gRPC listener at all.
+            "server:\n  bind_address: 0.0.0.0\n",
+        ] {
+            let issues = grpc_issues(yaml);
+            assert!(issues.is_empty(), "{yaml}\nmust be accepted; got {issues:?}");
+        }
+    }
+
+    #[test]
+    fn plaintext_grpc_stays_allowed_in_dev_mode() {
+        let mut config = Config::dev();
+        config.server.grpc_port = Some(9090);
+        config.server.grpc_bind_address = Some("0.0.0.0".to_string());
+        let issues: Vec<_> = config
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field.starts_with("server.grpc"))
+            .collect();
+        assert!(issues.is_empty(), "got {issues:?}");
     }
 
     // ── GA audit 2026-09-28 M15: `email.transport: log` in production ───────
