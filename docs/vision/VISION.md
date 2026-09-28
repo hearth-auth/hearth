@@ -259,7 +259,8 @@ Hearth compiles to a single binary (dynamically linked against the system C libr
 │                     │                                   │
 │  ┌──────────────────┴───────────────────────────────┐  │
 │  │          Cluster / Replication Layer              │  │
-│  │   Raft consensus · auto-failover · snapshots      │  │
+│  │   Raft consensus · snapshots (experimental; HA    │  │
+│  │   failover is roadmap — single-node supported)    │  │
 │  └──────────────────────────────────────────────────┘  │
 │                                                         │
 └─────────────────────────────────────────────────────────┘
@@ -288,7 +289,7 @@ All data types except the audit log participate in a **hot/cold tiered storage m
 
 **Cluster Layer** *(Experimental in 1.x)*: Raft-based consensus for multi-node deployments. Automatic leader election, log replication, and snapshot-based recovery. The cluster layer is designed to be invisible in single-node mode — no configuration, no port allocation, no ceremony.
 
-> **Note (Hearth 1.x):** Multi-node clustering is present but experimental. Known limitations: follower nodes do not invalidate RBAC or session caches on leader writes (C-5); cluster membership is set at bootstrap and cannot be changed without a full-cluster restart (C-6, `add_learner`/`change_membership` not implemented); writes to follower nodes return HTTP 500 rather than redirecting to the leader (H-3). These are tracked for resolution in the Wave 5 roadmap. The supported production deployment for Hearth 1.x is single-node. See [Clustering Guide](../guides/clustering.md) for the full list of current limitations.
+> **Note (Hearth 1.x):** Multi-node clustering is present but experimental. Known limitations: follower cache invalidation is partial — RBAC, audit, revoked-token and control-epoch rows are forwarded, other cached types are not proven coherent (C-5); cluster membership is set at bootstrap and cannot be changed without a full-cluster restart (C-6, `add_learner`/`change_membership` not implemented); writes and logins on follower nodes fail with HTTP 500 rather than being forwarded or redirected to the leader (H-3). These are tracked for resolution in the Wave 5 roadmap. The supported production deployment for Hearth 1.x is single-node. See [Clustering Guide](../guides/clustering.md) for the full list of current limitations.
 
 ### 6.2 Embedded vs. Server Modes
 
@@ -547,7 +548,7 @@ This is the same model used by Confluent (Kafka), Elastic (pre-license-change), 
 
 ### 9.3 What Hearth Cloud Is Not
 
-Hearth Cloud is not an excuse to cripple the open-source version. The open-source Hearth is a complete, production-grade identity database. It includes clustering, replication, all protocol support, all authorization features, and all administrative capabilities. Hearth Cloud competes on operational convenience and enterprise requirements (compliance certifications, SLAs, support), not on feature gating.
+Hearth Cloud is not an excuse to cripple the open-source version. The open-source Hearth is intended to be the complete identity database: all protocol support, all authorization features, and all administrative capabilities ship in it, and clustering and replication will too when they are ready. **Status (2026-09-28): clustering is experimental and not supported for production.** Single-node is the only supported topology; multi-node must not be used for load-balanced traffic, for writes or logins on followers, or for HA failover (see [`docs/guides/clustering.md`](../guides/clustering.md)). Production-grade clustering and automatic failover are roadmap items, not shipped features. Hearth Cloud competes on operational convenience and enterprise requirements (compliance certifications, SLAs, support), not on feature gating.
 
 ### 9.4 Funding Path
 
@@ -605,10 +606,10 @@ This path is not the only option. The project could remain community-funded and 
 
 **Goal**: Multi-node deployment suitable for production use by teams with significant scale.
 
-> **Status (Hearth 1.x):** Most Phase 2 items have shipped. Multi-node clustering is present but currently **experimental** — the exit criteria below have not been met. Known blockers: follower RBAC cache staleness (C-5), immutable cluster membership requiring full restart (C-6), and HTTP 500 on follower writes (H-3). These are tracked for Wave 5. Until they ship, the production deployment model is single-node.
+> **Status (Hearth 1.x):** Most Phase 2 items have shipped. Multi-node clustering is present but currently **experimental** — the exit criteria below have not been met. Known blockers: partial follower cache invalidation (C-5), immutable cluster membership requiring full restart (C-6), HTTP 500 on follower writes and logins (H-3), and per-node secrets and rate limits. These are tracked for Wave 5. Until they ship, the production deployment model is single-node.
 
 - Raft-based consensus and log replication *(shipped, experimental)*
-- Automatic leader election and failover *(shipped, experimental)*
+- Automatic leader election *(shipped, experimental)*; failover for client traffic *(not yet — no leader redirect (H-3) and per-node state; do not use as HA failover)*
 - Online membership changes (add/remove nodes without downtime) *(not yet — C-6)*
 - Snapshot-based recovery *(shipped)*
 - SAML 2.0 support (SP and IdP) *(shipped)*

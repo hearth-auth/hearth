@@ -19,8 +19,13 @@ Add token verification and permission checks to a PHP app using `hearth-auth/php
 
 ## Install
 
+> **Packagist status (checked 2026-09-28):** `hearth-auth/php-sdk` is listed on Packagist with
+> only a `dev-main` version — no tagged release — so `composer require hearth-auth/php-sdk:^1.0`
+> does not resolve. Until a tagged release is published, require the development branch (and
+> allow it in your `minimum-stability`), or pin a commit.
+
 ```bash
-composer require hearth-auth/php-sdk:^1.0
+composer require hearth-auth/php-sdk:dev-main
 ```
 
 For Laravel, the `illuminate/support` package is required (already present in any Laravel project):
