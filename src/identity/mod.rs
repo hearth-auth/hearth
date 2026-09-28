@@ -736,12 +736,16 @@ pub trait IdentityEngine: Send + Sync {
     /// Issues only when the client does not require consent or a recorded
     /// consent covers every requested scope — the browser consent gate's
     /// rule — and otherwise fails with [`IdentityError::ConsentRequired`]
-    /// (GA audit B2). [`Self::authorize`] is for callers that have already
-    /// obtained consent interactively.
+    /// (GA audit B2). For a client or role that demands a second factor,
+    /// `session_id` — the session behind the caller's bearer token — must
+    /// have proved one, or the call fails with [`IdentityError::MfaRequired`]
+    /// (the browser MFA-use gate's rule, GA audit B5). [`Self::authorize`] is
+    /// for callers that have already run those gates interactively.
     fn authorize_non_interactive(
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
+        session_id: &SessionId,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     /// Exchanges an authorization code for access, ID, and refresh tokens.

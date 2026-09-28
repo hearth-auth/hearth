@@ -2157,11 +2157,18 @@ async fn authorize(
     // user identity.  The body's `user_id` field is ignored to prevent unauthenticated
     // account takeover via caller-supplied user IDs.
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let authenticated_user_id =
-        match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
-            Ok(uid) => uid,
-            Err(e) => return e.into_response(),
-        };
+    // The bearer token's session is kept: the engine judges the factor it
+    // proved (GA audit B2/B5).
+    let (authenticated_user_id, bearer_session) = match super::auth::extract_user_session_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
+        Ok(auth) => auth,
+        Err(e) => return e.into_response(),
+    };
 
     // PAR path: when `request_uri` is present, consume the stored entry to
     // obtain the pre-validated parameters and set `via_par = true`.
@@ -2250,7 +2257,7 @@ async fn authorize(
     // or one the user already consented to (GA audit B2).
     match state
         .identity
-        .authorize_non_interactive(&realm_id, &request)
+        .authorize_non_interactive(&realm_id, &request, &bearer_session)
     {
         Ok(response) => (
             StatusCode::OK,
@@ -3746,11 +3753,18 @@ async fn realm_authorize(
 
     // HEA-1721: authenticate the caller; their token's `sub` is the authoritative user identity.
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let authenticated_user_id =
-        match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
-            Ok(uid) => uid,
-            Err(e) => return e.into_response(),
-        };
+    // The bearer token's session is kept: the engine judges the factor it
+    // proved (GA audit B2/B5).
+    let (authenticated_user_id, bearer_session) = match super::auth::extract_user_session_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
+        Ok(auth) => auth,
+        Err(e) => return e.into_response(),
+    };
 
     let mut request = match proto_authorize_to_domain(body) {
         Ok(r) => r,
@@ -3768,7 +3782,7 @@ async fn realm_authorize(
     // or one the user already consented to (GA audit B2).
     match state
         .identity
-        .authorize_non_interactive(&realm_id, &request)
+        .authorize_non_interactive(&realm_id, &request, &bearer_session)
     {
         Ok(response) => (
             StatusCode::OK,

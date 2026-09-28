@@ -395,6 +395,85 @@ async fn json_authorize_issues_a_code_for_a_client_that_does_not_require_consent
     );
 }
 
+// ── B2 + B5: the factor the bearer token's session PROVED ───────────────────
+
+/// A client that sets `mfa_required` needs a session that proved a second
+/// factor — the rule `authorize_gate::mfa_use_gate` applies in the browser.
+/// The JSON surface has no challenge to offer, so it refuses outright when the
+/// bearer token's session proved none.
+#[tokio::test]
+async fn json_authorize_refuses_an_mfa_required_client_for_an_unproved_session() {
+    let f = setup().await;
+    let client = f
+        .harness
+        .identity()
+        .register_client(
+            &f.realm,
+            &RegisterClientRequest {
+                client_name: "mfa-app".into(),
+                redirect_uris: vec![REDIRECT_URI.into()],
+                grant_types: vec!["authorization_code".into()],
+                require_consent: false,
+                trust_level: ClientTrustLevel::FirstParty,
+                mfa_required: Some(true),
+                ..Default::default()
+            },
+        )
+        .expect("register")
+        .client_id()
+        .clone();
+
+    // `f.token` belongs to a session that proved no factor.
+    let (status, body) = post_authorize(
+        &f,
+        "/authorize",
+        &f.token,
+        authorize_body(&client, "openid"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body {body}");
+    assert_eq!(
+        body["error_code"].as_str(),
+        Some("HEARTH_MFA_REQUIRED"),
+        "the refusal must be the MFA refusal; body {body}"
+    );
+
+    // Control: a token from a session that proved a factor is issued a code.
+    let proved = f
+        .harness
+        .identity()
+        .create_session(
+            &f.realm,
+            &f.user,
+            &SessionContext {
+                mfa_proof: hearth::identity::MfaProof::Proved,
+                ..SessionContext::default()
+            },
+        )
+        .expect("proved session");
+    let proved_token = f
+        .harness
+        .identity()
+        .issue_tokens(&f.realm, &f.user, proved.id())
+        .expect("issue")
+        .access_token()
+        .to_string();
+    let (status, body) = post_authorize(
+        &f,
+        "/authorize",
+        &proved_token,
+        authorize_body(&client, "openid"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a proved session gets the code; body {body}"
+    );
+}
+
 // ── L8: realm_authorize DPoP htu ─────────────────────────────────────────────
 
 #[tokio::test]

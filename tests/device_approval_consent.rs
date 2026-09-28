@@ -24,7 +24,7 @@ use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
 use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::{
     ClientTrustLevel, CreateRealmRequest, CreateUserRequest, CredentialConfig,
-    DeviceAuthorizationRequest, EmbeddedIdentityEngine, IdentityConfig, IdentityError,
+    DeviceAuthorizationRequest, EmbeddedIdentityEngine, IdentityConfig, IdentityError, MfaProof,
     RegisterClientRequest, SessionContext,
 };
 use hearth::protocol::web::auth::{issue_auth_cookies, CookieSecret, CSRF_COOKIE};
@@ -45,6 +45,11 @@ struct Rig {
 }
 
 fn rig() -> Rig {
+    rig_with_proof(MfaProof::None)
+}
+
+/// A rig whose UI session recorded `mfa_proof` at sign-in.
+fn rig_with_proof(mfa_proof: MfaProof) -> Rig {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
     std::mem::forget(temp);
@@ -94,7 +99,14 @@ fn rig() -> Rig {
         .id()
         .clone();
     let session = identity
-        .create_session(&realm, &user, &SessionContext::default())
+        .create_session(
+            &realm,
+            &user,
+            &SessionContext {
+                mfa_proof,
+                ..SessionContext::default()
+            },
+        )
         .expect("session");
 
     let email = Arc::new(
@@ -132,6 +144,11 @@ impl Rig {
     /// Registers a third-party device client and starts a flow for
     /// `openid profile`; returns `(client, device_code, user_code)`.
     fn start(&self) -> (ClientId, String, String) {
+        self.start_for(None)
+    }
+
+    /// [`Self::start`] with the client's `mfa_required` set.
+    fn start_for(&self, mfa_required: Option<bool>) -> (ClientId, String, String) {
         let client = self
             .state
             .identity
@@ -145,6 +162,7 @@ impl Rig {
                     trust_level: ClientTrustLevel::ThirdParty,
                     declared_scopes: vec!["openid".into(), "profile".into()],
                     client_logo_url: Some(LOGO.into()),
+                    mfa_required,
                     ..Default::default()
                 },
             )
@@ -277,4 +295,85 @@ async fn denying_a_device_approves_nothing() {
             .is_none(),
         "deny records no consent"
     );
+}
+
+// ─── GA audit B5 on the device path: the factor the session PROVED ──────────
+
+fn compute_totp_code(secret_base32: &str, unix_secs: u64) -> String {
+    let secret_bytes = data_encoding::BASE32_NOPAD
+        .decode(secret_base32.as_bytes())
+        .expect("decode base32");
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, &secret_bytes);
+    let tag = ring::hmac::sign(&key, &(unix_secs / 30).to_be_bytes());
+    let hash = tag.as_ref();
+    let offset = (hash[hash.len() - 1] & 0x0f) as usize;
+    let binary = u32::from_be_bytes([
+        hash[offset] & 0x7f,
+        hash[offset + 1],
+        hash[offset + 2],
+        hash[offset + 3],
+    ]);
+    format!("{:06}", binary % 1_000_000)
+}
+
+/// Enrols TOTP for the rig's user AFTER its session was opened, so the
+/// session proves nothing while the account now holds a factor.
+fn enrol_totp_after_sign_in(rig: &Rig) {
+    let enrollment = rig
+        .state
+        .identity
+        .enroll_totp(&rig.realm, &rig.user)
+        .expect("enroll_totp");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs();
+    rig.state
+        .identity
+        .verify_totp_enrollment(
+            &rig.realm,
+            &rig.user,
+            &compute_totp_code(&enrollment.secret_base32, now),
+        )
+        .expect("verify_totp_enrollment");
+}
+
+/// A device client that sets `mfa_required` must not be approved from a
+/// session that proved no factor, the rule the browser authorize path
+/// applies (`authorize_gate::mfa_use_gate`): the session is ended so the
+/// user signs in again with the factor.
+#[tokio::test]
+async fn an_mfa_required_device_client_is_not_approved_from_an_unproved_session() {
+    let rig = rig_with_proof(MfaProof::None);
+    enrol_totp_after_sign_in(&rig);
+    let (client, device_code, user_code) = rig.start_for(Some(true));
+
+    let (status, location, _) = rig
+        .post(&format!("user_code={user_code}&decision=approve"))
+        .await;
+    assert!(status.is_redirection(), "refusal redirects; got {status}");
+    assert_ne!(
+        location.as_deref(),
+        Some("/ui/device?flash=approved"),
+        "an unproved session must not approve an MFA-required client"
+    );
+    assert!(
+        rig.poll(&client, &device_code).is_err(),
+        "the device must not receive tokens"
+    );
+}
+
+/// The control: a session that proved a factor approves the same client.
+#[tokio::test]
+async fn an_mfa_required_device_client_is_approved_from_a_proved_session() {
+    let rig = rig_with_proof(MfaProof::Proved);
+    enrol_totp_after_sign_in(&rig);
+    let (client, device_code, user_code) = rig.start_for(Some(true));
+
+    let (_, location, _) = rig
+        .post(&format!("user_code={user_code}&decision=approve"))
+        .await;
+    assert_eq!(location.as_deref(), Some("/ui/device?flash=approved"));
+    rig.poll(&client, &device_code)
+        .expect("a proved session approves the MFA-required client");
 }

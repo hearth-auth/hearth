@@ -5747,6 +5747,13 @@ pub async fn device_approve_submit(
         _ => return confirm_device(&state, &session, &guard_key, &code),
     }
 
+    // A client or role that demands a second factor needs a session that
+    // PROVED one — the browser authorize path's `mfa_use_gate` rule
+    // (GA audit B5), applied before any other approval gate.
+    if let Some(refusal) = device_mfa_use_gate(&state, &session, &code) {
+        return refusal;
+    }
+
     // Approving a device hands the device client tokens for this user, so it
     // passes the same gates as issuing an authorization code. It used to run
     // neither: pending required actions were skipped, and a session created
@@ -5867,6 +5874,68 @@ fn record_device_consent(
         return Err(super::handlers_common::server_error());
     }
     Ok(())
+}
+
+/// The device-path twin of `authorize_gate::mfa_use_gate` (GA audit B5).
+///
+/// When the device's client (`mfa_required`) or one of the user's roles
+/// (`mfa_required_roles`) demands a second factor, the session must have
+/// proved one. A user who holds no factor is left to the required-action
+/// gate, which enrols one. A user who holds one must prove it: the session is
+/// revoked and the page reloaded, which sends the user to sign in again with
+/// the factor. A code that no longer resolves is left to `approve_device`.
+fn device_mfa_use_gate(
+    state: &Arc<WebState>,
+    session: &super::auth::UiSession,
+    code: &str,
+) -> Option<Response> {
+    if session.mfa_proof.satisfies_mfa_required() {
+        return None;
+    }
+    let Ok(Some(pending)) = state
+        .identity
+        .pending_device_authorization(&session.realm_id, code)
+    else {
+        return None;
+    };
+    let realm_config = match state.identity.get_realm(&session.realm_id) {
+        Ok(r) => r.map(|r| r.config().clone()),
+        Err(e) => {
+            tracing::warn!(error = %e, "device_approve: realm lookup failed at the MFA-use gate");
+            return Some(super::handlers_common::server_error());
+        }
+    };
+    let client_id = pending.client_id.as_uuid().to_string();
+    match super::required_action::client_or_role_requires_mfa(
+        state,
+        &session.realm_id,
+        &session.user_id,
+        realm_config.as_ref(),
+        Some(&client_id),
+    ) {
+        Ok(false) => return None,
+        Ok(true) => {}
+        Err(()) => return Some(super::handlers_common::server_error()),
+    }
+    match state
+        .identity
+        .has_second_factor(&session.realm_id, &session.user_id)
+    {
+        Ok(false) => return None,
+        Ok(true) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "device_approve: factor lookup failed at the MFA-use gate");
+            return Some(super::handlers_common::server_error());
+        }
+    }
+    if let Err(e) = state
+        .identity
+        .revoke_session(&session.realm_id, &session.session_id)
+    {
+        tracing::warn!(error = %e, "device_approve: revoking an unproved session failed");
+        return Some(super::handlers_common::server_error());
+    }
+    Some(Redirect::to("/ui/device").into_response())
 }
 
 /// First submission of a user code: look it up and render the confirmation

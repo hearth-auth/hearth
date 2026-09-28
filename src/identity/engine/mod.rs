@@ -9619,15 +9619,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &AuthorizationRequest,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        self.authorize_inner(realm_id, request, false)
+        self.authorize_inner(realm_id, request, None)
     }
 
     fn authorize_non_interactive(
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
+        session_id: &SessionId,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        self.authorize_inner(realm_id, request, true)
+        self.authorize_inner(realm_id, request, Some(session_id))
     }
 
     #[allow(clippy::too_many_lines)]

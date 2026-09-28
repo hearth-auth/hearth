@@ -43,7 +43,7 @@ impl OAuthService for OAuthSvc {
 
         let realm_id = extract_realm_id(req.metadata())?;
         // HEA-1721: authenticate the caller; their token's `sub` is the authoritative user identity.
-        let authenticated_user_id =
+        let (authenticated_user_id, bearer_session) =
             extract_grpc_user_auth(req.metadata(), &realm_id, self.state.identity.as_ref())?;
         let body = req.into_inner();
 
@@ -87,7 +87,7 @@ impl OAuthService for OAuthSvc {
             .state
             .identity
             // No consent screen over gRPC (GA audit B2).
-            .authorize_non_interactive(&realm_id, &domain_req)
+            .authorize_non_interactive(&realm_id, &domain_req, &bearer_session)
             .map_err(identity_to_status)?;
         Ok(Response::new(pb::AuthorizationResponse::from(&resp)))
     }

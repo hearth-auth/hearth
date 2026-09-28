@@ -289,18 +289,20 @@ impl EmbeddedIdentityEngine {
 
     /// Issues an authorization code.
     ///
-    /// `require_recorded_consent` is set by the non-interactive surfaces (JSON
-    /// and gRPC `Authorize`), which cannot show a consent screen: they may
-    /// issue only when the client does not require consent or a recorded
-    /// consent covers the requested scopes (GA audit B2). The browser flow
-    /// passes `false` because `authorize_gate::consent_gate` has already
-    /// obtained consent.
+    /// `bearer_session` is set by the non-interactive surfaces (JSON and gRPC
+    /// `Authorize`) to the session behind the caller's bearer token. They
+    /// cannot show a consent screen or a factor challenge, so they may issue
+    /// only when the client does not require consent or a recorded consent
+    /// covers the requested scopes (GA audit B2), and — for a client or role
+    /// that demands a second factor — only when that session proved one
+    /// (GA audit B5). The browser flow passes `None`: its gates
+    /// (`authorize_gate::mfa_use_gate`, `consent_gate`) have already run.
     #[allow(clippy::too_many_lines)]
     pub(super) fn authorize_inner(
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
-        require_recorded_consent: bool,
+        bearer_session: Option<&SessionId>,
     ) -> Result<AuthorizationResponse, IdentityError> {
         use crate::identity::oidc::{CodeChallengeMethod as CCM, JarmClaims};
         use crate::identity::types::FapiProfile;
@@ -559,7 +561,7 @@ impl EmbeddedIdentityEngine {
         //     rule as the browser `consent_gate` — issue only when the client
         //     does not require consent or a recorded consent covers every
         //     requested scope. Checked after JAR has settled the scopes.
-        if require_recorded_consent && client.require_consent() {
+        if bearer_session.is_some() && client.require_consent() {
             let requested = crate::identity::types::canonicalize_scopes(
                 request
                     .scope
@@ -572,6 +574,20 @@ impl EmbeddedIdentityEngine {
                 .is_some_and(|record| record.covers(&requested));
             if !covered {
                 return Err(IdentityError::ConsentRequired);
+            }
+        }
+
+        // 4a'. Factor USE on the non-interactive surfaces (GA audit B5, the
+        //      browser `mfa_use_gate`'s rule): a client or role that demands a
+        //      second factor needs a bearer session that proved one. There is
+        //      no challenge to offer here, so an unproved session is refused.
+        if let Some(session_id) = bearer_session {
+            let proved = self
+                .get_session(realm_id, session_id)?
+                .filter(|s| s.user_id() == &request.user_id)
+                .is_some_and(|s| s.mfa_proof().satisfies_mfa_required());
+            if !proved && self.client_or_role_requires_mfa(realm_id, &request.user_id, &client)? {
+                return Err(IdentityError::MfaRequired);
             }
         }
 
@@ -3406,6 +3422,45 @@ impl EmbeddedIdentityEngine {
         Ok(DecidePermissionResponse {
             allowed: resolved.permissions.contains(&permission),
         })
+    }
+
+    /// Whether `client` (its `mfa_required`) or one of `user_id`'s roles
+    /// (listed in the realm's `mfa_required_roles`) demands a second factor —
+    /// the engine twin of the web layer's `client_or_role_requires_mfa`.
+    /// A lookup failure is returned, so the caller refuses.
+    fn client_or_role_requires_mfa(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client: &OAuthClient,
+    ) -> Result<bool, IdentityError> {
+        if client.mfa_required() == Some(true) {
+            return Ok(true);
+        }
+        let required_roles = self
+            .get_realm(realm_id)?
+            .and_then(|realm| realm.config().mfa_required_roles.clone())
+            .unwrap_or_default();
+        if required_roles.is_empty() {
+            return Ok(false);
+        }
+        let rbac_err = |e: RbacError| IdentityError::Internal {
+            reason: format!("rbac lookup failed: {e}"),
+        };
+        for assignment in self
+            .rbac
+            .list_user_assignments(realm_id, user_id)
+            .map_err(rbac_err)?
+        {
+            let role = self
+                .rbac
+                .get_role(realm_id, &assignment.role_id)
+                .map_err(rbac_err)?;
+            if role.is_some_and(|r| required_roles.iter().any(|req| req == &r.name)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     // ===== UserInfo (OIDC Core §5.3) =====
