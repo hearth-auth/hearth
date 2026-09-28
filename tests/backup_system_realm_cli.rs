@@ -261,8 +261,7 @@ async fn cli_export_and_offline_restore_bring_back_operator_console_access() {
         archive.as_os_str(),
         os("--data-dir"),
         restored.as_os_str(),
-        os("--verify-key"),
-        os(&verify_key),
+        os(&format!("--verify-key={verify_key}")),
     ]);
     assert_eq!(
         code,
@@ -426,8 +425,7 @@ async fn replacing_a_live_system_signing_key_takes_the_explicit_flag() {
         archive.as_os_str(),
         os("--data-dir"),
         kept.as_os_str(),
-        os("--verify-key"),
-        os(&verify_key),
+        os(&format!("--verify-key={verify_key}")),
         os("--mode"),
         os("overwrite"),
     ]);
@@ -450,8 +448,7 @@ async fn replacing_a_live_system_signing_key_takes_the_explicit_flag() {
         archive.as_os_str(),
         os("--data-dir"),
         replaced.as_os_str(),
-        os("--verify-key"),
-        os(&verify_key),
+        os(&format!("--verify-key={verify_key}")),
         os("--mode"),
         os("overwrite"),
         os("--replace-system-signing-key"),
@@ -484,8 +481,7 @@ async fn the_cli_says_when_operator_access_did_not_come_back() {
         archive.as_os_str(),
         os("--data-dir"),
         fresh.as_os_str(),
-        os("--verify-key"),
-        os(&verify_key),
+        os(&format!("--verify-key={verify_key}")),
     ]);
     assert_eq!(code, Some(0), "fresh restore: {out}");
     assert!(
@@ -508,8 +504,7 @@ async fn the_cli_says_when_operator_access_did_not_come_back() {
         archive.as_os_str(),
         os("--data-dir"),
         again.as_os_str(),
-        os("--verify-key"),
-        os(&verify_key),
+        os(&format!("--verify-key={verify_key}")),
     ]);
     assert!(code.is_some_and(|c| c <= 1), "repeat restore: {out}");
     assert!(

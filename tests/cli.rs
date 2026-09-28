@@ -808,8 +808,7 @@ fn backup_keygen_sign_and_verified_restore_round_trip() {
         archive.as_os_str(),
         os("--data-dir"),
         data_dir.as_os_str(),
-        os("--verify-key"),
-        os(&verify_key),
+        os(&format!("--verify-key={verify_key}")),
     ]);
     assert_eq!(code, Some(0), "signed archive must restore; output: {out}");
     assert!(out.contains("signature verified"), "{out}");
@@ -826,8 +825,7 @@ fn backup_keygen_sign_and_verified_restore_round_trip() {
         archive.as_os_str(),
         os("--data-dir"),
         data_dir2.as_os_str(),
-        os("--verify-key"),
-        os(&other_key),
+        os(&format!("--verify-key={other_key}")),
         os("--allow-unsigned"),
     ]);
     assert_eq!(code, Some(2), "wrong key must refuse; output: {out}");
@@ -942,8 +940,7 @@ fn backup_restore_refuses_skip_verify_when_the_signature_is_checked() {
         archive.as_os_str(),
         os("--data-dir"),
         data_dir.as_os_str(),
-        os("--verify-key"),
-        os(&verify_key),
+        os(&format!("--verify-key={verify_key}")),
         os("--skip-verify"),
     ]);
     assert_eq!(
@@ -972,8 +969,7 @@ fn backup_restore_refuses_skip_verify_when_the_signature_is_checked() {
         archive.as_os_str(),
         os("--data-dir"),
         data_dir.as_os_str(),
-        os("--verify-key"),
-        os(&verify_key),
+        os(&format!("--verify-key={verify_key}")),
     ]);
     assert_eq!(code, Some(2), "tampered member must be refused: {out}");
     assert!(out.contains("realms/ghost/users.ndjson"), "{out}");
