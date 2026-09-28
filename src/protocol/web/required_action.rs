@@ -836,38 +836,14 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
             tracing::warn!(error = %e, "verify_email_page: auto-clear audit append failed");
         }
 
-        let remaining: Vec<RequiredAction> = claims
-            .pending_actions
-            .into_iter()
-            .filter(|a| *a != RequiredAction::VerifyEmail)
-            .collect();
-
-        return if remaining.is_empty() {
-            if claims.browser_return_to.is_some() {
-                resume_browser_flow(
-                    &state,
-                    &realm,
-                    &claims.sub,
-                    claims.browser_return_to,
-                    secure,
-                )
-            } else if let Some(oidc_params) = claims.oidc_params {
-                resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
-            } else {
-                resume_browser_flow(&state, &realm, &claims.sub, None, secure)
-            }
-        } else {
-            next_required_action(
-                &state,
-                &realm,
-                &claims.sub,
-                remaining,
-                claims.oidc_params,
-                claims.browser_return_to,
-                secure,
-                now,
-            )
-        };
+        return advance_flow(
+            &state,
+            &realm,
+            claims,
+            RequiredAction::VerifyEmail,
+            secure,
+            now,
+        );
     }
 
     // Issue a new verification token and send the email (best-effort).
@@ -1052,38 +1028,14 @@ pub async fn verify_email_confirm_submit(
                 }
 
                 // Advance flow (OIDC or browser).
-                let remaining: Vec<RequiredAction> = claims
-                    .pending_actions
-                    .into_iter()
-                    .filter(|a| *a != RequiredAction::VerifyEmail)
-                    .collect();
-
-                if remaining.is_empty() {
-                    if claims.browser_return_to.is_some() {
-                        resume_browser_flow(
-                            &state,
-                            &realm,
-                            &claims.sub,
-                            claims.browser_return_to,
-                            secure,
-                        )
-                    } else if let Some(oidc_params) = claims.oidc_params {
-                        resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
-                    } else {
-                        resume_browser_flow(&state, &realm, &claims.sub, None, secure)
-                    }
-                } else {
-                    next_required_action(
-                        &state,
-                        &realm,
-                        &claims.sub,
-                        remaining,
-                        claims.oidc_params,
-                        claims.browser_return_to,
-                        secure,
-                        now,
-                    )
-                }
+                advance_flow(
+                    &state,
+                    &realm,
+                    claims,
+                    RequiredAction::VerifyEmail,
+                    secure,
+                    now,
+                )
             }
             Err(IdentityError::VerificationTokenInvalid) => render_verify_email_expired(&state),
             Err(e) => {
@@ -1433,38 +1385,14 @@ pub async fn update_password_submit(
     }
 
     // Advance the OIDC flow: remove UPDATE_PASSWORD from the RA JWT pending list.
-    let remaining: Vec<RequiredAction> = claims
-        .pending_actions
-        .into_iter()
-        .filter(|a| *a != RequiredAction::UpdatePassword)
-        .collect();
-
-    if remaining.is_empty() {
-        if claims.browser_return_to.is_some() {
-            resume_browser_flow(
-                &state,
-                &realm,
-                &claims.sub,
-                claims.browser_return_to,
-                secure,
-            )
-        } else if let Some(oidc_params) = claims.oidc_params {
-            resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
-        } else {
-            resume_browser_flow(&state, &realm, &claims.sub, None, secure)
-        }
-    } else {
-        next_required_action(
-            &state,
-            &realm,
-            &claims.sub,
-            remaining,
-            claims.oidc_params,
-            claims.browser_return_to,
-            secure,
-            now,
-        )
-    }
+    advance_flow(
+        &state,
+        &realm,
+        claims,
+        RequiredAction::UpdatePassword,
+        secure,
+        now,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1857,32 +1785,14 @@ pub async fn enroll_phone_otp_verify_submit(
         tracing::warn!(error = %e, "enroll_phone_otp_verify_submit: audit append failed");
     }
 
-    if updated_actions.is_empty() {
-        if claims.browser_return_to.is_some() {
-            resume_browser_flow(
-                &state,
-                &realm,
-                &claims.sub,
-                claims.browser_return_to,
-                secure,
-            )
-        } else if let Some(oidc_params) = claims.oidc_params {
-            resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
-        } else {
-            resume_browser_flow(&state, &realm, &claims.sub, None, secure)
-        }
-    } else {
-        next_required_action(
-            &state,
-            &realm,
-            &claims.sub,
-            updated_actions,
-            claims.oidc_params,
-            claims.browser_return_to,
-            secure,
-            now,
-        )
-    }
+    advance_flow(
+        &state,
+        &realm,
+        claims,
+        RequiredAction::EnrollPhoneOtp,
+        secure,
+        now,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2363,32 +2273,14 @@ pub async fn enroll_email_otp_verify_submit(
         tracing::warn!(error = %e, "enroll_email_otp_verify_submit: audit append failed");
     }
 
-    if updated_actions.is_empty() {
-        if claims.browser_return_to.is_some() {
-            resume_browser_flow(
-                &state,
-                &realm,
-                &claims.sub,
-                claims.browser_return_to,
-                secure,
-            )
-        } else if let Some(oidc_params) = claims.oidc_params {
-            resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
-        } else {
-            resume_browser_flow(&state, &realm, &claims.sub, None, secure)
-        }
-    } else {
-        next_required_action(
-            &state,
-            &realm,
-            &claims.sub,
-            updated_actions,
-            claims.oidc_params,
-            claims.browser_return_to,
-            secure,
-            now,
-        )
-    }
+    advance_flow(
+        &state,
+        &realm,
+        claims,
+        RequiredAction::EnrollEmailOtp,
+        secure,
+        now,
+    )
 }
 
 fn render_enroll_email_otp_page(
