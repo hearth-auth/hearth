@@ -475,23 +475,6 @@ async fn token_exchange_refuses_a_suspended_agent_actor() {
     let owner = make_user(identity, &realm);
     let agent = make_agent(identity, &realm, &owner);
     let subject = make_user(identity, &realm);
-    // The exchanging OAuth client must exist and hold the token-exchange
-    // grant (GA audit M7); give it the agent's UUID so the agent is the actor.
-    identity
-        .import_client(
-            &realm,
-            &hearth::identity::ImportClientRequest {
-                id: Some(ClientId::new(*agent.as_uuid())),
-                client_name: "agent-exchanger".to_string(),
-                client_secret: Some("agent-exchanger-secret-long-enough".to_string()),
-                grant_types: vec![
-                    "client_credentials".to_string(),
-                    "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
-                ],
-                ..Default::default()
-            },
-        )
-        .expect("import the agent's exchanging client");
 
     let make_req = || Rfc8693Request {
         client_id: ClientId::new(*agent.as_uuid()),

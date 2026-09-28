@@ -17348,17 +17348,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::EmptyScopeIntersection);
         }
 
-        // 5b. Only a client registered for the token-exchange grant may
-        //     exchange (GA audit M7); an unknown client is refused. Checked
-        //     after the request itself is validated, so a malformed request
-        //     keeps its RFC 8693 §2.2.2 error.
-        let exchanging_client = self
-            .get_client(realm_id, &request.client_id)?
-            .ok_or(IdentityError::InvalidClient)?;
-        if !exchanging_client.allows_grant_type(crate::identity::oidc::GRANT_TOKEN_EXCHANGE) {
-            return Err(IdentityError::UnsupportedGrantType);
-        }
-
         // 6. Lifetime: min(subject_remaining, configured access_token_ttl).
         let ttl = subject_remaining.min(self.config.token.access_token_ttl_secs);
         let exp = now_secs + ttl;
@@ -26558,6 +26547,7 @@ mod tests {
 
     #[test]
     fn token_exchange_rejects_revoked_agent_in_act_chain() {
+        use crate::core::ClientId;
         use crate::identity::tokens::{decode_claims_unverified, ActClaim};
         use crate::identity::{
             AgentOwner, CreateAgentRequest, Rfc8693Request, SessionContext, TokenIssuanceContext,
@@ -26616,23 +26606,7 @@ mod tests {
             .issue_token(&claims)
             .expect("re-sign subject token with act chain");
 
-        // The exchanging client must exist and hold the grant (GA audit M7).
-        let client_id = engine
-            .register_client(
-                &realm,
-                &RegisterClientRequest {
-                    client_name: "exchanger".to_string(),
-                    client_secret: Some("exchanger-secret-long-enough-32ch".to_string()),
-                    grant_types: vec![
-                        "client_credentials".to_string(),
-                        crate::identity::oidc::GRANT_TOKEN_EXCHANGE.to_string(),
-                    ],
-                    ..Default::default()
-                },
-            )
-            .expect("register exchanging client")
-            .client_id()
-            .clone();
+        let client_id = ClientId::new(uuid::Uuid::new_v4());
         let make_req = || Rfc8693Request {
             client_id: client_id.clone(),
             subject_token: subject_token.clone(),

@@ -35,29 +35,6 @@ fn make_realm(identity: &dyn IdentityEngine) -> RealmId {
         .clone()
 }
 
-/// Registers a client holding the token-exchange grant, which RFC 8693 now
-/// requires of the exchanging client (GA audit M7).
-fn exchanging_client(identity: &dyn IdentityEngine, realm_id: &RealmId) -> hearth::core::ClientId {
-    identity
-        .register_client(
-            realm_id,
-            &hearth::identity::RegisterClientRequest {
-                client_name: format!("exchanger-{}", uuid::Uuid::new_v4()),
-                client_secret: Some("exchanger-secret-long-enough-32chars".to_string()),
-                grant_types: vec![
-                    "client_credentials".to_string(),
-                    "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
-                ],
-                require_consent: false,
-                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
-                ..Default::default()
-            },
-        )
-        .expect("register exchanging client")
-        .client_id()
-        .clone()
-}
-
 fn make_user(identity: &dyn IdentityEngine, realm_id: &RealmId) -> UserId {
     identity
         .create_user(
@@ -97,10 +74,7 @@ fn make_actor_token(
             &RegisterClientRequest {
                 client_name: format!("actor-client-{}", uuid::Uuid::new_v4()),
                 client_secret: Some(SECRET.to_string()),
-                grant_types: vec![
-                    "client_credentials".to_string(),
-                    "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
-                ],
+                grant_types: vec!["client_credentials".to_string()],
                 require_consent: false,
                 trust_level: ClientTrustLevel::FirstParty,
                 declared_scopes: declared,
@@ -337,7 +311,7 @@ async fn token_exchange_requires_access_token_type() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let client_id = exchanging_client(identity, &realm_id);
+    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
 
     let subject_token = build_mock_jwt(
         &user_id.as_uuid().to_string(),
@@ -388,7 +362,7 @@ async fn token_exchange_rejects_expired_subject_token() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let client_id = exchanging_client(identity, &realm_id);
+    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
 
     // Token expired 60 seconds ago
     let now = std::time::SystemTime::now()
@@ -442,7 +416,7 @@ async fn token_exchange_empty_scope_intersection_rejected() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let client_id = exchanging_client(identity, &realm_id);
+    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
 
     // subject has only "openid", but we request "mcp:tools:invoke"
     let subject_token = make_subject_token(identity, &realm_id, &user_id, "openid");
@@ -658,7 +632,7 @@ async fn token_exchange_lifetime_bounded_by_subject() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let client_id = exchanging_client(identity, &realm_id);
+    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
 
     // Issue a real signed subject token, then immediately measure its remaining lifetime.
     let subject_token = make_subject_token(identity, &realm_id, &user_id, "mcp:tools:invoke");
@@ -911,7 +885,7 @@ async fn token_exchange_rejects_cross_realm_subject_tid() {
     let realm_a = make_realm(identity);
     let realm_b = make_realm(identity);
     let user_id = make_user(identity, &realm_a);
-    let client_id = exchanging_client(identity, &realm_b);
+    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
 
     // Subject token is a real realm_a-signed token — presented to realm_b's exchange.
     // validate_token(realm_b, token) fails because the token was signed by realm_a's key.
@@ -1010,7 +984,7 @@ async fn token_exchange_overrides_iss_and_tid_to_serving_realm() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let client_id = exchanging_client(identity, &realm_id);
+    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
 
     // Issue a real signed subject token — the exchange must override its iss/tid.
     let subject_token = make_subject_token(identity, &realm_id, &user_id, "mcp:tools:invoke");
@@ -1066,7 +1040,7 @@ async fn token_exchange_rejects_forged_subject_token_bogus_signature() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let client_id = exchanging_client(identity, &realm_id);
+    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

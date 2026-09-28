@@ -491,8 +491,6 @@ pub const GRANT_AUTHORIZATION_CODE: &str = "authorization_code";
 pub const GRANT_REFRESH_TOKEN: &str = "refresh_token";
 /// The device authorization grant (RFC 8628 §3.4).
 pub const GRANT_DEVICE_CODE: &str = "urn:ietf:params:oauth:grant-type:device_code";
-/// The token-exchange grant (RFC 8693 §2.1).
-pub const GRANT_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 
 /// Grant types given to a client registered without naming any:
 /// `authorization_code` plus `refresh_token`.

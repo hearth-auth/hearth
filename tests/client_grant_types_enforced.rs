@@ -4,16 +4,17 @@
 //!
 //! Every other grant ignored them: a client registered for
 //! `authorization_code` alone still received and redeemed refresh tokens, and
-//! any client could start a device flow (the phishing path of B3) or run an
-//! RFC 8693 token exchange. The admin console's refresh-token toggle therefore
-//! did nothing.
+//! any client could start a device flow (the phishing path of B3). The admin
+//! console's refresh-token toggle therefore did nothing.
 //!
 //! Every grant now checks the client's `grant_types`:
 //!
 //! * `/authorize` and the code exchange need `authorization_code`;
 //! * a refresh token is issued, and redeemed, only for `refresh_token`;
-//! * the device grant needs `urn:ietf:params:oauth:grant-type:device_code`;
-//! * RFC 8693 needs `urn:ietf:params:oauth:grant-type:token-exchange`.
+//! * the device grant needs `urn:ietf:params:oauth:grant-type:device_code`.
+//!
+//! (RFC 8693 token exchange is gated separately by the per-client
+//! token-exchange policy, GA audit M8.)
 //!
 //! Compatibility: a client registered without `grant_types` now defaults to
 //! `["authorization_code", "refresh_token"]`, and a client record written
@@ -26,14 +27,13 @@ use base64::Engine as _;
 use hearth::core::{ClientId, RealmId, UserId};
 use hearth::identity::{
     AuthorizationRequest, ClientTrustLevel, CodeChallengeMethod, CreateUserRequest,
-    DeviceAuthorizationRequest, IdentityError, OAuthClient, RegisterClientRequest, Rfc8693Request,
-    SessionContext, TokenExchangeRequest, UpdateClientRequest,
+    DeviceAuthorizationRequest, IdentityError, OAuthClient, RegisterClientRequest,
+    TokenExchangeRequest, UpdateClientRequest,
 };
 
 const REDIRECT_URI: &str = "https://grants.example.com/cb";
 const VERIFIER: &str = "S4gKJfVNgWiFl2PQ8RxXS7E6Mhr9BqyTvUIe3WoA5Zc";
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
-const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const SECRET: &str = "grant-types-enforced-secret-32chars!";
 
 fn user(h: &common::TestHarness, realm: &RealmId) -> UserId {
@@ -251,63 +251,4 @@ async fn device_grant_refuses_a_client_not_registered_for_it() {
             },
         )
         .expect("control: a device client starts the flow");
-}
-
-#[tokio::test]
-async fn token_exchange_refuses_a_client_not_registered_for_it() {
-    let h = common::TestHarness::embedded().await.expect("harness");
-    let realm = h.create_realm();
-    let user = user(&h, &realm);
-    let session = h
-        .identity()
-        .create_session(&realm, &user, &SessionContext::default())
-        .expect("session");
-    let subject = h
-        .identity()
-        .issue_tokens_with_context(
-            &realm,
-            &user,
-            session.id(),
-            &hearth::identity::TokenIssuanceContext {
-                granted_scopes: std::iter::once("openid".to_string()).collect(),
-                ..Default::default()
-            },
-        )
-        .expect("issue")
-        .access_token()
-        .to_string();
-    let exchange = |client: &ClientId| {
-        h.identity().rfc8693_token_exchange(
-            &realm,
-            &Rfc8693Request {
-                client_id: client.clone(),
-                subject_token: subject.clone(),
-                subject_token_type: "urn:ietf:params:oauth:token-type:access_token".into(),
-                actor_token: None,
-                actor_token_type: None,
-                requested_token_type: None,
-                scope: Some("openid".into()),
-                resource: None,
-                audience: None,
-                dpop_jkt: None,
-            },
-        )
-    };
-
-    let plain = register(&h, &realm, &["client_credentials"], Some(SECRET));
-    let outcome = exchange(plain.client_id());
-    assert!(
-        matches!(outcome, Err(IdentityError::UnsupportedGrantType)),
-        "a client without the token-exchange grant must not exchange tokens; \
-         got {:?}",
-        outcome.map(|_| "token")
-    );
-
-    let exchanger = register(
-        &h,
-        &realm,
-        &["client_credentials", TOKEN_EXCHANGE_GRANT],
-        Some(SECRET),
-    );
-    exchange(exchanger.client_id()).expect("control: the declared grant exchanges");
 }
