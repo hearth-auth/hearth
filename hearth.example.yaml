@@ -65,9 +65,10 @@
 # │ [ ] server.trusted_proxies — REQUIRED whenever                      │
 # │                            trust_forwarded_proto is true; the       │
 # │                            server refuses to start with an empty    │
-# │                            list. Individual IPs only — CIDR is not  │
-# │                            supported and a CIDR entry is silently   │
-# │                            dropped at runtime.                      │
+# │                            list. Single IPs or CIDR ranges, e.g.    │
+# │                            ["10.0.0.7", "10.42.0.0/16"]. No host    │
+# │                            bits in a range, nothing broader than    │
+# │                            /8 (IPv4) or /16 (IPv6).                 │
 # │                                                                     │
 # │ [ ] demo.enabled          — must be absent/false in production;     │
 # │                            demo accounts share one well-known       │
@@ -107,7 +108,7 @@
 #   # If TLS terminates at a proxy instead, replace the two paths above with
 #   # BOTH of these — trust_forwarded_proto alone is refused at start-up:
 #   # trust_forwarded_proto: true
-#   # trusted_proxies: ["10.0.0.7", "10.0.0.8"]   # individual IPs, no CIDR
+#   # trusted_proxies: ["10.0.0.7", "10.42.0.0/16"]   # single IPs and/or CIDR ranges
 #
 # security:
 #   # Or set the HEARTH_KEK env var (recommended — keeps the key out of YAML).

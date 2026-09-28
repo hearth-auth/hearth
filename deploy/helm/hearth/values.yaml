@@ -10,7 +10,7 @@
 #      it exists the pod sits in CreateContainerConfigError.
 #   2. An HTTPS posture is chosen: direct TLS (`tls` below) OR
 #      config.server.trust_forwarded_proto: true with a non-empty
-#      config.server.trusted_proxies (individual IPs, no CIDR). The defaults
+#      config.server.trusted_proxies (IPs or CIDR ranges). The defaults
 #      here choose neither, so the server refuses to start until you pick one.
 #      values-prod.yaml shows a complete ingress-terminated setup.
 #   3. config.oidc.issuer is set to the public HTTPS URL (commented out below).
@@ -117,7 +117,7 @@ config:
     #  (b) TLS terminated by a reverse proxy / Ingress in front of the pod:
     # trust_forwarded_proto: true
     # trusted_proxies:
-    #   - "REPLACE_WITH_PROXY_IP"   # individual IPs only; CIDR is refused
+    #   - "REPLACE_WITH_PROXY_IP_OR_CIDR"   # e.g. "10.42.1.7" or "10.42.3.0/24"
     #
     # See values-prod.yaml for (b) spelled out with its caveats.
 
