@@ -10,6 +10,7 @@ use hearth::config::{
     MailgunConfig, MailtrapConfig, PostmarkConfig, SendgridConfig, SmtpConfig, SnsSmsConfig,
     TwilioConfig,
 };
+use hearth::core::FormSecret;
 use hearth::identity::{PasswordGrantRequest, StepUpMfaGrantRequest};
 use hearth::protocol::web::account::ChangePasswordForm;
 use hearth::protocol::web::handlers::{LoginForm, RegisterForm, ResetPasswordFormData};
@@ -31,7 +32,7 @@ fn web_forms_do_not_print_passwords() {
             "{:?}",
             LoginForm {
                 email: "user@example.com".to_string(),
-                password: SECRET.to_string(),
+                password: FormSecret::new(SECRET.to_string()),
                 return_to: None,
                 locale: None,
                 csrf: SECRET.to_string(),
@@ -43,9 +44,9 @@ fn web_forms_do_not_print_passwords() {
         &format!(
             "{:?}",
             ChangePasswordForm {
-                current_password: SECRET.to_string(),
-                new_password: SECRET.to_string(),
-                confirm_password: SECRET.to_string(),
+                current_password: FormSecret::new(SECRET.to_string()),
+                new_password: FormSecret::new(SECRET.to_string()),
+                confirm_password: FormSecret::new(SECRET.to_string()),
                 csrf: SECRET.to_string(),
             }
         ),
@@ -70,9 +71,9 @@ fn web_forms_do_not_print_passwords() {
                 display_name: String::new(),
                 first_name: String::new(),
                 last_name: String::new(),
-                password: SECRET.to_string(),
-                password_confirm: SECRET.to_string(),
-                invitation_token: Some(SECRET.to_string()),
+                password: FormSecret::new(SECRET.to_string()),
+                password_confirm: FormSecret::new(SECRET.to_string()),
+                invitation_token: Some(FormSecret::new(SECRET.to_string())),
                 captcha_token: SECRET.to_string(),
                 csrf: SECRET.to_string(),
             }

@@ -27,7 +27,7 @@ use axum::Form;
 use serde::Deserialize;
 
 use crate::audit::{AuditAction, CreateAuditEvent};
-use crate::core::{IdpId, RealmId, Timestamp, UserId};
+use crate::core::{FormSecret, IdpId, RealmId, Timestamp, UserId};
 use crate::identity::federation::{
     compute_confirm_ticket_mac, compute_federation_state_mac, verify_confirm_ticket_mac,
     verify_federation_state_mac, FederationOutcome, FederationService,
@@ -562,7 +562,7 @@ pub struct ConfirmLinkForm {
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
     pub ticket: String,
-    pub password: String,
+    pub password: FormSecret,
 }
 
 #[derive(Template)]
@@ -779,7 +779,7 @@ async fn confirm_link_submit_impl(
     // pool that bounds total hashing work and sheds 503 on overload
     // (audit 2026-08-28 §4.17#2 class; HEA-1891/F3). This callsite was the last
     // ungated `verify_password`.
-    let cleartext = crate::identity::CleartextPassword::from_string(form.password);
+    let cleartext = crate::identity::CleartextPassword::new(form.password.as_bytes().to_vec());
     let realm_for_verify = realm_id.clone();
     let user_for_verify = ticket_rec.user_id.clone();
     let identity = state.identity.clone();
@@ -1124,5 +1124,17 @@ mod tests {
     #[test]
     fn confirm_cookie_without_a_mac_separator_is_rejected() {
         assert_eq!(confirm_cookie_mac_for(TICKET, TICKET), None);
+    }
+
+    /// The link-confirmation password is wiped on drop and never printed by
+    /// `Debug` (GA audit L20).
+    #[test]
+    fn confirm_link_form_password_is_zeroized_and_redacted() {
+        let form: ConfirmLinkForm =
+            serde_urlencoded::from_str("ticket=t&password=CANARY-pw").expect("form parses");
+        crate::core::secrets::assert_zeroize_on_drop(&form.password);
+        assert_eq!(form.password.expose(), "CANARY-pw");
+        let dbg = format!("{form:?}");
+        assert!(!dbg.contains("CANARY"), "Debug leaked a secret: {dbg}");
     }
 }

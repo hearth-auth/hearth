@@ -1,6 +1,7 @@
 //! User CRUD, sessions, consents, and per-user role/permission assignment.
 
 use super::*;
+use crate::core::FormSecret;
 
 /// Minimal HTML-entity escape for text interpolated into a hand-built
 /// HTMX fragment (the surrounding templates are Askama and escape for
@@ -454,7 +455,7 @@ pub struct CreateUserForm {
     #[serde(default)]
     pub last_name: String,
     #[serde(default)]
-    pub password: String,
+    pub password: FormSecret,
     /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
     #[serde(
         default,
@@ -486,7 +487,7 @@ impl<S: Send + Sync> axum::extract::FromRequest<S> for CreateUserForm {
             display_name: super::handlers_common::form_scalar(&p, "display_name"),
             first_name: super::handlers_common::form_scalar(&p, "first_name"),
             last_name: super::handlers_common::form_scalar(&p, "last_name"),
-            password: super::handlers_common::form_scalar(&p, "password"),
+            password: FormSecret::new(super::handlers_common::form_scalar(&p, "password")),
             attr_keys: super::handlers_common::form_vec(&p, "attr_key"),
             attr_vals: super::handlers_common::form_vec(&p, "attr_val"),
             csrf: super::handlers_common::form_scalar(&p, "_csrf"),
@@ -593,7 +594,7 @@ pub async fn admin_user_create_submit(
             // Set the initial password. If this fails, delete the partially
             // created user and surface the error rather than leaving an
             // account that can never log in.
-            let pw = CleartextPassword::from_string(form.password);
+            let pw = CleartextPassword::new(form.password.as_bytes().to_vec());
             if let Err(e) = state.identity.set_password(target.id(), user.id(), &pw) {
                 tracing::warn!(error = %e, "set initial password after create_user failed");
                 let _ = state.identity.delete_user(target.id(), user.id());
@@ -3618,5 +3619,22 @@ fn assign_role_by_slug(
     };
     if let Err(e) = state.rbac.assign_role(realm_id, &req) {
         tracing::warn!(error = %e, role_slug = %role_slug, "import assign_role failed");
+    }
+}
+
+/// The initial password is wiped on drop and never printed by `Debug`
+/// (GA audit L20).
+#[cfg(test)]
+mod secret_field_tests {
+    use super::*;
+
+    #[test]
+    fn create_user_form_password_is_zeroized_and_redacted() {
+        let form: CreateUserForm =
+            serde_urlencoded::from_str("email=a%40b.test&password=CANARY-pw").expect("form parses");
+        crate::core::secrets::assert_zeroize_on_drop(&form.password);
+        assert_eq!(form.password.expose(), "CANARY-pw");
+        let dbg = format!("{form:?}");
+        assert!(!dbg.contains("CANARY"), "Debug leaked a secret: {dbg}");
     }
 }

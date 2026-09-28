@@ -11,7 +11,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::audit::{Actor, AuditContext, CreateAuditEvent};
-use crate::core::{ClientId, RealmId, UserId, WebhookId};
+use crate::core::{ClientId, FormSecret, RealmId, UserId, WebhookId};
 use crate::identity::email::{validate_email_template, EmailBranding, LocalizedEmailTemplate};
 use crate::identity::UpdateRealmRequest;
 use crate::protocol::convert::identity::{
@@ -3320,7 +3320,7 @@ pub(super) async fn dev_seed_password(
         }
     };
     let user_id = UserId::new(user_uuid);
-    let password = crate::identity::CleartextPassword::from_string(body.password);
+    let password = crate::identity::CleartextPassword::new(body.password.as_bytes().to_vec());
     match state.identity.set_password(&realm_id, &user_id, &password) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
@@ -3331,7 +3331,7 @@ pub(super) async fn dev_seed_password(
 #[cfg(feature = "dev-endpoints")]
 pub(super) struct DevSeedPasswordRequest {
     user_id: String,
-    password: String,
+    password: FormSecret,
 }
 
 /// Fixed dev-mode password for `admin@hearth.test`.
@@ -4605,7 +4605,7 @@ async fn admin_unassign_role(
 #[derive(Debug, Deserialize)]
 struct CreateWebhookBody {
     url: String,
-    secret: String,
+    secret: FormSecret,
     #[serde(default = "default_enabled")]
     enabled: bool,
     #[serde(default)]
@@ -4620,7 +4620,7 @@ fn default_enabled() -> bool {
 #[derive(Debug, Deserialize)]
 struct UpdateWebhookBody {
     url: Option<String>,
-    secret: Option<String>,
+    secret: Option<FormSecret>,
     enabled: Option<bool>,
     event_filters: Option<Vec<String>>,
 }
@@ -4729,7 +4729,7 @@ async fn admin_create_webhook(
     let req = CreateWebhookRequest {
         realm_id: auth.realm_id,
         url: body.url,
-        secret: body.secret,
+        secret: body.secret.expose().to_string(),
         enabled: body.enabled,
         event_filters,
     };
@@ -4855,7 +4855,7 @@ async fn admin_update_webhook(
 
     let req = UpdateWebhookRequest {
         url: body.url,
-        secret: body.secret,
+        secret: body.secret.as_deref().map(str::to_string),
         enabled: body.enabled,
         event_filters,
     };
@@ -6049,5 +6049,48 @@ async fn admin_delete_cross_realm_policy(
             tracing::error!(error = %e, "admin_delete_cross_realm_policy panicked");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+/// Secret-bearing request bodies are wiped on drop and never printed by
+/// `Debug` (GA audit L20).
+#[cfg(test)]
+mod secret_field_tests {
+    use super::*;
+    use crate::core::secrets::assert_zeroize_on_drop;
+
+    fn assert_redacted(dbg: &str) {
+        assert!(!dbg.contains("CANARY"), "Debug leaked a secret: {dbg}");
+    }
+
+    #[test]
+    fn create_webhook_body_secret_is_zeroized_and_redacted() {
+        let body: CreateWebhookBody =
+            serde_json::from_str(r#"{"url":"https://x.test","secret":"CANARY-whs"}"#)
+                .expect("json parses");
+        assert_zeroize_on_drop(&body.secret);
+        assert_eq!(body.secret.expose(), "CANARY-whs");
+        assert_redacted(&format!("{body:?}"));
+    }
+
+    #[test]
+    fn update_webhook_body_secret_is_zeroized_and_redacted() {
+        let body: UpdateWebhookBody =
+            serde_json::from_str(r#"{"secret":"CANARY-whs"}"#).expect("json parses");
+        assert_zeroize_on_drop(&body.secret);
+        assert_eq!(
+            body.secret.as_ref().map(crate::core::FormSecret::expose),
+            Some("CANARY-whs")
+        );
+        assert_redacted(&format!("{body:?}"));
+    }
+
+    #[cfg(feature = "dev-endpoints")]
+    #[test]
+    fn dev_seed_password_is_zeroized() {
+        let body: DevSeedPasswordRequest =
+            serde_json::from_str(r#"{"user_id":"u","password":"CANARY-pw"}"#).expect("json parses");
+        assert_zeroize_on_drop(&body.password);
+        assert_eq!(body.password.expose(), "CANARY-pw");
     }
 }

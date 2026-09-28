@@ -35,7 +35,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
 use crate::audit::{AuditAction, CreateAuditEvent};
-use crate::core::{ClientId, RealmId, Timestamp, UserId};
+use crate::core::{ClientId, FormSecret, RealmId, Timestamp, UserId};
 use crate::identity::error::IdentityError;
 use crate::identity::ra_token::{self, OidcParams};
 use crate::identity::RequiredAction;
@@ -101,11 +101,11 @@ pub struct UpdatePasswordForm {
     /// is applied (audit §4.23#2, task 21.3) so that possession of the RA
     /// cookie alone is not enough to take over the account.
     #[serde(default)]
-    pub current_password: String,
+    pub current_password: FormSecret,
     #[serde(default)]
-    pub new_password: String,
+    pub new_password: FormSecret,
     #[serde(default)]
-    pub confirm_password: String,
+    pub confirm_password: FormSecret,
     /// CSRF double-submit token, matched against the `hearth_ui_csrf` cookie.
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
@@ -1317,7 +1317,7 @@ pub async fn update_password_submit(
     let user_id = UserId::new(user_uuid);
     let csrf_echo = Some(form.csrf.clone());
 
-    if form.new_password != form.confirm_password {
+    if *form.new_password != *form.confirm_password {
         return render_update_password_form(
             &state,
             Some("New password and confirmation do not match."),
@@ -1331,8 +1331,8 @@ pub async fn update_password_submit(
     // credential and applies the new one; both are Argon2id operations, so the
     // pair runs through the shared KDF admission gate rather than inline on the
     // async worker.
-    let current = CleartextPassword::from_string(form.current_password);
-    let new_pw = CleartextPassword::from_string(form.new_password);
+    let current = CleartextPassword::new(form.current_password.as_bytes().to_vec());
+    let new_pw = CleartextPassword::new(form.new_password.as_bytes().to_vec());
     let identity = state.identity.clone();
     let realm_for_kdf = realm.clone();
     let user_for_kdf = user_id.clone();
@@ -2799,5 +2799,27 @@ mod email_otp_key_tests {
             "the operator's cluster-shared key wins over the per-process secret"
         );
         assert_ne!(k.as_slice(), OLD_PUBLIC_KEY);
+    }
+}
+
+/// Password fields are wiped on drop and never printed by `Debug`
+/// (GA audit L20).
+#[cfg(test)]
+mod secret_field_tests {
+    use super::*;
+    use crate::core::secrets::assert_zeroize_on_drop;
+
+    #[test]
+    fn update_password_form_is_zeroized_and_redacted() {
+        let form: UpdatePasswordForm = serde_urlencoded::from_str(
+            "current_password=CANARY-cur&new_password=CANARY-new&confirm_password=CANARY-cfm",
+        )
+        .expect("form parses");
+        assert_zeroize_on_drop(&form.current_password);
+        assert_zeroize_on_drop(&form.new_password);
+        assert_zeroize_on_drop(&form.confirm_password);
+        assert_eq!(form.confirm_password.expose(), "CANARY-cfm");
+        let dbg = format!("{form:?}");
+        assert!(!dbg.contains("CANARY"), "Debug leaked a secret: {dbg}");
     }
 }

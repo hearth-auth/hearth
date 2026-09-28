@@ -43,7 +43,7 @@ use serde::Deserialize;
 
 use crate::abuse::device_approval::{DeviceApprovalDecision, DeviceApprovalGuard};
 use crate::abuse::runtime::PreAuthVerdict;
-use crate::core::RealmId;
+use crate::core::{FormSecret, RealmId};
 use crate::identity::onboarding::OnboardingError;
 use crate::identity::{
     admin_gate, gate, AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams,
@@ -1494,7 +1494,7 @@ pub struct LoginForm {
     /// Email address.
     pub email: String,
     /// Password.
-    pub password: String,
+    pub password: FormSecret,
     /// Optional `return_to` path submitted via hidden field.
     #[serde(default)]
     pub return_to: Option<String>,
@@ -1987,7 +1987,7 @@ fn login_finish(
         // cost answers an unknown address measurably faster (GA audit L14).
         state.identity.dummy_verify_password_for_realm(
             realm.id(),
-            &CleartextPassword::from_string(form.password.clone()),
+            &CleartextPassword::new(form.password.as_bytes().to_vec()),
         );
         state
             .identity
@@ -2021,7 +2021,7 @@ fn login_finish(
         return render_ctx.generic_error(&email);
     };
 
-    let password = CleartextPassword::from_string(form.password.clone());
+    let password = CleartextPassword::new(form.password.as_bytes().to_vec());
     match state
         .identity
         .verify_password(realm.id(), user.id(), &password)
@@ -4721,12 +4721,12 @@ pub struct RegisterForm {
     #[serde(default)]
     pub last_name: String,
     /// New password.
-    pub password: String,
+    pub password: FormSecret,
     /// Password confirmation.
-    pub password_confirm: String,
+    pub password_confirm: FormSecret,
     /// Optional invitation token (required when policy is invite-only).
     #[serde(default)]
-    pub invitation_token: Option<String>,
+    pub invitation_token: Option<FormSecret>,
     /// CAPTCHA response token populated by the Turnstile widget (P-1).
     ///
     /// Empty string when no CAPTCHA provider is configured (`NoopCaptchaProvider`).
@@ -5133,7 +5133,7 @@ fn register_submit_impl(
             form.email,
         );
     }
-    if form.password != form.password_confirm {
+    if *form.password != *form.password_confirm {
         return render_err("Passwords do not match.".to_string(), form.email);
     }
     if form.password.len() < MIN_BROWSER_PASSWORD_LENGTH {
@@ -5169,9 +5169,9 @@ fn register_submit_impl(
         display_name: form.display_name.clone(),
         first_name: form.first_name.clone(),
         last_name: form.last_name.clone(),
-        password: CleartextPassword::from_string(form.password.clone()),
+        password: CleartextPassword::new(form.password.as_bytes().to_vec()),
         client_ip: register_client_ip(&headers, peer_addr, &state.trusted_proxies),
-        invitation_token: form.invitation_token.clone(),
+        invitation_token: form.invitation_token.as_deref().map(str::to_string),
     };
 
     let response = match state.identity.register_user(realm.id(), &request) {
@@ -6699,5 +6699,40 @@ mod tests {
         assert!(!singular.contains("1 seconds"), "no trailing s: {singular}");
         let plural = make(30).render().expect("renders");
         assert!(plural.contains("30 seconds"), "plural: {plural}");
+    }
+}
+
+/// Secret-bearing form fields are wiped on drop and never printed by `Debug`
+/// (GA audit L20).
+#[cfg(test)]
+mod secret_field_tests {
+    use super::*;
+    use crate::core::secrets::assert_zeroize_on_drop;
+
+    fn assert_redacted(dbg: &str) {
+        assert!(!dbg.contains("CANARY"), "Debug leaked a secret: {dbg}");
+    }
+
+    #[test]
+    fn login_form_password_is_zeroized_and_redacted() {
+        let form: LoginForm =
+            serde_urlencoded::from_str("email=a%40b.test&password=CANARY-pw").expect("form parses");
+        assert_zeroize_on_drop(&form.password);
+        assert_eq!(form.password.expose(), "CANARY-pw");
+        assert_redacted(&format!("{form:?}"));
+    }
+
+    #[test]
+    fn register_form_secrets_are_zeroized_and_redacted() {
+        let form: RegisterForm = serde_urlencoded::from_str(
+            "email=a%40b.test&password=CANARY-pw&password_confirm=CANARY-pc\
+             &invitation_token=CANARY-inv",
+        )
+        .expect("form parses");
+        assert_zeroize_on_drop(&form.password);
+        assert_zeroize_on_drop(&form.password_confirm);
+        assert_zeroize_on_drop(&form.invitation_token);
+        assert_eq!(form.password.expose(), "CANARY-pw");
+        assert_redacted(&format!("{form:?}"));
     }
 }
