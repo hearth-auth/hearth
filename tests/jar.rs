@@ -462,6 +462,50 @@ fn jar_jti_replay_rejected() {
     );
 }
 
+/// GA audit L9 — the jti guard was check-then-write, so concurrent requests
+/// carrying the same request object could all pass it. Exactly one of a
+/// burst of simultaneous verifications may succeed.
+#[test]
+fn jar_jti_is_accepted_once_under_concurrency() {
+    const RACERS: usize = 8;
+    let env = setup();
+    let (pkcs8, pub_bytes) = generate_ed25519();
+    let client = register_client_with_jwks(&env, &jwks_json(&pub_bytes));
+    let client_id = client.client_id().clone();
+    let cid_str = client_id.to_string();
+
+    for round in 0..5 {
+        let jti = format!("concurrent-jti-{round}");
+        let jar = sign_jar(
+            &pkcs8,
+            &cid_str,
+            &env.issuer,
+            None,
+            None,
+            None,
+            Some(&jti),
+            None,
+        );
+        let barrier = std::sync::Barrier::new(RACERS);
+        let wins = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..RACERS)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        env.engine.verify_jar(&env.realm, &client_id, &jar).is_ok()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("racer"))
+                .filter(|ok| *ok)
+                .count()
+        });
+        assert_eq!(wins, 1, "round {round}: one jti, {wins} accepted");
+    }
+}
+
 /// Scenario 8 — `nbf` in the future is rejected.
 #[test]
 fn jar_nbf_in_future_rejected() {

@@ -2019,23 +2019,23 @@ impl EmbeddedIdentityEngine {
                 reason: "jti claim is required in signed request objects".to_string(),
             })?;
         let jti_key = keys::encode_jar_jti(jti);
-        if self
+        // Store expiry as 8-byte little-endian i64 (Unix seconds) so the
+        // background sweeper in cleanup::sweep_jar_jtis() can purge entries
+        // once they can no longer represent a valid JWT (exp + clock skew).
+        //
+        // One atomic step (GA audit L9): the old read-then-write let
+        // concurrent requests carrying the same request object all pass.
+        // `put_if_absent` is atomic here and Raft-routed in cluster mode.
+        let jar_jti_expires_at = claims.exp.saturating_add(CLOCK_SKEW_SECS);
+        let fresh = self
             .storage
-            .get(realm_id, &jti_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
+            .put_if_absent(realm_id, &jti_key, &jar_jti_expires_at.to_le_bytes())
+            .map_err(Self::storage_err)?;
+        if !fresh {
             return Err(IdentityError::InvalidJar {
                 reason: "jti has already been used (replay)".to_string(),
             });
         }
-        // Store expiry as 8-byte little-endian i64 (Unix seconds) so the
-        // background sweeper in cleanup::sweep_jar_jtis() can purge entries
-        // once they can no longer represent a valid JWT (exp + clock skew).
-        let jar_jti_expires_at = claims.exp.saturating_add(CLOCK_SKEW_SECS);
-        self.storage
-            .put(realm_id, &jti_key, &jar_jti_expires_at.to_le_bytes())
-            .map_err(Self::storage_err)?;
 
         Ok(claims)
     }
@@ -2586,6 +2586,15 @@ impl EmbeddedIdentityEngine {
             .ok_or(IdentityError::InvalidPushedAuthorizationRequest)?;
 
         let key = keys::encode_par_request(request_uri_id);
+        // GA audit L9: read → check `used` → write back was unserialised, so
+        // concurrent authorizations presenting one `request_uri` could each
+        // consume it. The per-key advisory lock the code and device-code
+        // redemptions use makes the sequence one step on this node (the
+        // `request_uri` is 128+ random bits, so the lock map is not shared
+        // meaningfully with code hashes). Held only across this sync block.
+        let lock = self.code_exchange_lock(&format!("par:{request_uri_id}"));
+        // INVARIANT: guard held only across the sync read-check-write below; no .await in scope.
+        let _consume_guard = lock.lock().expect("code_exchange_lock poisoned");
         let raw = self
             .storage
             .get(realm_id, &key)

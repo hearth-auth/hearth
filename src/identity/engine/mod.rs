@@ -17522,17 +17522,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         exp_secs: i64,
     ) -> Result<(), IdentityError> {
         let key = keys::encode_actor_jti(jti);
-        if self
+        // One atomic step (GA audit L9): the old read-then-write let
+        // concurrent exchanges presenting one actor token all pass.
+        // `put_if_absent` is atomic here and Raft-routed in cluster mode.
+        let fresh = self
             .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
+            .put_if_absent(realm_id, &key, &exp_secs.to_le_bytes())
+            .map_err(Self::storage_err)?;
+        if !fresh {
             return Err(IdentityError::ActorTokenReplayed);
         }
-        self.storage
-            .put(realm_id, &key, &exp_secs.to_le_bytes())
-            .map_err(Self::storage_err)?;
         Ok(())
     }
 
@@ -18016,6 +18015,8 @@ mod tests {
     mod fapi2_client_keys;
     /// An RS256 client's realm key is checked before an overwrite deletes it.
     mod import_client_rs256_key;
+    /// A PAR `request_uri` is consumed exactly once under concurrency.
+    mod par_consume_race;
     /// Concurrent revocations survive a racing control-cache reload.
     mod revocation_reload_races;
     /// A signing-key rotation lands in one atomic storage batch.
