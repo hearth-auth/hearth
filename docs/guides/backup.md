@@ -197,8 +197,9 @@ never replaces a live system key — the caller's own token is signed with it.
 
 A system-realm archive never writes, into the system realm, what the live API
 cannot create there: organizations (and their memberships and invitations),
-agents, external identity providers, federation links, SAML service providers
-and a SAML or RS256 ID-token signing key. Such a record is refused and reported,
+agents, external identity providers, federation links, SAML service providers,
+OAuth consents (they name a client, and the system realm has none), SCIM
+`externalId` mappings, and a SAML or RS256 ID-token signing key. Such a record is refused and reported,
 and the rest of the restore carries on.
 
 The system realm's record itself is not re-created; its contents are imported

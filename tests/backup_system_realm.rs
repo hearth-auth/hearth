@@ -1002,6 +1002,27 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
     .expect("saml sp");
     id.get_or_create_saml_signing_key(&tenant, "https://tenant.example")
         .expect("saml key");
+    // A consent needs a client, and the system realm refuses clients.
+    let client = id
+        .register_client(
+            &tenant,
+            &hearth::identity::RegisterClientRequest {
+                client_name: "Consent Client".to_string(),
+                redirect_uris: vec!["https://app.example/cb".to_string()],
+                client_secret: Some("super-secret-value-123!".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: true,
+                ..Default::default()
+            },
+        )
+        .expect("client");
+    id.grant_consent(
+        &tenant,
+        user.id(),
+        client.client_id(),
+        &["openid".to_string()],
+    )
+    .expect("consent");
 
     let members = decrypted_members(&h, &tenant);
     let link = serde_json::to_vec(&FederationLinkExport {
@@ -1028,6 +1049,22 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
     })
     .collect();
     carried.push(("federation_links.ndjson", link));
+    carried.push((
+        "consents.ndjson",
+        members
+            .get("consents.ndjson")
+            .cloned()
+            .expect("consents.ndjson"),
+    ));
+    // SCIM provisions only users and organizations, and the system realm
+    // refuses both through the live API.
+    let scim = serde_json::to_vec(&hearth::identity::ScimMappingExport {
+        kind: hearth::identity::ScimMappingKind::User,
+        external_id: "scim-ext-1".to_string(),
+        subject_id: *user.id().as_uuid(),
+    })
+    .expect("scim json");
+    carried.push(("scim_mappings.ndjson", scim));
     let archive = system_archive_with(&h, &carried);
 
     let report = restore(
@@ -1049,6 +1086,8 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
         ("identity_providers", &report.identity_providers),
         ("federation_links", &report.federation_links),
         ("saml_service_providers", &report.saml_service_providers),
+        ("consents", &report.consents),
+        ("scim_mappings", &report.scim_mappings),
     ] {
         assert_eq!(counts.errored, 1, "{family}: refused and reported");
         assert_eq!(
@@ -1070,4 +1109,16 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
     assert!(id.get_organization(&sys, org.id()).expect("get").is_none());
     assert!(id.get_idp(&sys, &idp_id).expect("get").is_none());
     assert!(id.get_saml_sp_by_key(&sys, "crm").expect("get").is_none());
+    assert!(
+        id.get_consent(&sys, user.id(), client.client_id())
+            .expect("get consent")
+            .is_none(),
+        "no consent lands in the system realm"
+    );
+    assert!(
+        id.export_all_scim_mappings(&sys)
+            .expect("scim mappings")
+            .is_empty(),
+        "no SCIM mapping lands in the system realm"
+    );
 }

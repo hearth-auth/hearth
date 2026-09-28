@@ -36,6 +36,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   restore refuses an archived retiring key so recorded (reported as an error on that key), and
   refuses a realm restored as new — including one deleted since the archive was made — whose
   archived active key is recorded, before writing anything.
+- **A system-realm restore no longer writes OAuth consents or SCIM mappings** — like the other
+  records the live API never creates in the system realm, they are refused and reported.
 
 - **Heap corruption on the hot path fixed** — token validation, session lookup and storage reads no
   longer use `arc-swap` 1.9.2, which corrupted the heap under concurrent `load` + `rcu` (3 crashes in

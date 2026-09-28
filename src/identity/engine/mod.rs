@@ -12786,6 +12786,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         consent: &ConsentExport,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // A consent names a client, and the system realm refuses clients
+        // (`register_client`, `import_client`): the live API never creates
+        // one there, so a restore must not either.
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_consent",
+            });
+        }
         if !keys::is_oauth_consent_key(&consent.storage_key) {
             return Err(IdentityError::Serialization {
                 reason: "consent record carries a storage key outside the consent key space"
@@ -13235,6 +13243,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         mapping: &ScimMappingExport,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // SCIM provisions users and organizations, and the system realm
+        // refuses both (`create_user`, `create_organization`): the live API
+        // never creates a mapping there, so a restore must not either.
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_scim_mapping",
+            });
+        }
         let (reverse_key, forward_key) = match mapping.kind {
             ScimMappingKind::User => (
                 keys::encode_scim_ext_user_key(&mapping.external_id),
