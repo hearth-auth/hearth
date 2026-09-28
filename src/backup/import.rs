@@ -18,8 +18,8 @@ use crate::identity::{
     AccessTokenAuthorization, AgentExport, ApplicationStatus, ClientProfile, ClientTrustLevel,
     ConsentExport, CreateRealmRequest, FederationLinkExport, IdentityEngine, IdentityError,
     ImportClientRequest, ImportUserRequest, MfaFactorExport, Organization, OrganizationInvitation,
-    OrganizationMembership, RawCredential, Realm, RetiringSigningKeyExport, ScimMappingExport,
-    User, Webhook,
+    OrganizationMembership, RawCredential, Realm, RetiringSigningKeyExport, RevocationExport,
+    ScimMappingExport, User, Webhook,
 };
 use crate::rbac::{
     Group, GroupMembershipEdge, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport,
@@ -58,6 +58,7 @@ pub(crate) const RECOGNIZED_MEMBERS: &[&str] = &[
     "saml_signing_key.json",
     "scim_mappings.ndjson",
     "invitations.ndjson",
+    "revocations.ndjson",
     "retiring_signing_keys.json",
     "signing_key.json",
     "id_token_signing_key.json",
@@ -206,6 +207,10 @@ pub struct ImportReport {
     pub scim_mappings: EntityCounts,
     /// Outcome counts for organization invitations (OpenSpec 26.40).
     pub invitations: EntityCounts,
+    /// Outcome counts for token revocations: revoked JTIs, blocked DPoP keys
+    /// and revoked AAT JTIs. `skipped` includes JTIs whose token had already
+    /// expired by the time of the restore (audit GA 2026-09-28 M3).
+    pub revocations: EntityCounts,
     /// Outcome counts for retiring signing keys. `skipped` counts keys whose
     /// grace window had already closed by the time of the restore
     /// (OpenSpec 26.40).
@@ -1094,6 +1099,19 @@ impl BackupImporter {
             |this, invitation: &OrganizationInvitation| {
                 this.identity
                     .import_invitation(&restored_realm_id, invitation, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/revocations.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.revocations,
+            |this, revocation: &RevocationExport| {
+                this.identity
+                    .import_revocation(&restored_realm_id, revocation, overwrite)
                     .map_err(|e| BackupError::Engine(e.to_string()))
             },
         )?;

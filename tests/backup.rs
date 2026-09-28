@@ -3125,3 +3125,230 @@ async fn a_deleted_realm_is_not_restored_with_a_key_it_revoked() {
         );
     }
 }
+
+// ── export barrier scope (audit GA 2026-09-28 M4) ─────────────────────────────
+
+/// M4: an export must hold the storage write barrier only for its consistent
+/// read pass, not while it encrypts, compresses and writes the archive.
+///
+/// The archive is written into a named pipe whose reader stops reading after
+/// the first byte, so the export stalls mid-write — the shape of a slow or
+/// full backup destination. A write issued meanwhile must complete. Before the
+/// fix the export held `backup_barrier.write()` until it returned, so every
+/// login, refresh and audit append on the node blocked behind the archive I/O.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn export_releases_the_write_barrier_before_writing_the_archive() {
+    use std::io::Read as _;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    let identity = h.identity_arc();
+
+    // Encrypted sections do not compress, so ~2.4 MiB of user attributes is
+    // an archive stream far larger than a pipe's buffer.
+    let value = "v".repeat(1000);
+    for i in 0..200u32 {
+        identity
+            .create_user(
+                &realm,
+                &CreateUserRequest {
+                    email: format!("bulk-{i}@m4.example"),
+                    display_name: "Bulk".into(),
+                    first_name: "Bulk".into(),
+                    last_name: "User".into(),
+                    attributes: (0..12).map(|a| (format!("a{a}"), value.clone())).collect(),
+                },
+            )
+            .expect("seed user");
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fifo = dir.path().join("archive.pipe");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo failed");
+
+    let (first_byte_tx, first_byte_rx) = mpsc::channel();
+    let (drain_tx, drain_rx) = mpsc::channel::<()>();
+    let reader = {
+        let fifo = fifo.clone();
+        std::thread::spawn(move || {
+            let mut pipe = std::fs::File::open(&fifo).expect("open the pipe for reading");
+            let mut byte = [0u8; 1];
+            pipe.read_exact(&mut byte).expect("first archive byte");
+            let _ = first_byte_tx.send(());
+            let _ = drain_rx.recv_timeout(Duration::from_secs(120));
+            let mut rest = Vec::new();
+            pipe.read_to_end(&mut rest).expect("drain the pipe");
+        })
+    };
+
+    let export = {
+        let (identity, audit, rbac) = (h.identity_arc(), h.audit_arc(), h.rbac_arc());
+        let realm = realm.clone();
+        let fifo = fifo.clone();
+        std::thread::spawn(move || {
+            let mut writer = BackupArchive::create(&fifo).expect("archive on the pipe");
+            let dek = BackupExporter::generate_dek().expect("dek");
+            BackupExporter::new(identity, audit, rbac)
+                .export_realm(&realm, &mut writer, &ExportOptions::default(), &dek)
+                .map(|_| ())
+        })
+    };
+
+    first_byte_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the export never started writing the archive");
+    // Lets the export fill the pipe and stall in its archive write.
+    // AUDIT: justified-sleep: the assertion below does not depend on its length
+    std::thread::sleep(Duration::from_millis(300));
+
+    let (wrote_tx, wrote_rx) = mpsc::channel();
+    let writer_thread = {
+        let identity = h.identity_arc();
+        let realm = realm.clone();
+        std::thread::spawn(move || {
+            let result = identity.create_user(
+                &realm,
+                &CreateUserRequest {
+                    email: "during-export@m4.example".into(),
+                    display_name: "During".into(),
+                    first_name: "During".into(),
+                    last_name: "Export".into(),
+                    attributes: Default::default(),
+                },
+            );
+            let _ = wrote_tx.send(());
+            result.map(|_| ())
+        })
+    };
+    let wrote_while_stalled = wrote_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+
+    // Unstall everything before asserting, so a failure does not hang.
+    let _ = drain_tx.send(());
+    reader.join().expect("reader");
+    export.join().expect("export thread").expect("export");
+    writer_thread.join().expect("writer").expect("create_user");
+
+    assert!(
+        wrote_while_stalled,
+        "a write blocked while the export was stalled writing its archive: the export held \
+         the storage write barrier through encryption and archive I/O"
+    );
+}
+
+// ── revocations survive a restore (audit GA 2026-09-28 M3) ────────────────────
+
+/// M3: a sessionless token (`client_credentials`, agents) is checked only
+/// against the revoked-JTI blocklist and the DPoP key blocklist; there is no
+/// session to lose. The realm signing key is restored verbatim, so such a
+/// token verifies on the restored node — and before the fix the archive did
+/// not carry either blocklist, so a token revoked (or a key blocked) before
+/// the backup came back to life after the restore.
+#[tokio::test]
+async fn restore_keeps_revoked_jtis_and_blocked_dpop_keys() {
+    use hearth::identity::{
+        ClientCredentialsRequest, IdentityError, RegisterClientRequest, TokenRevocationRequest,
+    };
+
+    const SECRET: &str = "m3-restore-secret-1!";
+    const JKT: &str = "OKVsYiUkGsOrgWxWpGpzDRzZpISBgekj0RvDqxNYors";
+
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, _email, _password) = seeded_realm(&src);
+    let client = src
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: format!("m3-{}", uuid::Uuid::new_v4()),
+                redirect_uris: vec![],
+                client_secret: Some(SECRET.to_string()),
+                grant_types: vec!["client_credentials".to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register client")
+        .client_id()
+        .clone();
+    let mint = |dpop_jkt: Option<&str>| {
+        src.identity()
+            .client_credentials_token(
+                &realm,
+                &ClientCredentialsRequest {
+                    client_id: client.clone(),
+                    client_secret: Some(SECRET.to_string()),
+                    scope: Some("openid".to_string()),
+                    dpop_jkt: dpop_jkt.map(str::to_string),
+                    client_assertion_type: None,
+                    client_assertion: None,
+                },
+            )
+            .expect("mint machine token")
+            .access_token()
+            .to_string()
+    };
+    let revoked = mint(None);
+    let live = mint(None);
+    let key_bound = mint(Some(JKT));
+
+    src.identity()
+        .revoke_token(
+            &realm,
+            &TokenRevocationRequest {
+                token: revoked.clone(),
+                token_type_hint: None,
+                revoking_client_id: None,
+            },
+        )
+        .expect("revoke");
+    src.identity()
+        .block_dpop_jkt(&realm, JKT)
+        .expect("block jkt");
+    assert!(matches!(
+        src.identity().validate_token(&realm, &revoked),
+        Err(IdentityError::InvalidToken)
+    ));
+    assert!(matches!(
+        src.identity().validate_token(&realm, &key_bound),
+        Err(IdentityError::DPopJktBlocked)
+    ));
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open archive");
+    let report = make_importer(&dst)
+        .import_realm(&slug, &reader, &import_opts_with_passphrase())
+        .expect("import realm");
+    assert_eq!(report.realms.created, 1, "realm must be restored");
+
+    // The control case: a sessionless token issued before the backup and never
+    // revoked is still valid after the restore — the disclosure used to say
+    // every pre-backup token is dead.
+    dst.identity()
+        .validate_token(&realm, &live)
+        .expect("an unrevoked sessionless token survives the restore");
+    let after = dst.identity().validate_token(&realm, &revoked);
+    assert!(
+        matches!(after, Err(IdentityError::InvalidToken)),
+        "a client_credentials token revoked before the backup validates again after the \
+         restore ({after:?})"
+    );
+    let after = dst.identity().validate_token(&realm, &key_bound);
+    assert!(
+        matches!(after, Err(IdentityError::DPopJktBlocked)),
+        "a token bound to a DPoP key blocked before the backup validates again after the \
+         restore ({after:?})"
+    );
+    assert_eq!(
+        report.revocations.created, 2,
+        "the report counts the restored revocations"
+    );
+}

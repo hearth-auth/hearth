@@ -233,7 +233,7 @@ incompatible, startup MUST fail with a clear error directing the operator to re-
 ### 6.1 Write Path Invariants
 
 - Every mutation MUST be written to the WAL before being acknowledged. No write is considered committed until the WAL entry is `fsync`'d.
-- Memtable insertions happen after WAL append. If the process crashes between WAL write and memtable update, WAL replay MUST reconstruct the correct state.
+- A mutation is applied to the memtable inside the WAL critical section that assigns its record a position, and before the `fsync` that acknowledges it. So the memtable applies writes in WAL order (replay after a crash reproduces what the node served), and a record the WAL has made durable is never missing from the memtable when a rotation flushes it and truncates the segment. If the process crashes before the `fsync`, WAL replay MUST reconstruct the correct state. A write that returns an error has an unknown outcome: a concurrent flush may already have persisted it.
 - Writes SHOULD be batched where possible to amortize `fsync` cost.
 - `fsync()` is non-optional in production builds. A `--dev` flag MAY relax this for development mode only.
 - The storage engine MUST survive `kill -9` at any point and recover to a consistent state. This is verified by crash-recovery simulation tests (see [TESTING.md Section 5](./TESTING.md)).

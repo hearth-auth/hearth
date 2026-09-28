@@ -145,9 +145,9 @@ pub use types::{
     CreateCrossRealmPolicyRequest, CreateTransactionTokenRequest, CrossRealmTrustPolicy,
     DelegationGrantEntry, DeriveAatRequest, IssueAatRequest, ListAgentsQuery, PlaintextApiKey,
     ProtectedResource, RegisterProtectedResourceRequest, RegisterSpiffeIdRequest,
-    RetiringSigningKeyExport, Rfc8693Request, Rfc8693Response, SpiffeIdentityMapping,
-    StoredDelegationGrant, TransactionTokenClaims, TransactionTokenResponse, UpdateAgentRequest,
-    UpdateProtectedResourceRequest,
+    RetiringSigningKeyExport, RevocationExport, Rfc8693Request, Rfc8693Response,
+    SpiffeIdentityMapping, StoredDelegationGrant, TransactionTokenClaims, TransactionTokenResponse,
+    UpdateAgentRequest, UpdateProtectedResourceRequest,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -2785,6 +2785,27 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         key: &RetiringSigningKeyExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns the realm's live token revocations — revoked access-token
+    /// JTIs, blocked DPoP key thumbprints and revoked AAT JTIs — for backup
+    /// export (audit GA 2026-09-28 M3). JTIs already past their `exp` are
+    /// omitted: the token they name can no longer validate anywhere.
+    ///
+    /// Read-only: the exporter calls it while holding the backup barrier.
+    fn export_revocations(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<RevocationExport>, IdentityError>;
+
+    /// Restores one revocation and applies it to this node's in-memory
+    /// blocklists, so a token revoked before the backup stays dead after the
+    /// restore. A JTI whose `exp` has passed is [`ImportOutcome::Skipped`].
+    fn import_revocation(
+        &self,
+        realm_id: &RealmId,
+        revocation: &RevocationExport,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError>;
 

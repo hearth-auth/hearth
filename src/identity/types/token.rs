@@ -184,6 +184,37 @@ impl std::fmt::Debug for RetiringSigningKeyExport {
     }
 }
 
+/// One persisted token revocation, for backup export (audit GA 2026-09-28 M3).
+///
+/// A sessionless token — `client_credentials`, an agent's token — has no
+/// session a restore could lose, and the realm signing key is restored
+/// verbatim, so such a token verifies on the restored node. The blocklists
+/// are what keep a revoked one dead, and they must travel with the archive.
+/// None of these values is secret: a JTI and a key thumbprint identify a
+/// token or key, they do not grant anything.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RevocationExport {
+    /// A revoked access-token `jti` (RFC 7009).
+    Jti {
+        /// The revoked token's `jti`.
+        jti: String,
+        /// The token's `exp` in Unix seconds, after which the row is inert and
+        /// is swept; `None` for a legacy row stored without one.
+        exp: Option<i64>,
+    },
+    /// A blocked DPoP key thumbprint (`cnf.jkt`, RFC 9449).
+    DpopJkt {
+        /// The JWK SHA-256 thumbprint.
+        jkt: String,
+    },
+    /// A revoked agent authorization token (AAT) `jti`.
+    AatJti {
+        /// The revoked AAT's `jti`.
+        jti: String,
+    },
+}
+
 /// One persisted consent record plus the exact storage key it was read from,
 /// for backup export.
 ///

@@ -80,6 +80,10 @@ pub struct RecordCounts {
     /// window at export time (OpenSpec 26.40).
     #[serde(default)]
     pub retiring_signing_keys: u64,
+    /// Number of live token revocations — revoked access-token JTIs, blocked
+    /// DPoP keys, revoked AAT JTIs (audit GA 2026-09-28 M3).
+    #[serde(default)]
+    pub revocations: u64,
     /// Number of retiring RS256 ID-token signing keys still inside their
     /// rotation grace window at export time (task 26.55).
     #[serde(default)]

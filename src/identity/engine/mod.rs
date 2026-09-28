@@ -229,6 +229,23 @@ const CLIENT_TOKEN_CUTOFF_PREFIX: &str = "client-cutoff:";
 /// the cache-miss path reconciles unconditionally regardless.
 const EPOCH_SYNC_INTERVAL_MICROS: i64 = 200_000;
 
+/// Number of per-realm signing-key debounce windows (a power of two).
+///
+/// Realms are spread over the windows by a hash of their id; two realms that
+/// share a window share its debounce, exactly as every realm used to share
+/// one. 1,024 windows make that rare for any realistic realm count, and the
+/// replicated-write observer reconciles a rotation directly in cluster mode.
+const REALM_EPOCH_WINDOWS: usize = 1024;
+
+/// The debounce window of `realm_id`'s signing-key epoch: an allocation-free
+/// hash of the (random) UUID, masked to the table size.
+fn realm_epoch_window(realm_id: &RealmId) -> usize {
+    let (hi, lo) = realm_id.as_uuid().as_u64_pair();
+    #[allow(clippy::cast_possible_truncation)] // masked to the table size below
+    let hash = (hi ^ lo) as usize;
+    hash & (REALM_EPOCH_WINDOWS - 1)
+}
+
 /// Maximum entries in the in-process session cache (S12-F1).
 const SESSION_CACHE_MAX: usize = 4096;
 
@@ -314,8 +331,8 @@ use crate::identity::types::{
     ListAgentsQuery, Organization, OrganizationInvitation, OrganizationMembership,
     OrganizationRole, OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey,
     ProtectedResource, Realm, RealmStatus, RegisterProtectedResourceRequest, RegisterUserRequest,
-    RegisterUserResponse, RegistrationPolicy, RetiringSigningKeyExport, Rfc8693Request,
-    Rfc8693Response, ScimMappingExport, ScimMappingKind, Session, SessionContext,
+    RegisterUserResponse, RegistrationPolicy, RetiringSigningKeyExport, RevocationExport,
+    Rfc8693Request, Rfc8693Response, ScimMappingExport, ScimMappingKind, Session, SessionContext,
     SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
     UpdateProtectedResourceRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
     Webhook,
@@ -676,12 +693,22 @@ pub struct EmbeddedIdentityEngine {
     /// The background reloader and bump threads, joined when the engine drops so no thread
     /// outlives the storage handle it reads.
     control_worker: Vec<std::thread::JoinHandle<()>>,
-    /// Micros timestamp before which the hot path skips epoch reconciliation.
+    /// Micros timestamp before which the hot path skips control-epoch
+    /// reconciliation.
     ///
-    /// Reconciling both epochs costs two storage reads, and the validation hot
-    /// path may perform none. This bounds how often it pays for them. See
-    /// [`Self::sync_epochs_debounced`] and [`EPOCH_SYNC_INTERVAL_MICROS`].
+    /// Reconciling an epoch costs a storage read, and the validation hot path
+    /// may perform none. This bounds how often it pays for the (global)
+    /// control epoch. See [`Self::sync_epochs_debounced`] and
+    /// [`EPOCH_SYNC_INTERVAL_MICROS`].
     epoch_sync_after: AtomicI64,
+    /// Per-realm debounce windows for the signing-key epoch, indexed by
+    /// [`realm_epoch_window`] (audit GA 2026-09-28 M5).
+    ///
+    /// The key epoch is per realm, and sharing `epoch_sync_after` meant only
+    /// the realm of the request that won the window was reconciled: a busy
+    /// realm starved a quiet one whose key another node had revoked. Fixed
+    /// size and allocated once, so the hot path allocates nothing to use it.
+    realm_epoch_due: Box<[AtomicI64]>,
     /// Lock-free realm status cache for the `validate_token` hot path.
     ///
     /// Populated at startup and updated on every realm CRUD operation.
@@ -930,6 +957,15 @@ pub struct EmbeddedIdentityEngine {
     // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
     // INVARIANT: inner (per-code) guard held only across the sync load + validate + delete window; no .await in scope.
     code_exchange_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-`(realm, session)` advisory lock serialising every
+    /// read-modify-write of a session row (audit GA 2026-09-28 B7).
+    ///
+    /// `refresh_session` and `revoke_session` each load the row, change it and
+    /// write it back. Unserialised, a refresh that loaded the live row before
+    /// a revocation wrote it back un-revoked afterwards. Held only across the
+    /// synchronous load → modify → persist (cache update included); never
+    /// across an `.await`, and never while taking a grant-family lock.
+    session_row_locks: advisory_lock::AdvisoryLockMap,
     /// Per-`(realm, fid)` advisory lock serializing grant-family rotation.
     ///
     /// Without it, `rotate_grant_family` is an unsynchronised read-modify-write:
@@ -1004,6 +1040,18 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
                 Err(err) => tracing::warn!(error = %err, "replicated control epoch is corrupted"),
             }
             return;
+        }
+        // A signing-key rotation on another node. Without this arm a follower
+        // learned of it only from the debounced read on the validation path
+        // (audit GA 2026-09-28 M5). In-memory invalidation only; on the node
+        // that rotated, the local epoch already matches and this is a no-op.
+        if keys::is_system_realm(realm_id) {
+            if let Some(rotated) = keys::parse_realm_key_epoch_realm(key) {
+                if let Ok(epoch) = <[u8; 8]>::try_from(value).map(u64::from_le_bytes) {
+                    self.observe_realm_key_epoch(&rotated, epoch);
+                }
+                return;
+            }
         }
         let prefix = keys::revoked_jti_scan_prefix();
         if let Some(jti_bytes) = key.strip_prefix(prefix.as_slice()) {
@@ -1375,6 +1423,9 @@ impl EmbeddedIdentityEngine {
             control: Arc::clone(&control),
             control_worker: Vec::new(),
             epoch_sync_after: AtomicI64::new(0),
+            realm_epoch_due: (0..REALM_EPOCH_WINDOWS)
+                .map(|_| AtomicI64::new(0))
+                .collect(),
             realm_status_cache: Arc::clone(&caches.realm_status),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -1406,6 +1457,7 @@ impl EmbeddedIdentityEngine {
             txn_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
             code_exchange_locks: Mutex::new(HashMap::new()),
+            session_row_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
             grant_family_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside otp_redemption_lock() before returning the inner Arc.
@@ -1803,6 +1855,9 @@ impl EmbeddedIdentityEngine {
             control: Arc::clone(&control),
             control_worker: Vec::new(),
             epoch_sync_after: AtomicI64::new(0),
+            realm_epoch_due: (0..REALM_EPOCH_WINDOWS)
+                .map(|_| AtomicI64::new(0))
+                .collect(),
             realm_status_cache: Arc::clone(&caches.realm_status),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -1834,6 +1889,7 @@ impl EmbeddedIdentityEngine {
             txn_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
             code_exchange_locks: Mutex::new(HashMap::new()),
+            session_row_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
             grant_family_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside otp_redemption_lock() before returning the inner Arc.
@@ -4146,7 +4202,9 @@ impl EmbeddedIdentityEngine {
         self.storage
             .put_batch(realm_id, &batch)
             .map_err(Self::storage_err)?;
-        // Update cache after the storage write succeeds.
+        // Update the cache after the storage write succeeds. The insert reads
+        // the row back rather than trusting `session`, so a revocation that
+        // lands in between is never overwritten in the cache.
         if session.is_valid(self.clock.now()) {
             self.session_cache_insert(realm_id, session);
         } else {
@@ -4157,20 +4215,26 @@ impl EmbeddedIdentityEngine {
 
     // ===== Session cache helpers (S12-F1) =====
 
-    /// Inserts or updates a session in the in-process cache.
+    /// Warms the in-process cache for a session its caller has just written.
+    ///
+    /// The session is re-read from storage and inserted through the
+    /// generation-guarded [`Self::session_cache_fill`], never inserted as
+    /// passed: a revocation landing between the caller's storage write and
+    /// this insert has already evicted the key, and inserting the caller's
+    /// live copy afterwards resurrected the session in the cache while storage
+    /// said revoked (audit GA 2026-09-28 B7). A row that is no longer valid,
+    /// or that cannot be read, is evicted instead.
     ///
     /// Silently skips at capacity so the storage fallback stays available.
     fn session_cache_insert(&self, realm_id: &RealmId, session: &Session) {
-        if self.session_cache.load().len() >= SESSION_CACHE_MAX {
-            return;
+        let gen_before_read = self.session_cache_gen.load(Ordering::SeqCst);
+        let now = self.clock.now();
+        match self.load_session_raw(realm_id, session.id()) {
+            Ok(Some(stored)) if stored.is_valid(now) && !stored.is_policy_expired(now) => {
+                self.session_cache_fill(realm_id, &Arc::new(stored), gen_before_read);
+            }
+            _ => self.session_cache_invalidate(realm_id, session.id()),
         }
-        let key = (realm_id.clone(), session.id().clone());
-        let val = Arc::new(session.clone());
-        self.session_cache.rcu(|map| {
-            let mut m = HashMap::clone(map);
-            m.insert(key.clone(), Arc::clone(&val));
-            m
-        });
     }
 
     /// Cache-miss fill of a session read from storage, discarded if any
@@ -4361,6 +4425,10 @@ impl EmbeddedIdentityEngine {
 
     /// Evicts a policy-expired session (A-18). Marks revoked, evicts from
     /// cache, bumps SV, and emits `SessionEvicted` audit.
+    ///
+    /// Does not take the session row lock: `refresh_session` calls it while
+    /// holding that lock, and the write it makes is a revocation, which a
+    /// concurrent writer holding the lock can only reinforce.
     fn evict_session_by_policy(
         &self,
         realm_id: &RealmId,
@@ -5113,26 +5181,40 @@ impl EmbeddedIdentityEngine {
     /// unconditionally. It is already paying for an Ed25519 verify, so two
     /// rows cost it nothing worth debouncing, and it means a token this engine
     /// has never seen is always judged against fresh epochs.
+    ///
+    /// The control epoch is global and has one window. The signing-key epoch
+    /// is per realm and has one window per realm (`realm_epoch_due`): with a single shared window only the realm of the
+    /// winning request was reconciled, and a busy realm could keep a quiet
+    /// realm's revoked key trusted indefinitely (audit GA 2026-09-28 M5).
     fn sync_epochs_debounced(&self, realm_id: &RealmId) {
         let now = self.clock.now().as_micros();
-        let due = self.epoch_sync_after.load(Ordering::Acquire);
-        if now < due {
-            return;
+        if Self::claim_window(&self.epoch_sync_after, now) {
+            self.sync_control_epoch();
         }
-        if self
-            .epoch_sync_after
-            .compare_exchange(
-                due,
-                now.saturating_add(EPOCH_SYNC_INTERVAL_MICROS),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return;
+        if self.claim_realm_window(realm_id, now) {
+            self.sync_realm_key_epoch(realm_id);
         }
-        self.sync_control_epoch();
-        self.sync_realm_key_epoch(realm_id);
+    }
+
+    /// Claims the debounce window `due` for this call if it has elapsed.
+    /// Returns `true` for exactly one caller per window.
+    fn claim_window(due_at: &AtomicI64, now: i64) -> bool {
+        let due = due_at.load(Ordering::Acquire);
+        now >= due
+            && due_at
+                .compare_exchange(
+                    due,
+                    now.saturating_add(EPOCH_SYNC_INTERVAL_MICROS),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+    }
+
+    /// Claims `realm_id`'s signing-key debounce window for this call if it
+    /// has elapsed.
+    fn claim_realm_window(&self, realm_id: &RealmId, now: i64) -> bool {
+        Self::claim_window(&self.realm_epoch_due[realm_epoch_window(realm_id)], now)
     }
 
     /// Signals the control-cache reloader when the persisted control epoch is
@@ -5208,6 +5290,14 @@ impl EmbeddedIdentityEngine {
     /// would silently no-op in production.
     fn sync_realm_key_epoch(&self, realm_id: &RealmId) {
         let persisted = self.read_persisted_key_epoch(realm_id);
+        self.observe_realm_key_epoch(realm_id, persisted);
+    }
+
+    /// Invalidates `realm_id`'s signing-key caches when `persisted` — its
+    /// signing-key epoch as storage holds it — is ahead of the one this node
+    /// last acted on. In-memory only, so the Raft observer can call it with a
+    /// replicated row's value (audit GA 2026-09-28 M5).
+    fn observe_realm_key_epoch(&self, realm_id: &RealmId, persisted: u64) {
         let local = self.realm_key_epoch.get(realm_id).unwrap_or(0);
         if persisted <= local {
             return;
@@ -5719,6 +5809,19 @@ impl EmbeddedIdentityEngine {
     /// presented (audit 2026-08-28 §4.3#4).
     fn code_exchange_lock(&self, code_hash: &str) -> advisory_lock::AdvisoryLock<'_> {
         advisory_lock::AdvisoryLock::acquire(&self.code_exchange_locks, code_hash)
+    }
+
+    /// Returns the advisory lock serialising read-modify-writes of one
+    /// session row (see the `session_row_locks` field).
+    ///
+    /// Not reentrant. The entry is reclaimed when the last holder drops it.
+    fn session_row_lock(
+        &self,
+        realm_id: &RealmId,
+        session_id: &SessionId,
+    ) -> advisory_lock::AdvisoryLock<'_> {
+        let key = format!("{}:{}", realm_id.as_uuid(), session_id.as_uuid());
+        advisory_lock::AdvisoryLock::acquire(&self.session_row_locks, &key)
     }
 
     /// Returns the per-`(realm_id, fid)` advisory lock serializing grant-family
@@ -8660,12 +8763,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
-        let mut session = self
-            .load_session_raw(realm_id, session_id)?
-            .ok_or(IdentityError::SessionNotFound)?;
-
-        session.revoke();
-        self.persist_session(realm_id, &session)?;
+        let session = {
+            // Serialise the row's read-modify-write against a racing refresh
+            // (audit GA 2026-09-28 B7). Released before the grant-family
+            // cascade below, which takes the family locks a refresh holds
+            // while it waits for this one.
+            let row_lock = self.session_row_lock(realm_id, session_id);
+            // INVARIANT: guard held only across the sync load + revoke + persist; no .await in scope.
+            let _row = row_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut session = self
+                .load_session_raw(realm_id, session_id)?
+                .ok_or(IdentityError::SessionNotFound)?;
+            session.revoke();
+            self.persist_session(realm_id, &session)?;
+            session
+        };
 
         // Cascade: revoke all refresh-token grant families issued under this session.
         //
@@ -8747,6 +8861,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         session_id: &SessionId,
     ) -> Result<Session, IdentityError> {
+        // Serialise the row's read-modify-write against a racing revocation:
+        // a refresh that loaded the live row used to write it back un-revoked
+        // after the revocation's write (audit GA 2026-09-28 B7).
+        let row_lock = self.session_row_lock(realm_id, session_id);
+        // INVARIANT: guard held only across the sync load + check + persist; no .await in scope.
+        let row = row_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut session = self
             .load_session_raw(realm_id, session_id)?
             .ok_or(IdentityError::SessionNotFound)?;
@@ -8762,6 +8884,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         session.refresh(now, self.config.session.ttl_micros);
         self.persist_session(realm_id, &session)?;
+        drop(row);
 
         self.record_audit(
             realm_id,
@@ -13649,6 +13772,103 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         })
     }
 
+    fn export_revocations(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<RevocationExport>, IdentityError> {
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        let mut out = Vec::new();
+        let scan = |prefix: Vec<u8>| -> Result<Vec<(String, Vec<u8>)>, IdentityError> {
+            let end = keys::prefix_end(&prefix);
+            Ok(self
+                .storage
+                .scan(realm_id, &prefix, &end)
+                .map_err(Self::storage_err)?
+                .into_iter()
+                .map(|e| {
+                    let id = String::from_utf8_lossy(e.key.get(prefix.len()..).unwrap_or(&[]))
+                        .into_owned();
+                    (id, e.value)
+                })
+                .collect())
+        };
+        for (jti, value) in scan(keys::revoked_jti_scan_prefix())? {
+            let exp = control::decode_revoked_jti_expiry(&value);
+            if exp != i64::MAX && now_secs >= exp {
+                continue;
+            }
+            out.push(RevocationExport::Jti {
+                jti,
+                exp: (exp != i64::MAX).then_some(exp),
+            });
+        }
+        for (jkt, _) in scan(keys::blocked_dpop_jkt_scan_prefix())? {
+            out.push(RevocationExport::DpopJkt { jkt });
+        }
+        for (jti, _) in scan(keys::aat_revoked_jti_scan_prefix())? {
+            out.push(RevocationExport::AatJti { jti });
+        }
+        Ok(out)
+    }
+
+    fn import_revocation(
+        &self,
+        realm_id: &RealmId,
+        revocation: &RevocationExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        /// A JTI or thumbprint longer than this is not one Hearth wrote.
+        const MAX_ID_LEN: usize = 512;
+        let (key, id) = match revocation {
+            RevocationExport::Jti { jti, .. } => (keys::encode_revoked_jti(jti), jti),
+            RevocationExport::DpopJkt { jkt } => (keys::encode_blocked_dpop_jkt(jkt), jkt),
+            RevocationExport::AatJti { jti } => (keys::encode_aat_revoked_jti(jti), jti),
+        };
+        if id.is_empty() || id.len() > MAX_ID_LEN {
+            return Err(IdentityError::InvalidInput {
+                reason: "revocation identifier is empty or too long".to_string(),
+            });
+        }
+        if let RevocationExport::Jti { exp: Some(exp), .. } = revocation {
+            if self.clock.now().as_micros() / 1_000_000 >= *exp {
+                // The token it names has expired; the row would be swept.
+                return Ok(ImportOutcome::Skipped);
+            }
+        }
+        let exists = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        // Each arm writes the row exactly as the live revocation path does and
+        // applies it to this node's control caches (and, through the control
+        // epoch, every other node's).
+        match revocation {
+            RevocationExport::Jti { jti, exp } => {
+                let value = exp.map_or_else(|| b"1".to_vec(), |e| e.to_le_bytes().to_vec());
+                self.storage
+                    .put(realm_id, &key, &value)
+                    .map_err(Self::storage_err)?;
+                self.insert_revoked_jti_cache(realm_id, jti, exp.unwrap_or(i64::MAX));
+            }
+            RevocationExport::DpopJkt { jkt } => self.block_dpop_jkt_inner(realm_id, jkt)?,
+            RevocationExport::AatJti { .. } => {
+                // AAT revocations are read from storage at validation time.
+                self.storage
+                    .put(realm_id, &key, b"1")
+                    .map_err(Self::storage_err)?;
+            }
+        }
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
     fn export_retiring_signing_keys(
         &self,
         realm_id: &RealmId,
@@ -13704,12 +13924,21 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
         // Refuse material that does not load, rather than storing a blob that
         // `load_realm_retiring_keys` will silently drop at validation time.
-        let _usable = SigningKey::from_pkcs8(&key.pkcs8)?;
+        let usable = SigningKey::from_pkcs8(&key.pkcs8)?;
+        // The archive's `key_id` is only a label. Checked against the kid the
+        // material produces, a purged key cannot be smuggled back in under
+        // another label, and a key is never stored under a kid its tokens do
+        // not carry (PR #358 follow-up).
+        if usable.key_id() != key.key_id {
+            return Err(IdentityError::InvalidInput {
+                reason: "retiring signing key's key_id does not match its key material".to_string(),
+            });
+        }
         // A key this realm recorded retired and that no longer has a retiring
         // row was purged — by a revoking rotation, the remedy for a leaked
         // key. An archive made inside its grace window still carries it;
         // reinstating it would let it verify tokens again.
-        self.refuse_purged_retiring_key(realm_id, KeyFamily::Ed25519, &key.key_id)?;
+        self.refuse_purged_retiring_key(realm_id, KeyFamily::Ed25519, usable.key_id())?;
         let sys_realm = keys::system_realm_id();
         let storage_key = keys::encode_realm_retiring_key(realm_id, key.deadline_secs, &key.key_id);
         let exists = self
@@ -18249,6 +18478,8 @@ mod tests {
     mod import_client_rs256_key;
     /// A PAR `request_uri` is consumed exactly once under concurrency.
     mod par_consume_race;
+    /// A retiring key is checked by the kid its material produces, not its label.
+    mod retiring_key_import_kid;
     /// Concurrent revocations survive a racing control-cache reload.
     mod revocation_reload_races;
     /// A signing-key rotation lands in one atomic storage batch.
@@ -18257,6 +18488,8 @@ mod tests {
     mod secret_compare;
     /// A session-cache fill never resurrects a session revoked while it ran.
     mod session_fill_race;
+    /// A session revocation is never undone by a racing refresh or create.
+    mod session_rmw_race;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.
