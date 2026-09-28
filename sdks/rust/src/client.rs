@@ -341,10 +341,7 @@ impl HearthClient {
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
                 .unwrap_or_default();
-            return Err(HearthError::RequiredActionError {
-                required_actions,
-                redirect_uri: None,
-            });
+            return Err(HearthError::RequiredActionError { required_actions });
         }
 
         Ok(claims)

@@ -6,7 +6,7 @@
 //!   completes the round-trip. Outcome decides what happens next:
 //!   existing-link → new Hearth session; JIT → new user + session;
 //!   ConfirmLink → HMAC-bound cookie + redirect to confirm page.
-//! * `GET  /ui/realms/{realm}/federation/confirm-link?ticket={t}` — renders a
+//! * `GET  /ui/realms/{realm}/federation/confirm-link` — renders a
 //!   page asking the user to enter their local password. The unscoped
 //!   `/ui/federation/confirm-link` twin resolves the default realm and exists
 //!   only for single-realm deployments (22.19).
@@ -27,7 +27,7 @@ use axum::Form;
 use serde::Deserialize;
 
 use crate::audit::{AuditAction, CreateAuditEvent};
-use crate::core::{IdpId, RealmId, Timestamp, UserId};
+use crate::core::{FormSecret, IdpId, RealmId, Timestamp, UserId};
 use crate::identity::federation::{
     compute_confirm_ticket_mac, compute_federation_state_mac, verify_confirm_ticket_mac,
     verify_federation_state_mac, FederationOutcome, FederationService,
@@ -538,12 +538,12 @@ pub(super) fn complete_federation_outcome(
                 header::HeaderValue::from_str(&cookie)
                     .unwrap_or_else(|_| header::HeaderValue::from_static("")),
             );
+            // The ticket travels only in the cookie above, never in the
+            // redirect URL, where history, `Referer` and proxy logs keep it
+            // (GA audit L18).
             (
                 resp_headers,
-                Redirect::to(&format!(
-                    "/ui/realms/{realm_name}/federation/confirm-link?ticket={}",
-                    ticket.ticket
-                )),
+                Redirect::to(&format!("/ui/realms/{realm_name}/federation/confirm-link")),
             )
                 .into_response()
         }
@@ -553,16 +553,11 @@ pub(super) fn complete_federation_outcome(
 // ------ confirm-link flow ------
 
 #[derive(Debug, Deserialize)]
-pub struct ConfirmLinkQuery {
-    pub ticket: String,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct ConfirmLinkForm {
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
     pub ticket: String,
-    pub password: String,
+    pub password: FormSecret,
 }
 
 #[derive(Template)]
@@ -590,7 +585,10 @@ struct ConfirmLinkPage {
     inline_theme_css: Option<String>,
 }
 
-/// `GET /ui/realms/{realm}/federation/confirm-link?ticket=...`
+/// `GET /ui/realms/{realm}/federation/confirm-link`
+///
+/// The ticket is read from the HMAC-bound confirm cookie the callback set;
+/// the redirect that lands here carries none (GA audit L18).
 ///
 /// 22.19 (audit 2026-08-28 §4.22#11): the confirm-to-link ticket is stored
 /// under the realm the federated login **started** in. The bare route below
@@ -601,34 +599,33 @@ struct ConfirmLinkPage {
 pub async fn confirm_link_page_scoped(
     State(state): State<Arc<WebState>>,
     Path(realm_name): Path<String>,
-    Query(q): Query<ConfirmLinkQuery>,
     headers: HeaderMap,
 ) -> Response {
-    confirm_link_page_impl(state, Some(realm_name), q, headers).await
+    confirm_link_page_impl(state, Some(realm_name), headers).await
 }
 
-/// `GET /ui/federation/confirm-link?ticket=...` (bare — resolves default realm).
-pub async fn confirm_link_page(
-    State(state): State<Arc<WebState>>,
-    Query(q): Query<ConfirmLinkQuery>,
-    headers: HeaderMap,
-) -> Response {
-    confirm_link_page_impl(state, None, q, headers).await
+/// `GET /ui/federation/confirm-link` (bare — resolves default realm).
+pub async fn confirm_link_page(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    confirm_link_page_impl(state, None, headers).await
 }
 
 async fn confirm_link_page_impl(
     state: Arc<WebState>,
     realm_name: Option<String>,
-    q: ConfirmLinkQuery,
     headers: HeaderMap,
 ) -> Response {
-    // Non-destructive read + cookie MAC check.
+    // Non-destructive read + cookie MAC check. The cookie is
+    // `{ticket}.{mac}`; the MAC binds the ticket to its user and is verified
+    // below once the ticket record names that user.
     let Some(cookie_val) = auth::cookie_value_from_headers(&headers, CONFIRM_LINK_COOKIE) else {
         return Redirect::to("/ui/login").into_response();
     };
-    let Some(mac) = confirm_cookie_mac_for(cookie_val, &q.ticket) else {
+    let Some((ticket, mac)) = cookie_val.rsplit_once('.') else {
         return Redirect::to("/ui/login").into_response();
     };
+    if ticket.is_empty() || mac.is_empty() {
+        return Redirect::to("/ui/login").into_response();
+    }
     // We don't know user_id yet (peek without consuming the engine
     // ticket). Peek by scanning — we want the user_id for MAC
     // verification, so read-through the engine.
@@ -638,8 +635,9 @@ async fn confirm_link_page_impl(
     };
     // Peek without consuming: the POST step takes the ticket. (This used to
     // take it and re-put it, which a replicated single-use claim — G4 —
-    // rightly refuses to take a second time.)
-    let ticket_rec = match state.identity.get_confirm_link_ticket(&realm_id, &q.ticket) {
+    // rightly refuses to take a second time.) The ticket comes from the
+    // confirm cookie, never the URL (GA audit L18).
+    let ticket_rec = match state.identity.get_confirm_link_ticket(&realm_id, ticket) {
         Ok(r) => r,
         Err(_) => return Redirect::to("/ui/login").into_response(),
     };
@@ -772,7 +770,7 @@ async fn confirm_link_submit_impl(
     // pool that bounds total hashing work and sheds 503 on overload
     // (audit 2026-08-28 §4.17#2 class; HEA-1891/F3). This callsite was the last
     // ungated `verify_password`.
-    let cleartext = crate::identity::CleartextPassword::from_string(form.password);
+    let cleartext = crate::identity::CleartextPassword::new(form.password.as_bytes().to_vec());
     let realm_for_verify = realm_id.clone();
     let user_for_verify = ticket_rec.user_id.clone();
     let identity = state.identity.clone();
@@ -1117,5 +1115,17 @@ mod tests {
     #[test]
     fn confirm_cookie_without_a_mac_separator_is_rejected() {
         assert_eq!(confirm_cookie_mac_for(TICKET, TICKET), None);
+    }
+
+    /// The link-confirmation password is wiped on drop and never printed by
+    /// `Debug` (GA audit L20).
+    #[test]
+    fn confirm_link_form_password_is_zeroized_and_redacted() {
+        let form: ConfirmLinkForm =
+            serde_urlencoded::from_str("ticket=t&password=CANARY-pw").expect("form parses");
+        crate::core::secrets::assert_zeroize_on_drop(&form.password);
+        assert_eq!(form.password.expose(), "CANARY-pw");
+        let dbg = format!("{form:?}");
+        assert!(!dbg.contains("CANARY"), "Debug leaked a secret: {dbg}");
     }
 }

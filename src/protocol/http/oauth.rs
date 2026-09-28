@@ -11,7 +11,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::audit::CreateAuditEvent;
-use crate::core::{ClientId, RealmId, UserId};
+use crate::core::{ClientId, FormSecret, RealmId, UserId};
 use crate::identity::{JwtBearerRequest, StepUpMfaGrantRequest};
 use crate::protocol::client_info::{extract_client_ip, PeerAddr};
 use crate::protocol::convert::oauth::{
@@ -398,48 +398,48 @@ struct HttpTokenRequest {
     #[serde(default)]
     grant_type: Option<String>,
     #[serde(default)]
-    code: Option<String>,
+    code: Option<FormSecret>,
     #[serde(default)]
     redirect_uri: Option<String>,
     #[serde(default)]
-    code_verifier: Option<String>,
+    code_verifier: Option<FormSecret>,
     #[serde(default)]
-    refresh_token: Option<String>,
+    refresh_token: Option<FormSecret>,
     // Client credentials fields
     #[serde(default)]
-    client_secret: Option<String>,
+    client_secret: Option<FormSecret>,
     #[serde(default)]
     scope: Option<String>,
     // Device code field
     #[serde(default)]
-    device_code: Option<String>,
+    device_code: Option<FormSecret>,
     // ROPC (password grant) fields — RFC 6749 §4.3
     #[serde(default)]
     username: Option<String>,
     #[serde(default)]
-    password: Option<String>,
+    password: Option<FormSecret>,
     // Step-up MFA completion (HEA-836)
     #[serde(default)]
-    mfa_code: Option<String>,
+    mfa_code: Option<FormSecret>,
     // JWT Bearer assertion (RFC 7523)
     #[serde(default)]
-    assertion: Option<String>,
+    assertion: Option<FormSecret>,
     // private_key_jwt client authentication (RFC 7523 §2.2)
     #[serde(default)]
     client_assertion_type: Option<String>,
     #[serde(default)]
-    client_assertion: Option<String>,
+    client_assertion: Option<FormSecret>,
     // Magic-link grant (`urn:hearth:grant-type:magic-link`) — the opaque
     // single-use token from the emailed link (audit 2026-08-28 §4.24#6).
     #[serde(default)]
-    token: Option<String>,
+    token: Option<FormSecret>,
     // RFC 8693 Token Exchange fields
     #[serde(default)]
-    subject_token: Option<String>,
+    subject_token: Option<FormSecret>,
     #[serde(default)]
     subject_token_type: Option<String>,
     #[serde(default)]
-    actor_token: Option<String>,
+    actor_token: Option<FormSecret>,
     #[serde(default)]
     actor_token_type: Option<String>,
     #[serde(default)]
@@ -454,27 +454,26 @@ struct HttpTokenRequest {
 /// secrets, passwords and assertions are redacted (GA audit L20).
 impl std::fmt::Debug for HttpTokenRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let redact = |v: &Option<String>| v.as_ref().map(|_| "<redacted>");
         f.debug_struct("HttpTokenRequest")
             .field("client_id", &self.client_id)
             .field("grant_type", &self.grant_type)
-            .field("code", &redact(&self.code))
+            .field("code", &self.code)
             .field("redirect_uri", &self.redirect_uri)
-            .field("code_verifier", &redact(&self.code_verifier))
-            .field("refresh_token", &redact(&self.refresh_token))
-            .field("client_secret", &redact(&self.client_secret))
+            .field("code_verifier", &self.code_verifier)
+            .field("refresh_token", &self.refresh_token)
+            .field("client_secret", &self.client_secret)
             .field("scope", &self.scope)
-            .field("device_code", &redact(&self.device_code))
+            .field("device_code", &self.device_code)
             .field("username", &self.username)
-            .field("password", &redact(&self.password))
-            .field("mfa_code", &redact(&self.mfa_code))
-            .field("assertion", &redact(&self.assertion))
+            .field("password", &self.password)
+            .field("mfa_code", &self.mfa_code)
+            .field("assertion", &self.assertion)
             .field("client_assertion_type", &self.client_assertion_type)
-            .field("client_assertion", &redact(&self.client_assertion))
-            .field("token", &redact(&self.token))
-            .field("subject_token", &redact(&self.subject_token))
+            .field("client_assertion", &self.client_assertion)
+            .field("token", &self.token)
+            .field("subject_token", &self.subject_token)
             .field("subject_token_type", &self.subject_token_type)
-            .field("actor_token", &redact(&self.actor_token))
+            .field("actor_token", &self.actor_token)
             .field("actor_token_type", &self.actor_token_type)
             .field("requested_token_type", &self.requested_token_type)
             .field("resource", &self.resource)
@@ -491,17 +490,17 @@ impl std::fmt::Debug for HttpTokenRequest {
 /// §2.2) — the only method a secretless `private_key_jwt` client has.
 #[derive(Debug, Deserialize)]
 struct HttpRevocationBody {
-    token: String,
+    token: FormSecret,
     #[serde(default)]
     token_type_hint: Option<String>,
     #[serde(default)]
     client_id: Option<String>,
     #[serde(default)]
-    client_secret: Option<String>,
+    client_secret: Option<FormSecret>,
     #[serde(default)]
     client_assertion_type: Option<String>,
     #[serde(default)]
-    client_assertion: Option<String>,
+    client_assertion: Option<FormSecret>,
 }
 
 /// HTTP request body for token introspection (RFC 7662).
@@ -512,17 +511,17 @@ struct HttpRevocationBody {
 /// Only confidential clients are served (RFC 7662 §2.1, task 26.43).
 #[derive(Debug, Deserialize)]
 struct HttpIntrospectionBody {
-    token: String,
+    token: FormSecret,
     #[serde(default)]
     token_type_hint: Option<String>,
     #[serde(default)]
     client_id: Option<String>,
     #[serde(default)]
-    client_secret: Option<String>,
+    client_secret: Option<FormSecret>,
     #[serde(default)]
     client_assertion_type: Option<String>,
     #[serde(default)]
-    client_assertion: Option<String>,
+    client_assertion: Option<FormSecret>,
 }
 
 /// Parses HTTP Basic Auth credentials from the `Authorization` header.
@@ -2283,13 +2282,13 @@ struct HttpParRequest {
     client_id: String,
     /// `client_secret_post` (RFC 6749 §2.3.1).
     #[serde(default)]
-    client_secret: Option<String>,
+    client_secret: Option<FormSecret>,
     /// `private_key_jwt` (RFC 7523 §2.2).
     #[serde(default)]
     client_assertion_type: Option<String>,
     /// `private_key_jwt` (RFC 7523 §2.2).
     #[serde(default)]
-    client_assertion: Option<String>,
+    client_assertion: Option<FormSecret>,
     redirect_uri: String,
     #[serde(default)]
     scope: String,
@@ -2721,9 +2720,9 @@ async fn token_exchange_impl(
 
             let proto_req = pb::TokenExchangeRequest {
                 client_id: body.client_id,
-                code,
+                code: code.expose().to_string(),
                 redirect_uri,
-                code_verifier: body.code_verifier,
+                code_verifier: body.code_verifier.as_deref().map(str::to_string),
             };
 
             let mut request = match proto_token_exchange_to_domain(&proto_req) {
@@ -2738,7 +2737,7 @@ async fn token_exchange_impl(
             };
             request.dpop_jkt = dpop_jkt.clone();
             request.client_assertion_type = body.client_assertion_type;
-            request.client_assertion = body.client_assertion;
+            request.client_assertion = body.client_assertion.as_deref().map(str::to_string);
 
             match state
                 .identity
@@ -2867,7 +2866,7 @@ async fn token_exchange_impl(
             };
             request.dpop_jkt = dpop_jkt.clone();
             request.client_assertion_type = body.client_assertion_type;
-            request.client_assertion = body.client_assertion;
+            request.client_assertion = body.client_assertion.as_deref().map(str::to_string);
 
             let realm_str = realm_id.as_uuid().to_string();
             match crate::identity::client_auth::client_credentials_token(
@@ -2977,8 +2976,8 @@ async fn token_exchange_impl(
             };
             let request = StepUpMfaGrantRequest {
                 email,
-                password,
-                mfa_code,
+                password: password.expose().to_string(),
+                mfa_code: mfa_code.expose().to_string(),
                 scope: body.scope,
                 client_ip: Some(client_ip.clone()),
                 user_agent: headers
@@ -3054,7 +3053,7 @@ async fn token_exchange_impl(
             };
             let request = JwtBearerRequest {
                 client_id: oauth_client_id,
-                assertion,
+                assertion: assertion.expose().to_string(),
                 scope: body.scope,
                 dpop_jkt: dpop_jkt.clone(),
             };
@@ -3112,11 +3111,11 @@ async fn token_exchange_impl(
             };
             let request = crate::identity::Rfc8693Request {
                 client_id: authenticated_client_id,
-                subject_token,
+                subject_token: subject_token.expose().to_string(),
                 subject_token_type: body
                     .subject_token_type
                     .unwrap_or_else(|| "urn:ietf:params:oauth:token-type:access_token".to_string()),
-                actor_token: body.actor_token,
+                actor_token: body.actor_token.as_deref().map(str::to_string),
                 actor_token_type: body.actor_token_type,
                 requested_token_type: body.requested_token_type,
                 scope: body.scope,
@@ -3228,7 +3227,7 @@ async fn token_revocation(
     // RFC 7009 §2.1: only a token issued to the authenticated client is
     // revoked; any other token is a silent 200 no-op (task 26.43 follow-up).
     let request = crate::identity::TokenRevocationRequest {
-        token: body.token,
+        token: body.token.expose().to_string(),
         token_type_hint: body.token_type_hint,
         revoking_client_id: Some(client_id.clone()),
     };
@@ -3284,7 +3283,7 @@ async fn token_introspection(
     };
 
     let request = crate::identity::TokenIntrospectionRequest {
-        token: body.token,
+        token: body.token.expose().to_string(),
         token_type_hint: body.token_type_hint,
         introspecting_client_id: Some(client_id.clone()),
     };
@@ -3967,9 +3966,9 @@ async fn realm_token_exchange(
             };
             let proto_req = pb::TokenExchangeRequest {
                 client_id: body.client_id,
-                code,
+                code: code.expose().to_string(),
                 redirect_uri,
-                code_verifier: body.code_verifier,
+                code_verifier: body.code_verifier.as_deref().map(str::to_string),
             };
             let mut request = match proto_token_exchange_to_domain(&proto_req) {
                 Ok(r) => r,
@@ -3983,7 +3982,7 @@ async fn realm_token_exchange(
             };
             request.dpop_jkt = dpop_jkt.clone();
             request.client_assertion_type = body.client_assertion_type;
-            request.client_assertion = body.client_assertion;
+            request.client_assertion = body.client_assertion.as_deref().map(str::to_string);
             match state
                 .identity
                 .exchange_authorization_code(&realm_id, &request)
@@ -4085,7 +4084,7 @@ async fn realm_token_exchange(
             };
             request.dpop_jkt = dpop_jkt.clone();
             request.client_assertion_type = body.client_assertion_type;
-            request.client_assertion = body.client_assertion;
+            request.client_assertion = body.client_assertion.as_deref().map(str::to_string);
             match crate::identity::client_auth::client_credentials_token(
                 &state.identity,
                 &realm_id,
@@ -4171,8 +4170,8 @@ async fn realm_token_exchange(
             };
             let request = StepUpMfaGrantRequest {
                 email,
-                password,
-                mfa_code,
+                password: password.expose().to_string(),
+                mfa_code: mfa_code.expose().to_string(),
                 scope: body.scope,
                 client_ip: Some(client_ip.clone()),
                 user_agent: headers
@@ -4240,7 +4239,7 @@ async fn realm_token_exchange(
             };
             let request = JwtBearerRequest {
                 client_id: oauth_client_id,
-                assertion,
+                assertion: assertion.expose().to_string(),
                 scope: body.scope,
                 dpop_jkt: dpop_jkt.clone(),
             };
@@ -4302,11 +4301,11 @@ async fn realm_token_exchange(
             };
             let request = crate::identity::Rfc8693Request {
                 client_id: authenticated_client_id,
-                subject_token,
+                subject_token: subject_token.expose().to_string(),
                 subject_token_type: body
                     .subject_token_type
                     .unwrap_or_else(|| "urn:ietf:params:oauth:token-type:access_token".to_string()),
-                actor_token: body.actor_token,
+                actor_token: body.actor_token.as_deref().map(str::to_string),
                 actor_token_type: body.actor_token_type,
                 requested_token_type: body.requested_token_type,
                 scope: body.scope,
@@ -4424,7 +4423,7 @@ async fn realm_token_revocation(
     // RFC 7009 §2.1: only a token issued to the authenticated client is
     // revoked; any other token is a silent 200 no-op (task 26.43 follow-up).
     let request = crate::identity::TokenRevocationRequest {
-        token: body.token,
+        token: body.token.expose().to_string(),
         token_type_hint: body.token_type_hint,
         revoking_client_id: Some(client_id.clone()),
     };
@@ -4480,7 +4479,7 @@ async fn realm_token_introspection(
     };
 
     let request = crate::identity::TokenIntrospectionRequest {
-        token: body.token,
+        token: body.token.expose().to_string(),
         token_type_hint: body.token_type_hint,
         introspecting_client_id: Some(client_id.clone()),
     };
@@ -4846,5 +4845,95 @@ async fn realm_register_client_dynamic(
             (StatusCode::CREATED, Json(resp)).into_response()
         }
         Err(e) => dcr_engine_refusal(&e),
+    }
+}
+
+/// Tokens, client secrets, passwords and assertions in OAuth request bodies
+/// are wiped on drop and never printed by `Debug` (GA audit L20).
+#[cfg(test)]
+mod secret_field_tests {
+    use super::*;
+    use crate::core::secrets::assert_zeroize_on_drop;
+
+    const CLIENT_AUTH: &str = "client_id=c&client_secret=CANARY-sec\
+         &client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+         &client_assertion=CANARY-asr";
+
+    fn assert_redacted(dbg: &str) {
+        assert!(!dbg.contains("CANARY"), "Debug leaked a secret: {dbg}");
+    }
+
+    #[test]
+    fn revocation_body_is_zeroized_and_redacted() {
+        let body: HttpRevocationBody =
+            serde_urlencoded::from_str(&format!("token=CANARY-tok&{CLIENT_AUTH}"))
+                .expect("form parses");
+        assert_zeroize_on_drop(&body.token);
+        assert_zeroize_on_drop(&body.client_secret);
+        assert_zeroize_on_drop(&body.client_assertion);
+        assert_eq!(body.token.expose(), "CANARY-tok");
+        let dbg = format!("{body:?}");
+        assert_redacted(&dbg);
+        assert!(
+            dbg.contains("client_id: Some(\"c\")"),
+            "shape still prints: {dbg}"
+        );
+    }
+
+    #[test]
+    fn introspection_body_is_zeroized_and_redacted() {
+        let body: HttpIntrospectionBody =
+            serde_urlencoded::from_str(&format!("token=CANARY-tok&{CLIENT_AUTH}"))
+                .expect("form parses");
+        assert_zeroize_on_drop(&body.token);
+        assert_zeroize_on_drop(&body.client_secret);
+        assert_zeroize_on_drop(&body.client_assertion);
+        assert_eq!(body.token.expose(), "CANARY-tok");
+        assert_redacted(&format!("{body:?}"));
+    }
+
+    #[test]
+    fn token_request_credentials_are_zeroized_and_redacted() {
+        let body: HttpTokenRequest = serde_urlencoded::from_str(&format!(
+            "grant_type=password&code=CANARY-code&code_verifier=CANARY-ver\
+             &refresh_token=CANARY-rt&device_code=CANARY-dc&username=u&password=CANARY-pw\
+             &mfa_code=CANARY-mfa&assertion=CANARY-jwt&token=CANARY-ml\
+             &subject_token=CANARY-st&actor_token=CANARY-at&{CLIENT_AUTH}"
+        ))
+        .expect("form parses");
+        assert_zeroize_on_drop(&body.code);
+        assert_zeroize_on_drop(&body.code_verifier);
+        assert_zeroize_on_drop(&body.refresh_token);
+        assert_zeroize_on_drop(&body.client_secret);
+        assert_zeroize_on_drop(&body.device_code);
+        assert_zeroize_on_drop(&body.password);
+        assert_zeroize_on_drop(&body.mfa_code);
+        assert_zeroize_on_drop(&body.assertion);
+        assert_zeroize_on_drop(&body.client_assertion);
+        assert_zeroize_on_drop(&body.token);
+        assert_zeroize_on_drop(&body.subject_token);
+        assert_zeroize_on_drop(&body.actor_token);
+        assert_eq!(
+            body.password.as_ref().map(crate::core::FormSecret::expose),
+            Some("CANARY-pw")
+        );
+        assert_redacted(&format!("{body:?}"));
+    }
+
+    #[test]
+    fn par_request_client_credentials_are_zeroized() {
+        // `HttpParRequest` implements no `Debug`; only the wipe needs pinning.
+        let body: HttpParRequest = serde_urlencoded::from_str(&format!(
+            "redirect_uri=https%3A%2F%2Fapp.test%2Fcb&{CLIENT_AUTH}"
+        ))
+        .expect("form parses");
+        assert_zeroize_on_drop(&body.client_secret);
+        assert_zeroize_on_drop(&body.client_assertion);
+        assert_eq!(
+            body.client_secret
+                .as_ref()
+                .map(crate::core::FormSecret::expose),
+            Some("CANARY-sec")
+        );
     }
 }

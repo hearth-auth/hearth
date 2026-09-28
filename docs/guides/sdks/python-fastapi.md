@@ -137,7 +137,7 @@ auth = HearthFastAPIDep(
 
 ## Required-action tokens
 
-If a user has a pending required action (e.g. MFA enrollment, email verification), their token carries `token_type: "required_action"`. The FastAPI adapter automatically rejects these with `HTTP 401` and a `WWW-Authenticate: Bearer realm="hearth", error="required_action"` header. No extra handling is needed in route handlers.
+Hearth never issues a token to a user with pending required actions (e.g. email verification, MFA enrollment): a browser login runs them at `/required-action/{ACTION}` before any code is issued, and a REST login answers `400 required_actions_pending`. As a defence, should a token with `token_type: "required_action"` ever be presented, the FastAPI adapter rejects it with `HTTP 401` and a `WWW-Authenticate: Bearer realm="hearth", error="required_action"` header. No extra handling is needed in route handlers.
 
 ## Configure from environment variables
 

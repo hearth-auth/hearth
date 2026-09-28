@@ -2432,6 +2432,14 @@ pub(crate) fn encode_consumed_otp(channel: &str, nonce: &str) -> Vec<u8> {
     encode_consumed("otp", &format!("{channel}:{nonce}"))
 }
 
+/// Single-use marker for the `UPDATE_PASSWORD` required action completed with
+/// one required-action session token, keyed by the token's SHA-256 hex.
+///
+/// Format: `consumed:ra-password:{sha256_hex}`
+pub(crate) fn encode_consumed_ra_password(token_hash: &str) -> Vec<u8> {
+    encode_consumed("ra-password", token_hash)
+}
+
 /// Scan prefix for every single-use redemption marker in a realm.
 pub(crate) fn consumed_marker_scan_prefix() -> Vec<u8> {
     CONSUMED_PREFIX.as_bytes().to_vec()

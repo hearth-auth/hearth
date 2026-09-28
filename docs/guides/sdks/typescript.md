@@ -337,8 +337,8 @@ try {
   const claims = await client.verifyToken(accessToken);
 } catch (err) {
   if (err instanceof RequiredActionError) {
-    // Token is valid but user must complete: err.requiredActions (string[])
-    // Redirect to err.redirectUri if present
+    // Defensive: Hearth issues no required-action token, but the SDK refuses
+    // one if presented. err.requiredActions (string[])
   } else if (err instanceof TokenExpiredError) {
     // 401 — ask client to refresh
   } else if (err instanceof TokenIssuerError) {

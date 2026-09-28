@@ -276,13 +276,39 @@ async fn password_mismatch_reset_rejected_before_consuming_a_kdf_permit() {
     let app = build_rig(true);
     let holder = saturate_shared_gate().await;
 
-    let body = "token=any-token&password=newpassword1&password_confirm=different";
-    let (status, headers) = post_form(&app, "/ui/reset-password", body).await;
+    // The token rides in the link-token cookie and the form carries its
+    // binding (GA audit L18). Both are valid here, so the request reaches the
+    // mismatch check rather than being refused as an invalid link.
+    let binding =
+        web::link_token::link_binding(&CookieSecret::from_bytes(COOKIE_SECRET), "any-token");
+    let body = format!("link_binding={binding}&password=newpassword1&password_confirm=different");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/reset-password")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", "hearth_link_token=any-token")
+                .body(Body::from(body))
+                .expect("build POST request"),
+        )
+        .await
+        .expect("send request");
+    let (status, headers) = (resp.status(), resp.headers().clone());
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    let html = String::from_utf8_lossy(&bytes);
 
     assert_ne!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
         "password-mismatch reset must be rejected pre-gate, not shed as 503 by the saturated gate"
+    );
+    assert!(
+        html.contains("Passwords do not match"),
+        "the reject must be the mismatch check itself, not an earlier refusal: {html}"
     );
     assert!(
         !headers.contains_key(axum::http::header::RETRY_AFTER),

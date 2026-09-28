@@ -25,6 +25,18 @@ use hearth::storage::{EmbeddedStorageEngine, StorageConfig};
 use tower::ServiceExt;
 
 const COOKIE_SECRET: [u8; 32] = [7u8; 32];
+
+/// The confirmation page's POST body for the stashed link `token`
+/// (GA audit L18).
+fn link_binding_body(token: &str) -> String {
+    format!(
+        "link_binding={}",
+        hearth::protocol::web::link_token::link_binding(
+            &CookieSecret::from_bytes(COOKIE_SECRET),
+            token
+        )
+    )
+}
 const PASSWORD: &str = "test-password-hearth";
 const PKCE_VERIFIER: &str = "dGVzdC12ZXJpZmllci10aGlzLWlzLTQzLWNoYXJhY3RlcnM";
 
@@ -451,13 +463,16 @@ async fn multiple_required_actions_sequential_completion() {
         .clone()
         .oneshot(
             Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/required-action/VERIFY_EMAIL/confirm?token={}",
-                    urlencode(&ve_token)
-                ))
-                .header(header::COOKIE, format!("hearth_ra_session={ra_token_1}"))
-                .body(Body::empty())
+                .method("POST")
+                .uri("/required-action/VERIFY_EMAIL/confirm")
+                // GA audit L18: the link's first GET moved the token into this
+                // cookie; only the confirmation page's POST spends it.
+                .header(
+                    header::COOKIE,
+                    format!("hearth_ra_session={ra_token_1}; hearth_link_token={ve_token}"),
+                )
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(link_binding_body(&ve_token)))
                 .expect("req"),
         )
         .await

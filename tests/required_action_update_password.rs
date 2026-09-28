@@ -966,3 +966,90 @@ async fn post_with_empty_current_password_is_rejected() {
         "an omitted current_password let the change through"
     );
 }
+
+// ── Single use (GA follow-up, found by G4) ──────────────────────────────────
+//
+// The RA session cookie lives 900 s and used to be accepted for any number of
+// UPDATE_PASSWORD submissions: each replay set the password again and resumed
+// the flow — a fresh authorization code or session — again. A completed
+// submission now spends the cookie; a refused one does not.
+
+fn update_body(current: &str, new: &str) -> String {
+    format!(
+        "current_password={}&new_password={}&confirm_password={}",
+        urlencode(current),
+        urlencode(new),
+        urlencode(new)
+    )
+}
+
+#[tokio::test]
+async fn a_second_submission_with_the_same_ra_cookie_is_refused() {
+    let rig = build_rig_default();
+    let email = "ra-replay@example.com";
+    let cookie = create_user_with_session(&rig, email);
+    let ra_token = obtain_ra_cookie(&rig, &cookie).await;
+    let first = "First-new-password-1!";
+    let second = "Second-new-password-2!";
+
+    let resp = post_update_password(&rig, &ra_token, None, update_body(PASSWORD, first)).await;
+    assert!(
+        resp.status().is_redirection(),
+        "the first submission completes, got {}",
+        resp.status()
+    );
+
+    // A replay — even one that knows the new current password — is refused
+    // and resumes nothing.
+    let replay = post_update_password(&rig, &ra_token, None, update_body(first, second)).await;
+    assert_eq!(
+        replay.status(),
+        StatusCode::BAD_REQUEST,
+        "a spent RA cookie must be refused"
+    );
+    assert!(location_of(&replay).is_none(), "a replay resumes no flow");
+    assert!(
+        password_still_matches(&rig, email, first),
+        "the replay must not have changed the password"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_submission_does_not_spend_the_ra_cookie() {
+    let rig = build_rig_default();
+    let email = "ra-retry@example.com";
+    let cookie = create_user_with_session(&rig, email);
+    let ra_token = obtain_ra_cookie(&rig, &cookie).await;
+
+    // Wrong current password: refused, cookie still live.
+    let refused = post_update_password(
+        &rig,
+        &ra_token,
+        None,
+        update_body("not-the-password", "Retry-new-password-1!"),
+    )
+    .await;
+    assert_eq!(
+        refused.status(),
+        StatusCode::OK,
+        "re-rendered with an error"
+    );
+
+    // Policy refusal (too short): refused, cookie still live.
+    let short = post_update_password(&rig, &ra_token, None, update_body(PASSWORD, "short")).await;
+    assert_eq!(short.status(), StatusCode::OK, "re-rendered with an error");
+
+    let ok = post_update_password(
+        &rig,
+        &ra_token,
+        None,
+        update_body(PASSWORD, "Retry-new-password-1!"),
+    )
+    .await;
+    assert!(
+        ok.status().is_redirection(),
+        "the corrected submission completes with the same cookie, got {}",
+        ok.status()
+    );
+    assert!(password_still_matches(&rig, email, "Retry-new-password-1!"));
+}

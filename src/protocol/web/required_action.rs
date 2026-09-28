@@ -29,13 +29,13 @@
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{Form, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
 use crate::audit::{AuditAction, CreateAuditEvent};
-use crate::core::{ClientId, RealmId, Timestamp, UserId};
+use crate::core::{ClientId, FormSecret, RealmId, Timestamp, UserId};
 use crate::identity::error::IdentityError;
 use crate::identity::ra_token::{self, OidcParams};
 use crate::identity::RequiredAction;
@@ -101,11 +101,11 @@ pub struct UpdatePasswordForm {
     /// is applied (audit §4.23#2, task 21.3) so that possession of the RA
     /// cookie alone is not enough to take over the account.
     #[serde(default)]
-    pub current_password: String,
+    pub current_password: FormSecret,
     #[serde(default)]
-    pub new_password: String,
+    pub new_password: FormSecret,
     #[serde(default)]
-    pub confirm_password: String,
+    pub confirm_password: FormSecret,
     /// CSRF double-submit token, matched against the `hearth_ui_csrf` cookie.
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
@@ -901,14 +901,6 @@ struct VerifyEmailExpiredTemplate {
     inline_theme_css: Option<String>,
 }
 
-/// Query parameters for `GET /required-action/VERIFY_EMAIL/confirm`.
-#[derive(Debug, Deserialize)]
-pub struct VerifyEmailConfirmQuery {
-    /// The plaintext verification token from the emailed link.
-    #[serde(default)]
-    pub token: String,
-}
-
 /// Renders the "check your email" page for the VERIFY_EMAIL required action.
 ///
 /// Before sending the verification email, checks if the user's email is already
@@ -1072,17 +1064,56 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
     render(&tmpl)
 }
 
-/// Validates a clicked verification token and advances the OIDC flow.
+/// `GET /required-action/VERIFY_EMAIL/confirm` — the confirmation page for
+/// the emailed verification link.
+///
+/// The link's `?token=` was moved into the link-token cookie by the route's
+/// middleware, and nothing is verified here: a mail scanner or link preview
+/// that fetches the URL must not complete the action (GA audit L18). The
+/// page's `POST` ([`verify_email_confirm_submit`]) verifies.
+///
+/// The RA session cookie is not required here: it is `SameSite=Strict`, so a
+/// browser arriving from a mail client does not send it on this cross-site
+/// navigation, but it does send it on the page's same-site `POST`.
+pub async fn verify_email_confirm(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = super::link_token::read(&headers) else {
+        return render_verify_email_expired(&state);
+    };
+    // The `hearth_ui_csrf` cookie is scoped to `/ui` and never reaches this
+    // path; the link binding plus the `SameSite=Strict` RA session cookie
+    // carry the `POST`'s cross-site protection.
+    super::handlers::render_link_confirm(
+        &state,
+        &headers,
+        &token,
+        super::handlers::LinkConfirmCopy {
+            heading: "Confirm your email address",
+            message: "Confirm that this address is yours to continue signing in.",
+            button_label: "Verify email",
+        },
+        "/required-action/VERIFY_EMAIL/confirm".to_string(),
+        state.realm_theme_url(),
+        false,
+    )
+}
+
+/// `POST /required-action/VERIFY_EMAIL/confirm` — validates the stashed
+/// verification token and advances the OIDC flow.
+///
+/// No redirect below ever carries the token (GA audit L18).
 ///
 /// Requires the RA session cookie (400 if absent). On success, removes
 /// VERIFY_EMAIL from the RA pending list and calls
 /// [`resume_oidc_flow`] or [`next_required_action`]. On failure, renders an
 /// error page with a link to resend the verification email.
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
-pub async fn verify_email_confirm(
+pub async fn verify_email_confirm_submit(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
-    Query(q): Query<VerifyEmailConfirmQuery>,
+    Form(form): Form<super::handlers::LinkConfirmForm>,
 ) -> Response {
     let Some(ra_cookie) = read_ra_cookie(&headers) else {
         return handlers_common::bad_request("No active required-action session");
@@ -1113,91 +1144,98 @@ pub async fn verify_email_confirm(
     let user_id = UserId::new(user_uuid);
     let secure = state.is_secure_request(&headers);
 
-    // Validate and consume the email verification token.
-    if q.token.is_empty() {
+    // Validate and consume the email verification token. A POST without the
+    // link cookie or with the wrong binding is refused and keeps the link.
+    let Some(verify_token) =
+        super::link_token::confirmed_token(&state, &headers, &form.link_binding, "", false)
+    else {
         return render_verify_email_expired(&state);
-    }
+    };
 
-    match state.identity.verify_email_token(&realm, &q.token) {
-        Ok(verified_user_id) => {
-            if verified_user_id != user_id {
-                return handlers_common::bad_request("Verification token does not match session");
-            }
-            // Remove VERIFY_EMAIL from the user's persistent required_actions.
-            if let Ok(Some(user)) = state.identity.get_user(&realm, &user_id) {
-                let updated: Vec<RequiredAction> = user
-                    .required_actions()
-                    .iter()
-                    .filter(|&&a| a != RequiredAction::VerifyEmail)
-                    .copied()
-                    .collect();
-                if let Err(e) = state.identity.update_user(
-                    &realm,
-                    &user_id,
-                    &UpdateUserRequest {
-                        required_actions: Some(updated),
-                        ..Default::default()
-                    },
-                ) {
-                    tracing::warn!(
-                        error = %e,
-                        "verify_email_confirm: failed to clear VERIFY_EMAIL from user record"
+    super::link_token::mark_spent(
+        match state.identity.verify_email_token(&realm, &verify_token) {
+            Ok(verified_user_id) => {
+                if verified_user_id != user_id {
+                    return handlers_common::bad_request(
+                        "Verification token does not match session",
                     );
                 }
-            }
+                // Remove VERIFY_EMAIL from the user's persistent required_actions.
+                if let Ok(Some(user)) = state.identity.get_user(&realm, &user_id) {
+                    let updated: Vec<RequiredAction> = user
+                        .required_actions()
+                        .iter()
+                        .filter(|&&a| a != RequiredAction::VerifyEmail)
+                        .copied()
+                        .collect();
+                    if let Err(e) = state.identity.update_user(
+                        &realm,
+                        &user_id,
+                        &UpdateUserRequest {
+                            required_actions: Some(updated),
+                            ..Default::default()
+                        },
+                    ) {
+                        tracing::warn!(
+                            error = %e,
+                            "verify_email_confirm: failed to clear VERIFY_EMAIL from user record"
+                        );
+                    }
+                }
 
-            // Audit: RequiredActionCompleted.
-            if let Err(e) = state.audit.append(&CreateAuditEvent {
-                realm_id: realm.clone(),
-                actor: user_id.as_uuid().to_string(),
-                action: AuditAction::RequiredActionCompleted,
-                resource_type: "user".to_string(),
-                resource_id: user_id.as_uuid().to_string(),
-                metadata: Some(serde_json::json!({ "action_type": "VERIFY_EMAIL" })),
-            }) {
-                tracing::warn!(error = %e, "verify_email_confirm: audit append failed");
-            }
+                // Audit: RequiredActionCompleted.
+                if let Err(e) = state.audit.append(&CreateAuditEvent {
+                    realm_id: realm.clone(),
+                    actor: user_id.as_uuid().to_string(),
+                    action: AuditAction::RequiredActionCompleted,
+                    resource_type: "user".to_string(),
+                    resource_id: user_id.as_uuid().to_string(),
+                    metadata: Some(serde_json::json!({ "action_type": "VERIFY_EMAIL" })),
+                }) {
+                    tracing::warn!(error = %e, "verify_email_confirm: audit append failed");
+                }
 
-            // Advance flow (OIDC or browser).
-            let remaining: Vec<RequiredAction> = claims
-                .pending_actions
-                .into_iter()
-                .filter(|a| *a != RequiredAction::VerifyEmail)
-                .collect();
+                // Advance flow (OIDC or browser).
+                let remaining: Vec<RequiredAction> = claims
+                    .pending_actions
+                    .into_iter()
+                    .filter(|a| *a != RequiredAction::VerifyEmail)
+                    .collect();
 
-            if remaining.is_empty() {
-                if claims.browser_return_to.is_some() {
-                    resume_browser_flow(
+                if remaining.is_empty() {
+                    if claims.browser_return_to.is_some() {
+                        resume_browser_flow(
+                            &state,
+                            &realm,
+                            &claims.sub,
+                            claims.browser_return_to,
+                            secure,
+                        )
+                    } else if let Some(oidc_params) = claims.oidc_params {
+                        resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
+                    } else {
+                        resume_browser_flow(&state, &realm, &claims.sub, None, secure)
+                    }
+                } else {
+                    next_required_action(
                         &state,
                         &realm,
                         &claims.sub,
+                        remaining,
+                        claims.oidc_params,
                         claims.browser_return_to,
                         secure,
+                        now,
                     )
-                } else if let Some(oidc_params) = claims.oidc_params {
-                    resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
-                } else {
-                    resume_browser_flow(&state, &realm, &claims.sub, None, secure)
                 }
-            } else {
-                next_required_action(
-                    &state,
-                    &realm,
-                    &claims.sub,
-                    remaining,
-                    claims.oidc_params,
-                    claims.browser_return_to,
-                    secure,
-                    now,
-                )
             }
-        }
-        Err(IdentityError::VerificationTokenInvalid) => render_verify_email_expired(&state),
-        Err(e) => {
-            tracing::warn!(error = %e, "verify_email_confirm: unexpected error");
-            handlers_common::server_error()
-        }
-    }
+            Err(IdentityError::VerificationTokenInvalid) => render_verify_email_expired(&state),
+            Err(e) => {
+                tracing::warn!(error = %e, "verify_email_confirm: unexpected error");
+                handlers_common::server_error()
+            }
+        },
+    )
 }
 
 fn render_verify_email_expired(state: &Arc<WebState>) -> Response {
@@ -1317,7 +1355,7 @@ pub async fn update_password_submit(
     let user_id = UserId::new(user_uuid);
     let csrf_echo = Some(form.csrf.clone());
 
-    if form.new_password != form.confirm_password {
+    if *form.new_password != *form.confirm_password {
         return render_update_password_form(
             &state,
             Some("New password and confirmation do not match."),
@@ -1331,23 +1369,31 @@ pub async fn update_password_submit(
     // credential and applies the new one; both are Argon2id operations, so the
     // pair runs through the shared KDF admission gate rather than inline on the
     // async worker.
-    let current = CleartextPassword::from_string(form.current_password);
-    let new_pw = CleartextPassword::from_string(form.new_password);
+    //
+    // The RA session cookie is single-use for this action: the engine claims
+    // it cluster-wide before writing, so a replay within its 900 s life can
+    // neither set the password again nor resume the flow again. A refused
+    // submission (wrong current password, policy, reuse) releases the claim.
+    // A user with no password credential yet (federated or passkey-only,
+    // forced to set one) has no current password to prove; the engine sets
+    // the password directly in that case.
+    let current = CleartextPassword::new(form.current_password.as_bytes().to_vec());
+    let new_pw = CleartextPassword::new(form.new_password.as_bytes().to_vec());
     let identity = state.identity.clone();
     let realm_for_kdf = realm.clone();
     let user_for_kdf = user_id.clone();
+    let ra_session_token = token.clone();
+    let ra_expires_at = Timestamp::from_micros(claims.exp.saturating_mul(1_000_000));
     let change_result = match crate::identity::gate()
         .run(move || {
-            match identity.change_password(&realm_for_kdf, &user_for_kdf, &current, &new_pw) {
-                // A user with no password credential at all (federated or
-                // passkey-only, forced to set one) has no "current password"
-                // to prove. There is nothing to bypass in that case, so fall
-                // through to a plain set.
-                Err(IdentityError::CredentialNotFound) => {
-                    identity.set_password(&realm_for_kdf, &user_for_kdf, &new_pw)
-                }
-                other => other,
-            }
+            identity.complete_required_password_update(
+                &realm_for_kdf,
+                &user_for_kdf,
+                &ra_session_token,
+                ra_expires_at,
+                &current,
+                &new_pw,
+            )
         })
         .await
     {
@@ -1374,6 +1420,11 @@ pub async fn update_password_submit(
 
     match change_result {
         Ok(()) => {}
+        Err(IdentityError::InvalidToken) => {
+            return handlers_common::bad_request(
+                "This required-action session was already used. Sign in again.",
+            );
+        }
         Err(IdentityError::InvalidCredential { .. }) => {
             return render_update_password_form(
                 &state,
@@ -2799,5 +2850,27 @@ mod email_otp_key_tests {
             "the operator's cluster-shared key wins over the per-process secret"
         );
         assert_ne!(k.as_slice(), OLD_PUBLIC_KEY);
+    }
+}
+
+/// Password fields are wiped on drop and never printed by `Debug`
+/// (GA audit L20).
+#[cfg(test)]
+mod secret_field_tests {
+    use super::*;
+    use crate::core::secrets::assert_zeroize_on_drop;
+
+    #[test]
+    fn update_password_form_is_zeroized_and_redacted() {
+        let form: UpdatePasswordForm = serde_urlencoded::from_str(
+            "current_password=CANARY-cur&new_password=CANARY-new&confirm_password=CANARY-cfm",
+        )
+        .expect("form parses");
+        assert_zeroize_on_drop(&form.current_password);
+        assert_zeroize_on_drop(&form.new_password);
+        assert_zeroize_on_drop(&form.confirm_password);
+        assert_eq!(form.confirm_password.expose(), "CANARY-cfm");
+        let dbg = format!("{form:?}");
+        assert!(!dbg.contains("CANARY"), "Debug leaked a secret: {dbg}");
     }
 }

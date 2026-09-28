@@ -1,7 +1,7 @@
 //! Webhook management handlers for the admin UI.
 
 use super::*;
-use crate::core::WebhookId;
+use crate::core::{FormSecret, WebhookId};
 use crate::identity::{CreateWebhookRequest, UpdateWebhookRequest};
 
 // ---------------------------------------------------------------------------
@@ -300,7 +300,7 @@ pub struct CreateWebhookForm {
     #[serde(default)]
     pub url: String,
     #[serde(default)]
-    pub secret: String,
+    pub secret: FormSecret,
     /// Checked event type checkboxes — may appear multiple times.
     #[serde(default)]
     pub events: Vec<String>,
@@ -329,7 +329,7 @@ pub async fn admin_webhook_create_submit(
         return render(&WebhookNewTemplate {
             realm_name,
             form_url: form.url.clone(),
-            form_secret: form.secret.clone(),
+            form_secret: form.secret.to_string(),
             form_enabled: form.enabled.is_some(),
             subscribed_events: form.events.clone(),
             available_event_types: available_event_types(&form.events),
@@ -353,7 +353,7 @@ pub async fn admin_webhook_create_submit(
         secret: if form.secret.is_empty() {
             None
         } else {
-            Some(form.secret.clone())
+            Some(form.secret.to_string())
         },
         events: form.events.clone(),
         enabled: form.enabled.is_some(),
@@ -379,7 +379,7 @@ pub async fn admin_webhook_create_submit(
             render(&WebhookNewTemplate {
                 realm_name,
                 form_url: form.url.clone(),
-                form_secret: form.secret.clone(),
+                form_secret: form.secret.to_string(),
                 form_enabled: form.enabled.is_some(),
                 subscribed_events: form.events.clone(),
                 available_event_types: available_event_types(&form.events),
@@ -498,7 +498,7 @@ pub async fn admin_webhook_test(
 pub struct TestPingBody {
     pub url: String,
     #[serde(default)]
-    pub secret: Option<String>,
+    pub secret: Option<FormSecret>,
 }
 
 /// `POST /ui/admin/realms/{realm}/webhooks/test-ping` — fires a synthetic ping
@@ -628,7 +628,7 @@ pub struct EditWebhookForm {
     #[serde(default)]
     pub url: String,
     #[serde(default)]
-    pub secret: String,
+    pub secret: FormSecret,
     /// Checked event type checkboxes — may appear multiple times.
     #[serde(default)]
     pub events: Vec<String>,
@@ -662,7 +662,7 @@ pub async fn admin_webhook_edit_submit(
             webhook_id: wid.as_uuid().to_string(),
             realm_name: realm_name.clone(),
             form_url: form.url.clone(),
-            form_secret: form.secret.clone(),
+            form_secret: form.secret.to_string(),
             form_enabled: form.enabled.is_some(),
             subscribed_events: form.events.clone(),
             available_event_types: available_event_types(&form.events),
@@ -690,7 +690,7 @@ pub async fn admin_webhook_edit_submit(
         secret: if form.secret.is_empty() {
             None
         } else {
-            Some(form.secret.clone())
+            Some(form.secret.to_string())
         },
         events: form.events.clone(),
         enabled: form.enabled.is_some(),
@@ -794,4 +794,49 @@ async fn fire_test_ping_result(url: &str, secret: Option<&str>) -> (bool, String
     })
     .await
     .unwrap_or((false, "Delivery task panicked".to_string()))
+}
+
+/// Webhook signing secrets are wiped on drop and never printed by `Debug`
+/// (GA audit L20).
+#[cfg(test)]
+mod secret_field_tests {
+    use super::*;
+    use crate::core::secrets::assert_zeroize_on_drop;
+
+    fn assert_redacted(dbg: &str) {
+        assert!(!dbg.contains("CANARY"), "Debug leaked a secret: {dbg}");
+    }
+
+    #[test]
+    fn create_webhook_form_secret_is_zeroized_and_redacted() {
+        let form: CreateWebhookForm =
+            serde_urlencoded::from_str("url=https%3A%2F%2Fx.test&secret=CANARY-whs")
+                .expect("form parses");
+        assert_zeroize_on_drop(&form.secret);
+        assert_eq!(form.secret.expose(), "CANARY-whs");
+        assert_redacted(&format!("{form:?}"));
+    }
+
+    #[test]
+    fn edit_webhook_form_secret_is_zeroized_and_redacted() {
+        let form: EditWebhookForm =
+            serde_urlencoded::from_str("url=https%3A%2F%2Fx.test&secret=CANARY-whs")
+                .expect("form parses");
+        assert_zeroize_on_drop(&form.secret);
+        assert_eq!(form.secret.expose(), "CANARY-whs");
+        assert_redacted(&format!("{form:?}"));
+    }
+
+    #[test]
+    fn test_ping_body_secret_is_zeroized_and_redacted() {
+        let body: TestPingBody =
+            serde_json::from_str(r#"{"url":"https://x.test","secret":"CANARY-whs"}"#)
+                .expect("json parses");
+        assert_zeroize_on_drop(&body.secret);
+        assert_eq!(
+            body.secret.as_ref().map(FormSecret::expose),
+            Some("CANARY-whs")
+        );
+        assert_redacted(&format!("{body:?}"));
+    }
 }

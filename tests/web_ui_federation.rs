@@ -600,24 +600,22 @@ fn callback_confirm_mode_redirects_to_confirm_link_for_existing_user() {
     );
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert!(
-        // 22.19: the redirect names the realm the login started in.
-        location.starts_with("/ui/realms/demo/federation/confirm-link?ticket="),
+    // 22.19: the redirect names the realm the login started in. GA audit
+    // L18: it carries no ticket — that lives only in the confirm cookie.
+    assert_eq!(
+        location, "/ui/realms/demo/federation/confirm-link",
         "unexpected confirm redirect: {location}"
     );
+    let ticket = ticket_from_confirm_cookie(&confirm_cookie_from(&resp));
     assert_eq!(
         rig.identity
             .find_user_by_external_identity(&rig.realm_id, &rig.idp_id, "ext-confirm-1")
             .expect("link lookup"),
         None
     );
-    let ticket = location
-        .split("ticket=")
-        .nth(1)
-        .expect("confirm-link ticket");
     let pending = rig
         .identity
-        .take_confirm_link_ticket(&rig.realm_id, ticket)
+        .take_confirm_link_ticket(&rig.realm_id, &ticket)
         .expect("load confirm-link ticket");
     assert_eq!(pending.user_id, *existing.id());
 }
@@ -700,6 +698,15 @@ fn add_second_realm(rig: &Rig) {
         .expect("create second realm");
 }
 
+/// The ticket inside a `hearth_ui_fed_confirm={ticket}.{mac}` cookie pair.
+fn ticket_from_confirm_cookie(cookie: &str) -> String {
+    cookie
+        .strip_prefix("hearth_ui_fed_confirm=")
+        .and_then(|v| v.rsplit_once('.'))
+        .map(|(ticket, _mac)| ticket.to_string())
+        .expect("confirm cookie carries {ticket}.{mac}")
+}
+
 /// Pulls the `hearth_ui_fed_confirm` cookie out of a response's `Set-Cookie`.
 fn confirm_cookie_from(resp: &axum::http::Response<Body>) -> String {
     resp.headers()
@@ -775,9 +782,10 @@ fn confirm_link_redirect_is_realm_scoped() {
     add_second_realm(&rig);
 
     let (location, _cookie, _user) = start_confirm_link_flow(&rig, &stub);
-    assert!(
-        location.starts_with("/ui/realms/demo/federation/confirm-link?ticket="),
-        "confirm redirect must name the originating realm, got: {location}"
+    assert_eq!(
+        location, "/ui/realms/demo/federation/confirm-link",
+        "confirm redirect must name the originating realm and carry no ticket \
+         (GA audit L18), got: {location}"
     );
 }
 
@@ -790,11 +798,6 @@ fn scoped_confirm_page_renders_where_the_bare_route_cannot() {
     add_second_realm(&rig);
 
     let (location, cookie, _user) = start_confirm_link_flow(&rig, &stub);
-    let ticket = location
-        .split("ticket=")
-        .nth(1)
-        .expect("ticket")
-        .to_string();
 
     // The scoped route resolves `demo` from the path and finds the ticket.
     let scoped = send(
@@ -829,7 +832,7 @@ fn scoped_confirm_page_renders_where_the_bare_route_cannot() {
         &rig.app,
         Request::builder()
             .header("cookie", cookie)
-            .uri(format!("/ui/federation/confirm-link?ticket={ticket}"))
+            .uri("/ui/federation/confirm-link")
             .body(Body::empty())
             .unwrap(),
     );
@@ -853,11 +856,7 @@ fn scoped_confirm_submit_links_the_external_identity() {
     add_second_realm(&rig);
 
     let (location, cookie, user_id) = start_confirm_link_flow(&rig, &stub);
-    let ticket = location
-        .split("ticket=")
-        .nth(1)
-        .expect("ticket")
-        .to_string();
+    let ticket = ticket_from_confirm_cookie(&cookie);
 
     // Task 21.14 made the POST handler actually read the `_csrf` field it had
     // been parsing and ignoring, so the round trip must now fetch the confirm
@@ -1125,11 +1124,7 @@ fn confirm_page_context(
     stub: &StubFederationTransport,
 ) -> (String, String, String, String) {
     let (location, confirm_cookie, _user) = start_confirm_link_flow(rig, stub);
-    let ticket = location
-        .split("ticket=")
-        .nth(1)
-        .expect("ticket")
-        .to_string();
+    let ticket = ticket_from_confirm_cookie(&confirm_cookie);
 
     let page = send(
         &rig.app,

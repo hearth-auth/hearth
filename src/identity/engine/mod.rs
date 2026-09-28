@@ -4229,7 +4229,6 @@ impl EmbeddedIdentityEngine {
             groups: effective_groups.clone(),
             org_groups,
             permissions: effective_perms.clone(),
-            required_actions: Vec::new(),
             act: None,
             amr: family.amr_values.clone(),
             cnf: dpop_jkt.map(|jkt| crate::identity::tokens::CnfClaim {
@@ -4258,7 +4257,6 @@ impl EmbeddedIdentityEngine {
             groups: effective_groups,
             org_groups: Vec::new(),
             permissions: effective_perms,
-            required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
             // M1 (RFC 9449 §5): propagate DPoP key binding to the rotated refresh token.
@@ -7875,174 +7873,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         crate::identity::ra_token::validate(token, key.public_key_bytes(), now)
     }
 
-    fn validate_required_action_token(
-        &self,
-        realm_id: &RealmId,
-        token: &str,
-        action: crate::identity::types::RequiredAction,
-    ) -> Result<crate::identity::tokens::TokenClaims, IdentityError> {
-        let claims = self.verify_token_signature_for_realm(realm_id, token)?;
-
-        if claims.token_type != crate::identity::tokens::REQUIRED_ACTION_TOKEN_TYPE {
-            return Err(IdentityError::InvalidToken);
-        }
-
-        let now_secs = self.clock.now().as_micros() / 1_000_000;
-        if now_secs >= claims.exp {
-            return Err(IdentityError::TokenExpired);
-        }
-
-        if claims.tid.parse::<RealmId>().ok().as_ref() != Some(realm_id) {
-            return Err(IdentityError::InvalidToken);
-        }
-
-        if !claims.required_actions.contains(&action) {
-            return Err(IdentityError::InvalidToken);
-        }
-
-        Ok(claims)
-    }
-
-    fn complete_update_password(
-        &self,
-        realm_id: &RealmId,
-        ra_token: &str,
-        new_password: crate::identity::credentials::CleartextPassword,
-    ) -> Result<crate::identity::types::RequiredActionTokenResponse, IdentityError> {
-        // Archival is a freeze: refuse mutations on a non-active realm
-        // (audit 2026-08-28 §4.20#5).
-        self.require_active_realm(realm_id)?;
-        use crate::identity::tokens::REQUIRED_ACTION_TOKEN_TYPE;
-        use crate::identity::types::{RequiredAction, RequiredActionTokenResponse};
-
-        let claims = self.validate_required_action_token(
-            realm_id,
-            ra_token,
-            RequiredAction::UpdatePassword,
-        )?;
-
-        let user_id = Self::parse_user_id_claim(&claims)?;
-
-        // Single use (GA audit L18). The token used to be replayable for its
-        // whole 15-minute life, each replay setting the password again and
-        // minting a new session — and it travels in a URL, so a copy in a
-        // proxy log or a `Referer` header was a login. Its `jti` is spent by
-        // a replicated claim just before the password is written, so exactly
-        // one submission completes on any node; a completion the password
-        // policy refuses does not spend it, so the user can correct the
-        // password and resubmit.
-        let jti = claims.jti.clone().ok_or(IdentityError::InvalidToken)?;
-        let spent_marker = format!("ra-jti:{jti}");
-        // Fast refusal of an already-spent token; the claim below decides.
-        // (No lock here: `redeem_mfa_nonce` takes the per-`jti` lock itself,
-        // and `std::sync::Mutex` is not reentrant.)
-        if self.is_mfa_nonce_burned(realm_id, &spent_marker)? {
-            return Err(IdentityError::InvalidToken);
-        }
-
-        // Vet the new password first (realm policy, breach, history), so a
-        // refused one leaves the token unspent. Then spend the `jti` with one
-        // replicated put-if-absent BEFORE the password is written (G4): the
-        // lock and the burned-check above are node-local, so across a cluster
-        // only the claim can decide which submission completes.
-        let history_depth = self.vet_new_password(realm_id, &user_id, &new_password)?;
-        if !self.redeem_mfa_nonce(
-            realm_id,
-            &spent_marker,
-            u64::try_from(claims.exp).unwrap_or(u64::MAX),
-        )? {
-            return Err(IdentityError::InvalidToken);
-        }
-        self.store_vetted_password(realm_id, &user_id, &new_password, history_depth)?;
-
-        // Remove UPDATE_PASSWORD from the pending actions list.
-        let remaining: Vec<RequiredAction> = claims
-            .required_actions
-            .iter()
-            .filter(|&&a| a != RequiredAction::UpdatePassword)
-            .copied()
-            .collect();
-
-        self.update_user(
-            realm_id,
-            &user_id,
-            &crate::identity::types::UpdateUserRequest {
-                required_actions: Some(remaining.clone()),
-                ..Default::default()
-            },
-        )?;
-
-        if !remaining.is_empty() {
-            // More actions pending — issue a new short-lived RA token.
-            let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
-            let now = self.clock.now();
-            let now_secs = now.as_micros() / 1_000_000;
-            let ra_claims = crate::identity::tokens::TokenClaims {
-                sub: claims.sub.clone(),
-                iss: self.realm_issuer_url(realm_id),
-                aud: crate::identity::tokens::Audience::single(self.config.token.audience.clone()),
-                exp: now_secs + 900, // 15-minute RA token TTL
-                iat: now_secs,
-                sid: claims.sid.clone(),
-                tid: claims.tid.clone(),
-                oid: None,
-                token_type: REQUIRED_ACTION_TOKEN_TYPE.to_string(),
-                nbf: None,
-                jti: Some(uuid::Uuid::new_v4().to_string()),
-                fid: None,
-                scope: None,
-                nonce: None,
-                azp: None,
-                roles: Vec::new(),
-                groups: Vec::new(),
-                org_groups: Vec::new(),
-                permissions: Vec::new(),
-                required_actions: remaining,
-                act: None,
-                amr: Vec::new(),
-                cnf: None,
-                custom: Default::default(),
-                sv: None,
-            };
-            let access_token = signing_key.issue_token(&ra_claims)?;
-            return Ok(RequiredActionTokenResponse { access_token });
-        }
-
-        // All actions complete — create a session and issue a full-access token.
-        // The MFA proof is inherited: a required-action token is only minted for
-        // a user who already authenticated, and that authentication passed the
-        // same `mfa_required` gate.
-        let session = self.create_session(
-            realm_id,
-            &user_id,
-            &crate::identity::types::SessionContext {
-                mfa_proof: crate::identity::types::MfaProof::Inherited,
-                ..Default::default()
-            },
-        )?;
-        let token_pair = self.issue_tokens(realm_id, &user_id, session.id())?;
-
-        Ok(RequiredActionTokenResponse {
-            access_token: token_pair.access_token().to_string(),
-        })
-    }
-
-    fn request_email_verification(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-    ) -> Result<(), IdentityError> {
-        // Archival is a freeze: refuse mutations on a non-active realm
-        // (audit 2026-08-28 §4.20#5).
-        self.require_active_realm(realm_id)?;
-        // Issue the verification token (stores SHA-256 hash in storage).
-        // Email delivery requires the email service in WebState; the engine
-        // does not have access to it. Callers that need the email sent must
-        // use WebState::email directly after this call succeeds.
-        let _token = self.issue_email_verification_token(realm_id, user_id)?;
-        Ok(())
-    }
-
     fn rotate_realm_signing_key(
         &self,
         realm_id: &RealmId,
@@ -8543,6 +8373,44 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // stolen session cookie cannot outlive the credential. Guarded by the
         // `change_password_revokes_existing_sessions` regression test.
         Ok(())
+    }
+
+    fn complete_required_password_update(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        ra_session_token: &str,
+        ra_expires_at: Timestamp,
+        current_password: &CleartextPassword,
+        new_password: &CleartextPassword,
+    ) -> Result<(), IdentityError> {
+        use sha2::Digest as _;
+        let token_hash = hex::encode(sha2::Sha256::digest(ra_session_token.as_bytes()));
+        let marker = keys::encode_consumed_ra_password(&token_hash);
+        // Same-node submissions queue here; across a cluster the replicated
+        // put-if-absent inside `claim_single_use` decides (G4).
+        let lock = self.token_redemption_lock(&format!("ra-password:{token_hash}"));
+        let _guard = lock.lock().expect("token_redemption_lock poisoned");
+        if !self.claim_single_use(realm_id, &marker, ra_expires_at)? {
+            return Err(IdentityError::InvalidToken);
+        }
+        let result = match self.change_password(realm_id, user_id, current_password, new_password) {
+            // A user with no password credential at all (federated or
+            // passkey-only, forced to set one) has no current password to
+            // prove: set it.
+            Err(IdentityError::CredentialNotFound) => {
+                self.set_password(realm_id, user_id, new_password)
+            }
+            other => other,
+        };
+        if result.is_err() {
+            // Nothing was written: release the claim so the user can correct
+            // the submission and resubmit with the same session.
+            if let Err(e) = self.storage.delete(realm_id, &marker) {
+                tracing::warn!(error = %e, "failed to release a refused UPDATE_PASSWORD claim");
+            }
+        }
+        result
     }
 
     #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
@@ -18267,7 +18135,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .cloned()
                     .collect()
             },
-            required_actions: Vec::new(),
             act: Some(new_act),
             amr: subject_claims.amr.clone(),
             sv: subject_claims.sv,

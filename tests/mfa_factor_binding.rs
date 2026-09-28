@@ -241,6 +241,34 @@ async fn get(app: &axum::Router, uri: &str, cookie: Option<&str>) -> axum::respo
         .expect("oneshot")
 }
 
+/// Redeems a magic link the way a browser does after the emailed link's
+/// first hop (GA audit L18): the token rides in the link cookie and the
+/// confirmation page's POST carries its binding. The rig runs in dev mode,
+/// so the absent CSRF cookie is tolerated.
+async fn redeem_magic_link(
+    app: &axum::Router,
+    realm_name: &str,
+    token: &str,
+) -> axum::response::Response {
+    let binding = hearth::protocol::web::link_token::link_binding(
+        &hearth::protocol::web::CookieSecret::from_bytes([9u8; 32]),
+        token,
+    );
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/ui/realms/{realm_name}/magic-link"))
+                .header("host", RP_ID)
+                .header(header::COOKIE, format!("hearth_link_token={token}"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("link_binding={binding}")))
+                .expect("build POST"),
+        )
+        .await
+        .expect("oneshot")
+}
+
 async fn post_json(
     app: &axum::Router,
     uri: &str,
@@ -429,15 +457,7 @@ async fn magic_link_redemption_challenges_an_enrolled_totp() {
         .expect("mint magic link");
     let app = build_web_app(&h);
 
-    let response = get(
-        &app,
-        &format!(
-            "/ui/realms/{realm_name}/magic-link?token={}",
-            minted.token()
-        ),
-        None,
-    )
-    .await;
+    let response = redeem_magic_link(&app, &realm_name, minted.token()).await;
     let cookies = set_cookies(&response);
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(location(&response), "/ui/mfa-challenge");
@@ -464,15 +484,7 @@ async fn magic_link_redemption_challenges_an_enrolled_passkey() {
         .expect("mint magic link");
     let app = build_web_app(&h);
 
-    let response = get(
-        &app,
-        &format!(
-            "/ui/realms/{realm_name}/magic-link?token={}",
-            minted.token()
-        ),
-        None,
-    )
-    .await;
+    let response = redeem_magic_link(&app, &realm_name, minted.token()).await;
     let cookies = set_cookies(&response);
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(location(&response), "/ui/mfa-passkey-challenge");
@@ -491,15 +503,7 @@ async fn magic_link_redemption_still_signs_in_a_user_without_a_factor() {
         .expect("mint magic link");
     let app = build_web_app(&h);
 
-    let response = get(
-        &app,
-        &format!(
-            "/ui/realms/{realm_name}/magic-link?token={}",
-            minted.token()
-        ),
-        None,
-    )
-    .await;
+    let response = redeem_magic_link(&app, &realm_name, minted.token()).await;
     let cookies = set_cookies(&response);
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert!(has_session_cookie(&cookies), "cookies: {cookies:?}");

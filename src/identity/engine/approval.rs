@@ -454,7 +454,6 @@ impl EmbeddedIdentityEngine {
                 format!("tool.{}.{}", request.tool, request.action),
                 format!("approval.{}.approved", request.request_id),
             ],
-            required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
             sv: None,
