@@ -6,6 +6,269 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+<!-- GA audit follow-ups, 2026-09-28 (branch feature/ga-followups-9-28-26). -->
+
+### Security
+- **Production never reads `hearth.host_key`** — outside `--dev`, the storage host key now comes
+  from `HEARTH_MASTER_KEY` only. A `{data_dir}/hearth.host_key` file is ignored even when present,
+  and a production start (`hearth serve`, and every one-shot CLI command that opens a data
+  directory: `backup create` / `restore`, `migrate keycloak` / `auth0`, …) without
+  `HEARTH_MASTER_KEY` refuses with an error that names the variable and says the file was
+  ignored. A plaintext key file on the same disk as the data it protects defeated encryption at
+  rest. `--dev` is unchanged: it still auto-generates `hearth.host_key` and reuses it on the next
+  `--dev` start.
+- A `HEARTH_MASTER_KEY` that is set but not valid UTF-8 is now an error naming the variable,
+  instead of being treated as unset (which, under `--dev`, silently fell back to the key file).
+
+- Config load refuses these `protected_resources` entries, naming the offending key:
+  - a `resource_uri` that is not an absolute URI with a scheme and host, or that has userinfo, a
+    fragment or surrounding whitespace
+  - a `resource_uri` declared twice in one realm (compared in canonical form)
+  - an `mcp:`-prefixed scope bundle name that is not `mcp:{category}:{action}`
+
+  Registering a protected resource refuses the same URIs.
+- **Protected resources must use HTTPS in production** (AGENT_AUTH §2.5): outside `--dev`,
+  config load refuses a `resource_uri` that is not `https`, loopback included.
+- **Removing a protected resource revokes its tokens** (AGENT_AUTH §2.5): when an entry leaves
+  YAML, every access token whose `aud` names it stops validating and introspects inactive at
+  once, and refresh tokens bound to it stop rotating. Tokens minted after the resource is added
+  back are unaffected. A resource server that verifies JWTs offline, without asking Hearth, still
+  accepts them until they expire.
+- **`cidr_policy` now evaluates deny first, then allow, as documented.** Evaluation is deny
+  first, then allow: a `deny` match refuses outright; otherwise a non-empty `allow` list
+  refuses every address it does not contain. Both lists empty means no network restriction.
+  Previously an `allow` match overrode `deny`, so a deny exception inside an allowed range
+  (`allow: ["10.0.0.0/8"]`, `deny: ["10.1.2.3"]`) silently had no effect and 10.1.2.3 could
+  still sign in. Review any policy whose `deny` entries overlap its `allow` ranges: those
+  addresses are now refused.
+- **`cidr_policy` entries were never validated.** A malformed entry passed `hearth config
+  validate`, started cleanly, and was silently dropped when the policy was evaluated — so a
+  typo in a realm's only `allow` entry removed its network restriction entirely.
+  `hearth config validate` and start-up now refuse the entry, naming the realm, list and
+  position (e.g. `realms.acme.security.cidr_policy.allow[1]`).
+- **Cluster mode: PAR `request_uri`s, authorization codes and device codes can be redeemed only once
+  across the whole cluster.** Before, each node checked single use with its own lock around a local
+  read and a later write. A redemption already in flight when leadership moved to its node could
+  spend an artifact that another node had just redeemed. That gave two token sets for one code or
+  device code, and two authorizations for one `request_uri`. Redemption is now decided by one
+  conditional write, evaluated in order by the Raft log. Single-node deployments see no change in
+  behavior (G4).
+- **Cluster mode: magic links, password-reset links, email-verification links and refresh tokens
+  can also be used only once across the cluster.** The same race let one refresh token rotate twice,
+  which gave two live token pairs. It also let one reset link set two passwords, and one magic link
+  sign in twice. A refresh token presented after another node already rotated it is now treated as
+  a replay: its grant family is revoked and its session is ended, the same as on a single node. A
+  password the realm's policy refuses still leaves the reset link unused (G4).
+- **Replay protection now holds across the cluster**, including for requests that reached a node
+  that had not yet caught up with the others. This covers:
+  - pending-MFA login cookies;
+  - required-action password-update tokens;
+  - DPoP proofs;
+  - JWT-bearer assertions;
+  - SAML assertions and SAML RelayState;
+  - upstream-federation state and confirm-link tickets;
+  - consent tickets;
+  - transaction tokens;
+  - SMS and email one-time codes.
+  
+  Before, a SAML assertion or RelayState replayed at the same moment could be accepted twice even on
+  a single node, because that check had no lock. A transaction-token consume now fails closed on a
+  storage error instead of accepting the token (G4).
+- **Approval requests are decided once across the cluster.** One approval mints one capability
+  token. An approval can no longer overwrite a deny that another node recorded, and a deny can no
+  longer overwrite an approval (G4).
+
+- **One-time link tokens no longer stay in the URL** — setup, email-verification, password-reset,
+  magic-link, organization-invitation and required-action `VERIFY_EMAIL` links still arrive as
+  `…?token=<t>`, but the first request now answers `303` to the same path without the token and
+  moves it into a short-lived `hearth_link_token` cookie (HttpOnly, `SameSite=Lax`, `Secure` over
+  TLS, `Path` scoped to that exact route, 15-minute lifetime). The pages never render the token;
+  the reset and setup forms carry an HMAC binding of it (`link_binding`) instead of the token, so a
+  forged cross-site POST is refused. The token is cleared once spent. These pages send
+  `Referrer-Policy: no-referrer`. Tokens are therefore no longer written to browser history,
+  `Referer` headers or proxy access logs beyond the first hop (GA audit L18).
+- **Federation confirm-link redirect carries no ticket** — the Confirm-mode redirect to
+  `/ui/realms/{realm}/federation/confirm-link` no longer appends `?ticket=`; the page reads the
+  ticket from its HMAC-bound cookie (GA audit L18).
+- **Request-body secrets are wiped from memory** — passwords, one-time tokens, client secrets,
+  client assertions and webhook signing secrets in browser forms and in the OAuth token,
+  revocation, introspection and PAR bodies are now zeroized when the request completes and are
+  redacted from debug output (GA audit L20).
+
+- **Emailed links no longer act on GET** — email-verification, magic-link, organization-invitation
+  and required-action `VERIFY_EMAIL` links now open a confirmation page; the address is verified,
+  the user signed in or the invitation accepted only when that page's button is submitted (a POST
+  carrying the link binding and, on `/ui` routes, the CSRF token). Mail scanners and link previews
+  that fetch the URL no longer spend it (GA audit L18).
+- **Required-action password update is single-use** — `POST /required-action/UPDATE_PASSWORD`
+  now spends its required-action session cookie cluster-wide on success; a replay within the
+  cookie's 15-minute life is refused (`400`) instead of setting the password and resuming the login
+  again. A refused submission (wrong current password, password policy, reuse) does not spend it.
+
+- **CSRF protection on every required-action form** — the UPDATE_PASSWORD, phone-OTP enrolment,
+  email-OTP enrolment and TOTP enrolment forms now carry a per-page token bound to the
+  required-action session cookie, and their POSTs refuse a submission without it (`403`).
+  Previously the enrolment forms relied on `SameSite` alone.
+
+- A WebAuthn registration challenge can now only be completed for the user it was issued to (all
+  registration paths: account page, REST API and sign-in).
+- **Consent revocation can no longer be undone in cluster mode.** Revoking a grant family (consent
+  withdrawal, RFC 7009, session revocation, client archival, resource removal, refresh-token
+  replay) writes a write-once revocation tombstone that every family reader checks and spends the
+  family's current refresh token, so a refresh rotation that read the family before the
+  revocation and completed after a leader change neither mints a pair nor writes the family back
+  live. (G6)
+- **TOTP codes and recovery codes are single-use cluster-wide.** A TOTP code (per user and time
+  step) and a recovery code are each accepted once across all nodes; a stale write of the MFA
+  record can no longer bring a spent recovery code back. (G6)
+- **MFA and OTP guess budgets are cluster-wide.** Every TOTP / activation / recovery-code guess
+  spends one of 5 guesses per user per 5-minute window, and every SMS / email OTP guess one of the
+  code's own budget, shared by all nodes (previously each node granted the full budget). (G6)
+- **Organization invitations are accepted or revoked once cluster-wide.** A node with a stale
+  view can no longer accept a revoked invitation, or re-admit a member an admin removed after the
+  invitation was first accepted. (G6)
+- **Email-change confirmation and device approve/deny are decided once cluster-wide.** A stale
+  node can no longer confirm an email change a second time, or overwrite an approval with a
+  denial (or the reverse). (G6)
+
+### Added
+- **CIDR ranges in `server.trusted_proxies`** — each entry may now be a single IP
+  (`10.0.0.7`, `2001:db8::7`) or a CIDR range (`10.42.0.0/16`, `2001:db8:42::/48`), so a
+  Kubernetes ingress controller whose pod IPs change on reschedule can be trusted by range.
+  The range is honoured consistently by the `X-Forwarded-For` client-IP walk, the
+  `X-Forwarded-Proto` trust check, and the `operational.max_connections_per_ip` exemption.
+
+- **Passkey enrolment during login** — in a realm with `webauthn_required: true`, a user without a
+  passkey now registers one during sign-in at `/required-action/enroll-mfa` (after the password
+  and any second factor they already hold) instead of hitting a dead end. The registration requires
+  user verification (PIN, fingerprint or face), pins the relying-party ID and origin to Hearth's
+  public origin, and uses a single-use challenge bound to the sign-in in progress. The session
+  created at the end records the passkey as the proved second factor, so `webauthn_required` is
+  satisfied. New endpoints: `POST /required-action/enroll-mfa/passkey/begin` and
+  `POST /required-action/enroll-mfa/passkey/complete` (browser-only, driven by the page).
+
+- **`protected_resources[].introspection_client`** — names the application (its key under
+  `applications` / `oauth_clients` in the same realm) a protected resource's server authenticates
+  as at `/introspect`. That client may introspect any access token whose `aud` names the resource,
+  including a token exchanged with `audience=` only (which carries no Hearth audience and
+  previously introspected `active: false` for every caller). Other clients are still refused.
+  Config load refuses a key that names no application of the realm. (G6)
+
+### Changed
+- **Breaking:** a production data directory whose only key source is a `hearth.host_key` file no
+  longer starts; set `HEARTH_MASTER_KEY`. `hearth config validate` now warns about a missing
+  `HEARTH_MASTER_KEY` even when a `hearth.host_key` file exists (it still exits 0 — the key is a
+  property of the host, not of the file being validated).
+
+- **RFC 8693 token-exchange targets come from YAML `protected_resources`**: each realm's
+  `protected_resources` entries are now also its protected-resource registry. The registry is
+  reconciled at startup and on every config reload. An exchange may name an entry's `resource_uri`
+  (in any spelling of its canonical form, see below) as `audience` or `resource`. An entry removed
+  from YAML stops being a valid target on the next reload (`invalid_target`). There is no admin
+  write API for the registry.
+- **One canonical form for resource URIs**: scheme and host are lowercased, the scheme's default
+  port and trailing slashes are dropped, and path and query keep their case. So
+  `HTTPS://MCP.Example.com:443/api/` becomes `https://mcp.example.com/api`.
+  - This form is what the registry stores, what token exchange and RBAC's resource scope lookup
+    match on, and what minted `aud` claims carry. Every spelling of one URI now behaves the same
+    everywhere.
+  - A different path, path case, scheme, or non-default port is still a different resource.
+- **RBAC resource scope bundles mirror YAML exactly**: bundles of a resource removed from YAML, a
+  bundle removed from a listed resource, and all bundles when `protected_resources` is emptied or
+  removed are now deleted on the next reconcile.
+
+- **`server.trusted_proxies` entries are checked more strictly, and identically at
+  `hearth config validate` and at start-up.** Refused: a range with host bits set
+  (`10.0.0.7/8` — write `10.0.0.0/8` or `10.0.0.7`), any range starting at the unspecified
+  address (`0.0.0.0/8`, `::/16`, as well as the existing `0.0.0.0/0`, `::/0`, `0.0.0.0`, `::`),
+  ranges broader than `/8` (IPv4) or `/16` (IPv6), a zero-padded or signed prefix (`/08`,
+  `/+8`), and a loopback range on a non-loopback `bind_address`. A bad entry now stops the
+  server from starting instead of being logged and dropped.
+- Helm `values-prod.yaml` placeholder renamed to `REPLACE_WITH_INGRESS_CONTROLLER_IP_OR_CIDR`
+  (still refused at start-up until replaced); its comments show a CIDR example.
+- **`realms.<name>.security.cidr_policy` entries use the same strict grammar as
+  `server.trusted_proxies`.** A range with host bits set (`10.1.2.255/24`) is now refused
+  instead of being silently treated as `10.1.2.0/24`; a signed or zero-padded prefix (`/+8`,
+  `/08`), a zone id, brackets, a port or surrounding whitespace are refused. A bare address
+  (`192.0.2.7`) is now accepted as a single host. No breadth limit applies — `deny:
+  ["0.0.0.0/0"]` stays valid. IPv4 clients arriving on a dual-stack listener as
+  `::ffff:a.b.c.d` are now matched against IPv4 entries.
+
+- The periodic cleanup sweep removes `consumed:` single-use markers 60 s after the artifact each
+  one guards expires. There is one marker per redeemed PAR `request_uri`, authorization code, device
+  code, magic link, reset link, verification link, refresh token, SAML or federation state, ticket,
+  approval decision, transaction token or OTP. `CleanupStats` gains `consumed_markers_deleted` (G4).
+- The federation confirm-link page now reads its ticket without consuming it. The ticket is
+  consumed only when the form is submitted (G4).
+- The reset-password (`/ui/reset-password`, `/ui/realms/{realm}/reset-password`,
+  `/ui/admin/reset-password`) and first-run setup (`/ui/setup`) forms no longer accept a `token`
+  form field; the token is read from the `hearth_link_token` cookie set by following the emailed
+  link, and the POST must carry the page's `link_binding` field.
+
+- A realm that requires a passkey but whose `mfa_methods` excludes `webauthn` now answers
+  `/required-action/enroll-mfa` with a `409` saying passkeys must be enabled for the realm.
+
+- **RFC 8707 `resource` is checked on every authorization surface.** `/authorize` (browser plain
+  query and request object), PAR (`/as/par`), and `/authorize` over JSON or gRPC (via a pushed
+  `request_uri`) refuse a `resource` that is not a registered protected resource of the realm with
+  `invalid_target` (browser plain: error redirect; browser JAR/PAR: `400`; JSON: `400
+  {"error":"invalid_target"}`; gRPC: `INVALID_ARGUMENT`). A request pushed for a resource that is
+  removed before the code is issued is refused the same way. The browser `/ui/oauth/authorize`
+  now honours `resource=` on a plain query (it used to drop it). (G6)
+- An accepted `resource` is stored, consent-keyed and minted in canonical form, so any spelling
+  of one registered resource (`HTTPS://MCP.Example.com:443/api/`) is that resource everywhere and
+  never reads a different consent record. (G6)
+- SMS / email OTP records no longer carry `attempt_count`; the guess budget lives in replicated
+  guess slots (see Security). (G6)
+
+### Fixed
+- `hearth rbac orphans list` / `purge` now print why they failed. They reported errors through a
+  logger that was never initialised, so any failure — a missing `HEARTH_MASTER_KEY`, a held
+  data-directory lock — exited 1 with no output at all.
+- `examples/auth0-migration/run.sh` and `examples/keycloak-migration/run.sh` work again: they ran
+  `hearth migrate … --data-dir` without `HEARTH_MASTER_KEY`, which the importer refuses. They now
+  generate a random key for the throwaway store when none is exported and reject a malformed one;
+  the example READMEs and migration guides note that `hearth migrate --data-dir` needs the same
+  stable `HEARTH_MASTER_KEY` the server runs with.
+- Token exchange could only narrow to the subject token's existing audiences: the
+  protected-resource allowlist added in the GA audit (M8) had no way to be populated.
+
+- **Required-action forms work in production** — the "update your password" required-action
+  form (`/required-action/UPDATE_PASSWORD`) always failed with `403` outside `--dev`: it checked a
+  CSRF cookie scoped to `/ui`, which browsers never send to `/required-action/*`. It now works.
+
+- **No more redirect loop on the "set up two-factor" required action** — a user who already had
+  TOTP and still had the `ENROLL_MFA` required action (an operator set it, or it was never cleared
+  after enrolment) was redirected from `/required-action/enroll-mfa` to itself forever. An
+  enrolment or verification required action the user has already satisfied (TOTP or passkey for
+  `ENROLL_MFA`, a verified phone for `ENROLL_PHONE_OTP`, email OTP for `ENROLL_EMAIL_OTP`, a
+  verified address for `VERIFY_EMAIL`) is now recorded as completed (`RequiredActionAutoCleared`
+  audit event), removed from the account, and the login continues to the next pending action or
+  its destination. Completing `ENROLL_MFA` now also removes it from the account.
+- In a realm that requires a passkey (`webauthn_required`), a user without one now gets a clear
+  `409` page instead of being offered a TOTP enrolment that would not satisfy the realm.
+
+### Removed
+- The `hearth.host_key` fallback for production host-key loading, and the documentation that told
+  operators to rely on (or `xxd`-export) an auto-generated `hearth.host_key`.
+
+- **`/ui/required-actions/*` pages** (`update-password`, `verify-email`, `verify-email/resend`,
+  `verify-email/success`) — they carried a required-action JWT in a `?ra_token=` query parameter
+  and had no production entry point. Pending required actions run at `/required-action/{ACTION}`
+  during browser and OIDC login, as before (GA audit L18).
+
+- **SDKs: `RequiredActionError.redirectUri`** (TypeScript/Node `redirectUri`, Go `RedirectURI`,
+  Python/Rust `redirect_uri`, PHP `getRedirectUri()`, Kotlin `redirectUri`) — the server never
+  supplied it. The TypeScript `handleCallback()` no longer looks for a
+  `required_action_redirect_uri` callback parameter or a `required_action` token: Hearth runs
+  pending required actions itself at `/required-action/{ACTION}` before issuing a code; REST logins
+  answer `400 {"error":"required_actions_pending","actions":[...]}`.
+- The unused `required_actions` JWT claim (never populated) is gone from Hearth-issued tokens'
+  schema.
+
+- The generic `GET/POST /required-action/{action}` route. Every required action has its own page
+  and handler, and an unknown action now answers the branded `404`.
+
 <!-- GA audit fixes, 2026-09-28 (branch feature/ga-readiness-fixes-9-28-26). -->
 
 ### Security
