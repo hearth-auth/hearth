@@ -101,6 +101,12 @@ pub struct RaClaims {
     /// and redirects to this path (or `/ui` when `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_return_to: Option<String>,
+    /// Whether this required-action flow has registered a passkey with user
+    /// verification. The browser-login session created when the flow ends
+    /// then records `MfaProof::ProvedWebAuthn`: the user just proved a
+    /// user-verified passkey.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub webauthn_verified: bool,
     /// Issued-at time (Unix seconds).
     pub iat: i64,
     /// Expiry time (Unix seconds).
@@ -152,6 +158,7 @@ pub fn generate(
         pending_actions,
         oidc_params: Some(oidc_params),
         browser_return_to: None,
+        webauthn_verified: false,
         iat,
         exp,
     };
@@ -168,6 +175,7 @@ pub fn generate_browser(
     realm_id: &str,
     pending_actions: Vec<RequiredAction>,
     return_to: Option<String>,
+    webauthn_verified: bool,
     signing_key: &SigningKey,
     now: Timestamp,
 ) -> Result<String, IdentityError> {
@@ -180,6 +188,7 @@ pub fn generate_browser(
         pending_actions,
         oidc_params: None,
         browser_return_to: return_to,
+        webauthn_verified,
         iat,
         exp,
     };

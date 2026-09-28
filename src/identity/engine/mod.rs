@@ -6505,6 +6505,135 @@ impl EmbeddedIdentityEngine {
 // parametrisation, so both the unattributed (actor="system") and attributed
 // (real admin actor) paths avoid code duplication.
 impl EmbeddedIdentityEngine {
+    /// Shared body of the two registration completions. `require_uv` makes
+    /// a credential that proved user presence only a refusal.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn complete_webauthn_registration_inner(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_data_json: &[u8],
+        attestation_object: &[u8],
+        origin: &str,
+        discoverable: bool,
+        require_uv: bool,
+    ) -> Result<WebAuthnCredentialInfo, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
+        self.require_mfa_method(realm_id, "webauthn")?;
+        // Extract challenge from clientDataJSON to look up pending
+        let client_data: serde_json::Value =
+            serde_json::from_slice(client_data_json).map_err(|e| {
+                IdentityError::WebAuthnRegistrationFailed {
+                    reason: format!("invalid clientDataJSON: {e}"),
+                }
+            })?;
+        let challenge_b64 = client_data
+            .get("challenge")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| IdentityError::WebAuthnRegistrationFailed {
+                reason: "missing challenge in clientDataJSON".to_string(),
+            })?;
+
+        // SECURITY (audit 2026-08-28 §4.18#8): the challenge store is
+        // process-global. Redemption must prove the challenge was minted by
+        // *this* realm for *this* ceremony — otherwise a challenge issued to
+        // one tenant enrols a credential in another, and a login challenge
+        // enrols a passkey.
+        let pending = self
+            .webauthn_challenges
+            .redeem(challenge_b64, realm_id, CeremonyType::Registration)
+            .map_err(|e| IdentityError::WebAuthnRegistrationFailed {
+                reason: e.reason().to_string(),
+            })?;
+
+        // The challenge was minted for one user; it must not enrol a
+        // credential for another (the RA-session and account ceremonies both
+        // name the user from their own session).
+        if pending.user_id.as_ref() != Some(user_id) {
+            return Err(IdentityError::WebAuthnRegistrationFailed {
+                reason: "challenge was issued to another user".to_string(),
+            });
+        }
+
+        // Check expiry
+        let now = self.clock.now().as_micros();
+        if now - pending.created_at > 5 * 60 * 1_000_000 {
+            return Err(IdentityError::WebAuthnRegistrationFailed {
+                reason: "challenge expired".to_string(),
+            });
+        }
+
+        // A-13: retrieve the realm's WebAuthn attestation policy (if any).
+        let attestation_policy = self
+            .get_realm(realm_id)
+            .ok()
+            .flatten()
+            .and_then(|r| r.config().webauthn_attestation.clone());
+
+        // B10: a realm that requires user verification must not accept the
+        // enrolment of a credential that cannot prove it — such a credential
+        // would fail every subsequent login under the same policy.
+        if require_uv && !webauthn::registration_user_verified(attestation_object)? {
+            return Err(IdentityError::WebAuthnRegistrationFailed {
+                reason: "realm policy requires user verification; the authenticator proved user \
+                         presence only"
+                    .to_string(),
+            });
+        }
+
+        let (mut info, mut stored) = webauthn::complete_registration(
+            &pending,
+            client_data_json,
+            attestation_object,
+            origin,
+            now,
+            attestation_policy.as_ref(),
+        )?;
+
+        // Set discoverable from caller's request
+        info = WebAuthnCredentialInfo {
+            credential_id: info.credential_id().to_vec(),
+            algorithm: info.algorithm(),
+            discoverable,
+            name: None,
+        };
+        stored.discoverable = discoverable;
+
+        // Persist credential
+        let cred_id_b64 = URL_SAFE_NO_PAD.encode(info.credential_id());
+        let key = keys::encode_webauthn_credential(user_id, &cred_id_b64);
+        let bytes = serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &key, &bytes)
+            .map_err(Self::storage_err)?;
+
+        // If discoverable, create the index entry
+        if discoverable {
+            let disc_key = keys::encode_webauthn_discoverable(&cred_id_b64);
+            let user_uuid_bytes = user_id.as_uuid().to_string().into_bytes();
+            self.storage
+                .put(realm_id, &disc_key, &user_uuid_bytes)
+                .map_err(Self::storage_err)?;
+        }
+
+        self.record_audit(
+            realm_id,
+            Some(&AuditContext {
+                actor: Actor::User(user_id.clone()),
+                metadata: None,
+            }),
+            AuditAction::CredentialSet,
+            "credential",
+            &user_id.as_uuid().to_string(),
+        )?;
+
+        Ok(info)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn update_user_impl(
         &self,
@@ -7863,6 +7992,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         pending_actions: Vec<crate::identity::types::RequiredAction>,
         return_to: Option<String>,
+        webauthn_verified: bool,
         now: Timestamp,
     ) -> Result<String, IdentityError> {
         let key = self.get_or_load_realm_signing_key(realm_id)?;
@@ -7871,6 +8001,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             &realm_id.as_uuid().to_string(),
             pending_actions,
             return_to,
+            webauthn_verified,
             &key,
             now,
         )
@@ -10567,113 +10698,36 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         origin: &str,
         discoverable: bool,
     ) -> Result<WebAuthnCredentialInfo, IdentityError> {
-        // Archival is a freeze: refuse mutations on a non-active realm
-        // (audit 2026-08-28 §4.20#5).
-        self.require_active_realm(realm_id)?;
-        self.require_mfa_method(realm_id, "webauthn")?;
-        // Extract challenge from clientDataJSON to look up pending
-        let client_data: serde_json::Value =
-            serde_json::from_slice(client_data_json).map_err(|e| {
-                IdentityError::WebAuthnRegistrationFailed {
-                    reason: format!("invalid clientDataJSON: {e}"),
-                }
-            })?;
-        let challenge_b64 = client_data
-            .get("challenge")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| IdentityError::WebAuthnRegistrationFailed {
-                reason: "missing challenge in clientDataJSON".to_string(),
-            })?;
-
-        // SECURITY (audit 2026-08-28 §4.18#8): the challenge store is
-        // process-global. Redemption must prove the challenge was minted by
-        // *this* realm for *this* ceremony — otherwise a challenge issued to
-        // one tenant enrols a credential in another, and a login challenge
-        // enrols a passkey.
-        let pending = self
-            .webauthn_challenges
-            .redeem(challenge_b64, realm_id, CeremonyType::Registration)
-            .map_err(|e| IdentityError::WebAuthnRegistrationFailed {
-                reason: e.reason().to_string(),
-            })?;
-
-        // Check expiry
-        let now = self.clock.now().as_micros();
-        if now - pending.created_at > 5 * 60 * 1_000_000 {
-            return Err(IdentityError::WebAuthnRegistrationFailed {
-                reason: "challenge expired".to_string(),
-            });
-        }
-
-        // A-13: retrieve the realm's WebAuthn attestation policy (if any).
-        let attestation_policy = self
-            .get_realm(realm_id)
-            .ok()
-            .flatten()
-            .and_then(|r| r.config().webauthn_attestation.clone());
-
-        // B10: a realm that requires user verification must not accept the
-        // enrolment of a credential that cannot prove it — such a credential
-        // would fail every subsequent login under the same policy.
-        if self.realm_requires_user_verification(realm_id)
-            && !webauthn::registration_user_verified(attestation_object)?
-        {
-            return Err(IdentityError::WebAuthnRegistrationFailed {
-                reason: "realm policy requires user verification; the authenticator proved user \
-                         presence only"
-                    .to_string(),
-            });
-        }
-
-        let (mut info, mut stored) = webauthn::complete_registration(
-            &pending,
+        let require_uv = self.realm_requires_user_verification(realm_id);
+        self.complete_webauthn_registration_inner(
+            realm_id,
+            user_id,
             client_data_json,
             attestation_object,
             origin,
-            now,
-            attestation_policy.as_ref(),
-        )?;
-
-        // Set discoverable from caller's request
-        info = WebAuthnCredentialInfo {
-            credential_id: info.credential_id().to_vec(),
-            algorithm: info.algorithm(),
             discoverable,
-            name: None,
-        };
-        stored.discoverable = discoverable;
+            require_uv,
+        )
+    }
 
-        // Persist credential
-        let cred_id_b64 = URL_SAFE_NO_PAD.encode(info.credential_id());
-        let key = keys::encode_webauthn_credential(user_id, &cred_id_b64);
-        let bytes = serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(realm_id, &key, &bytes)
-            .map_err(Self::storage_err)?;
-
-        // If discoverable, create the index entry
-        if discoverable {
-            let disc_key = keys::encode_webauthn_discoverable(&cred_id_b64);
-            let user_uuid_bytes = user_id.as_uuid().to_string().into_bytes();
-            self.storage
-                .put(realm_id, &disc_key, &user_uuid_bytes)
-                .map_err(Self::storage_err)?;
-        }
-
-        self.record_audit(
+    fn complete_webauthn_registration_user_verified(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_data_json: &[u8],
+        attestation_object: &[u8],
+        origin: &str,
+        discoverable: bool,
+    ) -> Result<WebAuthnCredentialInfo, IdentityError> {
+        self.complete_webauthn_registration_inner(
             realm_id,
-            Some(&AuditContext {
-                actor: Actor::User(user_id.clone()),
-                metadata: None,
-            }),
-            AuditAction::CredentialSet,
-            "credential",
-            &user_id.as_uuid().to_string(),
-        )?;
-
-        Ok(info)
+            user_id,
+            client_data_json,
+            attestation_object,
+            origin,
+            discoverable,
+            true,
+        )
     }
 
     fn start_webauthn_authentication(

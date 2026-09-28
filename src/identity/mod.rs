@@ -261,12 +261,15 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// After all actions complete, the flow resumes by creating a session
     /// cookie and redirecting to `return_to` (or `/ui` when `None`).
+    /// `webauthn_verified` carries forward that this flow registered a
+    /// user-verified passkey (see [`ra_token::RaClaims::webauthn_verified`]).
     fn generate_browser_ra_token(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         pending_actions: Vec<RequiredAction>,
         return_to: Option<String>,
+        webauthn_verified: bool,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
 
@@ -1186,6 +1189,23 @@ pub trait IdentityEngine: Send + Sync {
     /// Validates the attestation response, extracts the credential, and
     /// stores it. Returns the credential info.
     fn complete_webauthn_registration(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_data_json: &[u8],
+        attestation_object: &[u8],
+        origin: &str,
+        discoverable: bool,
+    ) -> Result<WebAuthnCredentialInfo, IdentityError>;
+
+    /// Completes a `WebAuthn` registration that MUST prove user verification,
+    /// whatever the realm's `webauthn_user_verification` policy says.
+    ///
+    /// The login-time passkey enrolment uses it: the passkey it registers is
+    /// the factor a `webauthn_required` realm accepts, so a touch-only
+    /// credential would register a factor that can never satisfy the realm.
+    /// Otherwise identical to [`Self::complete_webauthn_registration`].
+    fn complete_webauthn_registration_user_verified(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
