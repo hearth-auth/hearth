@@ -977,3 +977,60 @@ fn backup_restore_refuses_skip_verify_when_the_signature_is_checked() {
     assert!(out.contains("realms/ghost/users.ndjson"), "{out}");
     assert!(!data_dir.exists(), "nothing may be written");
 }
+
+// ===== `hearth rbac orphans` must say why it failed =====
+
+/// Runs `hearth rbac orphans <verb> --data-dir <dir>` with NO master key, on a
+/// data directory holding only a `hearth.host_key` file (which production
+/// ignores), and returns (exit code, stdout + stderr).
+///
+/// Both streams count as "reported": CLI diagnostics follow the `serve` /
+/// `backup` convention above, where the tracing fmt layer writes to stdout.
+fn run_orphans_without_master_key(verb: &str) -> (Option<i32>, String) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    std::fs::write(data_dir.join("hearth.host_key"), [0u8; 72]).expect("write host key");
+
+    let out = Command::new(hearth_bin())
+        .args(["rbac", "orphans", verb, "--data-dir"])
+        .arg(&data_dir)
+        .env_remove("HEARTH_MASTER_KEY")
+        .env_remove("HEARTH_KEK")
+        .output()
+        .expect("run hearth rbac orphans");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code(), text)
+}
+
+/// `hearth rbac orphans list` reported every failure with `tracing::error!`
+/// before any subscriber was installed, so a refused store open exited 1 with
+/// no output at all.
+#[test]
+fn rbac_orphans_list_failure_reports_the_reason() {
+    let (code, out) = run_orphans_without_master_key("list");
+    assert_eq!(code, Some(1), "a failed list exits 1; output: {out:?}");
+    assert!(
+        out.contains("HEARTH_MASTER_KEY is not set"),
+        "the refusal must be reported and name HEARTH_MASTER_KEY, got: {out:?}"
+    );
+    assert!(
+        out.contains("ignored"),
+        "the refusal must say the host key file was ignored, got: {out:?}"
+    );
+}
+
+/// Same silent failure on `purge`.
+#[test]
+fn rbac_orphans_purge_failure_reports_the_reason() {
+    let (code, out) = run_orphans_without_master_key("purge");
+    assert_eq!(code, Some(1), "a failed purge exits 1; output: {out:?}");
+    assert!(
+        out.contains("HEARTH_MASTER_KEY is not set"),
+        "the refusal must be reported and name HEARTH_MASTER_KEY, got: {out:?}"
+    );
+}

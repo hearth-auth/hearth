@@ -30,7 +30,6 @@
 //!   `X-CSRF-Token` HTMX header.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -152,11 +151,11 @@ pub struct WebState {
     /// Per-realm `ETags`, keyed by the same realm hex string as
     /// [`WebState::realm_themes`]. Updated by [`WebState::with_realm_themes`].
     pub realm_theme_etags: HashMap<String, String>,
-    /// Parsed trusted proxy IP addresses (from `server.trusted_proxies` config).
+    /// Parsed trusted proxy addresses and CIDR ranges (`server.trusted_proxies`).
     ///
     /// Used by [`crate::protocol::client_info::extract_client_ip`] to walk
     /// `X-Forwarded-For` right-to-left and find the real client IP.
-    pub trusted_proxies: Vec<IpAddr>,
+    pub trusted_proxies: crate::core::TrustedProxies,
     /// Notifier for triggering config hot-reload from the admin API.
     ///
     /// When `notify()` is called, the SIGHUP handler loop wakes and
@@ -317,7 +316,7 @@ impl WebState {
             realm_product_names: HashMap::new(),
             theme_css_etag: etag_for(""),
             realm_theme_etags: HashMap::new(),
-            trusted_proxies: Vec::new(),
+            trusted_proxies: crate::core::TrustedProxies::default(),
             reload_notify: None,
             default_realm_name: None,
             config_path: None,
@@ -445,9 +444,9 @@ impl WebState {
         self
     }
 
-    /// Sets the parsed trusted proxy IPs for real client IP extraction.
+    /// Sets the parsed trusted proxies (addresses and CIDR ranges) for real client IP extraction.
     #[must_use]
-    pub fn with_trusted_proxies(mut self, proxies: Vec<IpAddr>) -> Self {
+    pub fn with_trusted_proxies(mut self, proxies: crate::core::TrustedProxies) -> Self {
         self.trusted_proxies = proxies;
         self
     }

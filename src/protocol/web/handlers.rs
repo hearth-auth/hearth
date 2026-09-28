@@ -4873,7 +4873,7 @@ fn register_error_message(err: &IdentityError) -> String {
 fn register_client_ip(
     headers: &HeaderMap,
     peer: SocketAddr,
-    trusted_proxies: &[std::net::IpAddr],
+    trusted_proxies: &crate::core::TrustedProxies,
 ) -> Option<String> {
     Some(crate::protocol::client_info::extract_client_ip(
         headers,
@@ -4892,7 +4892,7 @@ fn register_client_ip(
 fn captcha_client_ip(
     headers: &HeaderMap,
     peer: SocketAddr,
-    trusted_proxies: &[std::net::IpAddr],
+    trusted_proxies: &crate::core::TrustedProxies,
 ) -> std::net::IpAddr {
     crate::protocol::client_info::extract_client_ip(headers, peer, trusted_proxies)
         .parse()

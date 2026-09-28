@@ -1660,12 +1660,20 @@ pre-auth check (`abuse::runtime::compile_filter`); no shared cell holds it.
 
 ### Evaluation order
 
-1. If the source IP matches any entry in the **allow list** → `Allow`.  
-   Explicit trust cannot be overridden by the deny list.
-2. If the source IP matches any entry in the **deny list** → `Deny`.
-3. If the allow list is **non-empty** and the IP is **not** in it → `Deny`
+Evaluation is deny first, then allow: a `deny` match refuses outright;
+otherwise a non-empty `allow` list refuses every address it does not
+contain. Both lists empty means no network restriction.
+
+1. If the source IP matches any entry in the **deny list** → `Deny`, even when
+   it is also inside the allow list (a deny exception in an allowed range).
+2. If the allow list is **non-empty** and the IP is **not** in it → `Deny`
    (strict allowlist mode).
-4. Otherwise → `Allow` (fail-open, §6.1).
+3. Otherwise → `Allow` (fail-open, §6.1).
+
+Deny-first loses no expressible policy — a non-empty allow list already
+refuses everything outside it — and it is the only order in which a deny entry
+inside an allowed range has any effect. (Until the 2026-09-28 G3 follow-up the
+code let an allow match override deny, contradicting CONFIGURATION.md.)
 
 ### Fail-open policy
 

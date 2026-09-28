@@ -36,7 +36,7 @@ use ureq::http::Uri;
 use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
 use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
-use crate::abuse::cidr::Cidr;
+use crate::core::IpRange;
 
 use super::error::WebhookError;
 
@@ -76,12 +76,12 @@ const BLOCKED_CIDR_STRS: &[&str] = &[
     "fe80::/10",
 ];
 
-fn blocked_cidrs() -> &'static [Cidr] {
-    static CIDRS: OnceLock<Vec<Cidr>> = OnceLock::new();
+fn blocked_cidrs() -> &'static [IpRange] {
+    static CIDRS: OnceLock<Vec<IpRange>> = OnceLock::new();
     CIDRS.get_or_init(|| {
         BLOCKED_CIDR_STRS
             .iter()
-            .map(|s| Cidr::parse(s).expect("built-in CIDR is valid"))
+            .map(|s| s.parse::<IpRange>().expect("built-in CIDR is valid"))
             .collect()
     })
 }

@@ -116,21 +116,29 @@ config:
     # X-Forwarded-Proto / X-Forwarded-For — but only from the proxies listed
     # in trusted_proxies.
     trust_forwarded_proto: true
-    # REQUIRED — replace with the IP address(es) your Ingress controller
+    # REQUIRED — replace with the address(es) your Ingress controller
     # connects to the pod FROM (for ingress-nginx, its controller pod IPs:
     #   kubectl -n ingress-nginx get pods -o wide
     # or the node IPs when the controller runs with hostNetwork: true).
+    # This placeholder is refused at start-up (fail closed).
     #
-    # Entries must be individual IP addresses. CIDR ranges (10.0.0.0/8) are
-    # refused at start-up, and so is this placeholder.
+    # Each entry is a single IP ("10.42.1.7") or a CIDR range
+    # ("10.42.0.0/24"). Controller pod IPs change when the pods are
+    # rescheduled, so a range covering the addresses they can be given — for
+    # example the pod CIDR of a dedicated ingress node pool — keeps working
+    # where a list of pod IPs goes stale. A stale list means X-Forwarded-For is
+    # ignored, every client appears to come from the controller's IP, and
+    # per-IP rate limits (login lockout included) apply to all users at once.
     #
-    # Keep the list current: controller pod IPs change when the pods are
-    # rescheduled. A stale list means X-Forwarded-For is ignored, every client
-    # appears to come from the controller's IP, and per-IP rate limits (login
-    # lockout included) then apply to all users at once. Prefer a controller
-    # with stable addresses (hostNetwork, or static pod IPs from your CNI).
+    # Every host inside a listed range can set X-Forwarded-For and
+    # X-Forwarded-Proto, so use the narrowest range that holds the controller,
+    # not the whole cluster pod network. Refused: host bits set
+    # ("10.42.1.7/16" — write "10.42.0.0/16"), anything broader than /8 (IPv4)
+    # or /16 (IPv6), and catch-alls such as 0.0.0.0/0.
+    #   trusted_proxies:
+    #     - "10.42.3.0/24"      # ingress node pool pod CIDR
     trusted_proxies:
-      - "REPLACE_WITH_INGRESS_CONTROLLER_IP"
+      - "REPLACE_WITH_INGRESS_CONTROLLER_IP_OR_CIDR"
     #
     # Alternative — direct TLS inside the pod instead of the settings above:
     # remove trust_forwarded_proto, set `tls.enabled: true` +
