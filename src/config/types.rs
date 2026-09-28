@@ -696,6 +696,14 @@ pub struct EmailConfig {
     /// If set, templates from this directory override the compiled defaults.
     #[serde(default)]
     pub templates_dir: Option<String>,
+    /// Allow `transport: log` outside `--dev`.
+    ///
+    /// The `log` transport delivers nothing: every message, including the
+    /// system realm's admin password-reset mail, is dropped (production logs
+    /// omit the body). Production validation therefore refuses it unless this
+    /// is `true` — for evaluation deployments that knowingly run without mail.
+    #[serde(default)]
+    pub allow_log_transport_in_production: bool,
 }
 
 /// SMS delivery transport selector.

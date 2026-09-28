@@ -32,6 +32,8 @@ oidc:
   issuer: "https://auth.example.com"
 email:
   transport: log
+  # Not the gate under test (GA audit M15 refuses `log` without this opt-in).
+  allow_log_transport_in_production: true
 "#,
     );
     if kek {
@@ -227,6 +229,8 @@ oidc:
   issuer: "https://auth.example.com"
 email:
   transport: log
+  # Not the gate under test (GA audit M15 refuses `log` without this opt-in).
+  allow_log_transport_in_production: true
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 "#,

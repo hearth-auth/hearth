@@ -166,14 +166,19 @@ realms:
     );
 }
 
-/// HSEC-010: `log` transport in production with no email-requiring realm
-/// features must NOT produce a validation error (warning only at runtime).
+/// `log` transport in production is refused even when every declared realm is
+/// passkey-only, and allowed only with the explicit opt-in.
 ///
-/// A realm restricted to passkeys only has no email-bearing flow: no
-/// magic link, no self-registration, and no password to reset.
+/// This used to be accepted: a realm restricted to passkeys has no
+/// email-bearing flow. But the check only looked at realms declared in YAML,
+/// and the system realm — the admin console, which always has password login
+/// and so a password-reset mail — is never declared there (GA audit
+/// 2026-09-28 M15).
 #[test]
-fn prod_log_transport_without_email_features_is_ok() {
-    let yaml = r#"
+fn prod_log_transport_without_email_features_needs_the_explicit_opt_in() {
+    let yaml = |opt_in: &str| {
+        format!(
+            r#"
 server:
   port: 8420
   bind_address: "127.0.0.1"
@@ -187,15 +192,26 @@ oidc:
   issuer: "https://auth.example.com"
 email:
   transport: log
+{opt_in}
 realms:
   testrealm:
     auth:
       allowed_auth_methods: [passkey]
-"#;
-    let result = hearth::config::Config::from_yaml_str(yaml);
+"#
+        )
+    };
+    let err = hearth::config::Config::from_yaml_str(&yaml(""))
+        .expect_err("log transport must be refused in production without the opt-in");
+    assert!(
+        err.to_string().contains("email.transport"),
+        "the error must name email.transport; got: {err}"
+    );
+
+    let result =
+        hearth::config::Config::from_yaml_str(&yaml("  allow_log_transport_in_production: true"));
     assert!(
         result.is_ok(),
-        "log transport without email-requiring features must be allowed; got: {:?}",
+        "email.allow_log_transport_in_production: true must lift the refusal; got: {:?}",
         result.err()
     );
 }

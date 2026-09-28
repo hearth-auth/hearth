@@ -1116,6 +1116,16 @@ async fn run_serve(
              DO NOT expose this server on a non-loopback address."
         );
     }
+    if !config.dev_mode
+        && config.email.transport == hearth::config::EmailTransport::Log
+        && config.email.allow_log_transport_in_production
+    {
+        warn!(
+            "email.transport = log with email.allow_log_transport_in_production: true — \
+             NO email is delivered: password resets (including the admin console's), \
+             magic links, verification and invitation mail are all dropped"
+        );
+    }
     if let Some(notice) =
         dev_endpoints_missing_notice(config.dev_mode, cfg!(feature = "dev-endpoints"))
     {

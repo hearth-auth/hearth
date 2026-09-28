@@ -23,7 +23,8 @@ fn hearth_bin() -> std::path::PathBuf {
 // === hearth config validate ===
 
 /// A minimal valid production config (data_dir prevents the empty-dir error;
-/// the KEK and trust_forwarded_proto satisfy the HEA-2166 fail-closed gates).
+/// the KEK and trust_forwarded_proto satisfy the HEA-2166 fail-closed gates;
+/// a real email transport satisfies the GA-audit M15 gate).
 const VALID_CONFIG: &str = r#"
 server:
   trust_forwarded_proto: true
@@ -34,6 +35,12 @@ security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 oidc:
   issuer: "https://auth.example.com"
+email:
+  transport: smtp
+  from: "auth@example.com"
+  smtp:
+    host: "mail.example.com"
+    port: 587
 "#;
 
 /// Config with an invalid field (empty data_dir triggers a validation error).

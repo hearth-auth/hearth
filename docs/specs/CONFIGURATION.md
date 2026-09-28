@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Hearth is configured via a single YAML file. Every field is optional — an empty file (`{}`) is a valid, production-safe configuration with sensible defaults.
+Hearth is configured via a single YAML file. Every field has a default, so an empty file (`{}`) parses — but it is **not** a valid production configuration: outside `--dev` the server refuses to start until the requirements in [Mandatory in Production](#mandatory-in-production) are met (a key-encryption key, HTTPS, a real email transport, and `HEARTH_MASTER_KEY` in the environment). `{}` is only a complete configuration under `hearth serve --dev`.
 
 ## File Location & Loading
 
@@ -31,7 +31,7 @@ following hold. These are hard startup errors, not warnings.
 | **Key-encryption key** | `HEARTH_KEK` env var (recommended) **or** `security.key_encryption_key`, either one a random 64-lowercase-hex-character value (`openssl rand -hex 32`) | Without it, realm signing keys (Ed25519 private keys) are written to storage **in plaintext**. |
 | **HTTPS** | `server.tls_cert_path` + `server.tls_key_path`, **or** `server.trust_forwarded_proto: true` behind a TLS-terminating proxy | Without it, session cookies are issued without the `Secure` attribute and can be intercepted over plain HTTP. |
 | **No demo seeder** | Omit the `demo:` block, or set `demo.enabled: false` | `demo.enabled: true` mass-seeds accounts that all share a well-known default password. |
-| **A real email transport**, for any realm whose users can hold a password | Set `email.transport` to something other than `"log"` | `log` discards every message. A password-only realm configured this way validates, starts, and silently never delivers a reset email, so an account that forgets its password is unrecoverable. |
+| **A real email transport** | Set `email.transport` to something other than `"log"` (the default), **or** set `email.allow_log_transport_in_production: true` to run knowingly without mail | `log` discards every message. The system realm (the admin console) always has password login, so under `log` an admin who forgets their password cannot reset it — and neither can a user of any realm, whether declared in YAML, auto-created, or created at runtime. Until the GA audit (2026-09-28, M15) only YAML-declared realms were checked. |
 | **No `storage.fsync: false`** | Omit the key (it defaults to `true` outside `--dev`) | WAL durability is not optional. The key was previously accepted and then ignored; it is now a hard error rather than a promise the engine did not keep. |
 | **No empty `${VAR}` substitution** | Set every referenced variable, or write `${VAR:-}` to declare the empty value deliberate | An empty expected credential compares equal to a caller who supplied none — it opens `/metrics` and authenticates a confidential client with `Basic <client_id>:`. |
 | **Argon2id costs at or above the OWASP floor** | Leave `auth.password_memory_cost` / `password_time_cost` unset, or set a pair at least as strong as one documented row | See [Argon2id cost floor](#argon2id-cost-floor). |
@@ -386,7 +386,8 @@ Outbound email delivery for verification emails, password resets, magic links, a
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `transport` | string | `"log"` | Delivery transport. One of: `log`, `smtp`, `sendgrid`, `postmark`, `mailgun`, `mailtrap`. |
+| `transport` | string | `"log"` | Delivery transport. One of: `log`, `smtp`, `sendgrid`, `postmark`, `mailgun`, `mailtrap`. `log` delivers nothing and is refused outside `--dev` unless `allow_log_transport_in_production` is `true`. |
+| `allow_log_transport_in_production` | bool | `false` | Allow `transport: log` in production. Every message — including the admin console's password-reset mail — is then dropped, and startup logs a warning. For evaluation deployments only. |
 | `from` | string | — | Sender address for the `From:` header. **Required** when transport is not `log`. |
 | `smtp` | object | — | SMTP-specific settings. Required when `transport: smtp`. |
 | `sendgrid` | object | — | SendGrid API settings. Required when `transport: sendgrid`. |

@@ -67,6 +67,14 @@ const KEK_REQUIRED_IN_PROD: &str =
      security.key_encryption_key to a random 64-hex-char value (openssl rand -hex 32). \
      Dev mode (--dev) does not require this.";
 
+/// GA audit 2026-09-28 M15: the `log` email transport delivers nothing.
+const EMAIL_LOG_TRANSPORT_IN_PROD: &str =
+    "email.transport = log (the default) delivers no email: every message is dropped, \
+     including the system realm's admin password-reset mail and the mail of every realm \
+     created at runtime. Configure a real transport (smtp, sendgrid, postmark, mailgun or \
+     mailtrap), or set email.allow_log_transport_in_production: true for an evaluation \
+     deployment that knowingly runs without email. Dev mode (--dev) does not require this.";
+
 /// HEA-2166: production requires HTTPS so session cookies carry `Secure`.
 const TLS_REQUIRED_IN_PROD: &str =
     "production mode requires HTTPS — without it, session cookies are issued without the \
@@ -522,7 +530,20 @@ impl Config {
 
         // HSEC-010: Mirror the fail-fast check in validate_all so the admin
         // config-check panel surfaces this error alongside other issues.
-        if !self.dev_mode && self.email.transport == EmailTransport::Log {
+        //
+        // GA audit 2026-09-28 M15: this used to be the only log-transport
+        // check, and it covers only realms declared in YAML. The system realm
+        // (the admin console, which always has password login), the
+        // auto-created default realm and API-created realms were never
+        // checked, so a production config with no `email:` block booted and
+        // silently dropped admin password-reset mail. The per-realm reasons
+        // stay here because they name the feature that needs mail; the
+        // blanket refusal (with its opt-in) is added at the end of this
+        // function.
+        if !self.dev_mode
+            && self.email.transport == EmailTransport::Log
+            && !self.email.allow_log_transport_in_production
+        {
             validate_email_transport_log_prod_all(self.realms.as_ref(), &mut issues);
         }
 
@@ -624,6 +645,18 @@ impl Config {
         // time because only the raw YAML distinguishes an operator-set key from
         // a compiled-in default.
         issues.extend(self.key_liveness_issues.iter().cloned());
+
+        // GA audit 2026-09-28 M15. Last, so that a config with a more specific
+        // problem reports that problem first; see the per-realm check above.
+        if !self.dev_mode
+            && self.email.transport == EmailTransport::Log
+            && !self.email.allow_log_transport_in_production
+        {
+            issues.push(ValidationIssue {
+                field: "email.transport".to_string(),
+                reason: EMAIL_LOG_TRANSPORT_IN_PROD.to_string(),
+            });
+        }
 
         issues
     }
@@ -3845,6 +3878,67 @@ realms:
                 "{field} = 0 must be refused; issues: {fields:?}"
             );
         }
+    }
+
+    // ── GA audit 2026-09-28 M15: `email.transport: log` in production ───────
+
+    fn email_transport_issues(config: &Config) -> Vec<ValidationIssue> {
+        config
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field == "email.transport")
+            .collect()
+    }
+
+    /// The system realm always has password login, so its reset mail is
+    /// load-bearing even when no realm is declared in YAML. The check used to
+    /// return early when `realms` was absent.
+    #[test]
+    fn log_transport_is_refused_in_production_with_no_realms_declared() {
+        let config = Config::from_yaml_str_unchecked("{}").expect("parse");
+        assert!(!config.dev_mode);
+        let issues = email_transport_issues(&config);
+        assert!(
+            issues.iter().any(|i| i.reason.contains("system realm")),
+            "the default `log` transport must be refused in production even with no \
+             realms declared — admin password-reset mail is silently dropped; got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn the_explicit_opt_in_allows_log_transport_in_production() {
+        let config = Config::from_yaml_str_unchecked(
+            "email:\n  transport: log\n  allow_log_transport_in_production: true\n",
+        )
+        .expect("the opt-in key must parse");
+        let issues = email_transport_issues(&config);
+        assert!(
+            issues.is_empty(),
+            "the opt-in must lift the refusal; got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn log_transport_stays_allowed_in_dev_mode() {
+        let config = Config::dev();
+        let issues = email_transport_issues(&config);
+        assert!(
+            issues.is_empty(),
+            "dev mode keeps the log transport; got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn a_real_transport_needs_no_opt_in() {
+        let config = Config::from_yaml_str_unchecked(
+            "email:\n  transport: smtp\n  from: auth@example.com\n  smtp:\n    host: mail.example.com\n    port: 587\n",
+        )
+        .expect("parse");
+        let issues = email_transport_issues(&config);
+        assert!(
+            issues.is_empty(),
+            "smtp must not trip the log-transport rule; got {issues:?}"
+        );
     }
 
     #[test]
