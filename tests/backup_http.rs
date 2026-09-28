@@ -1958,6 +1958,50 @@ async fn restoring_audit_history_into_a_live_realm_keeps_its_chain_verifiable() 
 
 // ── Restore needs the realm's full admin (M2) ─────────────────────────────────
 
+/// `POST uri` with an empty body on an existing `app`, returning the status.
+async fn post_status_on(app: &axum::Router, uri: &str, token: &str, realm: &RealmId) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response")
+        .status()
+}
+
+/// A restore of `archive` on an existing `app`, returning status and body.
+async fn post_restore_on(
+    app: &axum::Router,
+    uri: &str,
+    token: &str,
+    realm: &RealmId,
+    archive: &[u8],
+) -> (StatusCode, serde_json::Value) {
+    let (ct, body) = multipart_body(archive);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("content-type", ct)
+                .body(Body::from(body))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    let status = resp.status();
+    (status, resp_json(resp).await)
+}
+
 /// Creates a user in `realm` (the system realm through `create_admin_user`)
 /// holding exactly `permissions` through one custom role, and returns the user
 /// id and the role assignment.
@@ -2050,6 +2094,7 @@ async fn a_tenant_restore_needs_the_realm_admin_not_a_sub_admin() {
     let tenant = h.create_realm();
     h.rbac().seed_realm(&tenant).expect("seed");
     let admin_token = make_admin_token(&h, &tenant).await;
+    let app = build_app(&h).await;
 
     let (grantee, revoked) = delegate(
         &h,
@@ -2080,7 +2125,7 @@ async fn a_tenant_restore_needs_the_realm_admin_not_a_sub_admin() {
             "/admin/backup/restore?mode=merge",
             "/admin/backup/restore?dry_run=true",
         ] {
-            let (status, body) = post_restore(&h, uri, &token, &tenant, &archive).await;
+            let (status, body) = post_restore_on(&app, uri, &token, &tenant, &archive).await;
             assert_eq!(
                 status,
                 StatusCode::FORBIDDEN,
@@ -2088,7 +2133,7 @@ async fn a_tenant_restore_needs_the_realm_admin_not_a_sub_admin() {
             );
         }
         assert_eq!(
-            post_backup_status(&h, "/admin/backup", &token, &tenant).await,
+            post_status_on(&app, "/admin/backup", &token, &tenant).await,
             StatusCode::OK,
             "{sub_admin} + hearth.export still exports its own realm"
         );
@@ -2113,8 +2158,8 @@ async fn a_tenant_restore_needs_the_realm_admin_not_a_sub_admin() {
         "a refused restore records no BackupRestored event: {restored_events:?}"
     );
 
-    let (status, body) = post_restore(
-        &h,
+    let (status, body) = post_restore_on(
+        &app,
         "/admin/backup/restore?mode=merge",
         &admin_token,
         &tenant,
@@ -2147,7 +2192,12 @@ async fn the_permission_checks_answer_before_the_export_rate_limit() {
     h.rbac().seed_realm(&tenant).expect("seed");
     let admin_token = make_admin_token(&h, &tenant).await;
     let tenant_archive = export_archive(&h, &tenant, &admin_token).await;
-    let app = build_app(&h).await;
+    // One export per user per hour, so the quota is spent in one call.
+    let app = router(Arc::new(
+        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+            .with_backup_verify_key(Some(test_verify_key()))
+            .with_rate_limits(None, None, Some(1)),
+    ));
 
     for (realm, uri) in [
         (system_realm(), "/admin/backup?realm=system"),
@@ -2160,35 +2210,15 @@ async fn the_permission_checks_answer_before_the_export_rate_limit() {
             &["hearth.admin", "hearth.export"],
         );
         let full_token = token_for(&h, &realm, &user);
-        let post = |token: String| {
-            let app = app.clone();
-            let realm = realm.clone();
-            async move {
-                app.oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(uri)
-                        .header("Authorization", format!("Bearer {token}"))
-                        .header("X-Realm-ID", realm.as_uuid().to_string())
-                        .body(Body::empty())
-                        .expect("req"),
-                )
-                .await
-                .expect("response")
-                .status()
-            }
-        };
-        let mut status = StatusCode::OK;
-        for _ in 0..64 {
-            status = post(full_token.clone()).await;
-            if status != StatusCode::OK {
-                break;
-            }
-        }
         assert_eq!(
-            status,
+            post_status_on(&app, uri, &full_token, &realm).await,
+            StatusCode::OK,
+            "precondition: {uri} spends the user's one export"
+        );
+        assert_eq!(
+            post_status_on(&app, uri, &full_token, &realm).await,
             StatusCode::TOO_MANY_REQUESTS,
-            "precondition: {uri} spent the user's export quota"
+            "precondition: {uri} — the user's export quota is spent"
         );
 
         h.rbac().unassign_role(&realm, &full.id).expect("demote");
@@ -2196,31 +2226,23 @@ async fn the_permission_checks_answer_before_the_export_rate_limit() {
         let demoted = token_for(&h, &realm, &user);
         if realm.as_uuid().is_nil() {
             assert_eq!(
-                post(demoted.clone()).await,
+                post_status_on(&app, uri, &demoted, &realm).await,
                 StatusCode::FORBIDDEN,
                 "a system-realm export by a sub-admin is refused before the quota"
             );
         }
-        let (ct, body) = multipart_body(&tenant_archive);
-        let status = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/backup/restore")
-                    .header("Authorization", format!("Bearer {demoted}"))
-                    .header("X-Realm-ID", realm.as_uuid().to_string())
-                    .header("content-type", ct)
-                    .body(Body::from(body))
-                    .expect("req"),
-            )
-            .await
-            .expect("response")
-            .status();
+        let (status, body) = post_restore_on(
+            &app,
+            "/admin/backup/restore",
+            &demoted,
+            &realm,
+            &tenant_archive,
+        )
+        .await;
         assert_eq!(
             status,
             StatusCode::FORBIDDEN,
-            "{realm:?}: a restore by a sub-admin is refused before the quota"
+            "{realm:?}: a restore by a sub-admin is refused before the quota: {body}"
         );
     }
 }
