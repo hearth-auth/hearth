@@ -1355,6 +1355,14 @@ async fn enrolment_ra_cookie(rig: &LoginRig) -> (UserId, String) {
 }
 
 async fn enroll_post(rig: &LoginRig, ra: &str, path: &str, body: String) -> Response<Body> {
+    // The page embeds a form token bound to the RA session cookie.
+    let form_token = hearth::protocol::web::required_action::ra_form_token_for(
+        &CookieSecret::from_bytes(COOKIE_SECRET),
+        ra.strip_prefix("hearth_ra_session=")
+            .and_then(|v| v.split(';').next())
+            .expect("RA cookie pair"),
+    );
+    let body = format!("{body}&_csrf={form_token}");
     rig.app
         .clone()
         .oneshot(
@@ -1710,11 +1718,10 @@ async fn completing_a_required_action_does_not_skip_the_sms_challenge() {
     let new_password = ["a", "brand", "new", "sms", "passphrase", "9"].join("-");
     let resp = enroll_post(
         &rig,
-        &format!("{ra}; hearth_ui_csrf={CSRF}"),
+        &ra,
         "/required-action/UPDATE_PASSWORD",
         format!(
-            "current_password={}&new_password={new_password}&confirm_password={new_password}\
-             &_csrf={CSRF}",
+            "current_password={}&new_password={new_password}&confirm_password={new_password}",
             password()
         ),
     )
@@ -1753,11 +1760,10 @@ async fn completing_a_required_action_without_an_sms_transport_issues_no_code() 
     let new_password = ["a", "brand", "new", "sms", "passphrase", "9"].join("-");
     let resp = enroll_post(
         &rig,
-        &format!("{ra}; hearth_ui_csrf={CSRF}"),
+        &ra,
         "/required-action/UPDATE_PASSWORD",
         format!(
-            "current_password={}&new_password={new_password}&confirm_password={new_password}\
-             &_csrf={CSRF}",
+            "current_password={}&new_password={new_password}&confirm_password={new_password}",
             password()
         ),
     )
@@ -2186,11 +2192,10 @@ async fn jar_resource_survives_a_required_action() {
     let new_password = ["a", "brand", "new", "jar", "passphrase", "7"].join("-");
     let resp = enroll_post(
         &rig,
-        &format!("{ra}; hearth_ui_csrf={CSRF}"),
+        &ra,
         "/required-action/UPDATE_PASSWORD",
         format!(
-            "current_password={}&new_password={new_password}&confirm_password={new_password}\
-             &_csrf={CSRF}",
+            "current_password={}&new_password={new_password}&confirm_password={new_password}",
             password()
         ),
     )

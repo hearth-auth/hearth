@@ -7,17 +7,22 @@
 //! 1. `required_action_check` intercepts the authorize request, sorts actions
 //!    by priority, generates an RA session JWT (via the identity engine), sets
 //!    an HttpOnly cookie, and redirects to `/required-action/{first_action}`.
-//! 2. `/required-action/{action}` renders the action page (GET) or marks the
-//!    action complete (POST).
-//! 3. On POST the handler calls `next_required_action` (more actions remain)
-//!    or `resume_oidc_flow` (all actions done).
+//! 2. Each action has its own page, `GET /required-action/{ACTION}`, whose
+//!    form POSTs to that action's handler (`UPDATE_PASSWORD`,
+//!    `VERIFY_EMAIL/confirm`, `ENROLL_PHONE_OTP/{send,verify}`,
+//!    `ENROLL_EMAIL_OTP/{send,verify}`, `enroll-mfa`). There is no generic
+//!    "mark complete" POST: an action is only done when its handler has done
+//!    it.
+//! 3. On success the handler calls `next_required_action` (more actions
+//!    remain) or `resume_oidc_flow` (all actions done).
 //! 4. `resume_oidc_flow` clears the RA cookie, issues the authorization code,
 //!    and redirects to `redirect_uri?code=…&state=…`.
 //!
-//! | Route | Method | Purpose |
-//! |-------|--------|---------|
-//! | `/required-action/{action}` | GET  | Render the action page |
-//! | `/required-action/{action}` | POST | Mark action complete |
+//! # CSRF
+//!
+//! Every form here carries `_csrf` = [`ra_form_token`], an HMAC of the RA
+//! session cookie. The `/ui` pages' `hearth_ui_csrf` double-submit cookie is
+//! `Path=/ui` and never reaches these routes in a browser.
 //!
 //! # Cookie security
 //!
@@ -29,7 +34,7 @@
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{Form, Path, State};
+use axum::extract::{Form, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
@@ -51,28 +56,6 @@ use super::WebState;
 // ---------------------------------------------------------------------------
 // Templates
 // ---------------------------------------------------------------------------
-
-/// Rendered by `GET /required-action/{action}`.
-#[derive(Template)]
-#[template(path = "ui/required_action/action.html")]
-struct ActionPageTemplate {
-    /// SCREAMING_SNAKE_CASE action name (e.g. `"VERIFY_EMAIL"`).
-    action: String,
-    /// Human-readable action description for the page heading.
-    action_label: &'static str,
-    // Layout chrome.
-    chrome: bool,
-    active: &'static str,
-    user_email: Option<String>,
-    is_admin: bool,
-    narrow: bool,
-    flash: Option<super::templates::Flash>,
-    csrf: Option<String>,
-    product_name: String,
-    logo_url: String,
-    realm_theme_url: Option<String>,
-    inline_theme_css: Option<String>,
-}
 
 /// Rendered by `GET /required-action/UPDATE_PASSWORD` (and re-rendered on validation failure).
 #[derive(Template)]
@@ -106,18 +89,9 @@ pub struct UpdatePasswordForm {
     pub new_password: FormSecret,
     #[serde(default)]
     pub confirm_password: FormSecret,
-    /// CSRF double-submit token, matched against the `hearth_ui_csrf` cookie.
+    /// The page's [`ra_form_token`].
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
-}
-
-fn action_label(action: &str) -> &'static str {
-    match action {
-        "VERIFY_EMAIL" => "Verify your email address",
-        "UPDATE_PASSWORD" => "Update your password",
-        "ENROLL_PHONE_OTP" => "Enroll your phone number",
-        _ => "Complete required action",
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -387,124 +361,6 @@ pub fn resume_browser_flow(
     append_cookie(&mut response, &csrf_cookie);
     append_cookie(&mut response, &last_realm_cookie);
     response
-}
-
-// ---------------------------------------------------------------------------
-// GET /required-action/{action}
-// ---------------------------------------------------------------------------
-
-/// Renders the action-specific page stub.
-pub async fn action_page(
-    State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
-    Path(action): Path<String>,
-) -> Response {
-    if RequiredAction::from_path_segment(&action).is_none() {
-        return handlers_common::not_found("Unknown required action");
-    }
-    // Require a syntactically present RA cookie before rendering so orphaned
-    // page loads (no active intercept) get a clear error rather than a form
-    // the user cannot submit successfully.
-    if read_ra_cookie(&headers).is_none() {
-        return handlers_common::bad_request("No active required-action session");
-    }
-
-    let tmpl = ActionPageTemplate {
-        action_label: action_label(&action),
-        action: action.clone(),
-        chrome: false,
-        active: "",
-        user_email: None,
-        is_admin: false,
-        narrow: true,
-        flash: None,
-        csrf: None,
-        product_name: state.product_name.clone(),
-        logo_url: state.logo_url.clone(),
-        realm_theme_url: state.realm_theme_url(),
-        inline_theme_css: state.inline_theme_css(),
-    };
-    render(&tmpl)
-}
-
-// ---------------------------------------------------------------------------
-// POST /required-action/{action}  (AC-3: sequential completion)
-// ---------------------------------------------------------------------------
-
-/// Marks the current required action complete and advances the flow.
-///
-/// Reads the RA session cookie, validates the JWT, removes `action` from
-/// `pending_actions`, then either:
-/// - Calls [`next_required_action`] (more actions remain), or
-/// - Calls [`resume_oidc_flow`] (all actions done — issues the auth code).
-pub async fn action_complete(
-    State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
-    Path(action): Path<String>,
-) -> Response {
-    let Some(completed) = RequiredAction::from_path_segment(&action) else {
-        return handlers_common::not_found("Unknown required action");
-    };
-
-    let Some(token) = read_ra_cookie(&headers) else {
-        return handlers_common::bad_request("No active required-action session");
-    };
-
-    // Bootstrap realm lookup from the unsigned payload before verifying.
-    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
-        return handlers_common::bad_request("Malformed RA session token");
-    };
-    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
-        return handlers_common::bad_request("Malformed realm in RA session token");
-    };
-    let realm = RealmId::new(realm_uuid);
-
-    let now = Timestamp::from_micros(now_micros());
-    let claims = match state.identity.validate_ra_token(&realm, &token, now) {
-        Ok(c) => c,
-        Err(ra_token::RaTokenError::Expired) => {
-            return handlers_common::bad_request("Required-action session has expired");
-        }
-        Err(_) => {
-            return handlers_common::bad_request("Invalid required-action session token");
-        }
-    };
-
-    let secure = state.is_secure_request(&headers);
-
-    // Remove the just-completed action from the pending list.
-    let remaining: Vec<RequiredAction> = claims
-        .pending_actions
-        .into_iter()
-        .filter(|a| *a != completed)
-        .collect();
-
-    if remaining.is_empty() {
-        if claims.browser_return_to.is_some() {
-            resume_browser_flow(
-                &state,
-                &realm,
-                &claims.sub,
-                claims.browser_return_to,
-                secure,
-            )
-        } else if let Some(oidc_params) = claims.oidc_params {
-            resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
-        } else {
-            resume_browser_flow(&state, &realm, &claims.sub, None, secure)
-        }
-    } else {
-        next_required_action(
-            &state,
-            &realm,
-            &claims.sub,
-            remaining,
-            claims.oidc_params,
-            claims.browser_return_to,
-            secure,
-            now,
-        )
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,10 +1124,8 @@ fn percent_encode_string(value: &str) -> String {
 
 /// Renders the update-password form.
 ///
-/// Issues (or re-uses) the `hearth_ui_csrf` double-submit cookie and embeds its
-/// value as the form's `_csrf` field, so the POST handler can verify it
-/// (task 21.3). Mirrors the pre-auth login form, which is the other `/ui` form
-/// rendered without a `UiSession`.
+/// Embeds the page's [`ra_form_token`] as the form's `_csrf` field, so the
+/// POST handler can verify it (task 21.3).
 pub async fn update_password_page(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -1279,19 +1133,7 @@ pub async fn update_password_page(
     if read_ra_cookie(&headers).is_none() {
         return handlers_common::bad_request("No active required-action session");
     }
-    let secure = state.is_secure_request(&headers);
-    let (csrf_value, fresh_cookie) = match super::auth::csrf_cookie_value_from_headers(&headers) {
-        Some(existing) => (existing.to_string(), None),
-        None => {
-            let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
-            (val, Some(cookie))
-        }
-    };
-    let mut resp = render_update_password_form(&state, None, Some(csrf_value));
-    if let Some(cookie) = fresh_cookie {
-        append_cookie(&mut resp, &cookie);
-    }
-    resp
+    render_update_password_form(&state, None, ra_form_token(&state, &headers))
 }
 
 // ---------------------------------------------------------------------------
@@ -1310,20 +1152,17 @@ pub async fn update_password_submit(
     headers: HeaderMap,
     Form(form): Form<UpdatePasswordForm>,
 ) -> Response {
-    // CSRF double-submit (audit §4.23#2, task 21.3). The RA cookie is
-    // `SameSite=Strict`, but `SameSite` is a browser-version-dependent
-    // mitigation, not a control — a cross-site POST that rides an existing RA
-    // session must be refused on its own merits. Fail-closed in production;
-    // `--dev` keeps the bypass so direct-POST tooling still works, exactly as
-    // `login_submit_impl` does.
-    let secure = state.is_secure_request(&headers);
-    let csrf_ok = match super::auth::csrf_cookie_value_from_headers(&headers) {
-        Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
-        None => state.dev_mode,
-    };
-    if !csrf_ok {
-        return update_password_csrf_failure(&state, secure);
+    // CSRF (audit §4.23#2, task 21.3). The RA cookie is `SameSite=Strict`,
+    // but `SameSite` is a browser-version-dependent mitigation, not a control
+    // — a cross-site POST that rides an existing RA session must be refused on
+    // its own merits. The form carries a token bound to the RA session cookie
+    // (`ra_form_token`); the `/ui`-scoped `hearth_ui_csrf` cookie this used to
+    // check never reaches `/required-action/*` in a real browser, so the form
+    // could not be submitted outside `--dev`.
+    if read_ra_cookie(&headers).is_some() && !ra_form_ok(&state, &headers, &form.csrf) {
+        return update_password_csrf_failure(&state, &headers);
     }
+    let secure = state.is_secure_request(&headers);
 
     let Some(token) = read_ra_cookie(&headers) else {
         return handlers_common::bad_request("No active required-action session");
@@ -1353,7 +1192,7 @@ pub async fn update_password_submit(
         return handlers_common::server_error();
     };
     let user_id = UserId::new(user_uuid);
-    let csrf_echo = Some(form.csrf.clone());
+    let csrf_echo = ra_form_token(&state, &headers);
 
     if *form.new_password != *form.confirm_password {
         return render_update_password_form(
@@ -1556,20 +1395,17 @@ fn render_update_password_form(
     render(&update_password_template(state, error, csrf))
 }
 
-/// 403 response for a failed CSRF double-submit on the update-password form.
+/// 403 response for an update-password POST without the page's form token.
 ///
-/// Re-renders the form (with a fresh token the browser can actually use) rather
-/// than a bare error page, so a user whose token expired mid-flow can retry.
-fn update_password_csrf_failure(state: &Arc<WebState>, secure: bool) -> Response {
-    let (csrf_value, cookie) = super::auth::fresh_csrf_cookie(secure);
+/// Re-renders the form (with the token the browser can actually use) rather
+/// than a bare error page, so a user whose page went stale can retry.
+fn update_password_csrf_failure(state: &Arc<WebState>, headers: &HeaderMap) -> Response {
     let tmpl = update_password_template(
         state,
         Some("Your session expired. Please try again."),
-        Some(csrf_value),
+        ra_form_token(state, headers),
     );
-    let mut resp = super::templates::render_status(&tmpl, StatusCode::FORBIDDEN);
-    append_cookie(&mut resp, &cookie);
-    resp
+    super::templates::render_status(&tmpl, StatusCode::FORBIDDEN)
 }
 
 // ---------------------------------------------------------------------------
@@ -1621,6 +1457,9 @@ struct EnrollPhoneOtpVerifyTemplate {
 /// `application/x-www-form-urlencoded` body for `POST /required-action/ENROLL_PHONE_OTP/send`.
 #[derive(Debug, Deserialize)]
 pub struct EnrollPhoneOtpSendForm {
+    /// The page's [`ra_form_token`].
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
     #[serde(default)]
     pub phone: String,
 }
@@ -1628,6 +1467,9 @@ pub struct EnrollPhoneOtpSendForm {
 /// `application/x-www-form-urlencoded` body for `POST /required-action/ENROLL_PHONE_OTP/verify`.
 #[derive(Debug, Deserialize)]
 pub struct EnrollPhoneOtpVerifyForm {
+    /// The page's [`ra_form_token`].
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
     #[serde(default)]
     pub nonce: String,
     #[serde(default)]
@@ -1646,7 +1488,7 @@ pub async fn enroll_phone_otp_page(
     if let Err(response) = validated_ra_session(&state, &headers) {
         return response;
     }
-    render_enroll_phone_page(&state, None)
+    render_enroll_phone_page(&state, &headers, None)
 }
 
 /// Verifies the RA session cookie and returns its realm and claims.
@@ -1694,6 +1536,9 @@ pub async fn enroll_phone_otp_send(
     headers: HeaderMap,
     Form(form): Form<EnrollPhoneOtpSendForm>,
 ) -> Response {
+    if read_ra_cookie(&headers).is_some() && !ra_form_ok(&state, &headers, &form.csrf) {
+        return ra_form_refused();
+    }
     // Verify the RA session token before doing anything that costs the realm
     // money: the realm below comes from the verified token, not from the
     // unauthenticated payload (audit 2026-08-28 §4.19#7).
@@ -1708,6 +1553,7 @@ pub async fn enroll_phone_otp_send(
     if !is_e164(&phone) {
         return render_enroll_phone_page(
             &state,
+            &headers,
             Some("Enter a valid international phone number (e.g. +15555550100)."),
         );
     }
@@ -1716,6 +1562,7 @@ pub async fn enroll_phone_otp_send(
         tracing::warn!("enroll_phone_otp_send: SMS transport not configured");
         return render_enroll_phone_page(
             &state,
+            &headers,
             Some("SMS delivery is not configured. Contact your administrator."),
         );
     };
@@ -1723,6 +1570,7 @@ pub async fn enroll_phone_otp_send(
     let Some(hmac_key) = sms_otp_hmac_key_bytes(&state) else {
         return render_enroll_phone_page(
             &state,
+            &headers,
             Some("SMS delivery is not configured. Contact your administrator."),
         );
     };
@@ -1739,6 +1587,7 @@ pub async fn enroll_phone_otp_send(
         Err(crate::identity::IdentityError::SmsResendLimitExceeded) => {
             return render_enroll_phone_verify(
                 &state,
+                &headers,
                 // Return the verify page with a warning rather than blocking —
                 // the real OTP was already sent recently (rate limit window).
                 &phone,
@@ -1750,12 +1599,13 @@ pub async fn enroll_phone_otp_send(
             tracing::warn!(error = %e, "enroll_phone_otp_send: issue_sms_otp failed");
             return render_enroll_phone_page(
                 &state,
+                &headers,
                 Some("Failed to send verification code. Please try again."),
             );
         }
     };
 
-    render_enroll_phone_verify(&state, &phone, Some(&nonce), None)
+    render_enroll_phone_verify(&state, &headers, &phone, Some(&nonce), None)
 }
 
 /// Verifies the submitted OTP code, stores the phone as verified, clears
@@ -1766,6 +1616,9 @@ pub async fn enroll_phone_otp_verify_submit(
     headers: HeaderMap,
     Form(form): Form<EnrollPhoneOtpVerifyForm>,
 ) -> Response {
+    if read_ra_cookie(&headers).is_some() && !ra_form_ok(&state, &headers, &form.csrf) {
+        return ra_form_refused();
+    }
     let Some(token) = read_ra_cookie(&headers) else {
         return handlers_common::bad_request("No active required-action session");
     };
@@ -1803,11 +1656,12 @@ pub async fn enroll_phone_otp_verify_submit(
     // unparsed number has nothing to mask, so send the user back to the entry
     // page instead of rendering a masked view of junk.
     if !is_e164(&phone) {
-        return render_enroll_phone_page(&state, Some("Invalid submission."));
+        return render_enroll_phone_page(&state, &headers, Some("Invalid submission."));
     }
     if form.nonce.is_empty() || form.code.is_empty() {
         return render_enroll_phone_verify(
             &state,
+            &headers,
             &phone,
             Some(&form.nonce),
             Some("Invalid submission."),
@@ -1817,6 +1671,7 @@ pub async fn enroll_phone_otp_verify_submit(
     let Some(hmac_key) = sms_otp_hmac_key_bytes(&state) else {
         return render_enroll_phone_page(
             &state,
+            &headers,
             Some("SMS delivery is not configured. Contact your administrator."),
         );
     };
@@ -1832,6 +1687,7 @@ pub async fn enroll_phone_otp_verify_submit(
         Err(_) => {
             return render_enroll_phone_verify(
                 &state,
+                &headers,
                 &phone,
                 Some(&form.nonce),
                 Some("That code is incorrect or has expired. Try again or request a new code."),
@@ -1904,7 +1760,11 @@ pub async fn enroll_phone_otp_verify_submit(
 // ENROLL_PHONE_OTP helpers
 // ---------------------------------------------------------------------------
 
-fn render_enroll_phone_page(state: &Arc<WebState>, error: Option<&str>) -> Response {
+fn render_enroll_phone_page(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    error: Option<&str>,
+) -> Response {
     let tmpl = EnrollPhoneOtpPageTemplate {
         error: error.map(str::to_string),
         chrome: false,
@@ -1913,7 +1773,7 @@ fn render_enroll_phone_page(state: &Arc<WebState>, error: Option<&str>) -> Respo
         is_admin: false,
         narrow: true,
         flash: None,
-        csrf: None,
+        csrf: ra_form_token(state, headers),
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
@@ -1924,6 +1784,7 @@ fn render_enroll_phone_page(state: &Arc<WebState>, error: Option<&str>) -> Respo
 
 fn render_enroll_phone_verify(
     state: &Arc<WebState>,
+    headers: &HeaderMap,
     phone: &str,
     nonce: Option<&str>,
     error: Option<&str>,
@@ -1939,7 +1800,7 @@ fn render_enroll_phone_verify(
         is_admin: false,
         narrow: true,
         flash: None,
-        csrf: None,
+        csrf: ra_form_token(state, headers),
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
@@ -2018,6 +1879,55 @@ fn now_unix_ts() -> u64 {
         .unwrap_or(0)
 }
 
+/// Purpose tag of the per-page form token every `/required-action/*` form
+/// carries.
+const RA_FORM_PURPOSE: &str = "hearth-ra-form";
+
+/// The `_csrf` value every `/required-action/*` form carries: an HMAC of the
+/// required-action session cookie under the cookie secret.
+///
+/// The `/ui` pages use the `hearth_ui_csrf` double-submit cookie, but that
+/// cookie is scoped to `Path=/ui` and a browser never sends it to
+/// `/required-action/*`, so these forms bind to the RA session cookie
+/// instead — the same shape as the emailed-link `link_binding`. The page can
+/// embed the token; a cross-site attacker, who can neither read the HttpOnly
+/// cookie nor compute the MAC, cannot. `None` without an RA cookie.
+fn ra_form_token(state: &WebState, headers: &HeaderMap) -> Option<String> {
+    read_ra_cookie(headers).map(|token| ra_form_token_for(&state.cookie_secret, &token))
+}
+
+/// The [`ra_form_token`] for the RA session cookie value `ra_session_token`
+/// under `secret`.
+#[must_use]
+pub fn ra_form_token_for(secret: &super::auth::CookieSecret, ra_session_token: &str) -> String {
+    super::link_token::keyed_binding(secret, RA_FORM_PURPOSE, ra_session_token)
+}
+
+/// Whether `submitted` is the form token for the request's RA session
+/// cookie, compared in constant time. There is no `--dev` bypass: the page
+/// always embeds the token, so a genuine submission always carries it.
+fn ra_form_ok(state: &WebState, headers: &HeaderMap, submitted: &str) -> bool {
+    ra_form_token(state, headers)
+        .is_some_and(|expected| crate::core::ct_eq_secret_str(&expected, submitted))
+}
+
+/// `403` for a `/required-action/*` POST that lacks the page's form token.
+fn ra_form_refused() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        "This form has expired. Go back, reload the page and try again.",
+    )
+        .into_response()
+}
+
+/// The only field the send-code forms post besides the form token.
+#[derive(Debug, Deserialize)]
+pub struct RaFormToken {
+    /// The page's [`ra_form_token`].
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
+}
+
 fn read_ra_cookie(headers: &HeaderMap) -> Option<String> {
     super::auth::cookie_value_from_headers(headers, ra_token::RA_SESSION_COOKIE).map(str::to_string)
 }
@@ -2093,6 +2003,9 @@ struct EnrollEmailOtpVerifyTemplate {
 /// `application/x-www-form-urlencoded` body for `POST /required-action/ENROLL_EMAIL_OTP/verify`.
 #[derive(Debug, Deserialize)]
 pub struct EnrollEmailOtpVerifyForm {
+    /// The page's [`ra_form_token`].
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
     #[serde(default)]
     pub nonce: String,
     #[serde(default)]
@@ -2130,7 +2043,7 @@ pub async fn enroll_email_otp_page(
         .flatten()
         .map(|u| u.email().to_string())
         .unwrap_or_default();
-    render_enroll_email_otp_page(&state, &email, None)
+    render_enroll_email_otp_page(&state, &headers, &email, None)
 }
 
 /// Sends an email OTP to the user's registered email address and renders
@@ -2138,7 +2051,11 @@ pub async fn enroll_email_otp_page(
 pub async fn enroll_email_otp_send(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
+    Form(form): Form<RaFormToken>,
 ) -> Response {
+    if read_ra_cookie(&headers).is_some() && !ra_form_ok(&state, &headers, &form.csrf) {
+        return ra_form_refused();
+    }
     let Some(token) = read_ra_cookie(&headers) else {
         return handlers_common::bad_request("No active required-action session");
     };
@@ -2169,6 +2086,7 @@ pub async fn enroll_email_otp_send(
         tracing::warn!("enroll_email_otp_send: email transport not configured");
         return render_enroll_email_otp_page(
             &state,
+            &headers,
             &email,
             Some("Email delivery is not configured. Contact your administrator."),
         );
@@ -2181,7 +2099,7 @@ pub async fn enroll_email_otp_send(
         .identity
         .issue_email_otp(&realm, &email, &hmac_key, email_service, None, now_ts)
     {
-        Ok(nonce) => render_enroll_email_otp_verify(&state, &email, Some(&nonce), None),
+        Ok(nonce) => render_enroll_email_otp_verify(&state, &headers, &email, Some(&nonce), None),
         Err(e) => {
             tracing::warn!(
                 error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
@@ -2189,6 +2107,7 @@ pub async fn enroll_email_otp_send(
             );
             render_enroll_email_otp_page(
                 &state,
+                &headers,
                 &email,
                 Some("Failed to send verification code. Please try again."),
             )
@@ -2204,6 +2123,9 @@ pub async fn enroll_email_otp_verify_submit(
     headers: HeaderMap,
     Form(form): Form<EnrollEmailOtpVerifyForm>,
 ) -> Response {
+    if read_ra_cookie(&headers).is_some() && !ra_form_ok(&state, &headers, &form.csrf) {
+        return ra_form_refused();
+    }
     let Some(token) = read_ra_cookie(&headers) else {
         return handlers_common::bad_request("No active required-action session");
     };
@@ -2238,6 +2160,7 @@ pub async fn enroll_email_otp_verify_submit(
     if form.nonce.is_empty() || form.code.is_empty() {
         return render_enroll_email_otp_verify(
             &state,
+            &headers,
             &email,
             Some(&form.nonce),
             Some("Invalid submission."),
@@ -2259,6 +2182,7 @@ pub async fn enroll_email_otp_verify_submit(
         Err(_) => {
             return render_enroll_email_otp_verify(
                 &state,
+                &headers,
                 &email,
                 Some(&form.nonce),
                 Some("That code is incorrect or has expired. Try again or request a new code."),
@@ -2328,6 +2252,7 @@ pub async fn enroll_email_otp_verify_submit(
 
 fn render_enroll_email_otp_page(
     state: &Arc<WebState>,
+    headers: &HeaderMap,
     email: &str,
     error: Option<&str>,
 ) -> Response {
@@ -2340,7 +2265,7 @@ fn render_enroll_email_otp_page(
         is_admin: false,
         narrow: true,
         flash: None,
-        csrf: None,
+        csrf: ra_form_token(state, headers),
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
@@ -2351,6 +2276,7 @@ fn render_enroll_email_otp_page(
 
 fn render_enroll_email_otp_verify(
     state: &Arc<WebState>,
+    headers: &HeaderMap,
     email: &str,
     nonce: Option<&str>,
     error: Option<&str>,
@@ -2365,7 +2291,7 @@ fn render_enroll_email_otp_verify(
         is_admin: false,
         narrow: true,
         flash: None,
-        csrf: None,
+        csrf: ra_form_token(state, headers),
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
@@ -2437,6 +2363,9 @@ struct EnrollMfaPageTemplate {
 /// `application/x-www-form-urlencoded` body for `POST /required-action/enroll-mfa`.
 #[derive(Debug, Deserialize)]
 pub struct EnrollMfaForm {
+    /// The page's [`ra_form_token`].
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
     #[serde(default)]
     pub code: String,
 }
@@ -2499,7 +2428,7 @@ pub async fn enroll_mfa_page(State(state): State<Arc<WebState>>, headers: Header
                 is_admin: false,
                 narrow: true,
                 flash: None,
-                csrf: None,
+                csrf: ra_form_token(&state, &headers),
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
                 realm_theme_url: state.realm_theme_url(),
@@ -2508,8 +2437,7 @@ pub async fn enroll_mfa_page(State(state): State<Arc<WebState>>, headers: Header
             super::templates::render(&tmpl)
         }
         Err(IdentityError::MfaAlreadyEnabled) => {
-            // Already enrolled — skip this action automatically by redirecting
-            // to the generic action_complete path.
+            // Already enrolled — send the browser back to this page.
             Redirect::to("/required-action/enroll-mfa").into_response()
         }
         Err(e) => {
@@ -2526,7 +2454,7 @@ pub async fn enroll_mfa_page(State(state): State<Arc<WebState>>, headers: Header
                 is_admin: false,
                 narrow: true,
                 flash: None,
-                csrf: None,
+                csrf: ra_form_token(&state, &headers),
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
                 realm_theme_url: state.realm_theme_url(),
@@ -2547,6 +2475,9 @@ pub async fn enroll_mfa_submit(
     headers: HeaderMap,
     Form(form): Form<EnrollMfaForm>,
 ) -> Response {
+    if read_ra_cookie(&headers).is_some() && !ra_form_ok(&state, &headers, &form.csrf) {
+        return ra_form_refused();
+    }
     let Some(token_str) = read_ra_cookie(&headers) else {
         return handlers_common::bad_request("No active required-action session");
     };
@@ -2601,7 +2532,7 @@ pub async fn enroll_mfa_submit(
             is_admin: false,
             narrow: true,
             flash: None,
-            csrf: None,
+            csrf: ra_form_token(&state, &headers),
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
             realm_theme_url: state.realm_theme_url(),
@@ -2738,13 +2669,6 @@ mod tests {
     fn build_redirect_location_skips_empty_values() {
         let loc = build_redirect_location("https://app/cb", &[("code", "abc"), ("state", "")]);
         assert_eq!(loc, "https://app/cb?code=abc");
-    }
-
-    #[test]
-    fn action_label_maps_known_actions() {
-        assert_eq!(action_label("VERIFY_EMAIL"), "Verify your email address");
-        assert_eq!(action_label("UPDATE_PASSWORD"), "Update your password");
-        assert_eq!(action_label("UNKNOWN"), "Complete required action");
     }
 }
 

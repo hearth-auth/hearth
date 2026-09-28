@@ -21,6 +21,7 @@
     {% endmatch %}
 
     <form method="post" action="/required-action/ENROLL_PHONE_OTP/send" class="space-y-5" data-testid="enroll-phone-form">
+      {% match csrf %}{% when Some with (c) %}<input type="hidden" name="_csrf" value="{{ c }}">{% when None %}{% endmatch %}
       <div>
         <label for="phone" class="block text-sm font-medium text-ht-content-secondary mb-1">Phone number</label>
         <input id="phone" name="phone" type="tel" required autocomplete="tel"

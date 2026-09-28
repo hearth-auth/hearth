@@ -28,6 +28,16 @@ use tower::ServiceExt;
 
 const COOKIE_SECRET: [u8; 32] = [11u8; 32];
 
+/// Appends the `_csrf` form token a `/required-action/*` page embeds for the RA
+/// session cookie `ra_token` (bound to the cookie, not a `/ui` CSRF cookie).
+fn with_ra_csrf(ra_token: &str, body: impl std::fmt::Display) -> String {
+    let token = hearth::protocol::web::required_action::ra_form_token_for(
+        &hearth::protocol::web::CookieSecret::from_bytes(COOKIE_SECRET),
+        ra_token,
+    );
+    format!("{body}&_csrf={token}")
+}
+
 /// The confirmation page's POST body for the stashed link `token`
 /// (GA audit L18).
 fn link_binding_body(token: &str) -> String {
@@ -308,9 +318,12 @@ async fn completing_second_action_first_does_not_skip_first_action() {
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
-                .body(Body::from(format!(
-                    "current_password={PASSWORD}&new_password=ValidPass-ac3!\
+                .body(Body::from(with_ra_csrf(
+                    &ra_token,
+                    format!(
+                        "current_password={PASSWORD}&new_password=ValidPass-ac3!\
                      &confirm_password=ValidPass-ac3!"
+                    ),
                 )))
                 .expect("req"),
         )
@@ -395,9 +408,12 @@ async fn tampered_ra_token_sub_is_rejected() {
                     header::COOKIE,
                     format!("hearth_ra_session={tampered_token}"),
                 )
-                .body(Body::from(format!(
-                    "current_password={PASSWORD}&new_password=ValidPass-ac4!\
+                .body(Body::from(with_ra_csrf(
+                    &tampered_token,
+                    format!(
+                        "current_password={PASSWORD}&new_password=ValidPass-ac4!\
                      &confirm_password=ValidPass-ac4!"
+                    ),
                 )))
                 .expect("req"),
         )
@@ -538,9 +554,12 @@ async fn update_password_completion_emits_audit_event() {
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
-                .body(Body::from(format!(
-                    "current_password={PASSWORD}&new_password=AuditTestPass-8!\
+                .body(Body::from(with_ra_csrf(
+                    &ra_token,
+                    format!(
+                        "current_password={PASSWORD}&new_password=AuditTestPass-8!\
                      &confirm_password=AuditTestPass-8!"
+                    ),
                 )))
                 .expect("req"),
         )
