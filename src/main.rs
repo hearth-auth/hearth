@@ -762,25 +762,36 @@ async fn main() {
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "hearth", &mut std::io::stdout());
         }
-        Commands::Rbac { action } => match action {
-            RbacAction::Orphans { action } => match action {
-                OrphansAction::List { realm, data_dir } => {
-                    if let Err(e) = run_rbac_orphans_list(realm.as_deref(), &data_dir) {
-                        tracing::error!("error: {e}");
-                        std::process::exit(1);
-                    }
+        Commands::Rbac { action } => {
+            // Without this every `tracing::error!` below went to a dispatcher
+            // that does not exist: a refused store open (no HEARTH_MASTER_KEY,
+            // the data-directory lock held) exited 1 with no output at all.
+            let _tracing_guard = init_cli_tracing();
+            run_rbac_command(action);
+        }
+    }
+}
+
+/// Dispatches `hearth rbac …`. Exits 1 on failure, after reporting it.
+fn run_rbac_command(action: RbacAction) {
+    match action {
+        RbacAction::Orphans { action } => match action {
+            OrphansAction::List { realm, data_dir } => {
+                if let Err(e) = run_rbac_orphans_list(realm.as_deref(), &data_dir) {
+                    tracing::error!("error: {e}");
+                    std::process::exit(1);
                 }
-                OrphansAction::Purge {
-                    realm,
-                    data_dir,
-                    dry_run,
-                } => {
-                    if let Err(e) = run_rbac_orphans_purge(realm.as_deref(), &data_dir, dry_run) {
-                        tracing::error!("error: {e}");
-                        std::process::exit(1);
-                    }
+            }
+            OrphansAction::Purge {
+                realm,
+                data_dir,
+                dry_run,
+            } => {
+                if let Err(e) = run_rbac_orphans_purge(realm.as_deref(), &data_dir, dry_run) {
+                    tracing::error!("error: {e}");
+                    std::process::exit(1);
                 }
-            },
+            }
         },
     }
 }
