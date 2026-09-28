@@ -115,7 +115,15 @@ pub(crate) fn extract_admin_auth(
                 | "hearth.agents.admin"
         )
     });
-    if !is_admin {
+    // A token held by a third-party client never administers the realm, even
+    // when a claim profile releases admin permissions to it (GA audit B1).
+    if !is_admin
+        || !crate::protocol::admin_auth::token_client_may_administer(
+            state.identity.as_ref(),
+            &realm_id,
+            &claims,
+        )
+    {
         return Err((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "forbidden"})),

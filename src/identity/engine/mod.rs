@@ -3686,11 +3686,6 @@ impl EmbeddedIdentityEngine {
                     reason: format!("rbac resolve failed: {e}"),
                 },
             })?;
-        let perm_strs: Vec<String> = resolved
-            .permissions
-            .iter()
-            .map(|p| p.as_str().to_string())
-            .collect();
 
         let resolved_client = if let Some(ref cid) = family.client_id {
             self.get_client(realm_id, cid)?
@@ -3744,18 +3739,19 @@ impl EmbeddedIdentityEngine {
             &permissions,
             &custom,
         )?;
-        let custom = crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+        let mut custom =
+            crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+        if let Some(ref cid) = family.client_id {
+            crate::identity::tokens::TokenClaims::insert_client_id(&mut custom, cid);
+        }
 
         let embedded = authz_mode == AccessTokenAuthorization::Embedded;
-        let effective_perms: Vec<String> = if embedded {
-            if permissions.is_empty() {
-                perm_strs
-            } else {
-                permissions
-            }
-        } else {
-            Vec::new()
-        };
+        // The claim profile's output is final: an empty list means the profile
+        // released no permissions to this client (a third-party client under
+        // the default `first_party_only` gate). Falling back to the resolved
+        // set here handed every third-party client the user's full authority
+        // on its first refresh (GA audit B1).
+        let effective_perms: Vec<String> = if embedded { permissions } else { Vec::new() };
         let effective_roles = if embedded { roles } else { Vec::new() };
         let effective_groups = if embedded { groups } else { Vec::new() };
 
@@ -8743,11 +8739,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     reason: format!("rbac resolve failed: {e}"),
                 },
             })?;
-        let perm_strs: Vec<String> = resolved
-            .permissions
-            .iter()
-            .map(|p| p.as_str().to_string())
-            .collect();
 
         // Resolve the OAuth client: use the caller-supplied client_id when
         // present, otherwise fall back to the first-party sentinel used by
@@ -8857,7 +8848,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             &permissions,
             &custom,
         )?;
-        let custom = crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+        let mut custom =
+            crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+        if let Some(ref cid) = ctx.client_id {
+            crate::identity::tokens::TokenClaims::insert_client_id(&mut custom, cid);
+        }
 
         let token_audit_ctx = AuditContext {
             actor: Actor::User(user_id.clone()),
@@ -8881,12 +8876,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             ..self.config.token.clone()
         };
         let realm_issuer = self.realm_issuer_url(realm_id);
+        // The claim profile's output is final — see `rotate_grant_family`: an
+        // empty list is the profile withholding permissions from this client,
+        // not a gap to fill from the resolved set (GA audit B1).
         let effective_perms = if authz_mode == AccessTokenAuthorization::Embedded {
-            if permissions.is_empty() {
-                &perm_strs
-            } else {
-                &permissions
-            }
+            &permissions
         } else {
             &empty_perm_strs
         };

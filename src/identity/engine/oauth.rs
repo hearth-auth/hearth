@@ -929,8 +929,12 @@ impl EmbeddedIdentityEngine {
             &access_permissions,
             &access_custom,
         )?;
-        let access_custom =
+        let mut access_custom =
             crate::identity::pre_token_webhook::merge_extra_claims(access_custom, webhook_extra);
+        // RFC 9068 §2.2: name the client this token is issued to, so a
+        // resource (the admin API, userinfo) can tell a third-party client's
+        // token from a first-party one (GA audit B1).
+        TokenClaims::insert_client_id(&mut access_custom, &request.client_id);
 
         // 9. (Code already consumed atomically in step 3 — no further write needed.)
 
