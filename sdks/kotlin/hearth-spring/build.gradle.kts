@@ -10,6 +10,14 @@ kotlin {
     jvmToolchain(17)
 }
 
+// Maven Central rejects a deployment without -sources and -javadoc jars
+// (GA audit: the Kotlin SDK has never reached Maven Central). Kotlin sources
+// yield a near-empty javadoc jar, which Central accepts.
+java {
+    withSourcesJar()
+    withJavadocJar()
+}
+
 val springBootVersion = "3.3.4"
 val springSecurityVersion = "6.3.3"
 
@@ -73,10 +81,38 @@ publishing {
                         url.set("https://www.apache.org/licenses/LICENSE-2.0")
                     }
                 }
+                // Maven Central REQUIRES a developers block; a deployment
+                // without one is rejected at validation (task 26.53).
+                developers {
+                    developer {
+                        id.set("hearth-auth")
+                        name.set("Hearth maintainers")
+                        url.set("https://github.com/hearth-auth")
+                    }
+                }
                 scm {
                     url.set("https://github.com/hearth-auth/hearth")
                     connection.set("scm:git:git://github.com/hearth-auth/hearth.git")
                     developerConnection.set("scm:git:ssh://git@github.com/hearth-auth/hearth.git")
+                }
+            }
+        }
+    }
+
+    // Same OSSRH target as hearth-core (task 26.53): without a repository
+    // `gradle publish` is a silent no-op for this module — the v1.6.11 tag run
+    // logged `:hearth-spring:publish UP-TO-DATE` and shipped nothing. Declared
+    // only when credentials are present, so local builds stay offline.
+    repositories {
+        val ossrhUsername: String? by project
+        val ossrhPassword: String? by project
+        if (ossrhUsername != null && ossrhPassword != null) {
+            maven {
+                name = "ossrh"
+                url = uri("https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/")
+                credentials {
+                    username = ossrhUsername
+                    password = ossrhPassword
                 }
             }
         }
