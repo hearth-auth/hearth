@@ -3,7 +3,7 @@
 //! Manages the two-level envelope encryption hierarchy:
 //!
 //! ```text
-//! Host Key (from HEARTH_MASTER_KEY env var or auto-generated file)
+//! Host Key (HEARTH_MASTER_KEY env var; dev mode only: auto-generated hearth.host_key)
 //!   └── Realm KEKs (stored encrypted in hearth.keys)
 //!         └── File DEKs (stored wrapped in SST/WAL headers)
 //!               └── File data (encrypted with DEK)
@@ -59,7 +59,7 @@ type KekMap = HashMap<RealmId, KeyEncryptionKey>;
 /// Thread-safe via a `std::sync::Mutex`. KEK operations are off the hot path
 /// (only during startup, realm creation, and key rotation).
 pub(crate) struct KeyRegistry {
-    /// Host key loaded from environment or auto-generated.
+    /// Host key from `HEARTH_MASTER_KEY` (dev mode: or the auto-generated file).
     host_key: HostKey,
     /// In-memory map of realm ID → decrypted KEK.
     keks: Mutex<KekMap>,
@@ -74,8 +74,10 @@ pub(crate) struct KeyRegistry {
 impl KeyRegistry {
     /// Loads or creates the key registry.
     ///
-    /// `dev_mode: true` permits auto-generating the host key when
-    /// `HEARTH_MASTER_KEY` is unset. `false` fails closed (production).
+    /// `dev_mode: false` (production) takes the host key from
+    /// `HEARTH_MASTER_KEY` only and fails closed when it is unset — an existing
+    /// `hearth.host_key` file is never read. `dev_mode: true` falls back to that
+    /// file, auto-generating it on first use.
     pub(crate) fn load(data_dir: &Path, dev_mode: bool) -> Result<Self, StorageError> {
         Self::load_with_fs(data_dir, Arc::new(RealFs), dev_mode)
     }
@@ -344,93 +346,55 @@ impl LoadKeksResult {
 
 /// Loads or creates the host key.
 ///
-/// Priority:
-/// 1. `HEARTH_MASTER_KEY` environment variable (hex-encoded 32-byte key)
-/// 2. `{data_dir}/hearth.host_key` file (32 raw bytes)
-/// 3. Auto-generate and persist to `{data_dir}/hearth.host_key`
+/// Production (`dev_mode == false`) takes the key from the
+/// `HEARTH_MASTER_KEY` environment variable (64 hex chars) and nowhere else.
+/// `{data_dir}/hearth.host_key` is never read: a plaintext key file stored
+/// beside the ciphertext it protects defeats encryption at rest, so a
+/// production start without the variable is refused even when such a file
+/// exists (the error says it was ignored).
+///
+/// Dev mode (`dev_mode == true`), in order:
+/// 1. `HEARTH_MASTER_KEY`, when set.
+/// 2. An existing `{data_dir}/hearth.host_key` — the file a previous `--dev`
+///    run generated, so a dev store with a persistent `storage.data_dir`
+///    reopens across restarts.
+/// 3. Auto-generate and persist to `{data_dir}/hearth.host_key` (mode `0o600`).
 fn load_or_create_host_key(
     data_dir: &Path,
     fs: &dyn Fs,
     dev_mode: bool,
 ) -> Result<HostKey, StorageError> {
-    // 1. Check environment variable
-    if let Ok(env_val) = std::env::var("HEARTH_MASTER_KEY") {
-        let env_val = env_val.trim();
-        if env_val.len() == 64 {
-            let bytes = decode_hex(env_val).map_err(|_| StorageError::Crypto {
-                reason: "HEARTH_MASTER_KEY is not valid hex".to_string(),
-            })?;
-            return Ok(HostKey::from_bytes(bytes));
-        }
-        return Err(StorageError::Crypto {
-            reason: "HEARTH_MASTER_KEY must be 64 hex chars".to_string(),
-        });
+    if let Some(host_key) = host_key_from_env()? {
+        return Ok(host_key);
     }
 
-    // 2. Check file
     let host_key_path = data_dir.join("hearth.host_key");
-    if host_key_path.exists() {
-        // Warn on non-Unix platforms where OS file ACLs cannot be enforced.
-        // On Unix the file is written with mode 0o600 (owner read/write only).
-        #[cfg(not(unix))]
-        tracing::warn!(
-            path = %host_key_path.display(),
-            "hearth.host_key file permissions cannot be enforced on this platform; \
-             use the HEARTH_MASTER_KEY environment variable to protect the host key"
-        );
-
-        let data = fs.read(&host_key_path)?;
-
-        // Verify file length: [8B magic][32B key][32B HMAC] = 72 bytes.
-        if data.len() != HOST_KEY_FILE_SIZE {
-            return Err(StorageError::Crypto {
-                reason: format!(
-                    "hearth.host_key has unexpected length: {} bytes \
-                     (expected {HOST_KEY_FILE_SIZE} for magic+key+HMAC framing)",
-                    data.len()
-                ),
-            });
-        }
-
-        // Verify magic header.
-        if &data[..8] != HOST_KEY_MAGIC {
-            return Err(StorageError::Crypto {
-                reason: "hearth.host_key has invalid magic header; \
-                         file may be corrupted or is from an incompatible version"
-                    .to_string(),
-            });
-        }
-
-        // Extract key bytes.
-        let mut key_bytes = [0u8; 32];
-        key_bytes.copy_from_slice(&data[8..40]);
-
-        // Verify HMAC-SHA256 integrity tag (constant-time comparison).
-        if !verify_host_key_file_hmac(&key_bytes, &data[40..72]) {
-            return Err(StorageError::Crypto {
-                reason: "hearth.host_key: HMAC integrity check failed; \
-                         file is corrupted — restore from backup or delete and restart"
-                    .to_string(),
-            });
-        }
-
-        return Ok(HostKey::from_bytes(key_bytes));
+    if !dev_mode {
+        let ignored_file = if host_key_path.exists() {
+            format!(
+                " '{}' exists but is ignored: production never reads a host key file.",
+                host_key_path.display()
+            )
+        } else {
+            String::new()
+        };
+        return Err(StorageError::Crypto {
+            reason: format!(
+                "HEARTH_MASTER_KEY is not set. Production takes the storage host key only from \
+                 HEARTH_MASTER_KEY; set it to a 64-hex-char random key (e.g. openssl rand -hex \
+                 32).{ignored_file}"
+            ),
+        });
     }
 
-    // 3. Auto-generate — only allowed in dev mode
-    if !dev_mode {
-        return Err(StorageError::Crypto {
-            reason: "HEARTH_MASTER_KEY is not set and auto-generation is disabled in \
-                     production mode; set HEARTH_MASTER_KEY to a 64-hex-char random key \
-                     (e.g. openssl rand -hex 32)"
-                .to_string(),
-        });
+    if host_key_path.exists() {
+        return read_host_key_file(&host_key_path, fs);
     }
 
     tracing::warn!(
         path = %host_key_path.display(),
-        "auto-generating host key and persisting to disk — \
-         set HEARTH_MASTER_KEY for production deployments"
+        "auto-generating host key and persisting to disk (dev mode only) — \
+         production requires HEARTH_MASTER_KEY"
     );
 
     let host_key = generate_host_key()?;
@@ -439,13 +403,94 @@ fn load_or_create_host_key(
     Ok(host_key)
 }
 
+/// Reads `HEARTH_MASTER_KEY`.
+///
+/// `Ok(None)` when it is unset. A set value that is not 64 hex characters —
+/// or is not valid UTF-8 — is an error, never "unset": treating a malformed
+/// variable as absent would fall through to the dev-mode key file, or tell a
+/// production operator to set a variable that is already set.
+fn host_key_from_env() -> Result<Option<HostKey>, StorageError> {
+    let env_val = match std::env::var("HEARTH_MASTER_KEY") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(StorageError::Crypto {
+                reason: "HEARTH_MASTER_KEY is set but is not valid UTF-8; it must be 64 hex \
+                         chars (openssl rand -hex 32)"
+                    .to_string(),
+            });
+        }
+    };
+    let env_val = env_val.trim();
+    if env_val.len() != 64 {
+        return Err(StorageError::Crypto {
+            reason: "HEARTH_MASTER_KEY must be 64 hex chars".to_string(),
+        });
+    }
+    let bytes = decode_hex(env_val).map_err(|_| StorageError::Crypto {
+        reason: "HEARTH_MASTER_KEY is not valid hex".to_string(),
+    })?;
+    Ok(Some(HostKey::from_bytes(bytes)))
+}
+
+/// Reads and verifies a dev-mode `hearth.host_key` file
+/// (`[8B magic][32B key][32B HMAC-SHA256]`).
+///
+/// Only [`load_or_create_host_key`]'s dev-mode branch calls this.
+fn read_host_key_file(host_key_path: &Path, fs: &dyn Fs) -> Result<HostKey, StorageError> {
+    // Warn on non-Unix platforms where OS file ACLs cannot be enforced.
+    // On Unix the file is written with mode 0o600 (owner read/write only).
+    #[cfg(not(unix))]
+    tracing::warn!(
+        path = %host_key_path.display(),
+        "hearth.host_key file permissions cannot be enforced on this platform"
+    );
+
+    let data = fs.read(host_key_path)?;
+
+    // Verify file length: [8B magic][32B key][32B HMAC] = 72 bytes.
+    if data.len() != HOST_KEY_FILE_SIZE {
+        return Err(StorageError::Crypto {
+            reason: format!(
+                "hearth.host_key has unexpected length: {} bytes \
+                 (expected {HOST_KEY_FILE_SIZE} for magic+key+HMAC framing)",
+                data.len()
+            ),
+        });
+    }
+
+    // Verify magic header.
+    if &data[..8] != HOST_KEY_MAGIC {
+        return Err(StorageError::Crypto {
+            reason: "hearth.host_key has invalid magic header; \
+                     file may be corrupted or is from an incompatible version"
+                .to_string(),
+        });
+    }
+
+    // Extract key bytes.
+    let mut key_bytes = [0u8; 32];
+    key_bytes.copy_from_slice(&data[8..40]);
+
+    // Verify HMAC-SHA256 integrity tag (constant-time comparison).
+    if !verify_host_key_file_hmac(&key_bytes, &data[40..72]) {
+        return Err(StorageError::Crypto {
+            reason: "hearth.host_key: HMAC integrity check failed; \
+                     file is corrupted — restore from backup or delete and restart"
+                .to_string(),
+        });
+    }
+
+    Ok(HostKey::from_bytes(key_bytes))
+}
+
 /// Writes the host key file with HMAC-SHA256 integrity framing and mode `0o600`.
 ///
 /// File layout: `[8B magic][32B key][32B HMAC-SHA256]` = 72 bytes total.
 /// Uses `create_new` semantics to prevent silently overwriting an existing key.
 ///
-/// On non-Unix platforms the mode flag is a no-op; callers should use
-/// `HEARTH_MASTER_KEY` instead of the file to maintain access control.
+/// Dev mode only — production never reads or writes this file. On non-Unix
+/// platforms the mode flag is a no-op.
 ///
 /// # Durability
 ///
@@ -1404,9 +1449,9 @@ mod tests {
 
     #[test]
     fn production_mode_refuses_autogenerated_host_key() {
-        if std::env::var("HEARTH_MASTER_KEY").is_ok() {
-            return; // skip when env var is already set
-        }
+        // nextest runs each test in its own process, so this cannot race a
+        // sibling test.
+        std::env::remove_var("HEARTH_MASTER_KEY");
         let dir = tempfile::tempdir().expect("tempdir");
         let err = KeyRegistry::load(dir.path(), false)
             .expect_err("production mode must refuse without HEARTH_MASTER_KEY");
@@ -1422,6 +1467,143 @@ mod tests {
         assert!(
             !dir.path().join("hearth.host_key").exists(),
             "host_key file must NOT be written on refused production start-up"
+        );
+    }
+
+    // ── G1: production never reads `hearth.host_key` ─────────────────────────
+
+    /// A `hearth.host_key` left in a production data directory (by a `--dev`
+    /// run, a copied dev store, or an operator) must NOT be accepted as the
+    /// master key. Production takes the key from `HEARTH_MASTER_KEY` only; a
+    /// plaintext key file beside the ciphertext it protects defeats the point
+    /// of encryption at rest.
+    #[test]
+    fn production_mode_ignores_an_existing_host_key_file() {
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hk_path = dir.path().join("hearth.host_key");
+        let file_key = generate_host_key().expect("generate");
+        write_host_key_private(&hk_path, &file_key, &RealFs).expect("write host key file");
+
+        let err = KeyRegistry::load(dir.path(), false)
+            .expect_err("production must refuse a store whose only key is hearth.host_key");
+        match err {
+            StorageError::Crypto { reason } => {
+                assert!(
+                    reason.contains("HEARTH_MASTER_KEY"),
+                    "error must name the variable that fixes it, got: {reason}"
+                );
+                assert!(
+                    reason.contains("hearth.host_key") && reason.contains("ignored"),
+                    "error must say the file present on disk was ignored, got: {reason}"
+                );
+            }
+            other => panic!("expected StorageError::Crypto, got: {other:?}"),
+        }
+        let after = std::fs::read(&hk_path).expect("host key file still present");
+        assert_eq!(
+            after.len(),
+            HOST_KEY_FILE_SIZE,
+            "the refusal must not touch the file"
+        );
+    }
+
+    /// Control — with `HEARTH_MASTER_KEY` set, production opens, and the key
+    /// it uses is the variable's, not the file's: a KEK sealed under the
+    /// file's key (by an earlier dev-mode run) does not decrypt.
+    #[test]
+    fn production_mode_uses_hearth_master_key_not_the_host_key_file() {
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm_under_file_key = RealmId::generate();
+        {
+            // Dev mode auto-generates hearth.host_key and seals a KEK under it.
+            let registry = KeyRegistry::load(dir.path(), true).expect("dev load");
+            registry
+                .ensure_kek_for_realm(&realm_under_file_key)
+                .expect("ensure kek");
+        }
+        assert!(
+            dir.path().join("hearth.host_key").exists(),
+            "fixture: dev run wrote the file"
+        );
+
+        std::env::set_var("HEARTH_MASTER_KEY", "7e".repeat(32));
+        let err = KeyRegistry::load(dir.path(), false)
+            .expect_err("the file's KEK must not decrypt under HEARTH_MASTER_KEY");
+        match err {
+            StorageError::HostKeyMismatch { affected_realms } => {
+                assert_eq!(affected_realms, vec![realm_under_file_key.to_string()]);
+            }
+            other => panic!("expected HostKeyMismatch, got: {other:?}"),
+        }
+    }
+
+    /// Control — production with `HEARTH_MASTER_KEY` and no file works and
+    /// survives a restart.
+    #[test]
+    fn production_mode_with_hearth_master_key_persists_across_reload() {
+        std::env::set_var("HEARTH_MASTER_KEY", "5d".repeat(32));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let kek = {
+            let registry = KeyRegistry::load(dir.path(), false).expect("production load");
+            registry.ensure_kek_for_realm(&realm).expect("ensure kek")
+        };
+        let reopened = KeyRegistry::load(dir.path(), false).expect("production reload");
+        let again = reopened
+            .get_kek_for_realm(&realm)
+            .expect("kek after reload");
+        assert_eq!(kek.as_bytes(), again.as_bytes());
+        assert!(
+            !dir.path().join("hearth.host_key").exists(),
+            "production must never write a host key file"
+        );
+    }
+
+    /// Control — dev mode still reuses its own auto-generated file across
+    /// restarts (a `--dev` run with a persistent `storage.data_dir`).
+    #[test]
+    fn dev_mode_still_reuses_its_host_key_file() {
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let kek = {
+            let registry = KeyRegistry::load(dir.path(), true).expect("dev load");
+            registry.ensure_kek_for_realm(&realm).expect("ensure kek")
+        };
+        let reopened = KeyRegistry::load(dir.path(), true).expect("dev reload");
+        let again = reopened
+            .get_kek_for_realm(&realm)
+            .expect("kek after reload");
+        assert_eq!(kek.as_bytes(), again.as_bytes());
+    }
+
+    /// A set-but-non-UTF-8 `HEARTH_MASTER_KEY` is an error naming the
+    /// variable, not "unset" — `var()` would otherwise report it as missing
+    /// (or, in dev mode, silently fall back to the file).
+    #[test]
+    #[cfg(unix)]
+    fn non_utf8_hearth_master_key_is_an_error_not_unset() {
+        use std::os::unix::ffi::OsStrExt;
+        std::env::set_var(
+            "HEARTH_MASTER_KEY",
+            std::ffi::OsStr::from_bytes(&[0xff, 0xfe, 0x41]),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = KeyRegistry::load(dir.path(), true).expect_err("non-UTF-8 key must be refused");
+        match err {
+            StorageError::Crypto { reason } => {
+                assert!(
+                    reason.contains("HEARTH_MASTER_KEY") && reason.contains("UTF-8"),
+                    "got: {reason}"
+                );
+            }
+            other => panic!("expected StorageError::Crypto, got: {other:?}"),
+        }
+        assert!(
+            !dir.path().join("hearth.host_key").exists(),
+            "a malformed variable must not fall through to auto-generation"
         );
     }
 }

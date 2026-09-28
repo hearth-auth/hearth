@@ -97,8 +97,9 @@ impl KeyEncryptionKey {
 }
 
 /// A 32-byte host key that encrypts realm KEKs when stored in the engine.
-/// Loaded from the `HEARTH_MASTER_KEY` environment variable or auto-generated
-/// and persisted to `hearth.host_key` on first start.
+/// Loaded from the `HEARTH_MASTER_KEY` environment variable. Dev mode alone
+/// may instead auto-generate it and persist it to `hearth.host_key`; production
+/// never reads that file.
 #[derive(ZeroizeOnDrop)]
 pub(crate) struct HostKey {
     bytes: [u8; KEY_SIZE],

@@ -31,7 +31,9 @@ cd examples/auth0-migration
 ./run.sh
 ```
 
-Prerequisites: `cargo`, `node` ≥ 18, `curl`, `jq`.
+Prerequisites: `cargo`, `node` ≥ 18, `curl`, `jq`, and `openssl` (used to generate a
+throwaway `HEARTH_MASTER_KEY` when none is exported — `hearth migrate` refuses to open a data
+directory without one).
 
 ## Step-by-step runbook
 
@@ -55,6 +57,9 @@ for full prerequisites and options (including `INCLUDE_SECRETS=1`).
 ### Step 2 — Migrate the bundle
 
 ```bash
+# The store's host key: the SAME stable value the server will run with.
+export HEARTH_MASTER_KEY=<64 hex chars from your secrets manager>
+
 # Use the sample bundle (this example):
 hearth migrate auth0 \
   --file examples/auth0-migration/sample-bundle.json \
