@@ -6,3 +6,14 @@ fail-fast = true
 [profile.ci]
 retries = 2
 fail-fast = false
+
+# backup_endpoint_rate_limits_after_quota drives EXPORT_RATE_LIMIT (10) real
+# backup exports through the server before asserting the 11th gets 429. Each
+# export wraps its archive key with Argon2id, which takes seconds in a debug
+# build, so the test runs 30–60 s and crossed the default 60 s kill under
+# parallel load (1 of 3 isolated stress runs, 2026-09-28). The work is the
+# point of the test; give it a longer, test-specific limit instead of raising
+# the global one.
+[[profile.default.overrides]]
+filter = 'binary(abuse_export_hardening) & test(=backup_endpoint_rate_limits_after_quota)'
+slow-timeout = { period = "60s", terminate-after = 3 }
