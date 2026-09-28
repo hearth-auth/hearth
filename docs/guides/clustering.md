@@ -165,10 +165,10 @@ Before enabling cluster mode in a test environment:
    node's value against its peers', when it is set (task 26.51). It is a
    warning, not an error: the key is a property of the machine, not of the file
    being validated, so validating a cluster config on a laptop stays legal.
-   Note that the single-node host-key check is satisfied by an existing
-   `{data_dir}/hearth.host_key` — which is exactly the per-node, auto-generated
-   key that is *wrong* in a cluster — so the cluster note is emitted
-   independently of it.
+   The single-node host-key check only says the variable is missing on the
+   host running the check; the cluster note adds that every node must carry
+   the same value. A `{data_dir}/hearth.host_key` file never stands in for the
+   variable outside `--dev`.
 
 ---
 

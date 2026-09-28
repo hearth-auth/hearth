@@ -205,8 +205,8 @@ client configurations, and read the audit log for that realm.
   they contain. Recovering that KEK exposes every realm's data — it is a durability and
   media-theft control, not a cross-tenant isolation boundary.
 - Signing key material is stored in `hearth.keys` encrypted by the host key (loaded from
-  `HEARTH_MASTER_KEY` or auto-generated to `hearth.host_key`). Losing the host key makes
-  all on-disk data permanently unrecoverable.
+  `HEARTH_MASTER_KEY` in production; only `--dev` auto-generates it to `hearth.host_key`).
+  Losing the host key makes all on-disk data permanently unrecoverable.
 - In-memory signing key bytes are wrapped in `ZeroizingPkcs8`, which overwrites memory on drop.
 
 ### 2.3 Primary attack vectors
