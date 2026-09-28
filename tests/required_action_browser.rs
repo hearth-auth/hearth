@@ -21,6 +21,8 @@
 
 #[path = "support/browser.rs"]
 mod browser;
+#[path = "common/webauthn_helper.rs"]
+mod webauthn_helper;
 
 use std::sync::{Arc, Mutex};
 
@@ -118,6 +120,7 @@ struct Rig {
     client: OAuthClient,
     outbox: Arc<Outbox>,
     audit: Arc<dyn AuditEngine>,
+    realm_name: String,
 }
 
 /// A production-mode (`dev_mode = false`) web router over plain HTTP, in a
@@ -158,9 +161,10 @@ fn build_rig_with(mfa_methods: &[&str], webauthn_required: bool) -> Rig {
         Arc::clone(&storage) as _,
         Arc::clone(&clock),
     )) as Arc<dyn RbacEngine>;
+    let realm_name = format!("ra-jar-{}", uuid::Uuid::new_v4().simple());
     let realm = identity
         .create_realm(&CreateRealmRequest {
-            name: format!("ra-jar-{}", uuid::Uuid::new_v4().simple()),
+            name: realm_name.clone(),
             config: Some(RealmConfig {
                 mfa_methods: (!mfa_methods.is_empty())
                     .then(|| mfa_methods.iter().map(|m| (*m).to_string()).collect()),
@@ -220,6 +224,7 @@ fn build_rig_with(mfa_methods: &[&str], webauthn_required: bool) -> Rig {
         client,
         outbox,
         audit,
+        realm_name,
     }
 }
 
@@ -951,28 +956,364 @@ async fn a_verified_email_with_a_pending_verification_continues_the_login() {
     assert!(!pending_on_account(&rig, &user).contains(&RequiredAction::VerifyEmail));
 }
 
-/// A realm that requires a passkey is not satisfied by TOTP, and this page
-/// cannot register a passkey: it must say so rather than loop.
+// ── Passkey enrolment during login ──────────────────────────────────────────
+//
+// A realm that requires a passkey (`webauthn_required`) used to answer a user
+// without one with a dead-end 409. The login now registers one: after the
+// password (and any existing second factor), `/required-action/enroll-mfa`
+// runs a WebAuthn registration with user verification REQUIRED, bound to the
+// required-action session, and the session created at the end records
+// `ProvedWebAuthn`.
+
+/// The origin and RP ID the server derives for a request with no `Host`.
+const ORIGIN: &str = "http://localhost";
+const RP_ID: &str = "localhost";
+const PASSKEY_PAGE: &str = "/required-action/enroll-mfa";
+const PASSKEY_BEGIN: &str = "/required-action/enroll-mfa/passkey/begin";
+const PASSKEY_COMPLETE: &str = "/required-action/enroll-mfa/passkey/complete";
+
+/// Creates an active user with a password and nothing else.
+fn password_only_user(rig: &Rig, email: &str) -> UserId {
+    let user = rig
+        .identity
+        .create_user(
+            &rig.realm_id,
+            &CreateUserRequest {
+                email: email.to_string(),
+                display_name: "Passkey User".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    rig.identity
+        .set_password(
+            &rig.realm_id,
+            user.id(),
+            &CleartextPassword::from_string(PASSWORD.to_string()),
+        )
+        .expect("set password");
+    rig.identity
+        .update_user(
+            &rig.realm_id,
+            user.id(),
+            &UpdateUserRequest {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .expect("activate");
+    user.id().clone()
+}
+
+/// Signs in through the realm's login form (CSRF cookie and field, password)
+/// and returns the browser and where the login sent it.
+async fn log_in(rig: &Rig, email: &str) -> (Browser, String) {
+    let mut browser = Browser::new(rig.app.clone());
+    let login = format!("/ui/realms/{}/login", rig.realm_name);
+    let html = open(&mut browser, &login).await;
+    let resp = submit(
+        &mut browser,
+        &html,
+        &login,
+        &[("email", email), ("password", PASSWORD)],
+    )
+    .await;
+    assert!(resp.status().is_redirection(), "login: {}", resp.status());
+    let next = location(&resp).expect("Location");
+    (browser, next)
+}
+
+/// The `<meta name="csrf">` token the page's script sends as `X-CSRF-Token`.
+fn page_csrf(html: &str) -> String {
+    html.split("<meta name=\"csrf\" content=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the page carries a CSRF token for its script")
+        .to_string()
+}
+
+fn b64(bytes: &[u8]) -> String {
+    data_encoding::BASE64URL_NOPAD.encode(bytes)
+}
+
+/// Starts a registration and returns the challenge the server issued.
+async fn begin_registration(browser: &mut Browser, csrf: &str) -> Vec<u8> {
+    let resp = browser
+        .post_json(
+            PASSKEY_BEGIN,
+            &serde_json::json!({}),
+            &[("x-csrf-token", csrf)],
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK, "begin");
+    let opts: serde_json::Value =
+        serde_json::from_str(&body_text(resp).await).expect("options JSON");
+    assert_eq!(opts["rp"]["id"], RP_ID, "the RP ID is pinned: {opts}");
+    assert_eq!(
+        opts["authenticatorSelection"]["userVerification"], "required",
+        "a login-time passkey must prove user verification: {opts}"
+    );
+    data_encoding::BASE64URL_NOPAD
+        .decode(opts["challenge"].as_str().expect("challenge").as_bytes())
+        .expect("b64 challenge")
+}
+
+async fn complete_registration(
+    browser: &mut Browser,
+    csrf: &str,
+    response: &(Vec<u8>, Vec<u8>),
+) -> axum::response::Response {
+    browser
+        .post_json(
+            PASSKEY_COMPLETE,
+            &serde_json::json!({
+                "client_data_json": b64(&response.0),
+                "attestation_object": b64(&response.1),
+            }),
+            &[("x-csrf-token", csrf)],
+        )
+        .await
+}
+
+fn passkeys(rig: &Rig, user: &UserId) -> usize {
+    rig.identity
+        .list_webauthn_credentials(&rig.realm_id, user)
+        .expect("list passkeys")
+        .len()
+}
+
+/// The `mfa_proof` of the browser session the jar now holds.
+fn session_proof(rig: &Rig, browser: &Browser) -> hearth::identity::MfaProof {
+    let cookie = browser
+        .cookie("hearth_ui_session")
+        .expect("a session cookie");
+    let session_id = cookie.split('.').next().expect("session id");
+    let session_id = hearth::core::SessionId::new(session_id.parse().expect("uuid"));
+    rig.identity
+        .get_session(&rig.realm_id, &session_id)
+        .expect("lookup")
+        .expect("session")
+        .mfa_proof()
+}
+
 #[tokio::test]
-async fn a_passkey_requirement_a_totp_holder_cannot_meet_here_does_not_loop() {
-    let rig = build_rig_with(&["totp"], true);
-    // The realm demands a passkey to sign in at all; the session stands in
-    // for one proved at login, while the account itself holds only TOTP.
+async fn a_password_only_user_enrols_a_passkey_during_login() {
+    let rig = build_rig_with(&["webauthn"], true);
+    let user = password_only_user(&rig, "pk-enrol@example.com");
+    let (mut browser, next) = log_in(&rig, "pk-enrol@example.com").await;
+    assert_eq!(next, PASSKEY_PAGE, "the login detours to passkey enrolment");
+
+    let html = open(&mut browser, PASSKEY_PAGE).await;
+    assert!(
+        html.contains("data-ra-passkey"),
+        "the page runs the registration"
+    );
+    let csrf = page_csrf(&html);
+    let challenge = begin_registration(&mut browser, &csrf).await;
+    let authenticator = webauthn_helper::TestAuthenticator::new(RP_ID);
+    let registration = authenticator.build_verified_registration_response(&challenge, ORIGIN);
+    let resp = complete_registration(&mut browser, &csrf, &registration).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&body_text(resp).await).expect("completion JSON");
+    assert_eq!(
+        body["next"], "/ui",
+        "the login lands on its destination: {body}"
+    );
+
+    assert_eq!(passkeys(&rig, &user), 1, "the passkey is registered");
+    assert!(!pending_on_account(&rig, &user).contains(&RequiredAction::EnrollMfa));
+    assert!(
+        !browser.has_cookie("hearth_ra_session"),
+        "the RA session is over"
+    );
+    assert_eq!(
+        session_proof(&rig, &browser),
+        hearth::identity::MfaProof::ProvedWebAuthn,
+        "the session proved a user-verified passkey"
+    );
+}
+
+#[tokio::test]
+async fn a_totp_holder_in_a_passkey_realm_enrols_a_passkey_too() {
+    let rig = build_rig_with(&["totp", "webauthn"], true);
     let (mut browser, user) = signed_in_browser_with(
         &rig,
-        "sat-passkey@example.com",
+        "pk-totp@example.com",
         vec![],
         hearth::identity::MfaProof::ProvedWebAuthn,
     );
     enrol_totp(&rig, &user);
     let page = start_flow(&rig, &mut browser).await;
-    assert_eq!(page, "/required-action/enroll-mfa");
-
+    assert_eq!(page, PASSKEY_PAGE);
     let resp = get_without_self_redirect(&mut browser, &page).await;
-    assert!(
-        !resp.status().is_redirection(),
-        "the passkey requirement is not met; nothing may be skipped"
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "TOTP does not satisfy the realm"
     );
+    let html = body_text(resp).await;
+    let csrf = page_csrf(&html);
+    let challenge = begin_registration(&mut browser, &csrf).await;
+    let registration = webauthn_helper::TestAuthenticator::new(RP_ID)
+        .build_verified_registration_response(&challenge, ORIGIN);
+    let resp = complete_registration(&mut browser, &csrf, &registration).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&body_text(resp).await).expect("completion JSON");
+    assert!(
+        body["next"]
+            .as_str()
+            .is_some_and(|n| n.starts_with(CALLBACK)),
+        "the authorization resumes: {body}"
+    );
+    assert_eq!(passkeys(&rig, &user), 1);
+}
+
+#[tokio::test]
+async fn passkey_registration_refuses_requests_without_the_page_token() {
+    let rig = build_rig_with(&["webauthn"], true);
+    let user = password_only_user(&rig, "pk-csrf@example.com");
+    let (mut browser, _) = log_in(&rig, "pk-csrf@example.com").await;
+    let html = open(&mut browser, PASSKEY_PAGE).await;
+    let csrf = page_csrf(&html);
+
+    let forged = browser
+        .post_json(PASSKEY_BEGIN, &serde_json::json!({}), &[])
+        .await;
+    assert_eq!(
+        forged.status(),
+        StatusCode::FORBIDDEN,
+        "begin without the token"
+    );
+
+    let challenge = begin_registration(&mut browser, &csrf).await;
+    let registration = webauthn_helper::TestAuthenticator::new(RP_ID)
+        .build_verified_registration_response(&challenge, ORIGIN);
+    let forged = browser
+        .post_json(
+            PASSKEY_COMPLETE,
+            &serde_json::json!({
+                "client_data_json": b64(&registration.0),
+                "attestation_object": b64(&registration.1),
+            }),
+            &[("x-csrf-token", "forged")],
+        )
+        .await;
+    assert_eq!(
+        forged.status(),
+        StatusCode::FORBIDDEN,
+        "complete with a forged token"
+    );
+    assert_eq!(passkeys(&rig, &user), 0, "nothing was registered");
+}
+
+#[tokio::test]
+async fn a_passkey_that_does_not_prove_user_verification_is_refused() {
+    let rig = build_rig_with(&["webauthn"], true);
+    let user = password_only_user(&rig, "pk-uv@example.com");
+    let (mut browser, _) = log_in(&rig, "pk-uv@example.com").await;
+    let html = open(&mut browser, PASSKEY_PAGE).await;
+    let csrf = page_csrf(&html);
+    let challenge = begin_registration(&mut browser, &csrf).await;
+    // User presence only: a touch, no PIN, no biometric.
+    let touch_only = webauthn_helper::TestAuthenticator::new(RP_ID)
+        .build_registration_response(&challenge, ORIGIN);
+    let resp = complete_registration(&mut browser, &csrf, &touch_only).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(passkeys(&rig, &user), 0);
+    assert!(
+        browser.has_cookie("hearth_ra_session"),
+        "the enrolment is still pending"
+    );
+}
+
+#[tokio::test]
+async fn a_registration_challenge_is_single_use() {
+    let rig = build_rig_with(&["webauthn"], true);
+    let user = password_only_user(&rig, "pk-replay@example.com");
+    let (mut browser, _) = log_in(&rig, "pk-replay@example.com").await;
+    let html = open(&mut browser, PASSKEY_PAGE).await;
+    let csrf = page_csrf(&html);
+    let challenge = begin_registration(&mut browser, &csrf).await;
+    let authenticator = webauthn_helper::TestAuthenticator::new(RP_ID);
+
+    // First use of the challenge (refused: presence only) spends it.
+    let first = complete_registration(
+        &mut browser,
+        &csrf,
+        &authenticator.build_registration_response(&challenge, ORIGIN),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+    // Replaying the same challenge, even with a good response, is refused.
+    let replay = complete_registration(
+        &mut browser,
+        &csrf,
+        &authenticator.build_verified_registration_response(&challenge, ORIGIN),
+    )
+    .await;
+    assert_eq!(
+        replay.status(),
+        StatusCode::BAD_REQUEST,
+        "a spent challenge"
+    );
+    assert_eq!(passkeys(&rig, &user), 0);
+
+    // A fresh challenge works.
+    let challenge = begin_registration(&mut browser, &csrf).await;
+    let ok = complete_registration(
+        &mut browser,
+        &csrf,
+        &authenticator.build_verified_registration_response(&challenge, ORIGIN),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(passkeys(&rig, &user), 1);
+}
+
+#[tokio::test]
+async fn a_challenge_from_another_required_action_session_is_refused() {
+    let rig = build_rig_with(&["webauthn"], true);
+    let victim = password_only_user(&rig, "pk-victim@example.com");
+    let _attacker = password_only_user(&rig, "pk-attacker@example.com");
+    let (mut victim_browser, _) = log_in(&rig, "pk-victim@example.com").await;
+    let (mut attacker_browser, _) = log_in(&rig, "pk-attacker@example.com").await;
+
+    let victim_html = open(&mut victim_browser, PASSKEY_PAGE).await;
+    let victim_csrf = page_csrf(&victim_html);
+    let attacker_html = open(&mut attacker_browser, PASSKEY_PAGE).await;
+    let attacker_csrf = page_csrf(&attacker_html);
+
+    // The attacker's challenge, answered in the victim's session.
+    let challenge = begin_registration(&mut attacker_browser, &attacker_csrf).await;
+    let registration = webauthn_helper::TestAuthenticator::new(RP_ID)
+        .build_verified_registration_response(&challenge, ORIGIN);
+    let resp = complete_registration(&mut victim_browser, &victim_csrf, &registration).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "bound to the RA session"
+    );
+    assert_eq!(passkeys(&rig, &victim), 0);
+}
+
+/// A realm that requires a passkey but does not offer the `webauthn` method
+/// cannot register one: say so plainly, never loop.
+#[tokio::test]
+async fn a_passkey_realm_that_does_not_offer_passkeys_says_so() {
+    let rig = build_rig_with(&["totp"], true);
+    let (mut browser, user) = signed_in_browser_with(
+        &rig,
+        "pk-misconfigured@example.com",
+        vec![],
+        hearth::identity::MfaProof::ProvedWebAuthn,
+    );
+    enrol_totp(&rig, &user);
+    let page = start_flow(&rig, &mut browser).await;
+    let resp = get_without_self_redirect(&mut browser, &page).await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let html = body_text(resp).await;
     assert!(
