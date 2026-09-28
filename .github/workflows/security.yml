@@ -311,8 +311,17 @@ jobs:
           # `npm install` from it), docs-site/package-lock.json. The root
           # pnpm-lock.yaml this list used to name was used by no install and was
           # deleted (GA audit supply-chain finding).
+          #
+          # --no-call-analysis=go: the action image (v2.3.8) ships Go 1.26.2 with
+          # GOTOOLCHAIN=local, while sdks/go/go.mod requires go >= 1.26.3, so the
+          # govulncheck reachability pass failed to load packages and osv-scanner
+          # exited 127 ("Failed to run code analysis (govulncheck)") with no
+          # finding at all. Without call analysis every advisory in the Go SDK's
+          # module graph is reported, which is the stricter mode; a local run
+          # with this flag reports "No issues found" (2026-09-28).
           scan-args: |-
             --config=osv-scanner.toml
+            --no-call-analysis=go
             --lockfile=Cargo.lock
             --lockfile=fuzz/Cargo.lock
             --lockfile=package-lock.json
