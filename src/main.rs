@@ -190,7 +190,8 @@ enum BackupAction {
         /// `skip` (default) — keep existing records unchanged.
         /// `overwrite` — delete and re-import conflicting records.
         /// `merge` — equivalent to `skip` in this version.
-        #[arg(long, default_value = "skip")]
+        /// Any other value is refused.
+        #[arg(long, default_value = "skip", value_parser = ["skip", "overwrite", "merge"])]
         mode: String,
 
         /// Parse and report without writing any data.
@@ -986,6 +987,55 @@ const DEV_MODE_BANNER: &str = "DEV MODE ACTIVE — security reductions in effect
      (3) the first-run setup URL is logged with its full setup token. \
      DO NOT expose this server on a non-loopback address.";
 
+/// File a production `serve` leaves in its data directory; `serve --dev`
+/// refuses any directory that holds it (GA audit 2026-09-28 OPS-13).
+const PRODUCTION_DATA_DIR_MARKER: &str = ".hearth-production";
+
+/// Marks `data_dir` as a production store. Idempotent.
+///
+/// # Errors
+///
+/// Returns an error when the marker cannot be written — a production data
+/// directory the server cannot write to is already a startup failure.
+fn mark_production_data_dir(data_dir: &std::path::Path) -> Result<(), String> {
+    let marker = data_dir.join(PRODUCTION_DATA_DIR_MARKER);
+    if marker.exists() {
+        return Ok(());
+    }
+    std::fs::write(
+        &marker,
+        "This data directory is used by a production `hearth serve`.\n\
+         `hearth serve --dev` refuses to open it: dev mode writes without fsync and\n\
+         hashes passwords with test-strength Argon2 parameters.\n",
+    )
+    .map_err(|e| format!("failed to write {}: {e}", marker.display()))
+}
+
+/// Refuses to let `--dev` open a data directory a production server has used.
+///
+/// `--dev` honours `storage.data_dir` from the config file (HEA-1805) and runs
+/// with fsync off and `fast_for_testing` Argon2 costs, so `serve --dev -c
+/// prod.yaml` used to write unsynced records and weakly hashed passwords into
+/// the production store (OPS-13).
+///
+/// # Errors
+///
+/// Returns an error naming the marker when `data_dir` carries it.
+fn refuse_production_data_dir_in_dev(data_dir: &std::path::Path) -> Result<(), String> {
+    let marker = data_dir.join(PRODUCTION_DATA_DIR_MARKER);
+    if marker.exists() {
+        return Err(format!(
+            "refusing to start in --dev mode on {}: it holds {PRODUCTION_DATA_DIR_MARKER}, so a \
+             production server uses it, and dev mode writes without fsync and hashes passwords \
+             with test-strength parameters. Point --dev at a different storage.data_dir (or \
+             HEARTH_DEV_DATA_DIR). To debug production data under --dev, copy the directory and \
+             delete {PRODUCTION_DATA_DIR_MARKER} from the copy.",
+            data_dir.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Resolves the dev-mode on-disk data directory, if one is explicitly
 /// configured (HEA-1805).
 ///
@@ -1165,7 +1215,12 @@ async fn run_serve(
         let env_override = std::env::var("HEARTH_DEV_DATA_DIR").ok();
         let data_path =
             match resolve_dev_data_dir(env_override.as_deref(), &config.storage.data_dir) {
-                Some(dir) => dir,
+                Some(dir) => {
+                    // OPS-13: never open a production store with dev's fsync-off
+                    // WAL and test-strength password hashing.
+                    refuse_production_data_dir_in_dev(&dir)?;
+                    dir
+                }
                 None => {
                     let temp_dir = tempfile::tempdir()?;
                     temp_dir.keep()
@@ -1239,6 +1294,8 @@ async fn run_serve(
         storage_config.block_cache_bytes = config.storage.block_cache_bytes;
         storage_config.set_hot_tier_per_realm_metrics(config.storage.hot_tier_per_realm_metrics);
         let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
+        // OPS-13: from now on `serve --dev` refuses this directory.
+        mark_production_data_dir(std::path::Path::new(&config.storage.data_dir))?;
         (engine, storage_config)
     };
 
@@ -4857,10 +4914,18 @@ fn restore_mode(
     replace_system_signing_key: bool,
 ) -> Result<hearth::backup::RestoreMode, Box<dyn std::error::Error>> {
     use hearth::backup::RestoreMode;
+    // OPS-17 (GA audit 2026-09-28): an unknown mode used to fall through to
+    // `Skip`, so `--mode overwirte` quietly kept every conflicting record.
     let mode = match mode_str {
+        "skip" => RestoreMode::Skip,
         "overwrite" => RestoreMode::Overwrite,
         "merge" => RestoreMode::Merge,
-        _ => RestoreMode::Skip,
+        other => {
+            return Err(format!(
+                "unknown restore mode '{other}': expected skip, overwrite or merge"
+            )
+            .into());
+        }
     };
     if replace_system_signing_key && mode != RestoreMode::Overwrite {
         return Err(
@@ -7635,6 +7700,57 @@ mod tests {
         for host in ["127.0.0.1", "::1", "localhost", "0.0.0.0"] {
             assert_eq!(split_bind_override(host), (host.to_string(), None));
         }
+    }
+
+    // ── GA audit 2026-09-28 OPS-17: `backup restore --mode` typos ────────────
+
+    /// Any unrecognised mode — a typo of `overwrite` included — silently became
+    /// `skip`, so an operator who asked for an overwrite restore got a restore
+    /// that kept every conflicting record and reported success.
+    #[test]
+    fn an_unknown_restore_mode_is_an_error_not_skip() {
+        assert!(
+            restore_mode("overwirte", false).is_err(),
+            "a typo of overwrite must be refused, not treated as skip"
+        );
+        for (input, expected) in [
+            ("skip", hearth::backup::RestoreMode::Skip),
+            ("overwrite", hearth::backup::RestoreMode::Overwrite),
+            ("merge", hearth::backup::RestoreMode::Merge),
+        ] {
+            assert!(
+                restore_mode(input, false).is_ok_and(|m| m == expected),
+                "{input} must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cli_rejects_an_unknown_restore_mode() {
+        use clap::Parser as _;
+        let parsed = Cli::try_parse_from([
+            "hearth",
+            "backup",
+            "restore",
+            "--mode",
+            "overwirte",
+            "--input",
+            "/tmp/archive.tar",
+        ]);
+        assert!(
+            parsed.is_err(),
+            "clap must refuse an unknown --mode before anything is restored"
+        );
+        let parsed = Cli::try_parse_from([
+            "hearth",
+            "backup",
+            "restore",
+            "--mode",
+            "overwrite",
+            "--input",
+            "/tmp/archive.tar",
+        ]);
+        assert!(parsed.is_ok(), "a valid --mode must still parse");
     }
 
     // ── GA audit 2026-09-28 OPS-11: non-UTF-8 HEARTH_KEK ─────────────────────

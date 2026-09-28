@@ -187,6 +187,16 @@ following three-level precedence rule:
    across restarts in this case, which matches the historical dev-mode
    behaviour.
 
+**A production data directory is never opened in dev mode.** Every production
+(non-`--dev`) start writes a `.hearth-production` marker into its
+`storage.data_dir`, and `--dev` refuses to start on a directory (from either
+of the first two rules) that holds it — dev mode writes without fsync and
+hashes passwords with test-strength Argon2 parameters, so `serve --dev -c
+prod.yaml` must not touch the production store. To inspect production data
+under `--dev`, copy the directory and delete the marker from the copy. A
+directory last used by a release older than this check carries no marker until
+its next production start.
+
 ```bash
 # Option A: env var override (recommended for repeated tier-miss testing)
 HEARTH_DEV_DATA_DIR=/tmp/hearth-dev-data make dev
