@@ -44,6 +44,11 @@
 id = "RUSTSEC-2023-0071"
 reason = "Marvin Attack timing side-channel in the rsa crate. Scope correction (audit 2026-08-28 §4.12#15): the server does not link rsa at all — it is absent from the root Cargo.lock. rsa reaches exactly one scanned tree, sdks/rust/Cargo.lock, as a transitive dependency of jsonwebtoken. The advisory's only affected code path is PKCS#1 v1.5 decryption; the Rust SDK performs no RSA decryption, and Hearth signs Ed25519 only (CLAUDE.md: no HS256, no alg:none). No patched version of rsa is available; revisit when rsa 0.10+ lands in the jsonwebtoken dependency tree. Tracked in HEA-116."
 
+# guard: package=golang.org/x/crypto lockfile=sdks/go/go.mod
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+reason = "golang.org/x/crypto/openpgp is unmaintained and unsafe by design. The advisory covers every x/crypto version (introduced 0, no fix) but only code that imports the openpgp packages. The Go SDK never does: `go list -deps -test ./...` in sdks/go shows x/crypto only as acme, acme/autocert (via labstack/echo), chacha20, chacha20poly1305, hkdf, sha3 and internals — no openpgp path (checked 2026-09-28, x/crypto v0.56.0). Revisit if any SDK dependency starts importing golang.org/x/crypto/openpgp; `go list -deps -test ./... | grep openpgp` must stay empty."
+
 # CVE-2026-42507, CVE-2026-42504 and CVE-2026-27145 were removed on 2026-09-28
 # (GA audit supply-chain fix). Their reasons blamed google.golang.org/protobuf
 # and genproto, but osv.dev aliases them to GO-2026-5039 (net/textproto),
