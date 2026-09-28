@@ -412,6 +412,18 @@ impl Config {
             });
         }
 
+        // OPS-11 (GA audit 2026-09-28): the server resolves HEARTH_KEK with
+        // `var`, which cannot read a non-UTF-8 value and now refuses it. Say
+        // so here too, rather than counting it as a present KEK below.
+        if std::env::var_os("HEARTH_KEK").is_some_and(|v| v.to_str().is_none()) {
+            issues.push(ValidationIssue {
+                field: "security.key_encryption_key".to_string(),
+                reason: "HEARTH_KEK is set but is not valid UTF-8; it must be 64 hex \
+                         characters (openssl rand -hex 32)"
+                    .to_string(),
+            });
+        }
+
         // HEA-2166: mirror the fail-closed production gates from `validate`
         // so the admin config-check panel surfaces all three in one pass.
         if !self.dev_mode {
@@ -3909,6 +3921,30 @@ realms:
                 "{field} = 0 must be refused; issues: {fields:?}"
             );
         }
+    }
+
+    // ── GA audit 2026-09-28 OPS-11: non-UTF-8 HEARTH_KEK ────────────────────
+
+    /// `var_os` saw the variable as present, so validation passed, while the
+    /// server's `var` saw it as absent. It must be refused here instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_hearth_kek_is_refused_by_validation() {
+        use std::os::unix::ffi::OsStrExt;
+        std::env::set_var(
+            "HEARTH_KEK",
+            std::ffi::OsStr::from_bytes(&[0xff, 0xfe, 0x41]),
+        );
+        let issues = Config::from_yaml_str_unchecked("{}")
+            .expect("parse")
+            .validate_all();
+        std::env::remove_var("HEARTH_KEK");
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field == "security.key_encryption_key" && i.reason.contains("UTF-8")),
+            "a HEARTH_KEK that is not valid UTF-8 must be reported; got {issues:?}"
+        );
     }
 
     // ── GA audit 2026-09-28 M14: plaintext gRPC in production ───────────────

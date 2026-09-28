@@ -976,6 +976,16 @@ fn dev_mode_bind_check(dev: bool, http_bind: &str, grpc_bind: Option<&str>) -> D
     }
 }
 
+/// Logged at ERROR on every `--dev` start.
+///
+/// Item (3) used to say the setup token was "printed (truncated)"; dev mode in
+/// fact logs the full setup URL, token included (GA audit 2026-09-28 L6).
+const DEV_MODE_BANNER: &str = "DEV MODE ACTIVE — security reductions in effect: \
+     (1) Argon2 parameters weakened to fast_for_testing (256 KiB / 1 iter); \
+     (2) CSRF cookie enforcement bypassed on pre-auth forms; \
+     (3) the first-run setup URL is logged with its full setup token. \
+     DO NOT expose this server on a non-loopback address.";
+
 /// Resolves the dev-mode on-disk data directory, if one is explicitly
 /// configured (HEA-1805).
 ///
@@ -1108,13 +1118,7 @@ async fn run_serve(
     );
 
     if config.dev_mode {
-        error!(
-            "DEV MODE ACTIVE — security reductions in effect: \
-             (1) Argon2 parameters weakened to fast_for_testing (256 KiB / 1 iter); \
-             (2) CSRF cookie enforcement bypassed on pre-auth forms; \
-             (3) setup token printed (truncated) in startup logs. \
-             DO NOT expose this server on a non-loopback address."
-        );
+        error!("{DEV_MODE_BANNER}");
     }
     if !config.dev_mode
         && config.email.transport == hearth::config::EmailTransport::Log
@@ -3420,7 +3424,7 @@ fn build_startup_panel(
             ));
         } else {
             lines.push(format!(
-                "  Setup:   {base}/ui/setup  (token redacted in prod — set HEARTH_SETUP_TOKEN)"
+                "  Setup:   {base}/ui/setup  (token redacted in prod — read <data_dir>/.setup_token)"
             ));
         }
     }
@@ -4443,9 +4447,20 @@ fn run_migrate_rotate_pepper(
 fn resolve_storage_kek(
     config_kek: Option<&str>,
 ) -> Result<Option<hearth::identity::key_encryption::StorageKek>, Box<dyn std::error::Error>> {
-    let hex_opt = std::env::var("HEARTH_KEK")
-        .ok()
-        .or_else(|| config_kek.map(str::to_string));
+    // OPS-11 (GA audit 2026-09-28): a set-but-non-UTF-8 value is an error,
+    // matching validation. `var().ok()` treated it as unset and silently fell
+    // back to the YAML key — or to no KEK at all.
+    let hex_opt = match std::env::var("HEARTH_KEK") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => config_kek.map(str::to_string),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(
+                "HEARTH_KEK is set but is not valid UTF-8 — it must be 64 hex characters \
+                        (openssl rand -hex 32)"
+                    .into(),
+            );
+        }
+    };
     let Some(hex) = hex_opt else {
         return Ok(None);
     };
@@ -7620,6 +7635,76 @@ mod tests {
         for host in ["127.0.0.1", "::1", "localhost", "0.0.0.0"] {
             assert_eq!(split_bind_override(host), (host.to_string(), None));
         }
+    }
+
+    // ── GA audit 2026-09-28 OPS-11: non-UTF-8 HEARTH_KEK ─────────────────────
+
+    /// Validation saw a non-UTF-8 `HEARTH_KEK` as present (`var_os`), and
+    /// resolution saw it as absent (`var`), falling back to the YAML key or to
+    /// no KEK at all. A value that is set but unreadable must be an error.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_hearth_kek_is_an_error_not_a_missing_key() {
+        use std::os::unix::ffi::OsStrExt;
+        std::env::set_var(
+            "HEARTH_KEK",
+            std::ffi::OsStr::from_bytes(&[0xff, 0xfe, 0x41]),
+        );
+        let config_kek = "11".repeat(32);
+        let result = resolve_storage_kek(Some(&config_kek));
+        let cli_result = resolve_cli_kek(None);
+        std::env::remove_var("HEARTH_KEK");
+
+        // `StorageKek` has no `Debug` (it is key material), so no `expect_err`.
+        let Err(err) = result else {
+            panic!("a non-UTF-8 HEARTH_KEK must not fall back to the YAML key");
+        };
+        assert!(err.to_string().contains("HEARTH_KEK"), "got: {err}");
+        assert!(
+            cli_result.is_err(),
+            "the CLI path must refuse it too, not resolve to no KEK"
+        );
+    }
+
+    // ── GA audit 2026-09-28 L6 / L25: setup-token wording ────────────────────
+
+    /// Dev mode logs the full first-run setup URL, token included
+    /// (`onboarding::log_and_notify_setup_url`). The banner used to say the
+    /// token was "truncated", which told the operator the opposite.
+    #[test]
+    fn dev_mode_banner_says_the_setup_token_is_logged_in_full() {
+        assert!(
+            !DEV_MODE_BANNER.contains("truncated"),
+            "the banner must not claim the setup token is truncated: {DEV_MODE_BANNER}"
+        );
+        assert!(
+            DEV_MODE_BANNER.contains("full"),
+            "the banner must say the setup URL is logged with the full token: {DEV_MODE_BANNER}"
+        );
+    }
+
+    /// The production panel told operators to "set HEARTH_SETUP_TOKEN", which
+    /// no code reads. The token lives in `<data_dir>/.setup_token`.
+    #[test]
+    fn production_panel_points_at_the_setup_token_file() {
+        let addr = "127.0.0.1:8420".parse().expect("valid socket addr");
+        let lines = build_startup_panel(addr, false, Some("tok"), None, &panel_stats_tls(true));
+        let setup = lines
+            .iter()
+            .find(|l| l.contains("/ui/setup"))
+            .expect("the panel must print the setup URL");
+        assert!(
+            !setup.contains("HEARTH_SETUP_TOKEN"),
+            "HEARTH_SETUP_TOKEN is read by nothing: {setup}"
+        );
+        assert!(
+            setup.contains(".setup_token"),
+            "the panel must name the file the token is in: {setup}"
+        );
+        assert!(
+            !setup.contains("tok "),
+            "the token itself must not be printed: {setup}"
+        );
     }
 
     // ── HEA-SEC-10: setup token truncation ───────────────────────────────────
