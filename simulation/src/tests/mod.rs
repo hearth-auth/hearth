@@ -18,4 +18,5 @@ mod txn_single_use;
 mod wal_crash;
 mod wal_fsync_before_ack;
 mod wal_group_commit;
+mod wal_memtable_order;
 mod wal_rotation_crash;
