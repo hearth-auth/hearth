@@ -227,6 +227,10 @@ jobs:
           # code. Tests, examples, fuzz, and node_modules are intentionally noisy
           # (fake creds in fixtures, vendored deps) and excluded.
           skip-dirs: .git,target,tests,examples,fuzz,node_modules
+          # Path-scoped secret allowances only (a public test-fixture key);
+          # see the policy header in the file. Vulnerabilities are fixed, not
+          # ignored.
+          trivyignores: .trivyignore.yaml
           format: sarif
           output: trivy.sarif
 
