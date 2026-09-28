@@ -241,7 +241,12 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::ConfigInvalid { .. }
         | IdentityError::AuditFailure { .. }
         | IdentityError::Internal { .. } => {
-            tracing::error!(error = %err, "internal gRPC error");
+            // PII-safe: an internal error can wrap text Hearth did not
+            // write, such as an SMTP rejection naming the recipient.
+            tracing::error!(
+                error = %crate::protocol::redact::LogSafeError(&err),
+                "internal gRPC error"
+            );
             (Code::Internal, "internal error".to_string())
         }
         IdentityError::SessionVersionDisabled => (
@@ -435,4 +440,66 @@ pub async fn verify_grpc_confidential_client_auth(
     .await
     .map(|()| client_id)
     .map_err(|e| client_auth_status(&e))
+}
+
+#[cfg(test)]
+mod internal_error_logging_tests {
+    //! An internal gRPC error is logged in a PII-safe form.
+    use super::identity_to_status;
+    use crate::identity::IdentityError;
+    use tonic::Code;
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture mutex").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for CaptureWriter {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn an_email_transport_error_is_logged_without_the_address() {
+        let err = IdentityError::Internal {
+            reason: format!(
+                "email OTP delivery failed: {}",
+                crate::identity::EmailError::Transport {
+                    reason: "550 5.1.1 <bob@corp.example.org>: mailbox unavailable".to_string(),
+                }
+            ),
+        };
+        let writer = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_max_level(tracing::Level::ERROR)
+            .with_ansi(false)
+            .finish();
+        let status = tracing::subscriber::with_default(subscriber, || identity_to_status(err));
+        let logs = String::from_utf8_lossy(&writer.0.lock().expect("capture mutex")).into_owned();
+        assert_eq!(status.code(), Code::Internal);
+        assert_eq!(status.message(), "internal error", "the status stays vague");
+        assert!(
+            logs.contains("ERROR") && logs.contains("mailbox unavailable"),
+            "the cause is logged: {logs:?}"
+        );
+        for leaked in ["bob", "corp.example.org"] {
+            assert!(
+                !logs.contains(leaked),
+                "the log must not carry {leaked:?}: {logs:?}"
+            );
+        }
+    }
 }

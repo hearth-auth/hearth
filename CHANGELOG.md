@@ -437,6 +437,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   MX lookup is performed. Registration behaviour does not change.
 
 ### Fixed
+- **A REST `500` now leaves its cause in the server log** — the REST error mapping answered `500`
+  with a deliberately vague body and logged nothing, and the HTTP trace layer records only the
+  status, so a `500` could not be explained from the log. It is now logged at `ERROR`
+  (`request failed with an internal error`), as gRPC already logged `internal gRPC error`. The
+  response body is unchanged. Both lines log the error's kind and a PII-safe form of its message:
+  e-mail addresses (an SMTP rejection names the recipient), values after secret-looking keys
+  (`password=`, `token:`, `Authorization: Bearer …`) and long opaque tokens are masked.
 - **A large audit restore no longer freezes the node** — the audit import of a backup restore held
   the realm's audit-chain lock for the whole import: a scan decoding every existing event, every
   chunk's fsync, for archives up to 4 GiB. Audit writes to that realm run on the async runtime's

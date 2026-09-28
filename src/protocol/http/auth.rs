@@ -935,10 +935,14 @@ pub(crate) fn identity_error_to_response(
     };
 
     // The body of a 500 is deliberately vague and the trace layer logs only
-    // the status, so this is the one place the cause of a 500 is recorded.
-    // `IdentityError`'s Display carries no secrets (error-handling rules).
+    // the status, so this is the one place the cause of a 500 is recorded —
+    // in a PII-safe form: an internal error can wrap text Hearth did not
+    // write, such as an SMTP rejection naming the recipient.
     if status == StatusCode::INTERNAL_SERVER_ERROR {
-        tracing::error!(error = %err, "request failed with an internal error");
+        tracing::error!(
+            error = %crate::protocol::redact::LogSafeError(err),
+            "request failed with an internal error"
+        );
     }
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);
@@ -1417,6 +1421,38 @@ mod internal_error_logging_tests {
             logs.contains("audit chain append refused"),
             "the cause of a 500 must be logged: {logs:?}"
         );
+    }
+
+    /// A 500's cause is logged in a PII-safe form: an email-transport failure
+    /// carries the SMTP server's rejection, which names the recipient.
+    #[test]
+    fn an_email_transport_500_is_logged_without_the_address() {
+        let err = IdentityError::Internal {
+            reason: format!(
+                "email OTP delivery failed: {}",
+                crate::identity::EmailError::Transport {
+                    reason: "550 5.1.1 <alice.smith+otp@example.com>: Recipient address \
+                             rejected; auth token=tok_0123456789abcdefABCDEF0123456789"
+                        .to_string(),
+                }
+            ),
+        };
+        let (status, _, logs) = map_capturing(&err);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            logs.contains("ERROR") && logs.contains("Recipient address rejected"),
+            "the cause is still logged: {logs:?}"
+        );
+        assert!(
+            logs.contains("Internal"),
+            "the error kind is logged: {logs:?}"
+        );
+        for leaked in ["alice", "example.com", "tok_", "0123456789abcdef"] {
+            assert!(
+                !logs.contains(leaked),
+                "the log must not carry {leaked:?}: {logs:?}"
+            );
+        }
     }
 
     #[test]
