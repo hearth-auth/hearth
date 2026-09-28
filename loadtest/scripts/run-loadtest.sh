@@ -30,7 +30,9 @@
 #                             limiter to stay under). Set >0 only to pin a
 #                             specific offered load for a controlled ramp.
 #   LOADTEST_DATA_DIR [./data/loadtest-corpus]  throwaway corpus data dir
-#                             (wiped before each boot so bootstrap stays fresh)
+#                             (wiped before each boot so bootstrap stays fresh;
+#                             a second concurrent run on the same dir is
+#                             refused — give it its own LOADTEST_DATA_DIR)
 #   CORPUS_ACME       [500000] users seeded into the acme realm (large default)
 #   CORPUS_GLOBEX     [400000] users seeded into the globex realm
 #   CORPUS_INITECH    [200000] users seeded into the initech realm
@@ -164,6 +166,18 @@ export LOADTEST_CORPUS_ACME="${CORPUS_ACME}"
 export LOADTEST_CORPUS_GLOBEX="${CORPUS_GLOBEX}"
 export LOADTEST_CORPUS_INITECH="${CORPUS_INITECH}"
 export LOADTEST_CORPUS_UMBRELLA="${CORPUS_UMBRELLA}"
+# One run per data dir. The wipe below would pull the directory out from under
+# a concurrent run's live server (its data-dir lock file goes with it), and the
+# two servers would then write SSTs into one directory, each unable to decrypt
+# the other's: every write that triggers a memtable flush answers 500. The lock
+# is held on an inherited fd, so the server keeps it even if this script dies.
+mkdir -p "$(dirname "${LOADTEST_DATA_DIR}")"
+exec 9>"${LOADTEST_DATA_DIR}.lock"
+if ! flock -n 9; then
+  echo "error: another load test is using ${LOADTEST_DATA_DIR} (lock held on" \
+    "${LOADTEST_DATA_DIR}.lock); wait for it or set LOADTEST_DATA_DIR" >&2
+  exit 1
+fi
 # Fresh data dir each run: the dev-realm bootstrap the token pool needs only
 # succeeds anonymously on a clean instance (a persisted dev realm 401s).
 rm -rf "${LOADTEST_DATA_DIR}"
