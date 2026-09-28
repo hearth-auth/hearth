@@ -8,41 +8,26 @@
 //! list differently (the validator accepted a CIDR the runtime then threw
 //! away, task 26.24); sharing the parser makes that disagreement impossible.
 //!
-//! # What an entry may be
+//! The grammar — address or `address/prefix`, strict, host bits refused,
+//! IPv4-mapped forms folded to IPv4 — is [`IpRange`]'s, shared with every
+//! other network list in Hearth. On top of it, a trusted proxy must not be a
+//! catch-all:
 //!
-//! | Form | Example | Meaning |
-//! |------|---------|---------|
-//! | IPv4 address | `10.0.0.7` | exactly that address (`/32`) |
-//! | IPv6 address | `2001:db8::7` | exactly that address (`/128`) |
-//! | IPv4 CIDR | `10.42.0.0/16` | every address in the range |
-//! | IPv6 CIDR | `2001:db8:42::/48` | every address in the range |
-//!
-//! The parser is strict on purpose — a lenient parse in a trust decision is a
-//! bypass (HEA-2165). It refuses:
-//!
-//! * anything that is not exactly an address or `address/prefix` (whitespace,
-//!   a second `/`, a signed or zero-padded prefix, a zone index);
-//! * a CIDR with **host bits set** (`10.0.0.7/8`). The operator almost
-//!   certainly meant either `10.0.0.7` or `10.0.0.0/8`, and those differ by
-//!   sixteen million addresses — refusing is safer than guessing. The error
-//!   names the network form;
 //! * the unspecified address or any range starting at it (`0.0.0.0`,
-//!   `0.0.0.0/0`, `::/0`, `::/16`): a catch-all that trusts every peer;
+//!   `0.0.0.0/0`, `::/0`, `::/16`) is refused — it trusts every peer;
 //! * a range broader than `/8` (IPv4) or `/16` (IPv6)
-//!   ([`MIN_IPV4_PREFIX`], [`MIN_IPV6_PREFIX`]). The largest private IPv4 block
-//!   is `10.0.0.0/8`, and real proxy fleets — Kubernetes pod networks, a CDN's
-//!   published ranges — are far narrower than either floor.
+//!   ([`MIN_IPV4_PREFIX`], [`MIN_IPV6_PREFIX`]) is refused. The largest private
+//!   IPv4 block is `10.0.0.0/8`, and real proxy fleets — Kubernetes pod
+//!   networks, a CDN's published ranges — are far narrower than either floor.
 //!
-//! An IPv4-mapped IPv6 entry (`::ffff:10.0.0.7`, `::ffff:10.0.0.0/104`) is
-//! stored as its IPv4 form, and a peer is canonicalized the same way before it
-//! is matched, so a dual-stack listener's `::ffff:a.b.c.d` peers match IPv4
-//! entries.
+//! These breadth rules are specific to trusted proxies: a deny list may block
+//! `0.0.0.0/0` on purpose, so [`IpRange`] itself does not apply them.
 
 use std::fmt;
 use std::net::IpAddr;
 use std::str::FromStr;
 
-use ipnet::IpNet;
+use super::ip_range::{IpRange, IpRangeError};
 
 /// The broadest IPv4 range accepted as a trusted proxy (`/8`).
 pub const MIN_IPV4_PREFIX: u8 = 8;
@@ -57,20 +42,8 @@ pub const MIN_IPV6_PREFIX: u8 = 16;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TrustedProxyError {
-    /// Not an IP address or `address/prefix`.
-    Malformed,
-    /// The prefix length exceeds the address family's width.
-    PrefixOutOfRange {
-        /// 32 for IPv4, 128 for IPv6.
-        max: u8,
-    },
-    /// A CIDR whose address has bits set below the prefix.
-    HostBitsSet {
-        /// The network the operator probably meant.
-        network: IpAddr,
-        /// The entry's prefix length.
-        prefix: u8,
-    },
+    /// Not a valid address or CIDR range (see [`IpRange`]).
+    Invalid(IpRangeError),
     /// The unspecified address, or a range starting at it.
     Unspecified,
     /// A range broader than the family's floor.
@@ -82,25 +55,16 @@ pub enum TrustedProxyError {
     },
 }
 
+impl From<IpRangeError> for TrustedProxyError {
+    fn from(e: IpRangeError) -> Self {
+        Self::Invalid(e)
+    }
+}
+
 impl fmt::Display for TrustedProxyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Malformed => f.write_str(
-                "is not an IP address or CIDR range (expected e.g. 10.0.0.7, 10.42.0.0/16, \
-                 2001:db8::7 or 2001:db8:42::/48)",
-            ),
-            Self::PrefixOutOfRange { max } => {
-                write!(
-                    f,
-                    "has a prefix length above {max}, the width of its address family"
-                )
-            }
-            Self::HostBitsSet { network, prefix } => write!(
-                f,
-                "has host bits set below its /{prefix} prefix. Write the network address \
-                 {network}/{prefix} to trust the whole range, or drop the prefix to trust \
-                 the single address"
-            ),
+            Self::Invalid(e) => e.fmt(f),
             Self::Unspecified => f.write_str(
                 "is the unspecified address or a range starting at it — a catch-all that \
                  trusts every peer as a proxy and bypasses every IP-based protection. List \
@@ -123,14 +87,14 @@ impl std::error::Error for TrustedProxyError {}
 /// Construct with [`str::parse`]; see the [module docs](self) for exactly
 /// what is accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TrustedProxy(IpNet);
+pub struct TrustedProxy(IpRange);
 
 impl TrustedProxy {
     /// `true` when `ip` (canonicalized, so `::ffff:a.b.c.d` is `a.b.c.d`)
     /// falls inside this entry.
     #[must_use]
     pub fn contains(&self, ip: IpAddr) -> bool {
-        self.0.contains(&ip.to_canonical())
+        self.0.contains(ip)
     }
 
     /// `true` when the entry lies in the loopback range.
@@ -144,35 +108,8 @@ impl FromStr for TrustedProxy {
     type Err = TrustedProxyError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // `IpAddr::from_str` is itself strict: no whitespace, no zone index,
-        // no brackets or port, no zero-padded IPv4 octets.
-        let (addr, prefix) = match s.split_once('/') {
-            None => {
-                let addr = s
-                    .parse::<IpAddr>()
-                    .map_err(|_| TrustedProxyError::Malformed)?;
-                (addr, u16::from(max_prefix(addr)))
-            }
-            Some((addr, prefix)) => (
-                addr.parse::<IpAddr>()
-                    .map_err(|_| TrustedProxyError::Malformed)?,
-                parse_prefix(prefix)?,
-            ),
-        };
-        let max = max_prefix(addr);
-        let prefix = u8::try_from(prefix)
-            .ok()
-            .filter(|p| *p <= max)
-            .ok_or(TrustedProxyError::PrefixOutOfRange { max })?;
-        let net = canonical_net(addr, prefix)?;
-
-        let network = net.network();
-        if net.addr() != network {
-            return Err(TrustedProxyError::HostBitsSet {
-                network,
-                prefix: net.prefix_len(),
-            });
-        }
+        let range: IpRange = s.parse()?;
+        let network = range.network();
         if network.is_unspecified() {
             return Err(TrustedProxyError::Unspecified);
         }
@@ -180,65 +117,20 @@ impl FromStr for TrustedProxy {
             IpAddr::V4(_) => MIN_IPV4_PREFIX,
             IpAddr::V6(_) => MIN_IPV6_PREFIX,
         };
-        if net.prefix_len() < min {
+        if range.prefix_len() < min {
             return Err(TrustedProxyError::TooBroad {
-                prefix: net.prefix_len(),
+                prefix: range.prefix_len(),
                 min,
             });
         }
-        Ok(Self(net))
+        Ok(Self(range))
     }
-}
-
-/// The width of `addr`'s family: 32 or 128.
-fn max_prefix(addr: IpAddr) -> u8 {
-    match addr {
-        IpAddr::V4(_) => 32,
-        IpAddr::V6(_) => 128,
-    }
-}
-
-/// Parses a prefix length: 1–3 ASCII digits, no sign, no zero padding.
-///
-/// `u8::from_str` alone would take `+8`; `08` is refused so that the only
-/// spelling of a prefix is the one every other tool prints. The range check
-/// against the address family is the caller's.
-fn parse_prefix(prefix: &str) -> Result<u16, TrustedProxyError> {
-    let digits_only = !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_digit());
-    let padded = prefix.len() > 1 && prefix.starts_with('0');
-    if !digits_only || padded || prefix.len() > 3 {
-        return Err(TrustedProxyError::Malformed);
-    }
-    prefix.parse().map_err(|_| TrustedProxyError::Malformed)
-}
-
-/// Builds the network, folding an IPv4-mapped IPv6 entry into IPv4 so it
-/// matches canonicalized peers.
-///
-/// A mapped address with a prefix below 96 cannot be a network address — bits
-/// 80–95 of `::ffff:0:0` are ones — so it is left as IPv6 and refused by the
-/// host-bits check.
-fn canonical_net(addr: IpAddr, prefix: u8) -> Result<IpNet, TrustedProxyError> {
-    let (addr, prefix) = match addr {
-        IpAddr::V6(v6) if prefix >= 96 => match v6.to_ipv4_mapped() {
-            Some(v4) => (IpAddr::V4(v4), prefix - 96),
-            None => (addr, prefix),
-        },
-        _ => (addr, prefix),
-    };
-    IpNet::new(addr, prefix).map_err(|_| TrustedProxyError::PrefixOutOfRange {
-        max: max_prefix(addr),
-    })
 }
 
 impl fmt::Display for TrustedProxy {
     /// A single address prints bare (`10.0.0.7`), a range as `net/prefix`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0.prefix_len() == self.0.max_prefix_len() {
-            write!(f, "{}", self.0.addr())
-        } else {
-            write!(f, "{}", self.0)
-        }
+        self.0.fmt(f)
     }
 }
 
@@ -426,73 +318,27 @@ mod tests {
 
     // ── refusals ──────────────────────────────────────────────────────────
 
+    /// The grammar is `IpRange`'s (tested in `core::ip_range`); its refusals
+    /// surface as `Invalid`.
     #[test]
-    fn malformed_entries_are_refused() {
-        for bad in [
-            "",
-            " ",
-            "10.0.0.7 ",
-            " 10.0.0.7",
-            "10.0.0",
-            "10.0.0.256",
-            "010.0.0.7",
-            "10.0.0.0/",
-            "/8",
-            "10.0.0.0/8/8",
-            "10.0.0.0/+8",
-            "10.0.0.0/-8",
-            "10.0.0.0/08",
-            "10.0.0.0/ 8",
-            "10.0.0.0 /8",
-            "10.0.0.0/8 ",
-            "10.0.0.0/x",
-            "10.0.0.0/0x8",
-            "10.0.0.0/1000",
-            "localhost",
-            "fe80::1%eth0",
-            "[2001:db8::1]",
-            "10.0.0.7:443",
-            "*",
-        ] {
-            assert!(
-                bad.parse::<TrustedProxy>().is_err(),
-                "'{bad}' must be refused"
-            );
-        }
-        assert_eq!(refused("proxy.internal"), TrustedProxyError::Malformed);
-    }
-
-    #[test]
-    fn a_prefix_wider_than_the_family_is_refused() {
+    fn grammar_refusals_are_ip_range_errors() {
+        assert_eq!(
+            refused("10.0.0.0/+8"),
+            TrustedProxyError::Invalid(IpRangeError::Malformed)
+        );
         assert_eq!(
             refused("10.0.0.0/33"),
-            TrustedProxyError::PrefixOutOfRange { max: 32 }
+            TrustedProxyError::Invalid(IpRangeError::PrefixOutOfRange { max: 32 })
         );
-        assert_eq!(
-            refused("2001:db8::/129"),
-            TrustedProxyError::PrefixOutOfRange { max: 128 }
-        );
-    }
-
-    #[test]
-    fn host_bits_are_refused_and_the_error_names_the_network() {
         let err = refused("10.0.0.7/8");
         assert_eq!(
             err,
-            TrustedProxyError::HostBitsSet {
+            TrustedProxyError::Invalid(IpRangeError::HostBitsSet {
                 network: ip("10.0.0.0"),
                 prefix: 8
-            }
+            })
         );
         assert!(err.to_string().contains("10.0.0.0/8"), "got: {err}");
-
-        assert_eq!(
-            refused("2001:db8:42::1/48"),
-            TrustedProxyError::HostBitsSet {
-                network: ip("2001:db8:42::"),
-                prefix: 48
-            }
-        );
     }
 
     #[test]

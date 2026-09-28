@@ -4,6 +4,7 @@
 
 mod epoch_cell;
 mod error;
+mod ip_range;
 pub mod pagination;
 pub mod secrets;
 mod swap_cell;
@@ -13,6 +14,7 @@ mod types;
 
 pub use epoch_cell::{EpochCell, EpochCellOption, EpochGuard};
 pub use error::CoreError;
+pub use ip_range::{IpRange, IpRangeError};
 pub use pagination::{
     Page, PageRequest, PagedResult, DEFAULT_COUNT_CAP, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
 };
