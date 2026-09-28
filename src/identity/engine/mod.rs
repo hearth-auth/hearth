@@ -3,7 +3,7 @@
 //! Implements `IdentityEngine` using the `StorageEngine` trait for persistence
 //! and `Clock` trait for deterministic timestamps.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -210,6 +210,28 @@ const CLOCK_SKEW_SECS: i64 = 60;
 /// archived or deleted can carry. Real `jti`s are UUIDs, so it cannot collide.
 const CLIENT_TOKEN_CUTOFF_PREFIX: &str = "client-cutoff:";
 
+/// Revoked-JTI projection id prefix for an audience cutoff (AGENT_AUTH.md
+/// §2.5): the entry `{realm}:aud-cutoff:{hash}` holds the latest `exp` any
+/// token minted for a since-removed protected resource can carry, where
+/// `{hash}` is [`audience_cutoff_hash_hex`] of the resource's canonical URI.
+const AUDIENCE_TOKEN_CUTOFF_PREFIX: &str = "aud-cutoff:";
+
+/// Hex length of the audience-cutoff hash: the first 16 bytes of SHA-256.
+const AUDIENCE_CUTOFF_HASH_HEX_LEN: usize = 32;
+
+/// Writes the first 16 bytes of SHA-256(`aud`) as lowercase hex into `out`.
+///
+/// Hot-path safe: the digest and the hex live on the stack — no allocation.
+fn audience_cutoff_hash_hex(aud: &str, out: &mut [u8; AUDIENCE_CUTOFF_HASH_HEX_LEN]) {
+    use sha2::Digest as _;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = sha2::Sha256::digest(aud.as_bytes());
+    for (pair, byte) in out.chunks_exact_mut(2).zip(digest.iter()) {
+        pair[0] = HEX[usize::from(byte >> 4)];
+        pair[1] = HEX[usize::from(byte & 0x0f)];
+    }
+}
+
 /// How long the token-validation hot path may reuse its last epoch
 /// reconciliation before reading the rows again.
 ///
@@ -330,9 +352,10 @@ use crate::identity::types::{
     DemoSeedSpec, FederationLinkExport, ImportClientRequest, ImportUserRequest, InvitationStatus,
     ListAgentsQuery, Organization, OrganizationInvitation, OrganizationMembership,
     OrganizationRole, OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey,
-    ProtectedResource, Realm, RealmStatus, RegisterProtectedResourceRequest, RegisterUserRequest,
-    RegisterUserResponse, RegistrationPolicy, RetiringSigningKeyExport, RevocationExport,
-    Rfc8693Request, Rfc8693Response, ScimMappingExport, ScimMappingKind, Session, SessionContext,
+    ProtectedResource, ProtectedResourceReconcileReport, Realm, RealmStatus,
+    RegisterProtectedResourceRequest, RegisterUserRequest, RegisterUserResponse,
+    RegistrationPolicy, RetiringSigningKeyExport, RevocationExport, Rfc8693Request,
+    Rfc8693Response, ScimMappingExport, ScimMappingKind, Session, SessionContext,
     SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
     UpdateProtectedResourceRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
     Webhook,
@@ -5881,6 +5904,58 @@ impl EmbeddedIdentityEngine {
             .is_some_and(|cutoff| claims.exp <= cutoff)
     }
 
+    /// Returns `true` when the token's `aud` names a protected resource that
+    /// has been removed since the token was minted (AGENT_AUTH.md §2.5): the
+    /// revoked-JTI projection holds an `aud-cutoff:{hash}` entry for that
+    /// `aud` value whose value is the latest `exp` any pre-removal token can
+    /// carry, and this token's `exp` is not after it.
+    ///
+    /// Hearth's own configured audience is never a protected resource and is
+    /// skipped, so a token for Hearth alone costs one string comparison.
+    ///
+    /// Hot-path safe: each other `aud` value is hashed on the stack and its
+    /// fixed-length key formatted into a stack buffer, then looked up with one
+    /// epoch-pinned `load()` — no allocation, lock or syscall.
+    fn is_audience_cut_off(&self, realm_id: &RealmId, claims: &TokenClaims) -> bool {
+        match &claims.aud {
+            crate::identity::tokens::Audience::Single(aud) => {
+                self.is_audience_value_cut_off(realm_id, aud, claims.exp)
+            }
+            crate::identity::tokens::Audience::Multi(list) => list
+                .iter()
+                .any(|aud| self.is_audience_value_cut_off(realm_id, aud, claims.exp)),
+        }
+    }
+
+    /// One `aud` value's half of [`Self::is_audience_cut_off`].
+    fn is_audience_value_cut_off(&self, realm_id: &RealmId, aud: &str, exp: i64) -> bool {
+        use std::fmt::Write as _;
+        if aud == self.config.token.audience {
+            return false;
+        }
+        let mut hex = [0u8; AUDIENCE_CUTOFF_HASH_HEX_LEN];
+        audience_cutoff_hash_hex(aud, &mut hex);
+        let Ok(hex) = std::str::from_utf8(&hex) else {
+            // Unreachable: the buffer holds only ASCII hex digits.
+            return true;
+        };
+        let mut key = StackKeyBuf::new();
+        match write!(
+            key,
+            "{}:{AUDIENCE_TOKEN_CUTOFF_PREFIX}{hex}",
+            realm_id.as_uuid()
+        ) {
+            Ok(()) => key.as_str().map_or(true, |k| {
+                self.revoked_jti_cache
+                    .get(k)
+                    .is_some_and(|cutoff| exp <= cutoff)
+            }),
+            // Unreachable: the key is a fixed 80 bytes, within the buffer. Fail
+            // closed rather than skip the check.
+            Err(_) => true,
+        }
+    }
+
     /// Returns `true` when the token's `jti` appears in the revocation
     /// projection (`revoked_jti_cache`). Both the sessionless
     /// (client_credentials) path and the session-bound path consult this so a
@@ -9492,6 +9567,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             if self.blocked_dpop_jkt_cache.contains_key(cnf.jkt.as_str()) {
                 return Err(IdentityError::DPopJktBlocked);
             }
+        }
+
+        // AGENT_AUTH.md §2.5: a token whose `aud` names a protected resource
+        // removed since it was minted stops validating, on both the
+        // session-bound and the sessionless path. Hot-path safe (see the fn).
+        if self.is_audience_cut_off(realm_id, &claims) {
+            return Err(IdentityError::InvalidToken);
         }
 
         // Parse session ID from claims. Sessionless tokens (client_credentials,
@@ -17510,23 +17592,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
-        if request.resource_uri.is_empty() {
-            return Err(IdentityError::InvalidInput {
-                reason: "resource_uri must not be empty".to_string(),
-            });
-        }
-        if !request.resource_uri.contains("://") {
-            return Err(IdentityError::InvalidInput {
-                reason: "resource_uri must be an absolute URI with a scheme".to_string(),
-            });
-        }
-        // AGENT_AUTH.md §2.6: a realm declares its MCP scope vocabulary here,
-        // and every `mcp:`-prefixed scope in it MUST be
-        // `{namespace}:{category}:{action}`. This is the enforcement point the
-        // validator was written for and had never been wired to (A-10).
-        crate::identity::mcp::validate_mcp_scope_vocabulary(&request.scopes)
-            .map_err(|reason| IdentityError::InvalidInput { reason })?;
-        let uri_key = keys::encode_resource_server_uri_index(&request.resource_uri);
+        let canonical = Self::validate_protected_resource_request(request)?;
+        let uri_key = keys::encode_resource_server_uri_index(canonical.as_str());
         if self
             .storage
             .get(realm_id, &uri_key)
@@ -17540,7 +17607,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let resource = ProtectedResource {
             id: id.clone(),
             realm_id: realm_id.clone(),
-            resource_uri: request.resource_uri.clone(),
+            resource_uri: canonical.as_str().to_string(),
             display_name: request.display_name.clone(),
             scopes: request.scopes.clone(),
             required_claims: request.required_claims.clone(),
@@ -17564,7 +17631,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             actor: Actor::System,
             metadata: Some(serde_json::json!({
                 "resource_id": id.as_uuid().to_string(),
-                "resource_uri": request.resource_uri,
+                "resource_uri": canonical.as_str(),
                 "display_name": request.display_name,
             })),
         };
@@ -17689,6 +17756,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
+        // AGENT_AUTH.md §2.5: removing a resource stops its tokens. Done
+        // before the registry rows go, so a failure leaves the resource
+        // registered (and the removal retried) rather than removed with its
+        // tokens still live.
+        let canonical =
+            crate::core::Uri::try_from(resource.resource_uri.clone()).map_err(|_| {
+                IdentityError::Internal {
+                    reason: "stored protected resource has an invalid resource_uri".to_string(),
+                }
+            })?;
+        self.revoke_resource_tokens(realm_id, &canonical)?;
         let uri_key = keys::encode_resource_server_uri_index(&resource.resource_uri);
         self.storage
             .write_batch(realm_id, &[], &[key, uri_key])
@@ -17708,6 +17786,75 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             &resource_id.as_uuid().to_string(),
         )?;
         Ok(())
+    }
+
+    fn reconcile_protected_resources(
+        &self,
+        realm_id: &RealmId,
+        declared: &[RegisterProtectedResourceRequest],
+    ) -> Result<ProtectedResourceReconcileReport, IdentityError> {
+        // Validate the whole declared set before writing anything, so a bad
+        // entry leaves the registry as it was rather than half-reconciled.
+        // Everything is keyed by the canonical `resource_uri`, so two spellings
+        // of one URI are one (duplicate) entry.
+        let mut canonical: Vec<String> = Vec::with_capacity(declared.len());
+        let mut declared_uris: HashSet<String> = HashSet::with_capacity(declared.len());
+        for request in declared {
+            let uri = Self::validate_protected_resource_request(request)?;
+            if !declared_uris.insert(uri.as_str().to_string()) {
+                return Err(IdentityError::InvalidInput {
+                    reason: format!(
+                        "protected resource resource_uri `{}` is declared more than once",
+                        uri.as_str()
+                    ),
+                });
+            }
+            canonical.push(uri.as_str().to_string());
+        }
+
+        let existing = self.list_protected_resources(realm_id)?;
+        let mut report = ProtectedResourceReconcileReport::default();
+
+        // Removals first: the registry is an allowlist of token-exchange
+        // targets, so if a later write fails the registry is left narrower
+        // than declared, never wider.
+        for resource in &existing {
+            if !declared_uris.contains(resource.resource_uri.as_str()) {
+                self.delete_protected_resource(realm_id, &resource.id)?;
+                report.removed.push(resource.resource_uri.clone());
+            }
+        }
+
+        let by_uri: HashMap<&str, &ProtectedResource> = existing
+            .iter()
+            .map(|r| (r.resource_uri.as_str(), r))
+            .collect();
+        for (request, uri) in declared.iter().zip(&canonical) {
+            match by_uri.get(uri.as_str()) {
+                Some(current) => {
+                    let drifted = current.display_name != request.display_name
+                        || current.scopes != request.scopes
+                        || current.required_claims != request.required_claims;
+                    if drifted {
+                        self.update_protected_resource(
+                            realm_id,
+                            &current.id,
+                            &UpdateProtectedResourceRequest {
+                                display_name: Some(request.display_name.clone()),
+                                scopes: Some(request.scopes.clone()),
+                                required_claims: Some(request.required_claims.clone()),
+                            },
+                        )?;
+                        report.updated.push(uri.clone());
+                    }
+                }
+                None => {
+                    self.register_protected_resource(realm_id, request)?;
+                    report.registered.push(uri.clone());
+                }
+            }
+        }
+        Ok(report)
     }
 
     // ── B.4 RFC 8693 Token Exchange ───────────────────────────────────────────
@@ -17921,21 +18068,24 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         //    protected resource registered in this realm (GA audit M8): taken
         //    verbatim, it let the holder of a token for one resource server
         //    mint a token another would accept.
-        for target in [request.resource.as_deref(), request.audience.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            if !subject_claims.aud.contains(target) {
-                self.require_registered_exchange_target(realm_id, target)?;
-            }
-        }
-        let aud = if let Some(ref resource_uri) = request.resource {
+        //    A registered target is matched and minted in its canonical form.
+        let resource_target = request
+            .resource
+            .as_deref()
+            .map(|t| self.resolve_exchange_target(realm_id, &subject_claims.aud, t))
+            .transpose()?;
+        let audience_target = request
+            .audience
+            .as_deref()
+            .map(|t| self.resolve_exchange_target(realm_id, &subject_claims.aud, t))
+            .transpose()?;
+        let aud = if let Some(resource_uri) = resource_target {
             crate::identity::tokens::Audience::Multi(vec![
                 subject_claims.aud.base().to_string(),
-                resource_uri.clone(),
+                resource_uri,
             ])
-        } else if let Some(ref audience) = request.audience {
-            crate::identity::tokens::Audience::Single(audience.clone())
+        } else if let Some(audience) = audience_target {
+            crate::identity::tokens::Audience::Single(audience)
         } else {
             subject_claims.aud.clone()
         };

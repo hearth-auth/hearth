@@ -3804,6 +3804,59 @@ impl RealmYamlConfig {
             })
             .collect();
 
+        // --- Protected resources: identity-registry invariants --------------
+        //
+        // Reconcile mirrors these entries into the identity protected-resource
+        // registry (the RFC 8693 token-exchange target allowlist, OIDC.md
+        // §3.4.1a), which enforces the same rules. Checking here makes a bad
+        // entry a config-load error naming it, not a reconcile failure.
+        // Duplicates compare canonical forms (`core::Uri`): two spellings of
+        // one URI are one resource.
+        let mut seen_uris: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (i, resource) in self
+            .protected_resources
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let uri = resource.resource_uri.as_str();
+            let canonical = crate::core::Uri::try_from(uri.to_string())
+                .ok()
+                .filter(|_| uri == uri.trim());
+            match canonical {
+                None => errors.push(RegistryError::InvalidRealmConfigField {
+                    field: format!("protected_resources[{i}].resource_uri"),
+                    value: uri.to_string(),
+                    reason: "must be an absolute URI with a scheme and host, no userinfo, no \
+                             fragment and no surrounding whitespace (RFC 8707 resource indicator)"
+                        .to_string(),
+                }),
+                Some(canonical) => {
+                    if !seen_uris.insert(canonical.as_str().to_string()) {
+                        errors.push(RegistryError::InvalidRealmConfigField {
+                            field: format!("protected_resources[{i}].resource_uri"),
+                            value: uri.to_string(),
+                            reason: format!(
+                                "declared more than once in this realm (canonical form `{}`)",
+                                canonical.as_str()
+                            ),
+                        });
+                    }
+                }
+            }
+            let bundle_names: Vec<String> =
+                resource.scopes.iter().map(|b| b.name.clone()).collect();
+            if let Err(reason) = crate::identity::mcp::validate_mcp_scope_vocabulary(&bundle_names)
+            {
+                errors.push(RegistryError::InvalidRealmConfigField {
+                    field: format!("protected_resources[{i}].scopes"),
+                    value: bundle_names.join(" "),
+                    reason,
+                });
+            }
+        }
+
         // --- Protected resources: grammar-validate bundle perm names -------
 
         let protected_resources: Vec<ProtectedResource> = self
@@ -3812,7 +3865,10 @@ impl RealmYamlConfig {
             .unwrap_or_default()
             .into_iter()
             .map(|resource| ProtectedResource {
-                resource_uri: resource.resource_uri,
+                // Stored canonical so RBAC and the identity registry agree;
+                // an invalid URI was already reported above.
+                resource_uri: crate::core::Uri::try_from(resource.resource_uri.clone())
+                    .map_or(resource.resource_uri, |uri| uri.as_str().to_string()),
                 display_name: resource.display_name,
                 scopes: resource
                     .scopes
@@ -4176,6 +4232,114 @@ mod tests {
         assert_eq!(cfg.port, 8420);
         assert!(cfg.tls_cert_path.is_none());
         assert!(cfg.tls_key_path.is_none());
+    }
+
+    // ===== Protected resources (token-exchange targets, OIDC.md §3.4.1a) =====
+
+    fn resource(uri: &str, bundles: &[&str]) -> ProtectedResourceYamlConfig {
+        ProtectedResourceYamlConfig {
+            resource_uri: uri.to_string(),
+            display_name: "RS".to_string(),
+            scopes: bundles
+                .iter()
+                .map(|name| ScopeBundleYamlConfig {
+                    name: (*name).to_string(),
+                    display_name: (*name).to_string(),
+                    description: None,
+                    permissions: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    /// The fields of every `InvalidRealmConfigField` error `resources` yields.
+    fn protected_resource_errors(resources: Vec<ProtectedResourceYamlConfig>) -> Vec<String> {
+        let yaml = RealmYamlConfig {
+            protected_resources: Some(resources),
+            ..RealmYamlConfig::default()
+        };
+        match yaml.to_realm_config(&AuthConfig::default(), None) {
+            Ok(_) => Vec::new(),
+            Err(errors) => errors
+                .into_iter()
+                .map(|e| match e {
+                    crate::rbac::RegistryError::InvalidRealmConfigField { field, .. } => field,
+                    other => panic!("unexpected error {other:?}"),
+                })
+                .collect(),
+        }
+    }
+
+    /// Reconcile writes each entry into the identity registry, which rejects
+    /// what these reject — so config load must reject it first, naming the
+    /// entry, instead of the reconcile failing at startup or reload.
+    #[test]
+    fn protected_resource_uri_must_be_a_valid_resource_indicator() {
+        for bad in [
+            "/relative/path",
+            "rs.example.com",
+            "https://rs.example.com/api#frag",
+            " https://rs.example.com/api",
+            "",
+        ] {
+            assert_eq!(
+                protected_resource_errors(vec![resource(bad, &[])]),
+                vec!["protected_resources[0].resource_uri".to_string()],
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            protected_resource_errors(vec![resource("https://rs.example.com/api", &[])]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn protected_resource_uri_must_be_unique_within_the_realm() {
+        assert_eq!(
+            protected_resource_errors(vec![
+                resource("https://rs.example.com/api", &[]),
+                resource("https://other.example.com", &[]),
+                resource("https://rs.example.com/api", &[]),
+            ]),
+            vec!["protected_resources[2].resource_uri".to_string()]
+        );
+    }
+
+    /// Two spellings of one URI are the same resource: the duplicate check
+    /// compares canonical forms, and the stored `resource_uri` is canonical.
+    #[test]
+    fn protected_resource_uri_is_canonical_and_duplicates_compare_canonically() {
+        assert_eq!(
+            protected_resource_errors(vec![
+                resource("https://rs.example.com/api", &[]),
+                resource("HTTPS://RS.example.com:443/api/", &[]),
+            ]),
+            vec!["protected_resources[1].resource_uri".to_string()]
+        );
+        let cfg = RealmYamlConfig {
+            protected_resources: Some(vec![resource("HTTPS://RS.example.com:443/api/", &[])]),
+            ..RealmYamlConfig::default()
+        }
+        .to_realm_config(&AuthConfig::default(), None)
+        .expect("valid");
+        assert_eq!(
+            cfg.protected_resources[0].resource_uri,
+            "https://rs.example.com/api"
+        );
+    }
+
+    /// `mcp:`-prefixed bundle names are the resource's MCP scope vocabulary
+    /// and must be `{namespace}:{category}:{action}` (AGENT_AUTH.md §2.6).
+    #[test]
+    fn protected_resource_mcp_bundle_names_must_have_three_parts() {
+        assert_eq!(
+            protected_resource_errors(vec![resource(
+                "https://mcp.example.com",
+                &["mcp:tools:invoke", "mcp:tools"]
+            )]),
+            vec!["protected_resources[0].scopes".to_string()]
+        );
     }
 
     // ===== WebAuthn realm policies (audit §4.18#9, task 20.14) =====

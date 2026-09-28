@@ -819,6 +819,27 @@ pub struct UpdateProtectedResourceRequest {
     pub required_claims: Option<Vec<String>>,
 }
 
+/// What [`reconcile_protected_resources`] changed, by `resource_uri`.
+///
+/// [`reconcile_protected_resources`]: crate::identity::IdentityEngine::reconcile_protected_resources
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProtectedResourceReconcileReport {
+    /// URIs that were not in the registry and were registered.
+    pub registered: Vec<String>,
+    /// URIs whose display name, scopes or required claims changed.
+    pub updated: Vec<String>,
+    /// URIs that were in the registry but not declared, and were deleted.
+    pub removed: Vec<String>,
+}
+
+impl ProtectedResourceReconcileReport {
+    /// `true` when the reconcile wrote nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.registered.is_empty() && self.updated.is_empty() && self.removed.is_empty()
+    }
+}
+
 // ── RFC 8693 Token Exchange ───────────────────────────────────────────────────
 
 /// RFC 8693 `urn:ietf:params:oauth:grant-type:token-exchange` request.
