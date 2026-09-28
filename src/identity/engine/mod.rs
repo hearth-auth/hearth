@@ -17823,6 +17823,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             display_name: request.display_name.clone(),
             scopes: request.scopes.clone(),
             required_claims: request.required_claims.clone(),
+            introspection_client_id: request.introspection_client_id.clone(),
             created_at: now,
             updated_at: now,
         };
@@ -17928,6 +17929,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if let Some(claims) = &request.required_claims {
             resource.required_claims = claims.clone();
         }
+        if let Some(client) = &request.introspection_client_id {
+            resource.introspection_client_id.clone_from(client);
+        }
         resource.updated_at = self.clock.now();
         let new_bytes =
             serde_json::to_vec(&resource).map_err(|e| IdentityError::Serialization {
@@ -18000,6 +18004,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(())
     }
 
+    fn canonical_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource: &str,
+    ) -> Result<String, IdentityError> {
+        self.resolve_authorization_resource(realm_id, resource)
+            .map(|uri| uri.as_str().to_string())
+    }
+
     fn reconcile_protected_resources(
         &self,
         realm_id: &RealmId,
@@ -18046,7 +18059,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 Some(current) => {
                     let drifted = current.display_name != request.display_name
                         || current.scopes != request.scopes
-                        || current.required_claims != request.required_claims;
+                        || current.required_claims != request.required_claims
+                        || current.introspection_client_id != request.introspection_client_id;
                     if drifted {
                         self.update_protected_resource(
                             realm_id,
@@ -18055,6 +18069,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                                 display_name: Some(request.display_name.clone()),
                                 scopes: Some(request.scopes.clone()),
                                 required_claims: Some(request.required_claims.clone()),
+                                introspection_client_id: Some(
+                                    request.introspection_client_id.clone(),
+                                ),
                             },
                         )?;
                         report.updated.push(uri.clone());
@@ -18896,6 +18913,8 @@ mod tests {
     /// Hot-path epoch reconciliation: debounced storage reads, bounded staleness.
     mod epoch_sync_debounce;
 
+    /// Every spelling of a resource reads the one consent record (G6).
+    mod authorize_resource_consent;
     /// Under FAPI 2.0 an assertion's `aud` is the issuer as a single string.
     mod client_assertion_audience;
     /// `private_key_jwt` assertion-JTI replay markers carry an expiry and are swept.

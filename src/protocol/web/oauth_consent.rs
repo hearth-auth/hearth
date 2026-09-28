@@ -132,15 +132,16 @@ pub struct AuthorizeQuery {
     /// sets `via_par = true` on the resulting authorization request.
     #[serde(default)]
     pub request_uri: Option<String>,
-    /// RFC 8707 resource indicator carried by a verified request object
-    /// (JAR) or a stored PAR entry.
+    /// RFC 8707 resource indicator (plain requests; a JAR or PAR request
+    /// takes it from the request object or the stored entry instead).
     ///
-    /// Never read from the query string (`serde(skip)`): this entry point
-    /// takes a resource only from a source the server verified. It exists so
-    /// the required-action and SMS intercepts can carry it to the code they
+    /// Every branch holds it to the realm's protected-resource registry
+    /// before anything else happens: an undeclared resource is refused with
+    /// `invalid_target`, and a registered one travels in canonical form (G6).
+    /// The required-action and SMS intercepts carry it to the code they
     /// eventually issue — dropping it issued a code, and a token, without
     /// the audience the client asked for.
-    #[serde(skip)]
+    #[serde(default)]
     pub resource: Option<String>,
 }
 
@@ -359,6 +360,27 @@ fn plain_params(
         ));
     }
 
+    // RFC 8707 §2: a resource the realm does not declare is `invalid_target`.
+    let resource = match q.resource.as_deref().filter(|r| !r.is_empty()) {
+        None => None,
+        Some(r) => match state.identity.canonical_protected_resource(realm, r) {
+            Ok(canonical) => Some(canonical),
+            Err(IdentityError::InvalidTarget { .. }) => {
+                return Err(authorization_error_redirect(
+                    state,
+                    realm,
+                    &error_return,
+                    "invalid_target",
+                    "resource is not a registered protected resource",
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "authorize_get: resource lookup failed");
+                return Err(handlers_common::server_error());
+            }
+        },
+    };
+
     Ok(AuthorizeParams {
         client_id: client_id.clone(),
         redirect_uri: q.redirect_uri.clone(),
@@ -369,8 +391,7 @@ fn plain_params(
         nonce: optional(&q.nonce),
         prompt: q.prompt.clone(),
         response_mode,
-        // This entry point never reads a resource from the query string.
-        resource: None,
+        resource,
         via_par: false,
     })
 }
@@ -419,6 +440,13 @@ fn par_params(
         return Err(handlers_common::bad_request("unsupported response_mode"));
     };
 
+    // The entry was checked against the registry when it was pushed; the
+    // resource may have been removed since (G6).
+    let resource = match stored.resource.as_deref() {
+        None => None,
+        Some(r) => Some(registered_resource_or_refusal(state, realm, r)?),
+    };
+
     Ok(AuthorizeParams {
         client_id: stored.client_id,
         redirect_uri: stored.redirect_uri,
@@ -429,7 +457,7 @@ fn par_params(
         nonce: stored.nonce,
         prompt: stored.prompt.unwrap_or_default(),
         response_mode,
-        resource: stored.resource,
+        resource,
         via_par: true,
     })
 }
@@ -945,6 +973,10 @@ fn jar_params(
     else {
         return Err(handlers_common::bad_request("unsupported response_mode"));
     };
+    let resource = match jar.resource.as_deref() {
+        None => None,
+        Some(r) => Some(registered_resource_or_refusal(state, realm, r)?),
+    };
 
     Ok(AuthorizeParams {
         client_id: client_id.clone(),
@@ -956,9 +988,29 @@ fn jar_params(
         nonce: optional(&jar.nonce.unwrap_or_else(|| q.nonce.clone())),
         prompt: jar.prompt.unwrap_or_else(|| q.prompt.clone()),
         response_mode,
-        resource: jar.resource,
+        resource,
         via_par: false,
     })
+}
+
+/// The canonical form of `resource` when it is a protected resource of the
+/// realm; otherwise the 400 `invalid_target` a JAR or PAR request is refused
+/// with (those branches never redirect an error).
+fn registered_resource_or_refusal(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    resource: &str,
+) -> Result<String, Response> {
+    match state.identity.canonical_protected_resource(realm, resource) {
+        Ok(canonical) => Ok(canonical),
+        Err(IdentityError::InvalidTarget { .. }) => Err(handlers_common::bad_request(
+            "invalid_target: resource is not a registered protected resource",
+        )),
+        Err(e) => {
+            tracing::warn!(error = %e, "authorize_get: resource lookup failed");
+            Err(handlers_common::server_error())
+        }
+    }
 }
 
 /// Builds the redirect location string from an `AuthorizationResponse`.

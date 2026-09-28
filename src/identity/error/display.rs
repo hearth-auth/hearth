@@ -258,6 +258,10 @@ impl fmt::Display for IdentityError {
             Self::TokenExchangeRejected { oauth_error, .. } => {
                 write!(f, "token exchange rejected: {oauth_error}")
             }
+            Self::InvalidTarget { .. } => write!(
+                f,
+                "invalid_target: the resource is not a registered protected resource"
+            ),
             Self::DelegationDepthExceeded { max, attempted } => write!(
                 f,
                 "delegation depth {attempted} exceeds agent maximum {max}"

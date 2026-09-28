@@ -228,6 +228,7 @@ fn make_bench_state() -> BenchState {
                 display_name: "Removed".to_string(),
                 scopes: Vec::new(),
                 required_claims: Vec::new(),
+                introspection_client_id: None,
             },
         )
         .expect("register protected resource");

@@ -68,6 +68,21 @@ fn authorize_and_exchange(
     client: &OAuthClient,
     resource: Option<&str>,
 ) -> hearth::identity::OidcTokenResponse {
+    if let Some(uri) = resource {
+        // RFC 8707: a `resource` must name a protected resource of the realm.
+        identity
+            .register_protected_resource(
+                realm_id,
+                &hearth::identity::RegisterProtectedResourceRequest {
+                    resource_uri: uri.to_string(),
+                    display_name: "API".to_string(),
+                    scopes: Vec::new(),
+                    required_claims: Vec::new(),
+                    introspection_client_id: None,
+                },
+            )
+            .expect("register the protected resource");
+    }
     let auth = identity
         .authorize(
             realm_id,

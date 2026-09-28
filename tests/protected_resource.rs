@@ -32,6 +32,7 @@ fn make_resource_request(uri: &str) -> RegisterProtectedResourceRequest {
             "mcp:resources:read".to_string(),
         ],
         required_claims: vec!["sub".to_string()],
+        introspection_client_id: None,
     }
 }
 
@@ -178,6 +179,7 @@ async fn protected_resource_update_display_name() {
                 display_name: Some("Updated Name".to_string()),
                 scopes: None,
                 required_claims: None,
+                introspection_client_id: None,
             },
         )
         .expect("update");
@@ -212,6 +214,7 @@ async fn protected_resource_update_scopes() {
                 display_name: None,
                 scopes: Some(new_scopes.clone()),
                 required_claims: None,
+                introspection_client_id: None,
             },
         )
         .expect("update scopes");
@@ -313,6 +316,7 @@ async fn protected_resource_empty_uri_rejected() {
         display_name: "Test".to_string(),
         scopes: vec![],
         required_claims: vec![],
+        introspection_client_id: None,
     };
 
     let err = identity
@@ -338,6 +342,7 @@ async fn protected_resource_relative_uri_rejected() {
         display_name: "Test".to_string(),
         scopes: vec![],
         required_claims: vec![],
+        introspection_client_id: None,
     };
 
     let err = identity

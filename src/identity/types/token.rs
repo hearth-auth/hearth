@@ -788,6 +788,13 @@ pub struct ProtectedResource {
     pub scopes: Vec<String>,
     /// JWT claims the resource requires in tokens presented to it.
     pub required_claims: Vec<String>,
+    /// The client the resource server authenticates as at the introspection
+    /// endpoint. That client may introspect any token whose `aud` names this
+    /// resource — including a token exchanged with `audience=` only, which
+    /// carries no Hearth audience (G6). `None`: only clients the token's own
+    /// claims name may introspect it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspection_client_id: Option<ClientId>,
     /// When the resource was registered.
     pub created_at: Timestamp,
     /// When the resource record was last updated.
@@ -806,6 +813,9 @@ pub struct RegisterProtectedResourceRequest {
     pub scopes: Vec<String>,
     /// Claims required in tokens.
     pub required_claims: Vec<String>,
+    /// The client the resource server introspects as (see
+    /// [`ProtectedResource::introspection_client_id`]).
+    pub introspection_client_id: Option<ClientId>,
 }
 
 /// Request to update an existing protected resource.
@@ -817,6 +827,8 @@ pub struct UpdateProtectedResourceRequest {
     pub scopes: Option<Vec<String>>,
     /// New required-claims list, if replacing.
     pub required_claims: Option<Vec<String>>,
+    /// New introspection client, if replacing (`Some(None)` clears it).
+    pub introspection_client_id: Option<Option<ClientId>>,
 }
 
 /// What [`reconcile_protected_resources`] changed, by `resource_uri`.

@@ -125,6 +125,7 @@ fn register_rs(h: &common::TestHarness, realm: &RealmId) {
                 display_name: "RS".to_string(),
                 scopes: vec!["read".to_string()],
                 required_claims: Vec::new(),
+                introspection_client_id: None,
             },
         )
         .unwrap();

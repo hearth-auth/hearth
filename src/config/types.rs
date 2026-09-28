@@ -2759,6 +2759,12 @@ pub struct ProtectedResourceYamlConfig {
     pub display_name: String,
     #[serde(default)]
     pub scopes: Vec<ScopeBundleYamlConfig>,
+    /// Key of the application (under `applications` / `oauth_clients` in
+    /// the same realm) the resource server authenticates as at the
+    /// introspection endpoint. That client may introspect tokens whose `aud`
+    /// names this resource (G6).
+    #[serde(default)]
+    pub introspection_client: Option<String>,
 }
 
 /// YAML for a single claim mapping.
@@ -4249,6 +4255,7 @@ mod tests {
                     permissions: Vec::new(),
                 })
                 .collect(),
+            introspection_client: None,
         }
     }
 

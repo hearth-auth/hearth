@@ -3143,6 +3143,20 @@ pub trait IdentityEngine: Send + Sync {
         declared: &[types::RegisterProtectedResourceRequest],
     ) -> Result<types::ProtectedResourceReconcileReport, IdentityError>;
 
+    /// Resolves an authorization request's RFC 8707 `resource` to the
+    /// canonical URI of a protected resource registered in the realm.
+    ///
+    /// [`IdentityError::InvalidTarget`] when the value is not a resource
+    /// indicator or names no registered resource — the protocol layer answers
+    /// `invalid_target`. `authorize` and `push_authorization_request` apply the
+    /// same rule themselves; this lets the browser entry point refuse before
+    /// running its interstitials.
+    fn canonical_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource: &str,
+    ) -> Result<String, IdentityError>;
+
     // ── B.4 RFC 8693 Token Exchange ───────────────────────────────────────────
 
     /// Processes an RFC 8693 `urn:ietf:params:oauth:grant-type:token-exchange` request.

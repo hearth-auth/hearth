@@ -240,6 +240,7 @@ async fn registry_mirrors_yaml_exactly() {
                 display_name: "not in YAML".to_string(),
                 scopes: Vec::new(),
                 required_claims: Vec::new(),
+                introspection_client_id: None,
             },
         )
         .unwrap();
@@ -304,6 +305,7 @@ fn declared(uri: &str) -> RegisterProtectedResourceRequest {
         display_name: "RS".to_string(),
         scopes: Vec::new(),
         required_claims: Vec::new(),
+        introspection_client_id: None,
     }
 }
 
