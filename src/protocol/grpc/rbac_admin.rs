@@ -302,6 +302,42 @@ fn check_direct_permission_ceiling(
     Ok(())
 }
 
+/// Privilege ceiling for a role definition — direct permissions AND the
+/// permissions its parent roles resolve to — shared with REST through
+/// [`crate::protocol::role_ceiling`] (GA audit M6). `hearth.admin` is exempt.
+///
+/// Returns `PERMISSION_DENIED` when the role would grant a permission the
+/// caller does not hold.
+fn check_role_definition_ceiling(
+    state: &GrpcState,
+    auth: &AdminAuth,
+    permissions: &[Permission],
+    parent_roles: &[RoleId],
+) -> Result<(), Status> {
+    match crate::protocol::role_ceiling::role_definition_ceiling_violation(
+        state.rbac.as_ref(),
+        &auth.realm_id,
+        &auth.permissions,
+        permissions,
+        parent_roles,
+    )
+    .map_err(rbac_to_status)?
+    {
+        None => Ok(()),
+        Some(missing) => {
+            tracing::warn!(
+                realm_id = %auth.realm_id,
+                missing_permission = %missing,
+                "gRPC role definition blocked: grantor does not hold the permission being granted"
+            );
+            Err(Status::new(
+                Code::PermissionDenied,
+                "grantor does not hold the permission being granted",
+            ))
+        }
+    }
+}
+
 // --- trait impl ---------------------------------------------------------
 
 #[tonic::async_trait]
@@ -345,10 +381,9 @@ impl RbacAdminService for RbacAdminSvc {
         // Privilege-ceiling check (HEA-1734): sub-admins must not define a role
         // whose permission set exceeds their own — prevents role-definition
         // poisoning and indirect self-escalation via a future assignment.
-        for permission in &permissions {
-            check_direct_permission_ceiling(&auth, permission)?;
-        }
+        // Parent roles count too (GA audit M6): they grant their permissions.
         let parent_roles = parent_role_ids_from_strings(&inner.parent_role_ids)?;
+        check_role_definition_ceiling(&self.state, &auth, &permissions, &parent_roles)?;
         let description = if inner.description.is_empty() {
             None
         } else {
@@ -421,11 +456,11 @@ impl RbacAdminService for RbacAdminSvc {
         // Privilege-ceiling check (HEA-1734): sub-admins may not replace a role's
         // permission set with permissions they don't hold — this is the direct
         // self-escalation path described in the issue (update own role → hearth.admin).
-        for permission in &parsed_permissions {
-            check_direct_permission_ceiling(&auth, permission)?;
-        }
+        // Parent roles count too (GA audit M6): they grant their permissions.
+        let parsed_parents = parent_role_ids_from_strings(&inner.parent_role_ids)?;
+        check_role_definition_ceiling(&self.state, &auth, &parsed_permissions, &parsed_parents)?;
         let permissions = Some(parsed_permissions);
-        let parent_roles = Some(parent_role_ids_from_strings(&inner.parent_role_ids)?);
+        let parent_roles = Some(parsed_parents);
         let is_full_admin = auth.permissions.iter().any(|p| p == "hearth.admin");
         let updated = self
             .state
