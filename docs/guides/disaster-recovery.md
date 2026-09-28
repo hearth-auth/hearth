@@ -732,16 +732,22 @@ post-restore validation checklist appropriate for an incident.
    # They MUST match.
    ```
 
-4. **Confirm operator-console access.** The restore's last lines say whether
-   the archive carried the **system realm** — the realm that holds every
-   operator-console account:
+4. **Confirm operator-console access.** The restore's last lines say what it
+   did with the **system realm** — the realm that holds every operator-console
+   account — based on what was actually imported:
 
-   - `System realm restored: …` — operators sign in at `/ui/admin/login` with
-     their original passwords and second factors (sessions are not restored,
-     so everyone signs in again). Into an empty data directory the system
-     realm's signing key is restored too, so system-realm tokens keep their
-     `kid`. Sign in once now: the cluster endpoints (`/admin/cluster/*`) and
-     every cross-realm operation need a system-realm token.
+   - `System realm: N operator-console account(s) restored; …` — those
+     operators sign in at `/ui/admin/login` with their original passwords and
+     second factors (sessions are not restored, so everyone signs in again).
+     The line also says what happened to the system signing key; into an empty
+     data directory the archived key is installed, so system-realm tokens keep
+     their `kid`. Any operator reported as refused did **not** come back. Sign
+     in once now: the cluster endpoints (`/admin/cluster/*`) and every
+     cross-realm operation need a system-realm token.
+   - `System realm: this restore did NOT restore operator-console access — …`
+     — the archive carried the system realm but no operator came back from it
+     (each was already present and kept, or was refused). Existing operators
+     keep their current credentials; check the counts it prints.
    - `This restore does not contain the system realm …` — the archive brought
      back no operator account, and a restored store holds realms, so the
      first-run setup URL is not issued. Restore the system realm from another

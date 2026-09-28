@@ -2003,13 +2003,19 @@ signature verification.
 #### A-30.1 Separate `hearth.export` capability
 
 All data-export endpoints (`POST /admin/backup`, `GET /admin/users/export`,
-`GET /admin/realms/{r}/audit/export`) now require the caller's token to carry
-**both** `hearth.admin` AND `hearth.export` in the `permissions` claim.
+`GET /admin/realms/{r}/audit/export`) and `POST /admin/backup/restore` require
+the caller's token to carry `hearth.export` **in addition to** an admin
+permission in the `permissions` claim — `hearth.admin`, or the sub-admin
+permission the endpoint accepts. A backup export or restore by a
+**system-realm** caller is not scoped to one realm (it reaches every realm,
+operator accounts and the system signing key included), so it requires
+`hearth.admin` itself; a sub-admin plus `hearth.export` is refused (`403`).
 
 - `hearth.export` is seeded in all realms and included in the `realm.admin` role
   by default.
-- Operators can grant it to dedicated service accounts (DR pipelines) without
-  granting full `hearth.admin`.
+- Operators can grant it to dedicated service accounts (DR pipelines) scoped to
+  a tenant realm without granting full `hearth.admin`; a service account that
+  backs up every realm from the system realm needs `hearth.admin`.
 - Fail-closed: missing permission → `403 Forbidden`.
 
 #### A-30.2 Per-export rate limit

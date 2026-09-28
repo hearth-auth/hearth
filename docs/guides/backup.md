@@ -138,7 +138,7 @@ without it, name a single realm with `--realm <name>`.
 | `hearth backup create` (no `--realm`) | **Yes** |
 | `hearth backup create --realm <tenant>` | No |
 | `hearth backup create --realm 00000000-0000-0000-0000-000000000000` | Yes, alone |
-| `POST /admin/backup` by a **system-realm** caller (nil `X-Realm-ID`, `hearth.export`) | **Yes** — appended to a full export; `?realm=system` exports it alone |
+| `POST /admin/backup` by a **system-realm** caller (nil `X-Realm-ID`, `hearth.admin` + `hearth.export`) | **Yes** — appended to a full export; `?realm=system` exports it alone |
 | `POST /admin/backup` by a tenant-scoped caller | **Never** — its own realm only; `?realm=system` is `403` |
 | `POST /admin/backup` from **v1.6.11 or earlier** | **No** — no HTTP export carried it before this release |
 
@@ -163,8 +163,26 @@ fresh signing key and no users, in every data directory):
 | Mode | Operator accounts and other records | System signing key |
 |---|---|---|
 | `skip` (default) / `merge` | Missing records are added; existing ones are kept (reported as conflicts) | Installed when the target's system realm **holds no user** — a fresh data directory, whose seeded key has signed nothing. Kept (reported as a conflict) when the target already has operators |
-| `overwrite` | Existing records are replaced by the archived ones | **Replaced**, even on a live instance. Every token signed by the replaced key stops verifying at once |
-| `--dry-run` | Counted, nothing written | Counted, nothing written |
+| `overwrite` | Existing records are replaced by the archived ones | As `skip` — a live key is **kept** — unless you also pass `--replace-system-signing-key` (CLI only): then the live key is **replaced**, and every token it signed stops verifying at once |
+| `--dry-run` | Counted, nothing written | Reports what the real run would do — installed, kept, replaced or refused — and writes nothing |
+
+**A retired system key is never reinstalled.** Every rotation of the system
+realm's signing key records the key it retires (and a revoking rotation, every
+retiring key it purges). A restore refuses an archived system key that record
+names — or that is still one of the target's retiring keys — in every mode and
+even with `--replace-system-signing-key`, and refuses to reinstate an archived
+retiring key a revoking rotation purged. An archive made before you rotated a
+compromised key therefore cannot bring that key back into a live instance;
+restore a backup made after the rotation. The record lives in the data
+directory: a restore into a fresh, empty directory has nothing to compare
+against, so restore the newest archive there. `POST /admin/backup/restore`
+never replaces a live system key — the caller's own token is signed with it.
+
+A system-realm archive never writes, into the system realm, what the live API
+cannot create there: organizations (and their memberships and invitations),
+agents, external identity providers, federation links, SAML service providers
+and a SAML or RS256 ID-token signing key. Such a record is refused and reported,
+and the rest of the restore carries on.
 
 The system realm's record itself is not re-created; its contents are imported
 into the system realm that already exists. In the restore report the `realms`
@@ -175,16 +193,23 @@ carries no signing key is refused unless you pass `--allow-missing-signing-key`,
 in which case the accounts are restored and the target keeps the key it has.
 
 **Who may restore it.** The CLI (an operator with the data directory) and, over
-HTTP, a **system-realm caller** only. A tenant-scoped caller's
-`POST /admin/backup/restore` of an archive carrying the system realm is refused
-with `403` before anything is written, in every mode — a restore never lets a
-lower-privileged caller create or overwrite an operator account.
+HTTP, a **system-realm caller holding `hearth.admin`** (plus `hearth.export`).
+A system-realm caller's backup export or restore reaches every realm — operator
+accounts and the system signing key included — so a system-realm operator
+delegated only a sub-admin permission (`hearth.users.admin`,
+`hearth.realm.admin`, …) is refused (`403`) even with `hearth.export`. A
+tenant-scoped caller's `POST /admin/backup/restore` is authorized against
+**every** realm in the archive before its first write: an archive carrying the
+system realm, or any other realm but its own, is refused with `403`, in every
+mode, and nothing — not even the restore's own audit event — is written.
 
 **After the restore** operators sign in at `/ui/admin/login` with their original
 passwords and second factors. Sessions are not restored (see
 [What a backup does not carry](#what-a-backup-does-not-carry)), so everyone signs
-in again. `hearth backup restore` says at the end whether the archive brought the
-system realm back.
+in again. `hearth backup restore` ends by saying what actually happened: how many
+operator accounts it restored, kept (already present) or refused, and what it did
+with the system signing key. When it restored no operator from the archive it
+says that operator-console access did **not** come back.
 
 ### Audit chain verification
 
@@ -205,6 +230,19 @@ unverified path fails the restore rather than skipping the check.
 Archives written before this member existed carry audit events with no chain
 material. Those still restore, with a warning: their restored chain attests to
 the restore, not to the source. Re-export to get a verifiable audit section.
+
+**Where restored events land.** Imported events are appended at the **end** of
+the destination realm's chain, never slotted in among — or re-signed together
+with — events the realm already holds, so the realm keeps verifying (`GET
+/admin/realms/{id}/audit/verify`) after a restore into a live instance. Every
+imported event carries a `backup_restore` entry in its metadata with its
+`original_timestamp`, so restored history is never mistaken for events this
+instance recorded. Into a realm with no audit event yet (a fresh data directory)
+events keep their original timestamps; into a realm that already has events
+each is stamped with the restore time, the original kept in the marker. An event
+the realm already holds (same id) is skipped, so restoring the same archive
+twice adds nothing. The `BackupRestored` event of `POST /admin/backup/restore`
+is recorded after the import, in the caller's realm.
 
 ### Signed archives
 
@@ -678,8 +716,9 @@ server process and needs no lock:
   >> /var/log/hearth/backup.log 2>&1
 ```
 
-The endpoint requires the `hearth.export` capability in addition to
-`hearth.admin`, and is rate-limited to **10 calls per hour per user**, which
+The endpoint requires the `hearth.export` capability in addition to an admin
+permission — `hearth.admin` itself for a system-realm caller, whose export
+covers every realm — and is rate-limited to **10 calls per hour per user**, which
 caps how tight a cadence you can schedule. Note that `POST /admin/backup` has
 no equivalent of the CLI's `--encrypt` flag; encrypt the resulting archive at
 rest yourself, or take encrypted archives from a stopped node with the CLI.

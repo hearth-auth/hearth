@@ -662,8 +662,9 @@ cluster must share one value anyway: run the restore and the new cluster with th
    ```
 
    Exit `0` means every record restored; read any conflicts and errors it prints before going
-   on. The second restore ends with `System realm restored: …`; the first one warns that its
-   archive does not contain the system realm, which is expected here. `hearth backup restore`
+   on. The second restore ends with `System realm: N operator-console account(s) restored; …`;
+   the first one warns that its archive does not contain the system realm, which is expected
+   here. `hearth backup restore`
    writes only the store, never a Raft log, so a directory it restored into while empty holds no
    `raft.db`. Do **not** start `hearth serve` on it yet.
 5. **Copy that directory to every node** before any node starts, into the path each node's

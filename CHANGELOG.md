@@ -9,6 +9,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 <!-- GA software-blocker fixes (branch fix/ga-software-blockers). -->
 
 ### Security
+- **A system-realm backup export or restore requires `hearth.admin`** — `POST /admin/backup` and
+  `POST /admin/backup/restore` accepted any sub-admin permission (`hearth.users.admin`,
+  `hearth.realm.admin`, …) plus `hearth.export`, and a system-realm caller's backup reaches every
+  realm. A delegated system-realm operator could export every realm and, with a signed archive,
+  resurrect deleted operators and revoked grants, overwrite every operator's password hash and
+  factors, reinstall a rotated-away system signing key, or rewrite any tenant realm. A system-realm
+  caller now needs `hearth.admin` itself (`403` otherwise, before anything is read or written).
+  Tenant-scoped callers are unchanged. The `hearth.export` description no longer claims
+  `hearth.admin` was already required.
+- **A restore never reinstalls a system signing key the realm rotated away from** — an archive made
+  before a key rotation (for instance after a compromise) could put the retired key back as the
+  live system key, or reinstate a retiring key a revoking rotation had purged. Rotations of the
+  system key now record every key they retire; a restore refuses such a key in every mode (dry run
+  included), before writing anything. `--mode overwrite` alone no longer replaces a live system
+  key: it takes the new `hearth backup restore --replace-system-signing-key`, and the HTTP restore
+  never replaces it.
+
 - **Heap corruption on the hot path fixed** — token validation, session lookup and storage reads no
   longer use `arc-swap` 1.9.2, which corrupted the heap under concurrent `load` + `rcu` (3 crashes in
   150 loaded runs under `MALLOC_CHECK_=3`). They now use `core::EpochCell`, an epoch-reclaimed cell with
@@ -355,6 +372,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
     example a FAPI 2.0 application asking for RS256 ID tokens) left a public client behind.
 
 ### Added
+- **`hearth backup restore --replace-system-signing-key`** — with `--mode overwrite`, also replaces
+  the live system realm's signing key with the archived one (signing every operator out). Refused
+  outside overwrite mode, and never reinstalls a key the target rotated away from.
 - **Per-client RS256 ID tokens (OIDC interop, task 26.55)** — a client can set
   `id_token_signed_response_alg` to `RS256` or `EdDSA` on Dynamic Client Registration, admin REST,
   gRPC (new field on `RegisterClientRequest`, `UpdateClientRequest`, `OAuthClient`), the admin console
@@ -408,12 +428,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   log and signing key (with its retiring keys), with the same skip / merge / overwrite / dry-run
   rules and validation as every other realm. Its signing key replaces the key of a system realm
   that holds no operator (a fresh data directory), so pre-backup system tokens keep their `kid`;
-  a live system realm keeps its key unless `--mode overwrite`. The same
-  `--allow-missing-signing-key` rule applies. `POST /admin/backup` by a system-realm caller now
-  includes the system realm (appended to a full export, or alone with `?realm=system`); a
-  tenant-scoped caller never exports it and its restore of an archive carrying it is refused
-  (`403`) before anything is written. `hearth backup restore` ends by saying whether the archive
-  brought the system realm back. HTTP exports from v1.6.11 and earlier do not contain it.
+  a live system realm keeps its key unless `--mode overwrite --replace-system-signing-key`, and a
+  key the target rotated away from is never reinstalled (see *Security*). The same
+  `--allow-missing-signing-key` rule applies. `POST /admin/backup` by a system-realm caller holding
+  `hearth.admin` now includes the system realm (appended to a full export, or alone with
+  `?realm=system`); a tenant-scoped caller never exports it, and its restore of an archive carrying
+  it — or any realm but its own — is refused (`403`) before its first write, audit event included.
+  Organizations, invitations, agents, IdPs, federation links, SAML service providers and SAML or
+  RS256 ID-token keys in a system-realm archive are refused and reported, as the live API never
+  creates them there. `hearth backup restore` ends by saying how many operator accounts it
+  restored, kept or refused and what it did with the system signing key, and says plainly when
+  operator-console access did not come back; `--dry-run` reports the key outcome the real run
+  would have. HTTP exports from v1.6.11 and earlier do not contain the system realm.
+- **Restored audit history keeps a live realm's chain verifiable** — archived audit events were
+  appended with their original timestamps, so into any realm that already held newer events (every
+  HTTP system-realm restore, a CLI restore into a directory with operators, a tenant merged into a
+  live realm) they sorted before the events they chained after and `verify_integrity` failed; a
+  repeated restore duplicated every event. Restored events are now appended at the end of the
+  destination chain — keeping their timestamps only into an empty chain, otherwise stamped with the
+  restore time — each marked with `metadata.backup_restore.original_timestamp`, and an event the
+  realm already holds is skipped. `POST /admin/backup/restore` records its `BackupRestored` event
+  after the import.
 - `Authorization: Basic base64("<client_id>:")` (an empty password) now means "no secret" on every
   endpoint. A public client identifying itself this way could redeem its code at `/token` but was
   refused (`401`) at `/as/par` and `/revoke`, where the empty password read as a wrong secret.
