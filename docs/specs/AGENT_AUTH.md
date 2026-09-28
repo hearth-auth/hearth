@@ -186,7 +186,12 @@ MCP tool servers advertise their authorization requirements via a discovery docu
 
 ### 2.5 Protected Resource Registration
 
-Realms register their MCP tool servers as protected resources in Hearth.
+Realms register their MCP tool servers as protected resources in Hearth. Registration is
+declarative: an operator lists them in the realm's YAML `protected_resources` block, and reconcile
+mirrors that block into the registry at startup and on every config reload — entries removed from
+YAML are removed from the registry. There is no admin write API. `scopes` holds the entry's
+resource-local bundle names; `required_claims` has no YAML key and is always empty. The registry
+is also the RFC 8693 token-exchange target allowlist (`OIDC.md` §3.4.1a).
 
 | Field | Type | Description |
 |-------|------|-------------|

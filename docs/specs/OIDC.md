@@ -449,12 +449,49 @@ policy before it looks at the subject token:
 
 `audience` and `resource` are restricted to an allowlist: each **MUST** either be an audience the
 subject token already carries (narrowing widens nothing) or equal the `resource_uri` of a
-protected resource registered in the realm's identity registry
-(`IdentityEngine::register_protected_resource`). Any other value is refused with
+protected resource in the realm's identity registry. Any other value is refused with
 `400 invalid_target` (RFC 8693 §2.2.2), so the holder of a token for one resource server cannot
-mint a token that another resource server accepts. The registry has no REST/gRPC surface yet and
-YAML `protected_resources` feed only RBAC scope bundles, so over the wire today only narrowing
-is available — an open owner decision.
+mint a token that another resource server accepts. Both parameters are checked the same way;
+`audience` replaces the minted `aud`, `resource` is appended to the subject token's base
+audience.
+
+**Where the allowlist comes from.** Operators register protected resources in the realm's YAML
+`protected_resources` block (`CONFIGURATION.md`, per-realm keys) — the same entries that define
+the resource-local scope bundles, so there is one source of truth. Reconcile mirrors that block
+into the identity registry at startup and on every config reload
+(`IdentityEngine::reconcile_protected_resources`, called from `reconcile_realms`):
+
+- The identifier is the entry's **`resource_uri`**. An exchange's `audience` / `resource` must
+  equal it **byte-for-byte** — no case folding, default-port stripping or trailing-slash
+  normalization — and the minted token's `aud` carries it verbatim.
+- The registry is exactly the YAML set. An entry added to YAML becomes a valid target on the next
+  reconcile; an entry removed from YAML (or removing the whole `protected_resources` key) is
+  deleted from the registry, and the next exchange naming it answers `invalid_target`. A changed
+  `display_name` or bundle list updates the record in place.
+- There is no admin REST/gRPC write API for the registry, deliberately.
+- Config load refuses an entry whose `resource_uri` is not an absolute URI with a scheme (or has
+  a fragment or surrounding whitespace), a `resource_uri` declared twice in one realm, and an
+  `mcp:`-prefixed bundle name that is not `mcp:{category}:{action}` — so reconcile never meets an
+  entry the registry would reject.
+
+```yaml
+realms:
+  acme:
+    protected_resources:
+      - resource_uri: "https://mcp.acme.example"   # the exchange target identifier
+        display_name: "Acme MCP"
+```
+
+```bash
+# Allowed: audience is a YAML protected resource.
+curl -s -X POST "$ISSUER/realms/acme/token" -u "$CLIENT_ID:$CLIENT_SECRET" \
+  --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  --data-urlencode "subject_token=$USER_ACCESS_TOKEN" \
+  --data-urlencode "subject_token_type=urn:ietf:params:oauth:token-type:access_token" \
+  --data-urlencode "audience=https://mcp.acme.example"
+# Any URI not in protected_resources (and not already in the subject token's aud):
+# → 400 {"error":"invalid_target"}
+```
 
 #### 3.4.2 DPoP-Bound Subject Tokens
 
