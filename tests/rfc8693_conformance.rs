@@ -44,6 +44,29 @@ fn make_realm(identity: &dyn IdentityEngine) -> RealmId {
         .clone()
 }
 
+/// Registers a client holding the token-exchange grant, which RFC 8693 now
+/// requires of the exchanging client (GA audit M7).
+fn exchanging_client(identity: &dyn IdentityEngine, realm_id: &RealmId) -> hearth::core::ClientId {
+    identity
+        .register_client(
+            realm_id,
+            &hearth::identity::RegisterClientRequest {
+                client_name: format!("exchanger-{}", uuid::Uuid::new_v4()),
+                client_secret: Some("exchanger-secret-long-enough-32chars".to_string()),
+                grant_types: vec![
+                    "client_credentials".to_string(),
+                    "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+                ],
+                require_consent: false,
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
+                ..Default::default()
+            },
+        )
+        .expect("register exchanging client")
+        .client_id()
+        .clone()
+}
+
 /// Issue a real Ed25519-signed access token for `user_id` with explicit `scope`.
 fn make_subject_token(
     identity: &dyn IdentityEngine,
@@ -201,7 +224,7 @@ async fn rfc8693_response_required_fields() {
         .rfc8693_token_exchange(
             &realm_id,
             &Rfc8693Request {
-                client_id: hearth::core::ClientId::new(uuid::Uuid::new_v4()),
+                client_id: exchanging_client(identity, &realm_id),
                 subject_token,
                 subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
                 actor_token: None,
@@ -273,7 +296,7 @@ async fn rfc8693_err01_wrong_subject_token_type() {
         .rfc8693_token_exchange(
             &realm_id,
             &Rfc8693Request {
-                client_id: hearth::core::ClientId::new(uuid::Uuid::new_v4()),
+                client_id: exchanging_client(identity, &realm_id),
                 subject_token,
                 // Wrong type — must be access_token, not jwt
                 subject_token_type: "urn:ietf:params:oauth:token-type:jwt".to_string(),
@@ -346,7 +369,7 @@ async fn rfc8693_err02_invalid_signature_subject_token_rejected() {
         .rfc8693_token_exchange(
             &realm_id,
             &Rfc8693Request {
-                client_id: hearth::core::ClientId::new(uuid::Uuid::new_v4()),
+                client_id: exchanging_client(identity, &realm_id),
                 subject_token,
                 subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
                 actor_token: None,
@@ -399,7 +422,7 @@ async fn rfc8693_err03_scope_wider_than_subject() {
         .rfc8693_token_exchange(
             &realm_id,
             &Rfc8693Request {
-                client_id: hearth::core::ClientId::new(uuid::Uuid::new_v4()),
+                client_id: exchanging_client(identity, &realm_id),
                 subject_token,
                 subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
                 actor_token: None,

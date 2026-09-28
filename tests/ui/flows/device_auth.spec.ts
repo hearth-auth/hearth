@@ -3,7 +3,7 @@
  *
  * RFC 8628 end-to-end:
  *   1. API: POST /oauth/device_authorization → device_code + user_code
- *   2. Browser: GET /ui/device → enter user_code → POST /ui/device (approve)
+ *   2. Browser: GET /ui/device → enter user_code → confirm client → Approve
  *   3. API: POST /oauth/token with device_code → access_token
  *
  * The approval step requires a logged-in user session (admin session used here).
@@ -149,10 +149,17 @@ test.describe('Device auth — full flow', () => {
     await expect(page.locator('input[name="user_code"]')).toBeVisible();
 
     await page.fill('input[name="user_code"]', deviceAuth.user_code);
+    await page.click('#main button[type="submit"]');
+
+    // The code alone approves nothing (GA audit B3): the confirmation step
+    // names the requesting application before the user decides.
+    await expect(page.locator('[data-testid="device-client-name"]')).toContainText('test-app', {
+      timeout: 10_000,
+    });
     await Promise.all([
       // Successful approval redirects to /ui/device?flash=approved (handlers.rs).
       page.waitForURL(/\/ui\/device\?flash=approved/, { timeout: 15_000 }),
-      page.click('#main button[type="submit"]'),
+      page.click('[data-testid="approve-button"]'),
     ]);
 
     // Assert the specific success flash renders — not merely a non-empty body,

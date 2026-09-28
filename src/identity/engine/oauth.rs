@@ -169,7 +169,7 @@ impl EmbeddedIdentityEngine {
         let now = self.clock.now();
 
         let grant_types = if request.grant_types.is_empty() {
-            vec!["authorization_code".to_string()]
+            crate::identity::oidc::default_grant_types()
         } else {
             request.grant_types.clone()
         };
@@ -286,11 +286,20 @@ impl EmbeddedIdentityEngine {
         Ok(client)
     }
 
+    /// Issues an authorization code.
+    ///
+    /// `require_recorded_consent` is set by the non-interactive surfaces (JSON
+    /// and gRPC `Authorize`), which cannot show a consent screen: they may
+    /// issue only when the client does not require consent or a recorded
+    /// consent covers the requested scopes (GA audit B2). The browser flow
+    /// passes `false` because `authorize_gate::consent_gate` has already
+    /// obtained consent.
     #[allow(clippy::too_many_lines)]
     pub(super) fn authorize_inner(
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
+        require_recorded_consent: bool,
     ) -> Result<AuthorizationResponse, IdentityError> {
         use crate::identity::oidc::{CodeChallengeMethod as CCM, JarmClaims};
         use crate::identity::types::FapiProfile;
@@ -405,6 +414,10 @@ impl EmbeddedIdentityEngine {
             })?;
         if client.status() != ApplicationStatus::Active {
             return Err(IdentityError::InvalidClient);
+        }
+        // 3a. The client must be registered for the grant (GA audit M7).
+        if !client.allows_grant_type(crate::identity::oidc::GRANT_AUTHORIZATION_CODE) {
+            return Err(IdentityError::UnsupportedGrantType);
         }
 
         // 3b. FAPI 2.0: PAR is mandatory for FAPI2 clients (RFC 9126 §2.4).
@@ -540,6 +553,26 @@ impl EmbeddedIdentityEngine {
         }
 
         self.validate_client_scope_request(&client, &request.scope)?;
+
+        // 4a. Consent on the non-interactive surfaces (GA audit B2): the same
+        //     rule as the browser `consent_gate` — issue only when the client
+        //     does not require consent or a recorded consent covers every
+        //     requested scope. Checked after JAR has settled the scopes.
+        if require_recorded_consent && client.require_consent() {
+            let requested = crate::identity::types::canonicalize_scopes(
+                request
+                    .scope
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect(),
+            );
+            let covered = self
+                .get_consent_inner(realm_id, &request.user_id, &request.client_id)?
+                .is_some_and(|record| record.covers(&requested));
+            if !covered {
+                return Err(IdentityError::ConsentRequired);
+            }
+        }
 
         // 4b. Consent scope-digest re-check.
         //
@@ -831,6 +864,11 @@ impl EmbeddedIdentityEngine {
         let client = self
             .get_client(realm_id, &request.client_id)?
             .ok_or(IdentityError::ClientNotFound)?;
+        // 8a. The grant may have been withdrawn since the code was issued
+        //     (GA audit M7).
+        if !client.allows_grant_type(crate::identity::oidc::GRANT_AUTHORIZATION_CODE) {
+            return Err(IdentityError::UnsupportedGrantType);
+        }
 
         // 8b. FAPI 2.0: DPoP sender-constrained tokens are mandatory.
         // Check both per-client profile flag AND realm-level fapi_profile so that
@@ -947,9 +985,15 @@ impl EmbeddedIdentityEngine {
             self.id_token_signer(realm_id, Some(&client), std::sync::Arc::clone(&signing_key))?;
 
         // 10. Create a session for the user (OAuth code exchange — no browser context).
-        //     The MFA proof is inherited: an authorization code is only minted by
-        //     `/authorize`, which requires a live UI session, and that session
-        //     passed the same `mfa_required` gate at login.
+        //     The MFA proof is inherited: an authorization code is minted only
+        //     for a principal holding a live session — the browser `/authorize`
+        //     requires a UI session, and the non-interactive surfaces (JSON and
+        //     gRPC `Authorize`) require a bearer token that `validate_token`
+        //     accepts only while its session is still active. Every session
+        //     was created by a path that cleared this same `mfa_required` gate
+        //     (GA audit B2). Sessions do not record which factor they proved,
+        //     so a realm that turns `mfa_required` on is enforced from each
+        //     session's next sign-in, on both surfaces alike.
         let session = self.create_session(
             realm_id,
             &stored_code.user_id,
@@ -1153,6 +1197,16 @@ impl EmbeddedIdentityEngine {
             "authz_code",
             &request.code,
         )?;
+
+        // A client not registered for the refresh-token grant receives no
+        // refresh token (GA audit M7). The grant family is still written: it
+        // records who owns the access token for revocation and session
+        // cascade, and the hash it stores matches a token nobody holds.
+        let refresh_token = if client.allows_refresh_token() {
+            refresh_token
+        } else {
+            String::new()
+        };
 
         Ok(OidcTokenResponse::new(
             access_token,
@@ -2053,6 +2107,13 @@ impl EmbeddedIdentityEngine {
                 reason: e.to_string(),
             })?;
 
+        // 1b. Only a client registered for the device grant may start one
+        //     (GA audit M7): otherwise any client — a third-party app — could
+        //     phish a user code for its own flow.
+        if !client.allows_grant_type(crate::identity::oidc::GRANT_DEVICE_CODE) {
+            return Err(IdentityError::UnsupportedGrantType);
+        }
+
         self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
 
         // 2. Generate device code (32 random bytes → base64url)
@@ -2189,6 +2250,100 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
+    /// Loads the still-pending device code `user_code` names, with its
+    /// storage key. `Ok(None)` when no device code carries that user code;
+    /// `DeviceCodeExpired` when it has expired; `InvalidAuthorizationCode`
+    /// when it was already approved or denied.
+    fn load_pending_device_code(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+    ) -> Result<Option<(Vec<u8>, StoredDeviceCode)>, IdentityError> {
+        use crate::identity::oidc::DeviceCodeStatus;
+
+        let Some(dc_hash_bytes) = self
+            .storage
+            .get(realm_id, &keys::encode_user_code(user_code))
+            .map_err(Self::storage_err)?
+        else {
+            return Ok(None);
+        };
+        let Ok(dc_hash) = String::from_utf8(dc_hash_bytes) else {
+            return Ok(None);
+        };
+        let dc_key = keys::encode_device_code(&dc_hash);
+        let Some(dc_bytes) = self
+            .storage
+            .get(realm_id, &dc_key)
+            .map_err(Self::storage_err)?
+        else {
+            return Ok(None);
+        };
+        let stored: StoredDeviceCode =
+            serde_json::from_slice(&dc_bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        if self.clock.now() >= stored.expires_at {
+            return Err(IdentityError::DeviceCodeExpired);
+        }
+        if stored.status != DeviceCodeStatus::Pending {
+            return Err(IdentityError::InvalidAuthorizationCode);
+        }
+        Ok(Some((dc_key, stored)))
+    }
+
+    /// Returns which client a pending user code belongs to and the scope it
+    /// requested, so the approval page can show them (GA audit B3).
+    pub(super) fn pending_device_authorization_inner(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+    ) -> Result<Option<crate::identity::oidc::PendingDeviceAuthorization>, IdentityError> {
+        Ok(self
+            .load_pending_device_code(realm_id, user_code)?
+            .map(
+                |(_, stored)| crate::identity::oidc::PendingDeviceAuthorization {
+                    client_id: stored.client_id,
+                    scope: stored.scope,
+                },
+            ))
+    }
+
+    /// Records the user's refusal of a pending device code, so the polling
+    /// device receives `access_denied` (RFC 8628 §3.5) instead of waiting
+    /// out the code's lifetime.
+    pub(super) fn deny_device_inner(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+        user_id: &UserId,
+    ) -> Result<(), IdentityError> {
+        use crate::identity::oidc::DeviceCodeStatus;
+
+        let (dc_key, mut stored) = self
+            .load_pending_device_code(realm_id, user_code)?
+            .ok_or(IdentityError::DeviceCodeExpired)?;
+        stored.status = DeviceCodeStatus::Denied;
+        let updated_bytes =
+            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        self.storage
+            .put(realm_id, &dc_key, &updated_bytes)
+            .map_err(Self::storage_err)?;
+        self.record_audit(
+            realm_id,
+            Some(&AuditContext {
+                actor: Actor::User(user_id.clone()),
+                metadata: None,
+            }),
+            AuditAction::ConsentDenied,
+            "device",
+            user_code,
+        )?;
+        Ok(())
+    }
+
     pub(super) fn poll_device_token_inner(
         &self,
         realm_id: &RealmId,
@@ -2291,14 +2446,22 @@ impl EmbeddedIdentityEngine {
                 }
                 drop(poll_guard);
 
+                // A client deleted since it started the flow gets nothing: its
+                // claim profile could no longer be evaluated, and the
+                // clientless fallback is the first-party sentinel, which would
+                // release the user's permissions to it (GA audit B1). A client
+                // whose device grant was withdrawn gets nothing either (M7).
+                let device_client = self
+                    .get_client(realm_id, client_id)?
+                    .ok_or(IdentityError::InvalidClient)?;
+                if !device_client.allows_grant_type(crate::identity::oidc::GRANT_DEVICE_CODE) {
+                    return Err(IdentityError::UnsupportedGrantType);
+                }
                 // Resolve the client's ID-token signer (task 26.55) before the
-                // session exists, so a key failure leaves nothing behind. A
-                // client deleted since it started the flow keeps the EdDSA
-                // behaviour this path always had.
-                let device_client = self.get_client(realm_id, client_id)?;
+                // session exists, so a key failure leaves nothing behind.
                 let id_token_signer = self.id_token_signer(
                     realm_id,
-                    device_client.as_ref(),
+                    Some(&device_client),
                     self.get_or_load_realm_signing_key(realm_id)?,
                 )?;
 
@@ -2367,12 +2530,19 @@ impl EmbeddedIdentityEngine {
                     }
                 })?;
 
+                // No refresh token for a client without the refresh-token
+                // grant (GA audit M7); see the authorization-code exchange.
+                let refresh_token = if device_client.allows_refresh_token() {
+                    token_pair.refresh_token().to_string()
+                } else {
+                    String::new()
+                };
                 Ok(OidcTokenResponse::new(
                     token_pair.access_token().to_string(),
                     id_token,
                     "Bearer".to_string(),
                     self.config.token.access_token_ttl_secs,
-                    token_pair.refresh_token().to_string(),
+                    refresh_token,
                 ))
             }
         }
@@ -3128,6 +3298,49 @@ impl EmbeddedIdentityEngine {
 
     // ===== UserInfo (OIDC Core §5.3) =====
 
+    /// Resolves the client an access token was issued to, for claim-release
+    /// gate evaluation on `/userinfo` (GA audit M10).
+    ///
+    /// Reads the RFC 9068 `client_id` claim, falling back to the grant
+    /// family's owner for a token minted before that claim existed. `None`
+    /// means no client was issued the token — a first-party session token.
+    /// A token naming a client that no longer exists is judged as a
+    /// third-party client, never as first-party.
+    fn userinfo_client(
+        &self,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+    ) -> Result<Option<OAuthClient>, IdentityError> {
+        let named: Option<ClientId> = if let Some(raw) = claims.client_id() {
+            Some(
+                raw.parse::<ClientId>()
+                    .map_err(|_| IdentityError::InvalidToken)?,
+            )
+        } else if let Some(fid) = claims.fid.as_deref() {
+            self.storage
+                .get(realm_id, &keys::encode_grant_family(fid))
+                .map_err(Self::storage_err)?
+                .and_then(|bytes| serde_json::from_slice::<StoredGrantFamily>(&bytes).ok())
+                .and_then(|family| family.client_id)
+        } else {
+            None
+        };
+        let Some(client_id) = named else {
+            return Ok(None);
+        };
+        if let Some(client) = self.get_client(realm_id, &client_id)? {
+            return Ok(Some(client));
+        }
+        let mut orphan = OAuthClient::new(
+            client_id,
+            "unknown".to_string(),
+            Vec::new(),
+            self.clock.now(),
+        );
+        orphan.set_trust_level(crate::identity::ClientTrustLevel::ThirdParty);
+        Ok(Some(orphan))
+    }
+
     pub(super) fn userinfo_inner(
         &self,
         realm_id: &RealmId,
@@ -3162,16 +3375,12 @@ impl EmbeddedIdentityEngine {
             .split_whitespace()
             .map(str::to_string)
             .collect();
-        let client = claims
-            .aud
-            .base()
-            .strip_prefix("client_")
-            .and_then(|uuid| uuid::Uuid::parse_str(uuid).ok())
-            .and_then(|uuid| {
-                self.get_client(realm_id, &ClientId::new(uuid))
-                    .ok()
-                    .flatten()
-            });
+        // Evaluate the claim-release gates against the client the token was
+        // issued to (GA audit M10). The old lookup read `aud` with a `client_`
+        // prefix that access tokens never carry, so every caller was judged
+        // as the first-party sentinel and `first_party_only` claims reached
+        // third-party clients.
+        let client = self.userinfo_client(realm_id, &claims)?;
         let empty_client = OAuthClient::new(
             ClientId::generate(),
             "userinfo".to_string(),

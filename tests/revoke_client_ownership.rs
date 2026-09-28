@@ -87,6 +87,8 @@ fn register(h: &common::TestHarness, realm: &RealmId, secret: Option<&str>) -> C
                     "authorization_code".to_string(),
                     "client_credentials".to_string(),
                     "refresh_token".to_string(),
+                    "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+                    "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
                 ],
                 trust_level: ClientTrustLevel::FirstParty,
                 ..RegisterClientRequest::default()
@@ -517,7 +519,10 @@ fn register_scoped(h: &common::TestHarness, realm: &RealmId, scope: &str) -> Cli
                 client_name: format!("scoped-{}", uuid::Uuid::new_v4()),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
                 client_secret: Some(SECRET.to_string()),
-                grant_types: vec!["client_credentials".to_string()],
+                grant_types: vec![
+                    "client_credentials".to_string(),
+                    "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+                ],
                 trust_level: ClientTrustLevel::FirstParty,
                 declared_scopes: scope.split_whitespace().map(String::from).collect(),
                 access_token_authorization: AccessTokenAuthorization::Embedded,

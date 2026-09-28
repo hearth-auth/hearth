@@ -443,7 +443,7 @@ impl Auth0Importer {
         }
 
         let grant_types = if ac.grant_types.is_empty() {
-            vec!["authorization_code".to_string()]
+            crate::identity::oidc::default_grant_types()
         } else {
             ac.grant_types.clone()
         };

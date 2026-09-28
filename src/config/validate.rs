@@ -141,6 +141,10 @@ const VALID_GRANT_TYPES: &[&str] = &[
     "client_credentials",
     "refresh_token",
     "urn:ietf:params:oauth:grant-type:device_code",
+    // Both grants are enforced against `grant_types` (GA audit M7), so a
+    // `hearth.yaml` client must be able to declare them.
+    "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    "urn:ietf:params:oauth:grant-type:token-exchange",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────

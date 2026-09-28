@@ -324,11 +324,15 @@ const MAGIC_LINK_GRANT_TYPE: &str = "urn:hearth:grant-type:magic-link";
 /// Single use is enforced by `validate_magic_link`, which marks the record
 /// consumed before returning. The resulting session is a normal browserless
 /// session, so revocation and the session-version feed behave as usual.
+///
+/// The tokens are never sender-constrained — `issue_tokens` binds no `cnf` —
+/// so the response always says `Bearer`, whether or not the request carried a
+/// DPoP proof. Answering `DPoP` for an unbound token told the client its token
+/// was bound when a thief could replay it as a plain bearer (GA audit L7).
 fn exchange_magic_link(
     state: &Arc<AppState>,
     realm_id: &crate::core::RealmId,
     token: &str,
-    dpop_jkt: Option<&str>,
 ) -> Result<serde_json::Value, crate::identity::IdentityError> {
     let user_id = state.identity.validate_magic_link(realm_id, token)?;
     let session = state.identity.create_session(
@@ -346,7 +350,7 @@ fn exchange_magic_link(
     Ok(serde_json::json!({
         "access_token": tokens.access_token(),
         "refresh_token": tokens.refresh_token(),
-        "token_type": if dpop_jkt.is_some() { "DPoP" } else { "Bearer" },
+        "token_type": "Bearer",
         "expires_in": 900,
     }))
 }
@@ -1899,9 +1903,16 @@ async fn register_client_dynamic(
         Err(resp) => return resp,
     };
 
+    // RFC 7591 §2: omitted `grant_types` means `authorization_code` alone —
+    // the realm DCR twin's default. Refresh tokens now follow `grant_types`
+    // (GA audit M7), so a DCR client that wants them registers for them.
+    let grant_types_omitted = body.grant_types.is_empty();
     // Strip any client-supplied secret — the server generates its own.
     // RFC 7591 DCR is anonymous; callers cannot self-grant first-party trust.
     let mut request = crate::identity::RegisterClientRequest::from(body);
+    if grant_types_omitted {
+        request.grant_types = vec![crate::identity::oidc::GRANT_AUTHORIZATION_CODE.to_string()];
+    }
     request.client_secret = None;
     request.trust_level = crate::identity::ClientTrustLevel::ThirdParty;
     request.jwks = extras.jwks.clone();
@@ -2146,7 +2157,12 @@ async fn authorize(
         }
     };
 
-    match state.identity.authorize(&realm_id, &request) {
+    // No consent screen here: issue only for a client that needs no consent
+    // or one the user already consented to (GA audit B2).
+    match state
+        .identity
+        .authorize_non_interactive(&realm_id, &request)
+    {
         Ok(response) => (
             StatusCode::OK,
             Json(proto_to_rest_json(&pb::AuthorizationResponse::from(
@@ -3050,7 +3066,7 @@ async fn token_exchange_impl(
                 )
                     .into_response();
             };
-            match exchange_magic_link(&state, &realm_id, &link_token, dpop_jkt.as_deref()) {
+            match exchange_magic_link(&state, &realm_id, &link_token) {
                 Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
@@ -3617,7 +3633,10 @@ async fn realm_authorize_browser_redirect(
 async fn realm_authorize(
     State(state): State<Arc<AppState>>,
     method: axum::http::Method,
-    uri: axum::http::Uri,
+    // `nest("/realms/{realm_name}")` strips the prefix from `Uri`, so the path
+    // the client signed in its DPoP proof survives only in `OriginalUri`
+    // (GA audit L8; the `realm_userinfo` twin was fixed the same way).
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: HeaderMap,
     Path(realm_name): Path<String>,
     Json(body): Json<pb::AuthorizationRequest>,
@@ -3647,7 +3666,12 @@ async fn realm_authorize(
     };
     // Override body-supplied user_id with the authenticated identity (HEA-1721).
     request.user_id = authenticated_user_id;
-    match state.identity.authorize(&realm_id, &request) {
+    // No consent screen here: issue only for a client that needs no consent
+    // or one the user already consented to (GA audit B2).
+    match state
+        .identity
+        .authorize_non_interactive(&realm_id, &request)
+    {
         Ok(response) => (
             StatusCode::OK,
             Json(proto_to_rest_json(&pb::AuthorizationResponse::from(
@@ -4216,7 +4240,7 @@ async fn realm_token_exchange(
                 )
                     .into_response();
             };
-            match exchange_magic_link(&state, &realm_id, &link_token, dpop_jkt.as_deref()) {
+            match exchange_magic_link(&state, &realm_id, &link_token) {
                 Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
                 Err(e) => identity_error_to_response(&e).into_response(),
             }

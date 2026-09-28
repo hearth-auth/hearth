@@ -141,7 +141,10 @@ fn create_client(h: &common::TestHarness, realm: &hearth::core::RealmId) -> hear
                 client_name: "SMS MFA Test App".to_string(),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: false,
                 client_logo_url: None,
                 ..Default::default()

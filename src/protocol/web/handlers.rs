@@ -5307,9 +5307,25 @@ pub struct DeviceApproveTemplate {
     pub logo_url: String,
     pub realm_theme_url: Option<String>,
     pub inline_theme_css: Option<String>,
+    /// The device authorization awaiting the user's decision. `None` renders
+    /// the code-entry form; `Some` renders the confirmation step.
+    pub pending: Option<DevicePendingView>,
 }
 
-/// Form submitted when the user approves a device.
+/// What the confirmation step shows about a pending device authorization:
+/// which application is asking and for what (GA audit B3).
+pub struct DevicePendingView {
+    /// The requesting client's display name.
+    pub client_name: String,
+    /// The requesting client's logo, when it registered one.
+    pub client_logo_url: Option<String>,
+    /// The scopes the device requested.
+    pub scopes: Vec<String>,
+    /// The user code, carried to the decision.
+    pub user_code: String,
+}
+
+/// Form submitted from the device page.
 #[derive(Debug, Deserialize)]
 pub struct DeviceApproveForm {
     /// The 8-character user code shown on the input-constrained device.
@@ -5317,6 +5333,10 @@ pub struct DeviceApproveForm {
     /// CSRF token.
     #[serde(default)]
     pub csrf_token: Option<String>,
+    /// `approve` or `deny` from the confirmation step. Absent on the first
+    /// submission, which only looks the code up and shows what it grants.
+    #[serde(default)]
+    pub decision: Option<String>,
 }
 
 /// GET `/ui/device` — renders the device approval form (requires auth).
@@ -5339,6 +5359,10 @@ pub async fn device_approve_form(
             kind: "error",
             message: "Invalid device code. Please check and try again.".to_string(),
         }),
+        Some("denied") => Some(super::templates::Flash {
+            kind: "success",
+            message: "Device access denied.".to_string(),
+        }),
         _ => None,
     };
 
@@ -5354,6 +5378,7 @@ pub async fn device_approve_form(
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
         inline_theme_css: state.inline_theme_css(),
+        pending: None,
     })
 }
 
@@ -5404,6 +5429,15 @@ pub async fn device_approve_submit(
             return device_approval_refusal(decision);
         }
         return Redirect::to("/ui/device?flash=invalid").into_response();
+    }
+
+    // The user code alone never approves anything (GA audit B3). The first
+    // submission shows which application is asking and for which scopes;
+    // only an explicit Approve from that page reaches the gates below.
+    match form.decision.as_deref() {
+        Some("approve") => {}
+        Some("deny") => return deny_device(&state, &session, &guard_key, &code),
+        _ => return confirm_device(&state, &session, &guard_key, &code),
     }
 
     // Approving a device hands the device client tokens for this user, so it
@@ -5460,6 +5494,9 @@ pub(super) fn finish_device_approval(
     code: &str,
 ) -> Response {
     let guard_key = format!("{}:{}", realm.as_uuid(), user_id.as_uuid());
+    if let Err(resp) = record_device_consent(state, realm, user_id, code) {
+        return resp;
+    }
     match state.identity.approve_device(realm, code, user_id) {
         Ok(()) => {
             state.device_approval_guard.record_success(&guard_key);
@@ -5473,6 +5510,147 @@ pub(super) fn finish_device_approval(
         Err(e) => {
             tracing::warn!(error = %e, "device_approve: approve_device failed");
             let decision = state.device_approval_guard.record_failure(&guard_key);
+            if decision != DeviceApprovalDecision::Allow {
+                return device_approval_refusal(decision);
+            }
+            Redirect::to("/ui/device?flash=invalid").into_response()
+        }
+    }
+}
+
+/// Records the user's consent to the device's client when that client
+/// requires consent — the record the browser consent screen writes — so an
+/// approved device grant is visible and revocable under the user's connected
+/// apps (GA audit B3).
+///
+/// A code that no longer resolves is left to `approve_device`, which reports
+/// it with its own outcome mapping.
+fn record_device_consent(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &crate::core::UserId,
+    code: &str,
+) -> Result<(), Response> {
+    let Ok(Some(pending)) = state.identity.pending_device_authorization(realm, code) else {
+        return Ok(());
+    };
+    let client = match state.identity.get_client(realm, &pending.client_id) {
+        Ok(Some(client)) => client,
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            tracing::warn!(error = %e, "device_approve: client lookup failed");
+            return Err(super::handlers_common::server_error());
+        }
+    };
+    if !client.require_consent() {
+        return Ok(());
+    }
+    let scopes: Vec<String> = pending
+        .scope
+        .as_deref()
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    if let Err(e) = state
+        .identity
+        .grant_consent(realm, user_id, &pending.client_id, &scopes)
+    {
+        tracing::warn!(error = %e, "device_approve: grant_consent failed");
+        return Err(super::handlers_common::server_error());
+    }
+    Ok(())
+}
+
+/// First submission of a user code: look it up and render the confirmation
+/// step naming the client, its logo and the requested scopes. Approves
+/// nothing (GA audit B3).
+fn confirm_device(
+    state: &Arc<WebState>,
+    session: &super::auth::UiSession,
+    guard_key: &str,
+    code: &str,
+) -> Response {
+    let pending = match state
+        .identity
+        .pending_device_authorization(&session.realm_id, code)
+    {
+        Ok(Some(pending)) => pending,
+        // An expired code really existed, so it is not a guess (as in
+        // `finish_device_approval`).
+        Err(IdentityError::DeviceCodeExpired) => {
+            return Redirect::to("/ui/device?flash=expired").into_response();
+        }
+        Ok(None) | Err(_) => {
+            let decision = state.device_approval_guard.record_failure(guard_key);
+            if decision != DeviceApprovalDecision::Allow {
+                return device_approval_refusal(decision);
+            }
+            return Redirect::to("/ui/device?flash=invalid").into_response();
+        }
+    };
+    let client = match state
+        .identity
+        .get_client(&session.realm_id, &pending.client_id)
+    {
+        Ok(Some(client)) => client,
+        Ok(None) => return Redirect::to("/ui/device?flash=invalid").into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "device_approve: client lookup failed");
+            return super::handlers_common::server_error();
+        }
+    };
+    render(&DeviceApproveTemplate {
+        chrome: true,
+        active: "",
+        user_email: Some(session.user_email.clone()),
+        is_admin: is_admin(state, session),
+        flash: None,
+        csrf: session.csrf.clone(),
+        narrow: true,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
+        pending: Some(DevicePendingView {
+            client_name: client.client_name().to_string(),
+            client_logo_url: client.client_logo_url().map(str::to_string),
+            scopes: pending
+                .scope
+                .as_deref()
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+            user_code: code.to_string(),
+        }),
+    })
+}
+
+/// Deny from the confirmation step: the device receives `access_denied`.
+fn deny_device(
+    state: &Arc<WebState>,
+    session: &super::auth::UiSession,
+    guard_key: &str,
+    code: &str,
+) -> Response {
+    match state
+        .identity
+        .deny_device(&session.realm_id, code, &session.user_id)
+    {
+        Ok(()) => Redirect::to("/ui/device?flash=denied").into_response(),
+        Err(IdentityError::DeviceCodeExpired) => {
+            // Unknown and expired codes both land here; charge the guard so
+            // Deny is no cheaper an oracle than the lookup.
+            let decision = state.device_approval_guard.record_failure(guard_key);
+            if decision != DeviceApprovalDecision::Allow {
+                return device_approval_refusal(decision);
+            }
+            Redirect::to("/ui/device?flash=expired").into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "device_approve: deny_device failed");
+            let decision = state.device_approval_guard.record_failure(guard_key);
             if decision != DeviceApprovalDecision::Allow {
                 return device_approval_refusal(decision);
             }

@@ -3492,6 +3492,12 @@ impl EmbeddedIdentityEngine {
             let Some(client) = self.get_client(realm_id, client_id)? else {
                 return Err(IdentityError::TokenRevoked);
             };
+            // The client must hold the refresh-token grant (GA audit M7), so
+            // withdrawing it — the console's refresh toggle — takes effect on
+            // refresh tokens already issued.
+            if !client.allows_refresh_token() {
+                return Err(IdentityError::UnsupportedGrantType);
+            }
             let realm_fapi = self
                 .get_realm(realm_id)?
                 .ok_or(IdentityError::RealmNotFound)?
@@ -6468,7 +6474,7 @@ impl EmbeddedIdentityEngine {
 
         let now = self.clock.now();
         let grant_types = if request.grant_types.is_empty() {
-            vec!["authorization_code".to_string()]
+            crate::identity::oidc::default_grant_types()
         } else {
             request.grant_types.clone()
         };
@@ -8743,8 +8749,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Resolve the OAuth client: use the caller-supplied client_id when
         // present, otherwise fall back to the first-party sentinel used by
         // the legacy session-token path.
+        // A named client that does not exist is refused rather than replaced
+        // by the first-party sentinel, which would release the user's
+        // permissions to whoever holds the token (GA audit B1).
         let resolved_client = if let Some(ref cid) = ctx.client_id {
-            self.get_client(realm_id, cid)?
+            Some(
+                self.get_client(realm_id, cid)?
+                    .ok_or(IdentityError::InvalidClient)?,
+            )
         } else {
             None
         };
@@ -9353,7 +9365,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &AuthorizationRequest,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        self.authorize_inner(realm_id, request)
+        self.authorize_inner(realm_id, request, false)
+    }
+
+    fn authorize_non_interactive(
+        &self,
+        realm_id: &RealmId,
+        request: &AuthorizationRequest,
+    ) -> Result<AuthorizationResponse, IdentityError> {
+        self.authorize_inner(realm_id, request, true)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -9483,6 +9503,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
     ) -> Result<(), IdentityError> {
         self.approve_device_inner(realm_id, user_code, user_id)
+    }
+
+    fn pending_device_authorization(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+    ) -> Result<Option<crate::identity::oidc::PendingDeviceAuthorization>, IdentityError> {
+        self.pending_device_authorization_inner(realm_id, user_code)
+    }
+
+    fn deny_device(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+        user_id: &UserId,
+    ) -> Result<(), IdentityError> {
+        self.deny_device_inner(realm_id, user_code, user_id)
     }
 
     fn poll_device_token(
@@ -17311,6 +17348,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::EmptyScopeIntersection);
         }
 
+        // 5b. Only a client registered for the token-exchange grant may
+        //     exchange (GA audit M7); an unknown client is refused. Checked
+        //     after the request itself is validated, so a malformed request
+        //     keeps its RFC 8693 §2.2.2 error.
+        let exchanging_client = self
+            .get_client(realm_id, &request.client_id)?
+            .ok_or(IdentityError::InvalidClient)?;
+        if !exchanging_client.allows_grant_type(crate::identity::oidc::GRANT_TOKEN_EXCHANGE) {
+            return Err(IdentityError::UnsupportedGrantType);
+        }
+
         // 6. Lifetime: min(subject_remaining, configured access_token_ttl).
         let ttl = subject_remaining.min(self.config.token.access_token_ttl_secs);
         let exp = now_secs + ttl;
@@ -20737,7 +20785,10 @@ mod tests {
                     client_name: "Test App".to_string(),
                     redirect_uris: vec!["https://app.example.com/callback".to_string()],
                     client_secret: None,
-                    grant_types: vec!["authorization_code".to_string()],
+                    grant_types: vec![
+                        "authorization_code".to_string(),
+                        "refresh_token".to_string(),
+                    ],
                     require_consent: true,
                     client_logo_url: None,
                     ..Default::default()
@@ -26507,7 +26558,6 @@ mod tests {
 
     #[test]
     fn token_exchange_rejects_revoked_agent_in_act_chain() {
-        use crate::core::ClientId;
         use crate::identity::tokens::{decode_claims_unverified, ActClaim};
         use crate::identity::{
             AgentOwner, CreateAgentRequest, Rfc8693Request, SessionContext, TokenIssuanceContext,
@@ -26566,7 +26616,23 @@ mod tests {
             .issue_token(&claims)
             .expect("re-sign subject token with act chain");
 
-        let client_id = ClientId::new(uuid::Uuid::new_v4());
+        // The exchanging client must exist and hold the grant (GA audit M7).
+        let client_id = engine
+            .register_client(
+                &realm,
+                &RegisterClientRequest {
+                    client_name: "exchanger".to_string(),
+                    client_secret: Some("exchanger-secret-long-enough-32ch".to_string()),
+                    grant_types: vec![
+                        "client_credentials".to_string(),
+                        crate::identity::oidc::GRANT_TOKEN_EXCHANGE.to_string(),
+                    ],
+                    ..Default::default()
+                },
+            )
+            .expect("register exchanging client")
+            .client_id()
+            .clone();
         let make_req = || Rfc8693Request {
             client_id: client_id.clone(),
             subject_token: subject_token.clone(),

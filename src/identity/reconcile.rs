@@ -1058,7 +1058,7 @@ pub(crate) fn reconcile_applications(
         let grant_types = app_cfg
             .grant_types
             .clone()
-            .unwrap_or_else(|| vec!["authorization_code".to_string()]);
+            .unwrap_or_else(crate::identity::oidc::default_grant_types);
         let redirect_uris = app_cfg.redirect_uris.clone().unwrap_or_default();
 
         let cfg_require_consent = app_cfg.require_consent.unwrap_or(true);

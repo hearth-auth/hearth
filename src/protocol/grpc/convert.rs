@@ -360,6 +360,15 @@ pub fn extract_grpc_user_auth(
     let claims = identity
         .validate_token(realm_id, token)
         .map_err(|_| Status::unauthenticated("invalid or expired token"))?;
+    // RFC 9449 §7.2: gRPC has no DPoP proof channel, so a `cnf`-bound token
+    // cannot prove possession here. Accepting it made the binding a no-op —
+    // a stolen DPoP-bound token was replayable as a plain Bearer (GA audit
+    // B2). Refused exactly as `auth::authenticate_admin` refuses it.
+    if claims.cnf.is_some() {
+        return Err(Status::unauthenticated(
+            "sender-constrained (DPoP) tokens are not accepted on this gRPC service",
+        ));
+    }
     // sub is "user_{uuid}" — strip the prefix before UUID parse.
     let sub_str = claims.sub.strip_prefix("user_").unwrap_or(&claims.sub);
     uuid::Uuid::parse_str(sub_str)
