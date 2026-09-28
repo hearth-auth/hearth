@@ -356,6 +356,7 @@ mod id_token_keys;
 pub(super) mod oauth;
 mod retired_keys;
 mod sharded_cache;
+mod single_use;
 // Phase D engine modules
 pub(super) mod aat;
 pub(super) mod cross_realm;
@@ -3661,6 +3662,154 @@ impl EmbeddedIdentityEngine {
         }
     }
 
+    /// Every check `set_password` makes before it writes anything: realm
+    /// state, length and floor, the realm's policy, the breach check and
+    /// password history. Returns the history depth to rotate into.
+    ///
+    /// Split out so a caller that must spend a single-use artifact on the
+    /// change (a password-reset link) can refuse a bad password BEFORE the
+    /// claim, and so not burn the link on it (G4).
+    fn vet_new_password(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        password: &CleartextPassword,
+    ) -> Result<usize, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
+        // Validate password length (DoS bound) and HSEC-003 floor.
+        validation::validate_password_length(password.as_bytes())?;
+        validation::validate_password_floor(password.as_bytes())?;
+
+        // Ensure the user exists.
+        let user = self
+            .get_user(realm_id, user_id)?
+            .ok_or(IdentityError::UserNotFound)?;
+
+        let policy = self.password_policy_for_realm(realm_id)?;
+        if let Some(policy) = policy.as_ref() {
+            validation::validate_password_against_policy(
+                password.as_bytes(),
+                policy,
+                Some(user.display_name()),
+                Some(user.email()),
+            )?;
+        }
+
+        // HIBP k-anonymity breach check.
+        // Only the 5-char SHA-1 prefix is sent to the API; no PII leaves the process (AC-2).
+        self.refuse_breached_password(realm_id, password, &user_id.as_uuid().to_string())?;
+
+        // Resolve history depth from the realm's password policy.
+        let history_depth = policy.as_ref().and_then(|p| p.history_depth).unwrap_or(0);
+
+        // Check history before hashing to avoid the expensive hash on likely reuse.
+        if history_depth > 0 {
+            // Reject immediate reuse of the current password.
+            let current_key = keys::encode_credential_key(user_id);
+            if let Some(bytes) = self
+                .storage
+                .get(realm_id, &current_key)
+                .map_err(Self::storage_err)?
+            {
+                let current_cred = Self::deserialize_credential(&bytes)?;
+                if credentials::verify_hash(password, &current_cred.hash)? {
+                    return Err(IdentityError::PasswordReused);
+                }
+            }
+
+            let hist_key = keys::encode_credential_history_key(user_id);
+            let hist_bytes = self
+                .storage
+                .get(realm_id, &hist_key)
+                .map_err(Self::storage_err)?;
+            if let Some(bytes) = hist_bytes {
+                let history = Self::deserialize_credential_history(&bytes)?;
+                for old_cred in &history {
+                    if credentials::verify_hash(password, &old_cred.hash)? {
+                        return Err(IdentityError::PasswordReused);
+                    }
+                }
+            }
+        }
+
+        Ok(history_depth)
+    }
+
+    /// The writing half of `set_password`, for a password
+    /// [`Self::vet_new_password`] accepted.
+    fn store_vetted_password(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        password: &CleartextPassword,
+        history_depth: usize,
+    ) -> Result<(), IdentityError> {
+        let now = self.clock.now().as_micros();
+        let credential_cfg = self.credential_config_for_realm(realm_id)?;
+        let cred = credentials::hash_password(password, &credential_cfg, now)?;
+        let cred_bytes = Self::serialize_credential(&cred)?;
+        let cred_key = keys::encode_credential_key(user_id);
+
+        // Rotate the current credential into history before overwriting it.
+        if history_depth > 0 {
+            let old_bytes = self
+                .storage
+                .get(realm_id, &cred_key)
+                .map_err(Self::storage_err)?;
+            if let Some(bytes) = old_bytes {
+                let old_cred = Self::deserialize_credential(&bytes)?;
+                let hist_key = keys::encode_credential_history_key(user_id);
+                let hist_bytes = self
+                    .storage
+                    .get(realm_id, &hist_key)
+                    .map_err(Self::storage_err)?;
+                let mut history = if let Some(b) = hist_bytes {
+                    Self::deserialize_credential_history(&b)?
+                } else {
+                    Vec::new()
+                };
+                history.insert(0, old_cred);
+                history.truncate(history_depth);
+                let new_hist_bytes = Self::serialize_credential_history(&history)?;
+                self.storage
+                    .put(realm_id, &hist_key, &new_hist_bytes)
+                    .map_err(Self::storage_err)?;
+            }
+        }
+
+        self.storage
+            .put(realm_id, &cred_key, &cred_bytes)
+            .map_err(Self::storage_err)?;
+
+        // A password now exists that no outstanding reset link knows about, so
+        // every link issued before this moment is stale (audit 2026-08-28
+        // §4.24#1). Written after the credential lands, so a refused password
+        // leaves outstanding links alone.
+        self.set_password_reset_watermark(realm_id, user_id, now)?;
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::CredentialSet,
+            "credential",
+            &user_id.as_uuid().to_string(),
+        )?;
+
+        // A-42: Revoke all sessions when a credential changes — phished or
+        // stale sessions must not survive a password reset or admin password set.
+        if let Err(e) = self.revoke_all_user_sessions(realm_id, user_id, None) {
+            tracing::warn!(
+                user_id = %user_id.as_uuid(),
+                error = %e,
+                "revoke_all_user_sessions failed on set_password"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Computes the SHA-256 hex digest of the given data.
     fn sha256_hex(data: &[u8]) -> String {
         let digest = ring::digest::digest(&ring::digest::SHA256, data);
@@ -3790,33 +3939,13 @@ impl EmbeddedIdentityEngine {
         // Verify the incoming refresh token matches the current hash
         if !Self::refresh_token_matches_hash(refresh_token, &family.current_refresh_hash) {
             // THEFT DETECTED — a previously-rotated token is being reused.
-            family.revoked = true;
-            let updated =
-                serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            self.storage
-                .put(realm_id, &family_key, &updated)
-                .map_err(Self::storage_err)?;
-            // `revoke_session` now takes this same per-family lock for its
-            // cascade (§4.16#2), and `std::sync::Mutex` is not reentrant —
-            // release before calling it.
-            drop(rotation_guard);
-            // The caller is already being refused below, and the
-            // grant family was marked revoked durably above, so the stolen
-            // token is dead either way. The session cascade is the extra
-            // blast-radius step; swapping `TokenRevoked` for a storage error
-            // would tell the client the wrong thing about why it was refused.
-            // A failure here is loud rather than silent (task 24.1).
-            if let Err(e) = self.revoke_session(realm_id, session_id) {
-                tracing::error!(
-                    error = %e,
-                    session_id = %session_id.as_uuid(),
-                    "refresh-token theft detected, but the session cascade \
-                     failed; the session may still be live"
-                );
-            }
-            return Err(IdentityError::TokenRevoked);
+            return Err(self.revoke_replayed_family(
+                realm_id,
+                &family_key,
+                family,
+                rotation_guard,
+                session_id,
+            ));
         }
 
         // Consent scope-digest re-check on refresh.
@@ -4121,6 +4250,31 @@ impl EmbeddedIdentityEngine {
         let new_access = signing_key.issue_token(&new_access_claims)?;
         let new_refresh = signing_key.issue_token(&new_refresh_claims)?;
 
+        // Claim the presented token's single use, as the last step before the
+        // rotation is persisted — so a refusal above (DPoP, consent, step-up,
+        // webhook) leaves it redeemable. The family lock only queues this
+        // node's racers and the hash check above is a local read: a rotation
+        // that read the family before another node rotated it, and wrote after
+        // leadership moved to its own node, minted a second pair (G4). The
+        // claim is one replicated put-if-absent the Raft state machine
+        // decides; losing it means the token was already rotated, which is
+        // the replay the hash check exists to catch, so it is refused the
+        // same way.
+        let presented_hash = Self::sha256_hex(refresh_token.as_bytes());
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_refresh(&presented_hash),
+            crate::core::Timestamp::from_micros(claims.exp.saturating_mul(1_000_000)),
+        )? {
+            return Err(self.revoke_replayed_family(
+                realm_id,
+                &family_key,
+                family,
+                rotation_guard,
+                session_id,
+            ));
+        }
+
         // Rotate the family's current refresh hash
         family.current_refresh_hash = Self::sha256_hex(new_refresh.as_bytes());
         // Extend family expiration to match the new refresh token (sliding).
@@ -4135,6 +4289,52 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         Ok(TokenPair::new(new_access, new_refresh))
+    }
+
+    /// Answers a replayed refresh token — one already rotated — by revoking
+    /// its grant family and cascading to the session. Returns the error the
+    /// caller is refused with.
+    ///
+    /// Takes the family lock's guard: `revoke_session` takes that same
+    /// per-family lock for its cascade (§4.16#2), and `std::sync::Mutex` is
+    /// not reentrant, so it is released before the cascade.
+    fn revoke_replayed_family(
+        &self,
+        realm_id: &RealmId,
+        family_key: &[u8],
+        mut family: StoredGrantFamily,
+        rotation_guard: std::sync::MutexGuard<'_, ()>,
+        session_id: &SessionId,
+    ) -> IdentityError {
+        family.revoked = true;
+        let written = serde_json::to_vec(&family)
+            .map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })
+            .and_then(|updated| {
+                self.storage
+                    .put(realm_id, family_key, &updated)
+                    .map_err(Self::storage_err)
+            });
+        if let Err(e) = written {
+            return e;
+        }
+        drop(rotation_guard);
+        // The caller is already being refused, and the grant family was
+        // marked revoked durably above, so the stolen token is dead either
+        // way. The session cascade is the extra blast-radius step; swapping
+        // `TokenRevoked` for a storage error would tell the client the wrong
+        // thing about why it was refused. A failure here is loud rather than
+        // silent (task 24.1).
+        if let Err(e) = self.revoke_session(realm_id, session_id) {
+            tracing::error!(
+                error = %e,
+                session_id = %session_id.as_uuid(),
+                "refresh-token theft detected, but the session cascade \
+                 failed; the session may still be live"
+            );
+        }
+        IdentityError::TokenRevoked
     }
 
     /// Generates a random user code for device authorization.
@@ -5934,6 +6134,17 @@ impl EmbeddedIdentityEngine {
         let lock = self.jwt_bearer_jti_lock(realm_id);
         let _guard = lock.lock().expect("jwt bearer jti lock poisoned");
 
+        // G4: the first use is decided by one replicated put-if-absent, not by
+        // the local read below — across a cluster that read can be stale, and
+        // the lock above is node-local.
+        if self
+            .storage
+            .put_if_absent(realm_id, &jti_key, &assertion_exp.to_be_bytes())
+            .map_err(Self::storage_err)?
+        {
+            return Ok(());
+        }
+        // A marker exists: a replay unless it outlived its assertion.
         if let Some(stored) = self
             .storage
             .get(realm_id, &jti_key)
@@ -7913,134 +8124,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.delete_user_impl(realm_id, user_id, Some(audit_ctx))
     }
 
-    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn set_password(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         password: &CleartextPassword,
     ) -> Result<(), IdentityError> {
-        // Archival is a freeze: refuse mutations on a non-active realm
-        // (audit 2026-08-28 §4.20#5).
-        self.require_active_realm(realm_id)?;
-        // Validate password length (DoS bound) and HSEC-003 floor.
-        validation::validate_password_length(password.as_bytes())?;
-        validation::validate_password_floor(password.as_bytes())?;
-
-        // Ensure the user exists.
-        let user = self
-            .get_user(realm_id, user_id)?
-            .ok_or(IdentityError::UserNotFound)?;
-
-        let policy = self.password_policy_for_realm(realm_id)?;
-        if let Some(policy) = policy.as_ref() {
-            validation::validate_password_against_policy(
-                password.as_bytes(),
-                policy,
-                Some(user.display_name()),
-                Some(user.email()),
-            )?;
-        }
-
-        // HIBP k-anonymity breach check.
-        // Only the 5-char SHA-1 prefix is sent to the API; no PII leaves the process (AC-2).
-        self.refuse_breached_password(realm_id, password, &user_id.as_uuid().to_string())?;
-
-        // Resolve history depth from the realm's password policy.
-        let history_depth = policy.as_ref().and_then(|p| p.history_depth).unwrap_or(0);
-
-        // Check history before hashing to avoid the expensive hash on likely reuse.
-        if history_depth > 0 {
-            // Reject immediate reuse of the current password.
-            let current_key = keys::encode_credential_key(user_id);
-            if let Some(bytes) = self
-                .storage
-                .get(realm_id, &current_key)
-                .map_err(Self::storage_err)?
-            {
-                let current_cred = Self::deserialize_credential(&bytes)?;
-                if credentials::verify_hash(password, &current_cred.hash)? {
-                    return Err(IdentityError::PasswordReused);
-                }
-            }
-
-            let hist_key = keys::encode_credential_history_key(user_id);
-            let hist_bytes = self
-                .storage
-                .get(realm_id, &hist_key)
-                .map_err(Self::storage_err)?;
-            if let Some(bytes) = hist_bytes {
-                let history = Self::deserialize_credential_history(&bytes)?;
-                for old_cred in &history {
-                    if credentials::verify_hash(password, &old_cred.hash)? {
-                        return Err(IdentityError::PasswordReused);
-                    }
-                }
-            }
-        }
-
-        let now = self.clock.now().as_micros();
-        let credential_cfg = self.credential_config_for_realm(realm_id)?;
-        let cred = credentials::hash_password(password, &credential_cfg, now)?;
-        let cred_bytes = Self::serialize_credential(&cred)?;
-        let cred_key = keys::encode_credential_key(user_id);
-
-        // Rotate the current credential into history before overwriting it.
-        if history_depth > 0 {
-            let old_bytes = self
-                .storage
-                .get(realm_id, &cred_key)
-                .map_err(Self::storage_err)?;
-            if let Some(bytes) = old_bytes {
-                let old_cred = Self::deserialize_credential(&bytes)?;
-                let hist_key = keys::encode_credential_history_key(user_id);
-                let hist_bytes = self
-                    .storage
-                    .get(realm_id, &hist_key)
-                    .map_err(Self::storage_err)?;
-                let mut history = if let Some(b) = hist_bytes {
-                    Self::deserialize_credential_history(&b)?
-                } else {
-                    Vec::new()
-                };
-                history.insert(0, old_cred);
-                history.truncate(history_depth);
-                let new_hist_bytes = Self::serialize_credential_history(&history)?;
-                self.storage
-                    .put(realm_id, &hist_key, &new_hist_bytes)
-                    .map_err(Self::storage_err)?;
-            }
-        }
-
-        self.storage
-            .put(realm_id, &cred_key, &cred_bytes)
-            .map_err(Self::storage_err)?;
-
-        // A password now exists that no outstanding reset link knows about, so
-        // every link issued before this moment is stale (audit 2026-08-28
-        // §4.24#1). Written after the credential lands, so a refused password
-        // leaves outstanding links alone.
-        self.set_password_reset_watermark(realm_id, user_id, now)?;
-
-        self.record_audit(
-            realm_id,
-            None,
-            AuditAction::CredentialSet,
-            "credential",
-            &user_id.as_uuid().to_string(),
-        )?;
-
-        // A-42: Revoke all sessions when a credential changes — phished or
-        // stale sessions must not survive a password reset or admin password set.
-        if let Err(e) = self.revoke_all_user_sessions(realm_id, user_id, None) {
-            tracing::warn!(
-                user_id = %user_id.as_uuid(),
-                error = %e,
-                "revoke_all_user_sessions failed on set_password"
-            );
-        }
-
-        Ok(())
+        let history_depth = self.vet_new_password(realm_id, user_id, password)?;
+        self.store_vetted_password(realm_id, user_id, password, history_depth)
     }
 
     fn dummy_verify_password_for_realm(&self, realm_id: &RealmId, password: &CleartextPassword) {
@@ -9757,7 +9848,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.push_authorization_request_inner(realm_id, request)
     }
 
-    #[allow(private_interfaces)]
     fn consume_par(
         &self,
         realm_id: &RealmId,
@@ -10184,13 +10274,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // under a per-nonce redemption lock so two concurrent MFA-challenge
         // submissions replaying the same pending cookie cannot both pass the
         // check before either persists the burn.
+        //
+        // G4: the lock is node-local and the burned-check is a local read, so
+        // across a cluster the burn itself decides: one replicated
+        // put-if-absent, evaluated by the Raft state machine. The lock stays
+        // so same-node racers queue instead of each proposing a write.
         let lock = self.token_redemption_lock(nonce);
         let _guard = lock.lock().expect("token_redemption_lock poisoned");
-        if self.is_mfa_nonce_burned(realm_id, nonce)? {
-            return Ok(false);
-        }
-        self.burn_mfa_nonce(realm_id, nonce, exp_secs)?;
-        Ok(true)
+        let key = keys::encode_mfa_nonce_key(nonce);
+        self.storage
+            .put_if_absent(realm_id, &key, &exp_secs.to_le_bytes())
+            .map_err(Self::storage_err)
     }
 
     fn load_pending_recovery_codes(
@@ -10816,7 +10910,21 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::MagicLinkTokenInvalid);
         }
 
-        // 5. Mark as used (write before returning so no second caller can pass step 3)
+        // 5. Claim the link's single use. The lock above only queues this
+        //    node's racers and `used` is a local read: a redemption that read
+        //    the link before another node spent it, and wrote after
+        //    leadership moved to its own node, was served too (G4). The claim
+        //    is one replicated put-if-absent the Raft state machine decides.
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_magic_link(&token_hash),
+            Timestamp::from_micros(stored.created_at_micros.saturating_add(expiry_micros)),
+        )? {
+            return Err(IdentityError::MagicLinkTokenInvalid);
+        }
+
+        // 5b. Record it on the link too: `used` is also how a newer link
+        //     supersedes this one, and the supersession sweep reads it.
         stored.used = true;
         let updated_bytes =
             serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
@@ -11177,13 +11285,26 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::PasswordResetTokenInvalid);
         }
 
-        // 5. Set the new password FIRST. A password the realm's policy refuses
-        //    must not burn the link — the user retries on the same one. The
-        //    per-token lock above is held across this whole window, so no
-        //    second caller can pass step 3 while the write is in flight.
-        self.set_password(realm_id, &user_id, new_password)?;
+        // 5. Vet the new password FIRST. A password the realm's policy refuses
+        //    must not burn the link — the user retries on the same one.
+        let history_depth = self.vet_new_password(realm_id, &user_id, new_password)?;
 
-        // 6. The password is set; consume the token so it cannot be replayed.
+        // 6. Claim the link's single use, BEFORE the password is written. The
+        //    lock above only queues this node's racers, and `used` and the
+        //    watermark are local reads: a reset that read them before another
+        //    node spent the link, and wrote after leadership moved to its own
+        //    node, set a second password (G4). The claim is one replicated
+        //    put-if-absent the Raft state machine decides.
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_password_reset(&token_hash),
+            Timestamp::from_micros(stored.created_at_micros.saturating_add(expiry_micros)),
+        )? {
+            return Err(IdentityError::PasswordResetTokenInvalid);
+        }
+        self.store_vetted_password(realm_id, &user_id, new_password, history_depth)?;
+
+        // 7. Record the consumption on the link too.
         stored.used = true;
         let updated_bytes =
             serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
@@ -11193,7 +11314,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &key, &updated_bytes)
             .map_err(Self::storage_err)?;
 
-        // 7. Invalidate all existing sessions — credential change should force re-auth.
+        // 8. Invalidate all existing sessions — credential change should force re-auth.
         // Revoke all sessions for this user via offset pagination.
         {
             let mut offset = 0u64;
@@ -11309,6 +11430,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 reason: format!("invalid stored user_id: {e}"),
             })?;
         let user_id = UserId::new(uuid);
+
+        // Claim the link's single use before acting on it. The lock above only
+        // queues this node's racers and `used` is a local read: a redemption
+        // that read the link before another node spent it, and wrote after
+        // leadership moved to its own node, was served too (G4). The claim is
+        // one replicated put-if-absent the Raft state machine decides.
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_email_verify(&token_hash),
+            Timestamp::from_micros(
+                stored
+                    .created_at_micros
+                    .saturating_add(EMAIL_VERIFY_EXPIRY_MICROS),
+            ),
+        )? {
+            return Err(IdentityError::VerificationTokenInvalid);
+        }
 
         // Transition user to Active (from PendingVerification) and mark
         // email_verified = true. For already-Active users we still set the
@@ -14715,20 +14853,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         state_token: &str,
     ) -> Result<crate::identity::federation::StateBag, IdentityError> {
-        let key = keys::encode_federation_state_key(state_token);
-        let bytes = self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .ok_or(IdentityError::FederationInvalidState)?;
-        // Single-use: delete before we even validate.
-        self.storage
-            .delete(realm_id, &key)
-            .map_err(Self::storage_err)?;
-        let bag: crate::identity::federation::StateBag =
-            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
+        // Single-use: claimed (G4) and deleted before we even validate.
+        let bag: crate::identity::federation::StateBag = self.take_single_use_row(
+            realm_id,
+            &keys::encode_federation_state_key(state_token),
+            &keys::encode_consumed_federation_state(&Self::sha256_hex(state_token.as_bytes())),
+            || IdentityError::FederationInvalidState,
+            |bag: &crate::identity::federation::StateBag| bag.expires_at,
+        )?;
         if self.clock.now().as_micros() >= bag.expires_at.as_micros() {
             return Err(IdentityError::FederationInvalidState);
         }
@@ -14753,15 +14885,30 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         ticket: &str,
     ) -> Result<crate::identity::federation::ConfirmLinkTicket, IdentityError> {
-        let key = keys::encode_federation_confirm_key(ticket);
+        // Single-use: claimed (G4) and deleted before the expiry check.
+        let t: crate::identity::federation::ConfirmLinkTicket = self.take_single_use_row(
+            realm_id,
+            &keys::encode_federation_confirm_key(ticket),
+            &keys::encode_consumed_confirm_link(&Self::sha256_hex(ticket.as_bytes())),
+            || IdentityError::FederationInvalidState,
+            |t: &crate::identity::federation::ConfirmLinkTicket| t.expires_at,
+        )?;
+        if self.clock.now().as_micros() >= t.expires_at.as_micros() {
+            return Err(IdentityError::FederationInvalidState);
+        }
+        Ok(t)
+    }
+
+    fn get_confirm_link_ticket(
+        &self,
+        realm_id: &RealmId,
+        ticket: &str,
+    ) -> Result<crate::identity::federation::ConfirmLinkTicket, IdentityError> {
         let bytes = self
             .storage
-            .get(realm_id, &key)
+            .get(realm_id, &keys::encode_federation_confirm_key(ticket))
             .map_err(Self::storage_err)?
             .ok_or(IdentityError::FederationInvalidState)?;
-        self.storage
-            .delete(realm_id, &key)
-            .map_err(Self::storage_err)?;
         let t: crate::identity::federation::ConfirmLinkTicket = serde_json::from_slice(&bytes)
             .map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
@@ -16436,19 +16583,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         token: &str,
     ) -> Result<crate::identity::federation::saml::SamlStateBag, IdentityError> {
-        let key = keys::encode_saml_state_key(token);
-        let bytes = self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .ok_or(IdentityError::FederationInvalidState)?;
-        self.storage
-            .delete(realm_id, &key)
-            .map_err(Self::storage_err)?;
-        let bag: crate::identity::federation::saml::SamlStateBag =
-            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
+        // Single-use: claimed (G4) and deleted before the TTL check. The
+        // get-then-delete this replaced took no lock, so even one node could
+        // hand the same RelayState to two concurrent ACS posts.
+        let bag: crate::identity::federation::saml::SamlStateBag = self.take_single_use_row(
+            realm_id,
+            &keys::encode_saml_state_key(token),
+            &keys::encode_consumed_saml_state(&Self::sha256_hex(token.as_bytes())),
+            || IdentityError::FederationInvalidState,
+            |bag: &crate::identity::federation::saml::SamlStateBag| {
+                bag.created_at
+                    .add_micros(crate::identity::federation::saml::SAML_STATE_TTL_SECS * 1_000_000)
+            },
+        )?;
         // TTL — the sweeper deletes anything older, this refuses a straggler.
         let age_secs = (self.clock.now().as_micros() - bag.created_at.as_micros()) / 1_000_000;
         if age_secs > crate::identity::federation::saml::SAML_STATE_TTL_SECS {
@@ -16465,22 +16612,24 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         expires_at_secs: i64,
     ) -> Result<(), IdentityError> {
         let key = keys::encode_saml_assertion_id(idp_id, assertion_id);
-        if self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            return Err(IdentityError::Saml(SamlError::Replay));
-        }
         // 22.11 (audit 2026-08-28 §4.10#9): the sentinel used to be an empty
         // value with no expiry, so the `saml:asn:` key space grew by one row
         // per successful login and never shrank. Record when the guarded
         // assertion stops being replayable so the cleanup sweeper can reclaim
         // it; the format matches the JAR/DPoP JTI sentinels.
-        self.storage
-            .put(realm_id, &key, &expires_at_secs.to_le_bytes())
-            .map_err(Self::storage_err)
+        //
+        // G4: check and record are one replicated put-if-absent. The read
+        // this replaced took no lock at all, and across a cluster it could be
+        // stale, so one captured SAMLResponse could log in twice.
+        if self
+            .storage
+            .put_if_absent(realm_id, &key, &expires_at_secs.to_le_bytes())
+            .map_err(Self::storage_err)?
+        {
+            Ok(())
+        } else {
+            Err(IdentityError::Saml(SamlError::Replay))
+        }
     }
 
     fn record_saml_sp_session(
@@ -16989,7 +17138,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         match result {
             Ok(()) => {
-                // 6a. Delete the record to prevent replay.
+                // 6a. Claim the code's single use, then delete the record.
+                //     The lock above is node-local and the record read is
+                //     local, so across a cluster only the replicated claim
+                //     can refuse the same code at a second node (G4).
+                if !self.claim_single_use(
+                    realm_id,
+                    &keys::encode_consumed_otp("sms", nonce),
+                    Self::otp_expiry(&stored),
+                )? {
+                    return Err(IdentityError::InvalidSmsOtp);
+                }
                 self.storage
                     .delete(realm_id, &otp_key)
                     .map_err(Self::storage_err)?;
@@ -17135,6 +17294,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         match result {
             Ok(()) => {
+                // Claim the code's single use before deleting the record (G4;
+                // see `verify_sms_otp`).
+                if !self.claim_single_use(
+                    realm_id,
+                    &keys::encode_consumed_otp("email", nonce),
+                    Self::otp_expiry(&stored),
+                )? {
+                    return Err(IdentityError::InvalidEmailOtp);
+                }
                 self.storage
                     .delete(realm_id, &otp_key)
                     .map_err(Self::storage_err)?;
@@ -17220,19 +17388,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let lock = self.jwt_bearer_jti_lock(realm_id);
         let _guard = lock.lock().expect("jti lock poisoned");
 
+        // G4: record-and-check in one replicated put-if-absent. A local `get`
+        // can be stale across a cluster and the lock above is node-local, so
+        // a proof replayed to a node that had not applied the first record
+        // was accepted again.
+        let expires_at = now_secs.saturating_add(DPOP_MAX_AGE_SECS);
         if self
             .storage
-            .get(realm_id, &jti_key)
+            .put_if_absent(realm_id, &jti_key, &expires_at.to_le_bytes())
             .map_err(Self::storage_err)?
-            .is_some()
         {
-            return Err(IdentityError::DPopProofReplay);
+            Ok(())
+        } else {
+            Err(IdentityError::DPopProofReplay)
         }
-
-        let expires_at = now_secs.saturating_add(DPOP_MAX_AGE_SECS);
-        self.storage
-            .put(realm_id, &jti_key, &expires_at.to_le_bytes())
-            .map_err(Self::storage_err)
     }
 
     fn get_realm_dpop_nonce_secret(&self, realm_id: &RealmId) -> Result<[u8; 32], IdentityError> {
@@ -18362,6 +18531,7 @@ mod tests {
     mod session_fill_race;
     /// A session revocation is never undone by a racing refresh or create.
     mod session_rmw_race;
+    mod stale_read_single_use;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.
@@ -26400,7 +26570,7 @@ mod tests {
     }
 
     #[test]
-    fn par_consume_happy_path_marks_used() {
+    fn par_consume_happy_path_claims_the_single_use_marker() {
         let (_dir, engine, _clock, realm, client) = par_setup_engine_and_public_client();
         let (_, challenge) = par_pkce_challenge();
 
@@ -26415,9 +26585,17 @@ mod tests {
             .expect("first consume must succeed");
 
         assert_eq!(stored.state, "state-xyz");
+        let id = resp
+            .request_uri
+            .strip_prefix("urn:ietf:params:oauth:request_uri:")
+            .expect("urn");
         assert!(
-            stored.used,
-            "stored entry must be marked used after consume"
+            engine
+                .storage
+                .get(&realm, &keys::encode_consumed_par(id))
+                .expect("get marker")
+                .is_some(),
+            "consume must claim the request_uri's single-use marker"
         );
     }
 

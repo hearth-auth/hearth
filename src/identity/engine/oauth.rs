@@ -798,7 +798,22 @@ impl EmbeddedIdentityEngine {
                     reason: e.to_string(),
                 })?;
 
-            // Delete as the first write — second caller finds nothing here.
+            // The single use is decided HERE, as the first write: one
+            // replicated put-if-absent the Raft state machine evaluates (G4).
+            // The delete below cannot decide it across nodes — a delete of an
+            // absent key succeeds, so a redemption that read the code before
+            // another node spent it, and wrote after leadership moved to its
+            // own node, used to be served too. The lock above still queues
+            // same-node racers so they do not each propose a Raft write.
+            if !self.claim_single_use(
+                realm_id,
+                &keys::encode_consumed_code(&code_hash),
+                code.expires_at,
+            )? {
+                return Err(IdentityError::InvalidAuthorizationCode);
+            }
+
+            // The code row itself goes too; its sweep would reclaim it anyway.
             self.storage
                 .delete(realm_id, &code_key)
                 .map_err(Self::storage_err)?;
@@ -2469,15 +2484,21 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        // 5. Update last_polled_at
-        stored.last_polled_at = Some(now);
-        let updated_bytes =
-            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
-        self.storage
-            .put(realm_id, &dc_key, &updated_bytes)
-            .map_err(Self::storage_err)?;
+        // 5. Update last_polled_at — except on the approved arm, which
+        //    consumes the code below. Writing the row back there bought
+        //    nothing (it is deleted next) and, for a poll that read the code
+        //    before another node redeemed it, re-created a row that node had
+        //    already deleted (G4).
+        if !matches!(stored.status, DeviceCodeStatus::Approved { .. }) {
+            stored.last_polled_at = Some(now);
+            let updated_bytes =
+                serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            self.storage
+                .put(realm_id, &dc_key, &updated_bytes)
+                .map_err(Self::storage_err)?;
+        }
 
         // 6. Check status
         match &stored.status {
@@ -2495,6 +2516,20 @@ impl EmbeddedIdentityEngine {
                 // pair over a device code that stayed redeemable: the caller
                 // was told the flow completed, and the code could be redeemed
                 // again, and again.
+                //
+                // The consume that DECIDES the single use is the claim, not
+                // the delete (G4): a delete of an absent key succeeds, so a
+                // poll that read the approved code before another node
+                // redeemed it, and wrote after leadership moved to its own
+                // node, used to be served too. The claim is one replicated
+                // put-if-absent the Raft state machine evaluates.
+                if !self.claim_single_use(
+                    realm_id,
+                    &keys::encode_consumed_device_code(&dc_hash),
+                    stored.expires_at,
+                )? {
+                    return Err(IdentityError::DeviceCodeExpired);
+                }
                 self.storage
                     .delete(realm_id, &dc_key)
                     .map_err(Self::storage_err)?;
@@ -2776,7 +2811,6 @@ impl EmbeddedIdentityEngine {
             prompt: effective_prompt.filter(|p| !p.is_empty()),
             created_at: now,
             expires_at,
-            used: false,
         };
 
         let key = keys::encode_par_request(&request_uri_id);
@@ -2793,7 +2827,6 @@ impl EmbeddedIdentityEngine {
         })
     }
 
-    #[allow(private_interfaces)]
     pub(super) fn consume_par_inner(
         &self,
         realm_id: &RealmId,
@@ -2807,14 +2840,17 @@ impl EmbeddedIdentityEngine {
             .ok_or(IdentityError::InvalidPushedAuthorizationRequest)?;
 
         let key = keys::encode_par_request(request_uri_id);
-        // GA audit L9: read → check `used` → write back was unserialised, so
-        // concurrent authorizations presenting one `request_uri` could each
-        // consume it. The per-key advisory lock the code and device-code
-        // redemptions use makes the sequence one step on this node (the
-        // `request_uri` is 128+ random bits, so the lock map is not shared
-        // meaningfully with code hashes). Held only across this sync block.
+        // GA audit L9 made read → check `used` → write back one step on this
+        // node with the per-key advisory lock; it still is, so same-node
+        // racers queue here instead of each proposing a Raft write. The lock
+        // is node-local, though, and the flag was a read-then-write: a
+        // redemption that read the entry before another node consumed it and
+        // wrote after leadership moved to its own node consumed it again (G4).
+        // The single use is now decided by `claim_single_use` — one replicated
+        // put-if-absent the Raft state machine evaluates — and the entry
+        // itself is never rewritten; the PAR sweep reclaims it at expiry.
         let lock = self.code_exchange_lock(&format!("par:{request_uri_id}"));
-        // INVARIANT: guard held only across the sync read-check-write below; no .await in scope.
+        // INVARIANT: guard held only across the sync read-check-claim below; no .await in scope.
         let _consume_guard = lock.lock().expect("code_exchange_lock poisoned");
         let raw = self
             .storage
@@ -2822,26 +2858,23 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?
             .ok_or(IdentityError::InvalidPushedAuthorizationRequest)?;
 
-        let mut stored: crate::identity::oidc::StoredPushedAuthorizationRequest =
+        let stored: crate::identity::oidc::StoredPushedAuthorizationRequest =
             serde_json::from_slice(&raw).map_err(|e| IdentityError::Internal {
                 reason: format!("failed to deserialize PAR request: {e}"),
             })?;
 
-        if stored.used {
-            return Err(IdentityError::InvalidPushedAuthorizationRequest);
-        }
+        // Expiry first: an expired `request_uri` is refused without a write.
         let now = self.clock.now();
         if now >= stored.expires_at {
             return Err(IdentityError::InvalidPushedAuthorizationRequest);
         }
-
-        stored.used = true;
-        let updated = serde_json::to_vec(&stored).map_err(|e| IdentityError::Internal {
-            reason: format!("failed to serialize updated PAR request: {e}"),
-        })?;
-        self.storage
-            .put(realm_id, &key, &updated)
-            .map_err(Self::storage_err)?;
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_par(request_uri_id),
+            stored.expires_at,
+        )? {
+            return Err(IdentityError::InvalidPushedAuthorizationRequest);
+        }
 
         Ok(stored)
     }
@@ -4819,21 +4852,15 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         ticket: &str,
     ) -> Result<PendingAuthorizationRequest, IdentityError> {
-        let key = keys::encode_pending_auth_key(ticket);
-        let bytes = self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .ok_or(IdentityError::ConsentTicketNotFound)?;
-        // Single-use: delete before we even validate expiry so callers can
-        // never replay the same ticket twice even on a narrow race.
-        self.storage
-            .delete(realm_id, &key)
-            .map_err(Self::storage_err)?;
-        let pending: PendingAuthorizationRequest =
-            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
+        // Single-use: claimed (G4) and deleted before we even validate expiry
+        // so callers can never replay the same ticket twice, on any node.
+        let pending: PendingAuthorizationRequest = self.take_single_use_row(
+            realm_id,
+            &keys::encode_pending_auth_key(ticket),
+            &keys::encode_consumed_pending_auth(&Self::sha256_hex(ticket.as_bytes())),
+            || IdentityError::ConsentTicketNotFound,
+            |p: &PendingAuthorizationRequest| p.expires_at,
+        )?;
         if self.clock.now().as_micros() >= pending.expires_at.as_micros() {
             return Err(IdentityError::ConsentTicketExpired);
         }

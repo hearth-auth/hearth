@@ -633,10 +633,11 @@ async fn confirm_link_page_impl(
         Resolved::Realm(r) => r.id().clone(),
         _ => return Redirect::to("/ui/login").into_response(),
     };
-    // Peek: get_pending isn't ideal (ticket is unrelated storage); we
-    // do a second-path take-and-resave via a transient round-trip.
-    // Simpler: call take, re-put immediately (idempotent write).
-    let ticket_rec = match state.identity.take_confirm_link_ticket(&realm_id, ticket) {
+    // Peek without consuming: the POST step takes the ticket. (This used to
+    // take it and re-put it, which a replicated single-use claim — G4 —
+    // rightly refuses to take a second time.) The ticket comes from the
+    // confirm cookie, never the URL (GA audit L18).
+    let ticket_rec = match state.identity.get_confirm_link_ticket(&realm_id, ticket) {
         Ok(r) => r,
         Err(_) => return Redirect::to("/ui/login").into_response(),
     };
@@ -647,10 +648,6 @@ async fn confirm_link_page_impl(
         mac,
     ) {
         return Redirect::to("/ui/login").into_response();
-    }
-    // Re-put the ticket for the POST step.
-    if state.identity.put_confirm_link_ticket(&ticket_rec).is_err() {
-        return handlers_common::server_error();
     }
     let idp = state
         .identity
