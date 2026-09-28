@@ -452,11 +452,12 @@ async fn multiple_required_actions_sequential_completion() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!(
-                    "/required-action/VERIFY_EMAIL/confirm?token={}",
-                    urlencode(&ve_token)
-                ))
-                .header(header::COOKIE, format!("hearth_ra_session={ra_token_1}"))
+                .uri("/required-action/VERIFY_EMAIL/confirm")
+                // GA audit L18: the link's first GET moved the token into this cookie.
+                .header(
+                    header::COOKIE,
+                    format!("hearth_ra_session={ra_token_1}; hearth_link_token={ve_token}"),
+                )
                 .body(Body::empty())
                 .expect("req"),
         )

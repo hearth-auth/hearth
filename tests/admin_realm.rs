@@ -549,12 +549,43 @@ async fn admin_setup_verify_login_end_to_end() {
     .with_dev_mode(true);
     let app = hearth::protocol::web::router(state);
 
-    // Hit the admin verify-email route. MUST succeed and activate the admin.
-    let resp = app
+    // Follow the emailed link. The first hop moves the token into a cookie
+    // and redirects to the same path without it (GA audit L18).
+    let hop = app
         .clone()
         .oneshot(
             Request::builder()
                 .uri(format!("/ui/admin/verify-email?token={token}"))
+                .body(Body::empty())
+                .expect("build"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(hop.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        hop.headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
+        Some("/ui/admin/verify-email"),
+        "the redirect must not carry the token"
+    );
+    let link_cookie = hop
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with("hearth_link_token="))
+        .and_then(|c| c.split(';').next())
+        .expect("link-token cookie")
+        .to_string();
+
+    // The second hop MUST succeed and activate the admin.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ui/admin/verify-email")
+                .header(axum::http::header::COOKIE, link_cookie)
                 .body(Body::empty())
                 .expect("build"),
         )

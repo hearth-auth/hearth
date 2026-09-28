@@ -600,11 +600,12 @@ async fn verify_email_completion_emits_audit_event() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!(
-                    "/required-action/VERIFY_EMAIL/confirm?token={}",
-                    urlencode(&ve_token)
-                ))
-                .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
+                .uri("/required-action/VERIFY_EMAIL/confirm")
+                // GA audit L18: the link's first GET moved the token into this cookie.
+                .header(
+                    header::COOKIE,
+                    format!("hearth_ra_session={ra_token}; hearth_link_token={ve_token}"),
+                )
                 .body(Body::empty())
                 .expect("req"),
         )
@@ -715,11 +716,12 @@ async fn cross_user_verify_email_token_is_rejected() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!(
-                    "/required-action/VERIFY_EMAIL/confirm?token={}",
-                    urlencode(&token_a)
-                ))
-                .header(header::COOKIE, format!("hearth_ra_session={ra_token_b}"))
+                .uri("/required-action/VERIFY_EMAIL/confirm")
+                // GA audit L18: the link's first GET moved the token into this cookie.
+                .header(
+                    header::COOKIE,
+                    format!("hearth_ra_session={ra_token_b}; hearth_link_token={token_a}"),
+                )
                 .body(Body::empty())
                 .expect("req"),
         )

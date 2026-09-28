@@ -169,10 +169,28 @@ async fn register_and_reset_are_shed_when_kdf_gate_is_saturated() {
         "shed registration must carry a Retry-After header"
     );
 
-    // Reset-confirm submission must also shed through the same gate.
-    let reset_body =
-        "token=whatever-token&password=correcthorsebattery&password_confirm=correcthorsebattery";
-    let (reset_status, _reset_headers) = post_form(&app, "/ui/reset-password", reset_body).await;
+    // Reset-confirm submission must also shed through the same gate. The
+    // token rides in the link-token cookie and the form carries its binding
+    // (GA audit L18); both are checked before the gate.
+    let binding =
+        web::link_token::link_binding(&CookieSecret::from_bytes(COOKIE_SECRET), "whatever-token");
+    let reset_body = format!(
+        "link_binding={binding}&password=correcthorsebattery&password_confirm=correcthorsebattery"
+    );
+    let reset_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/reset-password")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", "hearth_link_token=whatever-token")
+                .body(Body::from(reset_body))
+                .expect("build POST request"),
+        )
+        .await
+        .expect("send request");
+    let reset_status = reset_resp.status();
     assert_eq!(
         reset_status,
         StatusCode::SERVICE_UNAVAILABLE,

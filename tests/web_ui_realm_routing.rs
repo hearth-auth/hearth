@@ -131,6 +131,28 @@ async fn get(app: &axum::Router, path: &str) -> (StatusCode, String) {
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// GETs `path` carrying `token` in the link-token cookie, as a browser does
+/// after the emailed link's first hop.
+async fn get_with_link_token(app: &axum::Router, path: &str, token: &str) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(path)
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("hearth_link_token={token}"),
+                )
+                .body(Body::empty())
+                .expect("build GET request"),
+        )
+        .await
+        .expect("send request");
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.expect("body");
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 async fn post_form(app: &axum::Router, path: &str, body: &str) -> StatusCode {
     let resp = app
         .clone()
@@ -342,22 +364,26 @@ async fn verify_email_respects_path_realm() {
         )
         .expect("register_user");
 
-    // Hitting the token under realm `beta` must NOT succeed — no walk.
-    let beta_url = format!(
-        "/ui/realms/beta/verify-email?token={}",
-        resp.verification_token
-    );
-    let (status, _) = get(&rig.app, &beta_url).await;
+    // Hitting the token under realm `beta` must NOT succeed — no walk. The
+    // link's first GET moves the token into a cookie (GA audit L18); these
+    // requests are the second hop, carrying that cookie.
+    let (status, _) = get_with_link_token(
+        &rig.app,
+        "/ui/realms/beta/verify-email",
+        &resp.verification_token,
+    )
+    .await;
     assert!(
         status == StatusCode::GONE || status == StatusCode::NOT_FOUND,
         "wrong-realm verify must not succeed, got {status}"
     );
 
     // Hitting it under realm `alpha` succeeds.
-    let alpha_url = format!(
-        "/ui/realms/alpha/verify-email?token={}",
-        resp.verification_token
-    );
-    let (status, _) = get(&rig.app, &alpha_url).await;
+    let (status, _) = get_with_link_token(
+        &rig.app,
+        "/ui/realms/alpha/verify-email",
+        &resp.verification_token,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "alpha verify should succeed");
 }

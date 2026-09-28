@@ -312,18 +312,19 @@ async fn verify_email_page_renders_and_confirm_resumes_oidc() {
         .issue_email_verification_token(&rig.realm_id, &user_id)
         .expect("issue token");
 
-    // 4. GET /required-action/VERIFY_EMAIL/confirm?token={token} → resumes OIDC.
+    // 4. GET /required-action/VERIFY_EMAIL/confirm with the link cookie → resumes OIDC.
     let resp3 = rig
         .app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!(
-                    "/required-action/VERIFY_EMAIL/confirm?token={}",
-                    urlencode(&token)
-                ))
-                .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
+                .uri("/required-action/VERIFY_EMAIL/confirm")
+                // GA audit L18: the link's first GET moved the token into this cookie.
+                .header(
+                    header::COOKIE,
+                    format!("hearth_ra_session={ra_token}; hearth_link_token={token}"),
+                )
                 .body(Body::empty())
                 .expect("req"),
         )
@@ -397,8 +398,11 @@ async fn confirm_with_invalid_token_renders_error_page() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/required-action/VERIFY_EMAIL/confirm?token=invalid-token-abc123")
-                .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
+                .uri("/required-action/VERIFY_EMAIL/confirm")
+                .header(
+                    header::COOKIE,
+                    format!("hearth_ra_session={ra_token}; hearth_link_token=invalid-token-abc123"),
+                )
                 .body(Body::empty())
                 .expect("req"),
         )
@@ -535,7 +539,8 @@ async fn verify_email_confirm_without_ra_cookie_returns_400() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/required-action/VERIFY_EMAIL/confirm?token=some-token")
+                .uri("/required-action/VERIFY_EMAIL/confirm")
+                .header(header::COOKIE, "hearth_link_token=some-token")
                 .body(Body::empty())
                 .expect("req"),
         )

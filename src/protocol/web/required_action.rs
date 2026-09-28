@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{Form, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
@@ -901,14 +901,6 @@ struct VerifyEmailExpiredTemplate {
     inline_theme_css: Option<String>,
 }
 
-/// Query parameters for `GET /required-action/VERIFY_EMAIL/confirm`.
-#[derive(Debug, Deserialize)]
-pub struct VerifyEmailConfirmQuery {
-    /// The plaintext verification token from the emailed link.
-    #[serde(default)]
-    pub token: String,
-}
-
 /// Renders the "check your email" page for the VERIFY_EMAIL required action.
 ///
 /// Before sending the verification email, checks if the user's email is already
@@ -1074,6 +1066,10 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
 
 /// Validates a clicked verification token and advances the OIDC flow.
 ///
+/// The emailed link's `?token=` is moved into the link-token cookie by the
+/// route's middleware before this runs, so the token is read from that
+/// cookie and no redirect below ever carries it (GA audit L18).
+///
 /// Requires the RA session cookie (400 if absent). On success, removes
 /// VERIFY_EMAIL from the RA pending list and calls
 /// [`resume_oidc_flow`] or [`next_required_action`]. On failure, renders an
@@ -1082,7 +1078,6 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
 pub async fn verify_email_confirm(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
-    Query(q): Query<VerifyEmailConfirmQuery>,
 ) -> Response {
     let Some(ra_cookie) = read_ra_cookie(&headers) else {
         return handlers_common::bad_request("No active required-action session");
@@ -1114,11 +1109,11 @@ pub async fn verify_email_confirm(
     let secure = state.is_secure_request(&headers);
 
     // Validate and consume the email verification token.
-    if q.token.is_empty() {
+    let Some(verify_token) = super::link_token::read(&headers) else {
         return render_verify_email_expired(&state);
-    }
+    };
 
-    match state.identity.verify_email_token(&realm, &q.token) {
+    match state.identity.verify_email_token(&realm, &verify_token) {
         Ok(verified_user_id) => {
             if verified_user_id != user_id {
                 return handlers_common::bad_request("Verification token does not match session");

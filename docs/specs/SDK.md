@@ -478,7 +478,7 @@ After exchanging the authorization code for tokens, `handleCallback()` MUST insp
 2. If the callback URL contains a `required_action_redirect_uri` query parameter (server-supplied interstitial redirect): MUST throw `RequiredActionError` and set `error.redirectUri` to that value so the application can forward the user to the Hearth interstitial page.
 3. If neither condition applies, resolve normally and return the access/refresh token pair.
 
-Applications that catch `RequiredActionError` from `handleCallback()` SHOULD redirect the user to `error.redirectUri` (when present) or construct the appropriate `/ui/required-actions/{action}` URL for the first pending action.
+Applications that catch `RequiredActionError` from `handleCallback()` SHOULD redirect the user to `error.redirectUri` (when present) or restart the browser authorization flow: Hearth runs the pending actions itself, at `/required-action/{ACTION}`, before it issues an authorization code. (The former `/ui/required-actions/*` pages, which carried their token in a `?ra_token=` query parameter, were removed — GA audit L18.)
 
 ---
 

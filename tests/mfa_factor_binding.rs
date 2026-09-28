@@ -431,11 +431,9 @@ async fn magic_link_redemption_challenges_an_enrolled_totp() {
 
     let response = get(
         &app,
-        &format!(
-            "/ui/realms/{realm_name}/magic-link?token={}",
-            minted.token()
-        ),
-        None,
+        &format!("/ui/realms/{realm_name}/magic-link"),
+        // GA audit L18: the link's first GET moved the token into this cookie.
+        Some(&format!("hearth_link_token={}", minted.token())),
     )
     .await;
     let cookies = set_cookies(&response);
@@ -466,11 +464,9 @@ async fn magic_link_redemption_challenges_an_enrolled_passkey() {
 
     let response = get(
         &app,
-        &format!(
-            "/ui/realms/{realm_name}/magic-link?token={}",
-            minted.token()
-        ),
-        None,
+        &format!("/ui/realms/{realm_name}/magic-link"),
+        // GA audit L18: the link's first GET moved the token into this cookie.
+        Some(&format!("hearth_link_token={}", minted.token())),
     )
     .await;
     let cookies = set_cookies(&response);
@@ -493,11 +489,9 @@ async fn magic_link_redemption_still_signs_in_a_user_without_a_factor() {
 
     let response = get(
         &app,
-        &format!(
-            "/ui/realms/{realm_name}/magic-link?token={}",
-            minted.token()
-        ),
-        None,
+        &format!("/ui/realms/{realm_name}/magic-link"),
+        // GA audit L18: the link's first GET moved the token into this cookie.
+        Some(&format!("hearth_link_token={}", minted.token())),
     )
     .await;
     let cookies = set_cookies(&response);

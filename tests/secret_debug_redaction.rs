@@ -56,9 +56,9 @@ fn web_forms_do_not_print_passwords() {
         &format!(
             "{:?}",
             ResetPasswordFormData {
-                token: SECRET.to_string(),
-                password: SECRET.to_string(),
-                password_confirm: SECRET.to_string(),
+                link_binding: String::new(),
+                password: FormSecret::new(SECRET.to_string()),
+                password_confirm: FormSecret::new(SECRET.to_string()),
             }
         ),
     );

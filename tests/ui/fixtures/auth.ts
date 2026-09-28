@@ -36,11 +36,30 @@ export async function setupAdminAuth(): Promise<void> {
   if (fs.existsSync(tokenPath)) {
     const token = fs.readFileSync(tokenPath, 'utf-8').trim();
     try {
+      // The setup link's `?token=` is moved into the `hearth_link_token`
+      // cookie by the first GET (GA audit L18); the form then carries only
+      // the token's `link_binding`, never the token itself.
+      const stashResp = await fetch(
+        `${BASE_URL}/ui/setup?token=${encodeURIComponent(token)}`,
+        { redirect: 'manual' },
+      );
+      const linkCookie = (stashResp.headers.getSetCookie?.() ?? [])
+        .map((c) => c.split(';')[0])
+        .find((c) => c.startsWith('hearth_link_token=') && c.length > 'hearth_link_token='.length);
+      const pageResp = linkCookie
+        ? await fetch(`${BASE_URL}/ui/setup`, { headers: { Cookie: linkCookie } })
+        : undefined;
+      const binding = pageResp
+        ? /name="link_binding" value="([^"]*)"/.exec(await pageResp.text())?.[1] ?? ''
+        : '';
       const setupResp = await fetch(`${BASE_URL}/ui/setup`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          ...(linkCookie ? { Cookie: linkCookie } : {}),
+        },
         body: new URLSearchParams({
-          token,
+          link_binding: binding,
           admin_email: ADMIN_EMAIL,
           admin_display_name: 'Test Admin',
           admin_password: ADMIN_PASSWORD,

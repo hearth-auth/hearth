@@ -167,7 +167,7 @@ const PRE_AUTH_SHAPES: &[(&str, &str, Option<&str>)] = &[
     (
         "POST",
         "/reset-password",
-        Some("token=nope&password=hunter2hunter2"),
+        Some("link_binding=nope&password=hunter2hunter2"),
     ),
     ("GET", "/magic-link?token=nope", None),
     ("GET", "/verify-email?token=nope", None),
