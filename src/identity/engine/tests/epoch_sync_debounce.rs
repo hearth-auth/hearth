@@ -342,7 +342,8 @@ fn a_busy_realm_does_not_starve_a_quiet_realms_key_epoch_reconciliation() {
         matches!(after, Err(IdentityError::InvalidToken)),
         "past the debounce window a token signed by realm B's revoked key was still \
          accepted, because realm A's request had claimed the only reconciliation slot \
-         ({after:?})"
+         (error: {:?})",
+        after.as_ref().err()
     );
 }
 
@@ -369,6 +370,7 @@ fn a_replicated_key_epoch_row_invalidates_the_realms_keys_at_once() {
     assert!(
         matches!(after, Err(IdentityError::InvalidToken)),
         "inside the debounce window, after the replicated key-epoch row was observed, a \
-         token signed by the revoked key was still accepted ({after:?})"
+         token signed by the revoked key was still accepted (error: {:?})",
+        after.as_ref().err()
     );
 }
