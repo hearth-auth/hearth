@@ -1810,6 +1810,33 @@ fn resolve_dcr_id_token_alg(
 /// `dcr_policy` must be `Open` — returns 403 otherwise. The server
 /// generates a random client secret and slug; the client does not
 /// supply these. Returns an RFC 7591-compatible JSON response.
+/// The permission an RFC 7591 §3.1 initial access token must carry under the
+/// `authenticated` DCR policy (GA audit M9), besides `hearth.admin`: the same
+/// authority the admin `POST /clients` API requires. Any valid realm token
+/// used to be enough, so any end user could register clients.
+const DCR_INITIAL_ACCESS_PERMISSION: &str = "hearth.clients.admin";
+
+/// Refuses (`403 insufficient_scope`, RFC 6750 §3.1) a valid bearer token that
+/// is not an initial access token: one without `hearth.clients.admin` or
+/// `hearth.admin` in its `permissions` claim.
+fn require_dcr_initial_access(claims: &crate::identity::TokenClaims) -> Result<(), Response> {
+    if claims
+        .permissions
+        .iter()
+        .any(|p| p == "hearth.admin" || p == DCR_INITIAL_ACCESS_PERMISSION)
+    {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "insufficient_scope",
+            "error_description": "the initial access token must carry the hearth.clients.admin permission"
+        })),
+    )
+        .into_response())
+}
+
 async fn register_client_dynamic(
     State(state): State<Arc<AppState>>,
     method: axum::http::Method,
@@ -1862,16 +1889,14 @@ async fn register_client_dynamic(
             // as a plain Bearer to register clients in this realm (HEA-2039).
             // Global route ⇒ plain `Uri` yields the full request path.
             let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-            if validate_user_token_with_dpop(
+            let Ok(claims) = validate_user_token_with_dpop(
                 &headers,
                 &state,
                 &realm_id,
                 &token,
                 method.as_str(),
                 &htu,
-            )
-            .is_err()
-            {
+            ) else {
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({
@@ -1880,6 +1905,9 @@ async fn register_client_dynamic(
                     })),
                 )
                     .into_response();
+            };
+            if let Err(resp) = require_dcr_initial_access(&claims) {
+                return resp;
             }
         }
     }
@@ -4522,16 +4550,14 @@ async fn realm_register_client_dynamic(
             // preserves the `/realms/{name}` prefix so a legitimate proof's
             // `htu` matches the full request path.
             let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-            if validate_user_token_with_dpop(
+            let Ok(claims) = validate_user_token_with_dpop(
                 &headers,
                 &state,
                 &realm_id,
                 &token,
                 method.as_str(),
                 &htu,
-            )
-            .is_err()
-            {
+            ) else {
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({
@@ -4540,6 +4566,9 @@ async fn realm_register_client_dynamic(
                     })),
                 )
                     .into_response();
+            };
+            if let Err(resp) = require_dcr_initial_access(&claims) {
+                return resp;
             }
         }
     }

@@ -68,9 +68,10 @@ pub enum DcrPolicy {
     /// # Security Warning
     /// Unauthenticated — production deployments should prefer `Authenticated`.
     Open,
-    /// Requires a valid realm bearer token (RFC 7591 §3.1 initial access token).
-    /// The caller must present `Authorization: Bearer <token>` with a token
-    /// issued by this realm.
+    /// Requires an RFC 7591 §3.1 initial access token: the caller must present
+    /// `Authorization: Bearer <token>` with a token issued by this realm whose
+    /// `permissions` claim carries `hearth.clients.admin` or `hearth.admin`
+    /// (GA audit M9). Any other valid realm token is refused.
     Authenticated,
 }
 

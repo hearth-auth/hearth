@@ -395,7 +395,7 @@ either MUST send the credential that route requires — neither is anonymous by 
 | Route | Credential | Success |
 |-------|------------|---------|
 | `POST /clients` (admin) | `Authorization: Bearer <token>` carrying `hearth.clients.admin` (or `hearth.admin`) in the realm, plus `X-Realm-ID` | `201` with the proto `OAuthClient` (`client_id`, `client_name`, …) |
-| `registration_endpoint` from discovery (RFC 7591, e.g. `/realms/{name}/register`) | Set by the realm's `dcr_policy`: `disabled` (default) → `403`; `open` → none; `authenticated` → an RFC 7591 §3.1 initial access token as `Authorization: Bearer` | `201` with `client_id` + generated `client_secret` |
+| `registration_endpoint` from discovery (RFC 7591, e.g. `/realms/{name}/register`) | Set by the realm's `dcr_policy`: `disabled` (default) → `403`; `open` → none; `authenticated` → an RFC 7591 §3.1 initial access token (a realm token carrying `hearth.clients.admin`) as `Authorization: Bearer` | `201` with `client_id` + generated `client_secret` |
 
 SDK requirements:
 
