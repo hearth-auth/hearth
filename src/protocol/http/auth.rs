@@ -932,6 +932,13 @@ pub(crate) fn identity_error_to_response(
         IdentityError::SpiffeCertExpired => (StatusCode::UNAUTHORIZED, "spiffe_cert_expired"),
     };
 
+    // The body of a 500 is deliberately vague and the trace layer logs only
+    // the status, so this is the one place the cause of a 500 is recorded.
+    // `IdentityError`'s Display carries no secrets (error-handling rules).
+    if status == StatusCode::INTERNAL_SERVER_ERROR {
+        tracing::error!(error = %err, "request failed with an internal error");
+    }
+
     let error_code = crate::protocol::error_codes::for_identity_error(err);
     (
         status,
@@ -1320,5 +1327,103 @@ mod rate_limit_attribution_tests {
         let unique: std::collections::BTreeSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "limiter ids must be distinct");
         assert!(ids.iter().all(|id| !id.is_empty()));
+    }
+}
+
+#[cfg(test)]
+mod internal_error_logging_tests {
+    //! A `500` must leave its cause in the server log.
+    //!
+    //! The body of a `500` is deliberately vague ("internal error"), and the
+    //! HTTP trace layer logs only "response failed … 500". Before this, nothing
+    //! logged which [`crate::identity::IdentityError`] produced it, so the 500s
+    //! of a load-test run could not be explained even from the kept server log.
+    use super::identity_error_to_response;
+    use crate::identity::IdentityError;
+    use crate::storage::StorageError;
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture mutex").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for CaptureWriter {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Maps `err` with every event at ERROR captured; returns the status, the
+    /// body, and the captured log.
+    fn map_capturing(err: &IdentityError) -> (StatusCode, serde_json::Value, String) {
+        let writer = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_max_level(tracing::Level::ERROR)
+            .with_ansi(false)
+            .finish();
+        let (status, Json(body)) =
+            tracing::subscriber::with_default(subscriber, || identity_error_to_response(err));
+        let bytes = writer.0.lock().expect("capture mutex").clone();
+        (status, body, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[test]
+    fn a_storage_error_500_logs_its_cause_but_not_in_the_body() {
+        let err = IdentityError::Storage(Box::new(StorageError::Crypto {
+            reason: "SST 000007.sst DEK unwrapping failed".to_string(),
+        }));
+        let (status, body, logs) = map_capturing(&err);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            logs.contains("ERROR") && logs.contains("DEK unwrapping failed"),
+            "the cause of a 500 must be logged at ERROR: {logs:?}"
+        );
+        assert_eq!(
+            body["error"].as_str(),
+            Some("internal error"),
+            "the body stays vague"
+        );
+        assert!(
+            !body.to_string().contains("DEK"),
+            "the cause must not reach the client: {body}"
+        );
+    }
+
+    #[test]
+    fn an_audit_failure_500_logs_its_cause() {
+        let err = IdentityError::AuditFailure {
+            action: "user_deleted".to_string(),
+            reason: "audit chain append refused".to_string(),
+        };
+        let (status, _, logs) = map_capturing(&err);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            logs.contains("audit chain append refused"),
+            "the cause of a 500 must be logged: {logs:?}"
+        );
+    }
+
+    #[test]
+    fn a_client_error_is_not_logged_as_an_error() {
+        let (status, _, logs) = map_capturing(&IdentityError::InvalidClient);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            logs.is_empty(),
+            "a 4xx is the client's problem, not an ERROR: {logs:?}"
+        );
     }
 }
