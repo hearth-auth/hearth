@@ -95,7 +95,7 @@ impl TotpSecret {
 }
 
 /// Persisted MFA state for a user.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct StoredMfaState {
     /// Base32-encoded TOTP secret.
     pub secret_base32: String,
@@ -114,6 +114,24 @@ pub(crate) struct StoredMfaState {
     /// `verify_totp_enrollment()`, then cleared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_recovery_codes: Option<Vec<String>>,
+}
+
+/// Redacts the TOTP secret, the recovery-code hashes and any pending
+/// plaintext recovery codes (GA audit L20).
+impl std::fmt::Debug for StoredMfaState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredMfaState")
+            .field("secret_base32", &"<redacted>")
+            .field("enabled", &self.enabled)
+            .field("recovery_code_hashes", &"<redacted>")
+            .field("last_used_step", &self.last_used_step)
+            .field("enabled_at", &self.enabled_at)
+            .field(
+                "pending_recovery_codes",
+                &self.pending_recovery_codes.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Plaintext recovery codes returned once at enrollment.

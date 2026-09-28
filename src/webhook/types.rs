@@ -16,7 +16,7 @@ pub const MAX_DELIVERY_ATTEMPTS: u32 = 5;
 pub const BACKOFF_SECONDS: [u64; 5] = [0, 5, 25, 125, 625];
 
 /// A registered webhook subscription that receives audit events.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebhookSubscription {
     /// Unique identifier for this subscription.
     pub id: WebhookId,
@@ -36,6 +36,22 @@ pub struct WebhookSubscription {
     pub updated_at: Timestamp,
 }
 
+/// Redacts the signing secret (GA audit L20).
+impl std::fmt::Debug for WebhookSubscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookSubscription")
+            .field("id", &self.id)
+            .field("realm_id", &self.realm_id)
+            .field("url", &self.url)
+            .field("secret", &"<redacted>")
+            .field("enabled", &self.enabled)
+            .field("event_filters", &self.event_filters)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
 impl WebhookSubscription {
     /// Returns true if this subscription matches the given audit action.
     pub fn matches(&self, action: &AuditAction) -> bool {
@@ -44,7 +60,7 @@ impl WebhookSubscription {
 }
 
 /// Request to create a new webhook subscription.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CreateWebhookRequest {
     pub realm_id: RealmId,
     pub url: String,
@@ -55,15 +71,40 @@ pub struct CreateWebhookRequest {
     pub event_filters: Vec<AuditAction>,
 }
 
+/// Redacts the signing secret (GA audit L20).
+impl std::fmt::Debug for CreateWebhookRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateWebhookRequest")
+            .field("realm_id", &self.realm_id)
+            .field("url", &self.url)
+            .field("secret", &"<redacted>")
+            .field("enabled", &self.enabled)
+            .field("event_filters", &self.event_filters)
+            .finish()
+    }
+}
+
 /// Request to update an existing webhook subscription.
 ///
 /// `None` fields are left unchanged.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct UpdateWebhookRequest {
     pub url: Option<String>,
     pub secret: Option<String>,
     pub enabled: Option<bool>,
     pub event_filters: Option<Vec<AuditAction>>,
+}
+
+/// Redacts the signing secret (GA audit L20).
+impl std::fmt::Debug for UpdateWebhookRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateWebhookRequest")
+            .field("url", &self.url)
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .field("enabled", &self.enabled)
+            .field("event_filters", &self.event_filters)
+            .finish()
+    }
 }
 
 /// Outcome of a single delivery attempt.
