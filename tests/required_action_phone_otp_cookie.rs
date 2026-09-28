@@ -29,6 +29,16 @@ use hearth::storage::{EmbeddedStorageEngine, StorageConfig};
 use tower::ServiceExt;
 
 const COOKIE_SECRET: [u8; 32] = [23u8; 32];
+
+/// Appends the `_csrf` form token a `/required-action/*` page embeds for the RA
+/// session cookie `ra_token` (bound to the cookie, not a `/ui` CSRF cookie).
+fn with_ra_csrf(ra_token: &str, body: impl std::fmt::Display) -> String {
+    let token = hearth::protocol::web::required_action::ra_form_token_for(
+        &hearth::protocol::web::CookieSecret::from_bytes(COOKIE_SECRET),
+        ra_token,
+    );
+    format!("{body}&_csrf={token}")
+}
 const PASSWORD: &str = "test-password-hearth-ra-phone";
 const PKCE_VERIFIER: &str = "dGVzdC12ZXJpZmllci10aGlzLWlzLTQzLWNoYXJhY3RlcnM";
 const TEST_PHONE: &str = "+15555550188";
@@ -304,7 +314,10 @@ async fn phone_otp_send_refuses_a_forged_ra_cookie() {
                 .uri("/required-action/ENROLL_PHONE_OTP/send")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={token}"))
-                .body(Body::from(format!("phone={}", urlencode(TEST_PHONE))))
+                .body(Body::from(with_ra_csrf(
+                    &token,
+                    format!("phone={}", urlencode(TEST_PHONE)),
+                )))
                 .expect("req"),
         )
         .await
@@ -382,7 +395,10 @@ async fn phone_otp_send_still_works_with_a_genuine_ra_cookie() {
                 .uri("/required-action/ENROLL_PHONE_OTP/send")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
-                .body(Body::from(format!("phone={}", urlencode(TEST_PHONE))))
+                .body(Body::from(with_ra_csrf(
+                    &ra_token,
+                    format!("phone={}", urlencode(TEST_PHONE)),
+                )))
                 .expect("req"),
         )
         .await

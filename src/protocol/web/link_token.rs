@@ -88,10 +88,19 @@ pub fn read(headers: &HeaderMap) -> Option<FormSecret> {
 /// attacker, who can neither read the cookie nor compute the MAC, cannot.
 #[must_use]
 pub fn link_binding(secret: &CookieSecret, token: &str) -> String {
+    keyed_binding(secret, "hearth-link-binding", token)
+}
+
+/// A base64url HMAC-SHA256 of `token` under the cookie secret, domain-separated
+/// by `purpose`: a per-page form token bound to a cookie the page's holder
+/// has and a cross-site attacker cannot read.
+#[must_use]
+pub fn keyed_binding(secret: &CookieSecret, purpose: &str, token: &str) -> String {
     // INVARIANT: HMAC-SHA256 accepts a key of any length.
     #[allow(clippy::unwrap_used)]
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(cookie_secret_bytes(secret)).unwrap();
-    mac.update(b"hearth-link-binding|");
+    mac.update(purpose.as_bytes());
+    mac.update(b"|");
     mac.update(token.as_bytes());
     BASE64URL_NOPAD.encode(&mac.finalize().into_bytes())
 }

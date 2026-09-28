@@ -27,6 +27,7 @@
     {% endmatch %}
 
     <form method="post" action="/required-action/ENROLL_PHONE_OTP/verify" class="space-y-5" data-testid="enroll-phone-otp-form">
+      {% match csrf %}{% when Some with (c) %}<input type="hidden" name="_csrf" value="{{ c }}">{% when None %}{% endmatch %}
       {% match nonce %}{% when Some with (n) %}<input type="hidden" name="nonce" value="{{ n }}" />{% when None %}{% endmatch %}
       <input type="hidden" name="phone" value="{{ phone }}" />
       <div>
@@ -46,6 +47,7 @@
         <a href="/required-action/ENROLL_PHONE_OTP" class="font-medium text-accent hover:underline">Use a different number</a>
         or
         <form method="post" action="/required-action/ENROLL_PHONE_OTP/send" class="inline">
+          {% match csrf %}{% when Some with (c) %}<input type="hidden" name="_csrf" value="{{ c }}">{% when None %}{% endmatch %}
           <input type="hidden" name="phone" value="{{ phone }}" />
           <button type="submit" class="font-medium text-accent hover:underline">Send again</button>
         </form>

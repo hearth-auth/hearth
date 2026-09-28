@@ -1904,10 +1904,6 @@ pub fn router(state: WebState) -> Router {
             axum::routing::get(required_action::enroll_mfa_page)
                 .post(required_action::enroll_mfa_submit),
         )
-        .route(
-            "/required-action/{action}",
-            axum::routing::get(required_action::action_page).post(required_action::action_complete),
-        )
         // Branded 404 for any /ui/* path that no nested route matched, plus
         // every other unrouted path on the web tree. Without this, axum's
         // default falls through with an empty body and the browser paints
