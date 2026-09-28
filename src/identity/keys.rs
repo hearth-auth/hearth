@@ -2308,6 +2308,135 @@ pub(crate) fn par_scan_prefix() -> Vec<u8> {
     PAR_PREFIX.as_bytes().to_vec()
 }
 
+/// Prefix for single-use redemption markers.
+///
+/// One marker is claimed with a replicated `put_if_absent` when a single-use
+/// artifact is redeemed (see `identity::engine::single_use`). In cluster mode
+/// the claim is a `PutIfAbsent` Raft command whose presence check runs in the
+/// state machine's apply, so exactly one redemption wins across every node.
+/// The value is an 8-byte little-endian `i64` expiry (Unix seconds); the
+/// periodic cleanup sweep reclaims a marker once it has passed.
+///
+/// Its own prefix, not a row under the artifact's: the PAR and code sweepers
+/// decode every row under theirs as a JSON record, and a marker there would
+/// fail that decode and abort the sweep.
+const CONSUMED_PREFIX: &str = "consumed:";
+
+fn encode_consumed(kind: &str, id: &str) -> Vec<u8> {
+    format!("{CONSUMED_PREFIX}{kind}:{id}").into_bytes()
+}
+
+/// Single-use marker for a PAR `request_uri`.
+///
+/// Format: `consumed:par:{request_uri_id}`
+pub(crate) fn encode_consumed_par(request_uri_id: &str) -> Vec<u8> {
+    encode_consumed("par", request_uri_id)
+}
+
+/// Single-use marker for an authorization code, keyed by its SHA-256 hex.
+///
+/// Format: `consumed:code:{sha256_hex}`
+pub(crate) fn encode_consumed_code(code_hash: &str) -> Vec<u8> {
+    encode_consumed("code", code_hash)
+}
+
+/// Single-use marker for a device code, keyed by its SHA-256 hex.
+///
+/// Format: `consumed:device:{sha256_hex}`
+pub(crate) fn encode_consumed_device_code(device_code_hash: &str) -> Vec<u8> {
+    encode_consumed("device", device_code_hash)
+}
+
+/// Single-use marker for a magic link, keyed by its token's SHA-256 hex.
+///
+/// Format: `consumed:magic:{sha256_hex}`
+pub(crate) fn encode_consumed_magic_link(token_hash: &str) -> Vec<u8> {
+    encode_consumed("magic", token_hash)
+}
+
+/// Single-use marker for a password-reset link, keyed by its token's SHA-256.
+///
+/// Format: `consumed:reset:{sha256_hex}`
+pub(crate) fn encode_consumed_password_reset(token_hash: &str) -> Vec<u8> {
+    encode_consumed("reset", token_hash)
+}
+
+/// Single-use marker for an email-verification link, keyed by its token's
+/// SHA-256 hex.
+///
+/// Format: `consumed:verify:{sha256_hex}`
+pub(crate) fn encode_consumed_email_verify(token_hash: &str) -> Vec<u8> {
+    encode_consumed("verify", token_hash)
+}
+
+/// Single-use marker for a presented refresh token, keyed by its SHA-256 hex
+/// (the digest the grant family stores as `current_refresh_hash`).
+///
+/// Format: `consumed:refresh:{sha256_hex}`
+pub(crate) fn encode_consumed_refresh(refresh_hash: &str) -> Vec<u8> {
+    encode_consumed("refresh", refresh_hash)
+}
+
+/// Single-use marker for a SAML SP request-state bag (RelayState), keyed by
+/// the state token's SHA-256 hex.
+///
+/// Format: `consumed:saml-state:{sha256_hex}`
+pub(crate) fn encode_consumed_saml_state(token_hash: &str) -> Vec<u8> {
+    encode_consumed("saml-state", token_hash)
+}
+
+/// Single-use marker for an upstream-federation state bag, keyed by the
+/// state token's SHA-256 hex.
+///
+/// Format: `consumed:fed-state:{sha256_hex}`
+pub(crate) fn encode_consumed_federation_state(token_hash: &str) -> Vec<u8> {
+    encode_consumed("fed-state", token_hash)
+}
+
+/// Single-use marker for a federation confirm-link ticket, keyed by the
+/// ticket's SHA-256 hex.
+///
+/// Format: `consumed:fed-confirm:{sha256_hex}`
+pub(crate) fn encode_consumed_confirm_link(ticket_hash: &str) -> Vec<u8> {
+    encode_consumed("fed-confirm", ticket_hash)
+}
+
+/// Single-use marker for a pending (consent) authorization ticket, keyed by
+/// the ticket's SHA-256 hex.
+///
+/// Format: `consumed:pending-auth:{sha256_hex}`
+pub(crate) fn encode_consumed_pending_auth(ticket_hash: &str) -> Vec<u8> {
+    encode_consumed("pending-auth", ticket_hash)
+}
+
+/// Decision marker for an approval request: whichever of approve or deny
+/// claims it first decides the request.
+///
+/// Format: `consumed:approval:{request_id}`
+pub(crate) fn encode_consumed_approval(request_id: &str) -> Vec<u8> {
+    encode_consumed("approval", request_id)
+}
+
+/// Single-use marker for a transaction token, keyed by its `jti`.
+///
+/// Format: `consumed:txn:{jti}`
+pub(crate) fn encode_consumed_txn(jti: &str) -> Vec<u8> {
+    encode_consumed("txn", jti)
+}
+
+/// Single-use marker for a pending SMS or email OTP, keyed by channel and
+/// the OTP's nonce.
+///
+/// Format: `consumed:otp:{channel}:{nonce}`
+pub(crate) fn encode_consumed_otp(channel: &str, nonce: &str) -> Vec<u8> {
+    encode_consumed("otp", &format!("{channel}:{nonce}"))
+}
+
+/// Scan prefix for every single-use redemption marker in a realm.
+pub(crate) fn consumed_marker_scan_prefix() -> Vec<u8> {
+    CONSUMED_PREFIX.as_bytes().to_vec()
+}
+
 // ===== Session-version key encoding =====
 
 /// Encodes the per-session version counter key.

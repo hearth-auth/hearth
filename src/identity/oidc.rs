@@ -1669,8 +1669,12 @@ pub struct PushedAuthorizationResponse {
 }
 
 /// Stored PAR entry — persisted under `oauth:par:{uuid}`.
+///
+/// Public only so [`crate::identity::IdentityEngine::consume_par`] can be
+/// called outside the crate; every field is crate-private, so the value is
+/// opaque there.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct StoredPushedAuthorizationRequest {
+pub struct StoredPushedAuthorizationRequest {
     /// The UUID portion of the `request_uri`.
     pub(crate) request_uri_id: String,
     /// The client that pushed the request.
@@ -1710,9 +1714,10 @@ pub(crate) struct StoredPushedAuthorizationRequest {
     /// When this entry was created.
     pub(crate) created_at: Timestamp,
     /// When this entry expires (created_at + 90 s).
+    ///
+    /// Consumption is not recorded here: it is the `consumed:par:`
+    /// marker claimed by one replicated put-if-absent (G4).
     pub(crate) expires_at: Timestamp,
-    /// Whether the `request_uri` has already been consumed.
-    pub(crate) used: bool,
 }
 
 // ===== Client Credentials Grant =====

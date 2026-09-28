@@ -119,39 +119,34 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::TokenExpired);
         }
 
-        // Serialize concurrent consumption for this (realm_id, txn_id) pair to
-        // eliminate the TOCTOU race between the consumed-key read and write below.
-        // Without this lock, two concurrent callers presenting the same token can
-        // both pass the `get(consumed_key)` check before either writes the
-        // consumed marker, allowing double-consumption of a single-use token.
+        // Queue this node's concurrent consumers of one (realm_id, txn_id) so
+        // they do not each propose a Raft write; the claim below decides.
         let lock = self.txn_advisory_lock(realm_id, &claims.txn);
         let _guard = lock.lock().expect("txn_locks per-request mutex poisoned");
 
-        // Check that txn_id has not been consumed by a *different* token.
-        // (It was written at issuance — so if it's present now, the token was already consumed.)
+        // The issuance entry must exist (defensive: a token this server never
+        // issued is invalid). Checked before the claim so such a token burns
+        // nothing.
         let used_key = keys::encode_txn_token_used(&claims.txn);
-        // The value we stored at issuance was the expiry. A second call to consume
-        // would need to detect that the token was issued but already validated.
-        // We use a separate "consumed" marker to distinguish "issued" vs "consumed".
-        let consumed_key = keys::encode_txn_token_used(&format!("consumed:{}", claims.jti));
-        if let Ok(Some(_)) = self.storage.get(realm_id, &consumed_key) {
-            return Err(IdentityError::TransactionTokenReplayed);
-        }
-
-        // Mark as consumed.
-        self.storage
-            .put(realm_id, &consumed_key, b"1")
-            .map_err(Self::storage_err)?;
-
-        // Also ensure the issuance entry exists (defensive check).
         if self
             .storage
             .get(realm_id, &used_key)
             .map_err(Self::storage_err)?
             .is_none()
         {
-            // Token was never issued by this server — treat as invalid.
             return Err(IdentityError::InvalidToken);
+        }
+
+        // Consume: one replicated put-if-absent on the token's `jti` (G4).
+        // The read-then-write this replaced was only serialised per node, a
+        // storage error on its read failed OPEN, and its `b"1"` marker had no
+        // expiry for the sweep to reclaim.
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_txn(&claims.jti),
+            crate::core::Timestamp::from_micros(claims.exp.saturating_mul(1_000_000)),
+        )? {
+            return Err(IdentityError::TransactionTokenReplayed);
         }
 
         Ok(claims)

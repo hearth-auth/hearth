@@ -958,9 +958,11 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Consumes a stored PAR entry identified by its `request_uri`.
     ///
-    /// Returns the stored parameters on success. The entry is atomically
-    /// marked used; subsequent calls return `InvalidPushedAuthorizationRequest`.
-    #[allow(private_interfaces)]
+    /// Returns the stored parameters on success. Consumption is single-use
+    /// across the whole cluster: it is decided by one replicated
+    /// put-if-absent evaluated in the Raft state machine, so exactly one
+    /// caller on any node wins; every other call returns
+    /// `InvalidPushedAuthorizationRequest`.
     fn consume_par(
         &self,
         realm_id: &RealmId,
@@ -1945,7 +1947,20 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<(), IdentityError>;
 
     /// Retrieves and deletes a confirm-to-link ticket (single-use).
+    ///
+    /// The single use is claimed with one replicated put-if-absent, so a
+    /// ticket taken once can never be taken again — not even after it is
+    /// re-put. A caller that only needs to read it uses
+    /// [`Self::get_confirm_link_ticket`].
     fn take_confirm_link_ticket(
+        &self,
+        realm_id: &RealmId,
+        ticket: &str,
+    ) -> Result<federation::ConfirmLinkTicket, IdentityError>;
+
+    /// Reads a confirm-to-link ticket without consuming it. Returns
+    /// `FederationInvalidState` for an unknown or expired ticket.
+    fn get_confirm_link_ticket(
         &self,
         realm_id: &RealmId,
         ticket: &str,
