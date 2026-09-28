@@ -384,6 +384,22 @@ jobs:
       - name: Scanner coverage — guard self-test
         run: bash scripts/tests/check-scanner-coverage.test.sh
 
+      # GA audit: a Dependabot PR bumped only codeql-action/analyze (4.37.8)
+      # while init stayed on 4.36.2, and every CodeQL job on main then failed
+      # with "Loaded a configuration file for version '4.36.2', but running
+      # version '4.37.8'". All codeql-action sub-actions must share one pin.
+      - name: CodeQL action pins agree
+        run: |
+          pins="$(grep -rhoE 'github/codeql-action/[a-z-]+@[0-9a-f]{40}' .github/workflows \
+            | sed 's|.*@||' | sort -u)"
+          count="$(printf '%s\n' "$pins" | grep -c .)"
+          if [ "$count" -ne 1 ]; then
+            echo "github/codeql-action sub-actions are pinned to ${count} different SHAs:"
+            grep -rnoE 'github/codeql-action/[a-z-]+@[0-9a-f]{40}' .github/workflows
+            exit 1
+          fi
+          echo "OK: every github/codeql-action reference is pinned to ${pins}."
+
       # Audit §4.8#17: deploy/docker-compose.yml sourced the repository-root
       # `.env` into the container. Compose injects every key of an env_file into
       # the runtime environment, so unrelated developer credentials reached the
