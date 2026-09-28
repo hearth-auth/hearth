@@ -551,6 +551,21 @@ impl BackupExporter {
             members.push((format!("{prefix}/invitations.ndjson"), Zeroizing::new(data)));
         }
 
+        // revocations.ndjson — revoked access-token JTIs, blocked DPoP keys and
+        // revoked AAT JTIs. A sessionless token (`client_credentials`, an
+        // agent's) verifies against the restored signing key, so without these
+        // a token revoked before the backup validates again after a restore
+        // (audit GA 2026-09-28 M3). Expired JTIs are omitted.
+        let revocations = self
+            .identity
+            .export_revocations(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.revocations = revocations.len() as u64;
+        if !revocations.is_empty() {
+            let data = to_ndjson(&revocations)?;
+            members.push((format!("{prefix}/revocations.ndjson"), Zeroizing::new(data)));
+        }
+
         // retiring_signing_keys.json — a restore taken mid-rotation is exactly
         // when the outgoing key matters. Deadlines are absolute, so the window
         // resumes rather than restarting, and keys already past theirs are not

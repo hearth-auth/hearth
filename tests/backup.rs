@@ -3241,3 +3241,108 @@ async fn export_releases_the_write_barrier_before_writing_the_archive() {
          the storage write barrier through encryption and archive I/O"
     );
 }
+
+// ── revocations survive a restore (audit GA 2026-09-28 M3) ────────────────────
+
+/// M3: a sessionless token (`client_credentials`, agents) is checked only
+/// against the revoked-JTI blocklist and the DPoP key blocklist; there is no
+/// session to lose. The realm signing key is restored verbatim, so such a
+/// token verifies on the restored node — and before the fix the archive did
+/// not carry either blocklist, so a token revoked (or a key blocked) before
+/// the backup came back to life after the restore.
+#[tokio::test]
+async fn restore_keeps_revoked_jtis_and_blocked_dpop_keys() {
+    use hearth::identity::{
+        ClientCredentialsRequest, IdentityError, RegisterClientRequest, TokenRevocationRequest,
+    };
+
+    const SECRET: &str = "m3-restore-secret-1!";
+    const JKT: &str = "OKVsYiUkGsOrgWxWpGpzDRzZpISBgekj0RvDqxNYors";
+
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, _email, _password) = seeded_realm(&src);
+    let client = src
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: format!("m3-{}", uuid::Uuid::new_v4()),
+                redirect_uris: vec![],
+                client_secret: Some(SECRET.to_string()),
+                grant_types: vec!["client_credentials".to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register client")
+        .client_id()
+        .clone();
+    let mint = |dpop_jkt: Option<&str>| {
+        src.identity()
+            .client_credentials_token(
+                &realm,
+                &ClientCredentialsRequest {
+                    client_id: client.clone(),
+                    client_secret: Some(SECRET.to_string()),
+                    scope: Some("openid".to_string()),
+                    dpop_jkt: dpop_jkt.map(str::to_string),
+                    client_assertion_type: None,
+                    client_assertion: None,
+                },
+            )
+            .expect("mint machine token")
+            .access_token()
+            .to_string()
+    };
+    let revoked = mint(None);
+    let live = mint(None);
+    let key_bound = mint(Some(JKT));
+
+    src.identity()
+        .revoke_token(
+            &realm,
+            &TokenRevocationRequest {
+                token: revoked.clone(),
+                token_type_hint: None,
+                revoking_client_id: None,
+            },
+        )
+        .expect("revoke");
+    src.identity()
+        .block_dpop_jkt(&realm, JKT)
+        .expect("block jkt");
+    assert!(src.identity().validate_token(&realm, &revoked).is_err());
+    assert!(src.identity().validate_token(&realm, &key_bound).is_err());
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open archive");
+    let report = make_importer(&dst)
+        .import_realm(&slug, &reader, &import_opts_with_passphrase())
+        .expect("import realm");
+    assert_eq!(report.realms.created, 1, "realm must be restored");
+
+    // The control case: a sessionless token issued before the backup and never
+    // revoked is still valid after the restore — the disclosure used to say
+    // every pre-backup token is dead.
+    dst.identity()
+        .validate_token(&realm, &live)
+        .expect("an unrevoked sessionless token survives the restore");
+    let after = dst.identity().validate_token(&realm, &revoked);
+    assert!(
+        after.is_err(),
+        "a client_credentials token revoked before the backup validates again after the \
+         restore ({after:?})"
+    );
+    let after = dst.identity().validate_token(&realm, &key_bound);
+    assert!(
+        matches!(after, Err(IdentityError::DPopJktBlocked)),
+        "a token bound to a DPoP key blocked before the backup validates again after the \
+         restore ({after:?})"
+    );
+    assert_eq!(
+        report.revocations.created, 2,
+        "the report counts the restored revocations"
+    );
+}

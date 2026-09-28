@@ -2488,6 +2488,11 @@ pub(crate) fn encode_aat_revoked_jti(jti: &str) -> Vec<u8> {
     format!("{AAT_REVOKED_JTI_PREFIX}{jti}").into_bytes()
 }
 
+/// Returns the scan prefix for every revoked AAT JTI in a realm (backup export).
+pub(crate) fn aat_revoked_jti_scan_prefix() -> Vec<u8> {
+    AAT_REVOKED_JTI_PREFIX.as_bytes().to_vec()
+}
+
 // ── Phase D.3: Transaction token replay prevention ───────────────────────────
 
 /// Prefix for consumed transaction token entries.

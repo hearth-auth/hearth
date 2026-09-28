@@ -5045,6 +5045,7 @@ fn import_report_had_errors(report: &hearth::backup::ImportReport) -> bool {
         || report.saml_service_providers.errored > 0
         || report.scim_mappings.errored > 0
         || report.invitations.errored > 0
+        || report.revocations.errored > 0
         || report.retiring_signing_keys.errored > 0
         || report.audit_events.errored > 0
 }
@@ -5190,7 +5191,7 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
 /// 23.5). A restore report that hides seven of its eleven entity types is
 /// indistinguishable from a clean one.
 fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
-    let buckets: [(&str, &hearth::backup::EntityCounts); 22] = [
+    let buckets: [(&str, &hearth::backup::EntityCounts); 23] = [
         ("realms", &report.realms),
         ("users", &report.users),
         ("mfa", &report.mfa_factors),
@@ -5211,6 +5212,7 @@ fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
         ("saml sps", &report.saml_service_providers),
         ("scim mappings", &report.scim_mappings),
         ("invitations", &report.invitations),
+        ("revocations", &report.revocations),
         ("retiring keys", &report.retiring_signing_keys),
         ("audit", &report.audit_events),
     ];

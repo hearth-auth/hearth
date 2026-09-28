@@ -308,8 +308,8 @@ use crate::identity::types::{
     ListAgentsQuery, Organization, OrganizationInvitation, OrganizationMembership,
     OrganizationRole, OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey,
     ProtectedResource, Realm, RealmStatus, RegisterProtectedResourceRequest, RegisterUserRequest,
-    RegisterUserResponse, RegistrationPolicy, RetiringSigningKeyExport, Rfc8693Request,
-    Rfc8693Response, ScimMappingExport, ScimMappingKind, Session, SessionContext,
+    RegisterUserResponse, RegistrationPolicy, RetiringSigningKeyExport, RevocationExport,
+    Rfc8693Request, Rfc8693Response, ScimMappingExport, ScimMappingKind, Session, SessionContext,
     SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
     UpdateProtectedResourceRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
     Webhook,
@@ -13411,6 +13411,103 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         })
     }
 
+    fn export_revocations(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<RevocationExport>, IdentityError> {
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        let mut out = Vec::new();
+        let scan = |prefix: Vec<u8>| -> Result<Vec<(String, Vec<u8>)>, IdentityError> {
+            let end = keys::prefix_end(&prefix);
+            Ok(self
+                .storage
+                .scan(realm_id, &prefix, &end)
+                .map_err(Self::storage_err)?
+                .into_iter()
+                .map(|e| {
+                    let id = String::from_utf8_lossy(e.key.get(prefix.len()..).unwrap_or(&[]))
+                        .into_owned();
+                    (id, e.value)
+                })
+                .collect())
+        };
+        for (jti, value) in scan(keys::revoked_jti_scan_prefix())? {
+            let exp = control::decode_revoked_jti_expiry(&value);
+            if exp != i64::MAX && now_secs >= exp {
+                continue;
+            }
+            out.push(RevocationExport::Jti {
+                jti,
+                exp: (exp != i64::MAX).then_some(exp),
+            });
+        }
+        for (jkt, _) in scan(keys::blocked_dpop_jkt_scan_prefix())? {
+            out.push(RevocationExport::DpopJkt { jkt });
+        }
+        for (jti, _) in scan(keys::aat_revoked_jti_scan_prefix())? {
+            out.push(RevocationExport::AatJti { jti });
+        }
+        Ok(out)
+    }
+
+    fn import_revocation(
+        &self,
+        realm_id: &RealmId,
+        revocation: &RevocationExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        /// A JTI or thumbprint longer than this is not one Hearth wrote.
+        const MAX_ID_LEN: usize = 512;
+        let (key, id) = match revocation {
+            RevocationExport::Jti { jti, .. } => (keys::encode_revoked_jti(jti), jti),
+            RevocationExport::DpopJkt { jkt } => (keys::encode_blocked_dpop_jkt(jkt), jkt),
+            RevocationExport::AatJti { jti } => (keys::encode_aat_revoked_jti(jti), jti),
+        };
+        if id.is_empty() || id.len() > MAX_ID_LEN {
+            return Err(IdentityError::InvalidInput {
+                reason: "revocation identifier is empty or too long".to_string(),
+            });
+        }
+        if let RevocationExport::Jti { exp: Some(exp), .. } = revocation {
+            if self.clock.now().as_micros() / 1_000_000 >= *exp {
+                // The token it names has expired; the row would be swept.
+                return Ok(ImportOutcome::Skipped);
+            }
+        }
+        let exists = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        // Each arm writes the row exactly as the live revocation path does and
+        // applies it to this node's control caches (and, through the control
+        // epoch, every other node's).
+        match revocation {
+            RevocationExport::Jti { jti, exp } => {
+                let value = exp.map_or_else(|| b"1".to_vec(), |e| e.to_le_bytes().to_vec());
+                self.storage
+                    .put(realm_id, &key, &value)
+                    .map_err(Self::storage_err)?;
+                self.insert_revoked_jti_cache(realm_id, jti, exp.unwrap_or(i64::MAX));
+            }
+            RevocationExport::DpopJkt { jkt } => self.block_dpop_jkt_inner(realm_id, jkt)?,
+            RevocationExport::AatJti { .. } => {
+                // AAT revocations are read from storage at validation time.
+                self.storage
+                    .put(realm_id, &key, b"1")
+                    .map_err(Self::storage_err)?;
+            }
+        }
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
     fn export_retiring_signing_keys(
         &self,
         realm_id: &RealmId,
@@ -13466,12 +13563,21 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
         // Refuse material that does not load, rather than storing a blob that
         // `load_realm_retiring_keys` will silently drop at validation time.
-        let _usable = SigningKey::from_pkcs8(&key.pkcs8)?;
+        let usable = SigningKey::from_pkcs8(&key.pkcs8)?;
+        // The archive's `key_id` is only a label. Checked against the kid the
+        // material produces, a purged key cannot be smuggled back in under
+        // another label, and a key is never stored under a kid its tokens do
+        // not carry (PR #358 follow-up).
+        if usable.key_id() != key.key_id {
+            return Err(IdentityError::InvalidInput {
+                reason: "retiring signing key's key_id does not match its key material".to_string(),
+            });
+        }
         // A key this realm recorded retired and that no longer has a retiring
         // row was purged — by a revoking rotation, the remedy for a leaked
         // key. An archive made inside its grace window still carries it;
         // reinstating it would let it verify tokens again.
-        self.refuse_purged_retiring_key(realm_id, KeyFamily::Ed25519, &key.key_id)?;
+        self.refuse_purged_retiring_key(realm_id, KeyFamily::Ed25519, usable.key_id())?;
         let sys_realm = keys::system_realm_id();
         let storage_key = keys::encode_realm_retiring_key(realm_id, key.deadline_secs, &key.key_id);
         let exists = self
@@ -18000,6 +18106,8 @@ mod tests {
     mod fapi2_client_keys;
     /// An RS256 client's realm key is checked before an overwrite deletes it.
     mod import_client_rs256_key;
+    /// A retiring key is checked by the kid its material produces, not its label.
+    mod retiring_key_import_kid;
     /// Concurrent revocations survive a racing control-cache reload.
     mod revocation_reload_races;
     /// A signing-key rotation lands in one atomic storage batch.
