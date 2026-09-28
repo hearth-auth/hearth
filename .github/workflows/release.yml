@@ -204,7 +204,9 @@ jobs:
           # which nextest inherits, and the coloured summary line defeated the
           # summary parser below (audit §4.8#6, §4.12#9). The parser strips ANSI
           # anyway; this removes the cause as well as the symptom.
-          cargo nextest run --workspace --no-fail-fast --color never 2>&1 | tee nextest.log
+          # `dev-endpoints` is not a default feature; the suite exercises
+          # `/admin/bootstrap`. The shipped release binaries are built without it.
+          cargo nextest run --workspace --features hearth/dev-endpoints --no-fail-fast --color never 2>&1 | tee nextest.log
 
       - name: "Step 2 — Test quality gate (make test-quality)"
         id: test_quality

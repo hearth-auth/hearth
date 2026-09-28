@@ -52,7 +52,7 @@ with the owning `RealmId`, except signing keys which live in the **system realm*
 
 | Category | Storage Key | Format | Notes |
 |----------|-------------|--------|-------|
-| OAuth client registration | `oauth:client:{client_uuid}` | JSON | `client_name`, `redirect_uris`, `client_secret_hash` (Argon2id; plaintext never stored), grant types, allowed scopes |
+| OAuth client registration | `oauth:client:{client_uuid}` | JSON | `client_name`, `redirect_uris`, `client_secret_hash` (SHA-256 for Hearth-generated secrets, Argon2id for caller-chosen ones; plaintext never stored), grant types, allowed scopes |
 | Authorization code | `oauth:code:{sha256_hex_of_code}` | JSON | Plaintext code never stored; key is SHA-256 of the code issued to the client |
 | Refresh token (grant family) | `oauth:family:{family_id}` | JSON | `current_refresh_hash` (SHA-256 of current token) + `session_id`; plaintext refresh token never stored |
 | OAuth consent | `oauth:consent:{user_uuid}:{client_uuid}` | JSON | Granted scopes; no raw credentials |
@@ -95,6 +95,8 @@ the user once via email, then discarded.
 |----------|-------------|-------|-------|
 | Active signing key (Ed25519) | `realm:key:{realm_uuid}` | **System realm** | PKCS#8 DER; protected by `ZeroizingPkcs8` in memory |
 | Retiring signing keys | `realm:retiring:{realm_uuid}:{deadline}:{key_id}` | **System realm** | Grace-period keys kept for in-flight token validation |
+| RS256 ID-token signing key (RSA-3072) | `realm:idtoken_rsa:{realm_uuid}` | **System realm** | Present only once a client in the realm selected `id_token_signed_response_alg: RS256`; PKCS#8 DER, KEK-sealed at rest, zeroized in memory; signs ID tokens only |
+| Retiring RS256 ID-token keys | `realm:idtoken_rsa_retiring:{realm_uuid}:{deadline}:{key_id}` | **System realm** | Grace-period keys kept so pre-rotation ID tokens keep verifying |
 
 Signing keys are **never realm-scoped** — they live in the system realm
 (`RealmId::nil()`) and are inaccessible to tenant realm scans.
@@ -115,7 +117,8 @@ Stored as a SHA-256 hash chain under `audit:evt:{realm_uuid}:{seq}:{idx}` (see
 | Passwords | Argon2id, 19 MiB memory, 2 iterations, 1 parallelism | OWASP 2023 parameters; stored in PHC format |
 | Passwords (Bcrypt import) | Bcrypt (`$2y$`/`$2b$`) | Verify-only; upgraded to Argon2id on next `change_password` |
 | Passwords (Keycloak import) | PBKDF2-HMAC-SHA256 | Verify-only; upgraded to Argon2id on next `change_password` |
-| OAuth client secrets | Argon2id | Same parameters as passwords |
+| OAuth client secrets (Hearth-generated) | SHA-256 | 256-bit CSPRNG secret; stored as `$hearth-sha256$v=1$…`. Used by DCR (`POST /register`), the console, and secret regeneration |
+| OAuth client secrets (caller-chosen) | Argon2id | Same parameters as passwords. gRPC `RegisterClient`/`CreateApplication`, `hearth.yaml`, migration import, and any secret stored before the SHA-256 format existed |
 | TOTP recovery codes | Argon2id | Plaintext returned once at enrollment |
 | Refresh tokens | SHA-256 | Stored as `current_refresh_hash` inside grant family |
 | Authorization codes | SHA-256 | Key = `oauth:code:{sha256}` |
@@ -165,7 +168,8 @@ their memory when dropped.  They do **not** implement `Debug`, `Display`, or
 
 All admin endpoints require a valid `Authorization: Bearer <token>` with
 `admin` role in the realm (or a system-level admin token from
-`POST /admin/bootstrap` in dev mode).
+`POST /admin/bootstrap` in dev mode, on a binary built with the opt-in
+`dev-endpoints` cargo feature).
 
 ### 3.1 User PII Endpoints
 
@@ -385,7 +389,7 @@ redact metadata.
 | WebAuthn public key | Yes | COSE JSON | `webauthn:cred:…` |
 | Session token (JWT) | **No** | — | JWT verified by signature + WAL counter |
 | Session record (IP, UA) | Yes | Plaintext JSON | `ses:id:…` |
-| OAuth client secret | Yes | Argon2id hash | `oauth:client:…` |
+| OAuth client secret | Yes | SHA-256 (Hearth-generated) or Argon2id (caller-chosen) hash | `oauth:client:…` |
 | OAuth bearer / refresh tokens | **No** | — | Only SHA-256 hash of refresh stored |
 | Auth codes, magic links, reset tokens | Yes (hash only) | SHA-256 | Key-addressed |
 | Device fingerprint (raw IP/UA) | **No** | — | Only HMAC-SHA256 stored |

@@ -57,9 +57,18 @@ pub trait ReplicatedWriteObserver: Send + Sync {
     /// The whole key-space was replaced (snapshot install). Implementors
     /// MUST rebuild their projections from storage.
     fn on_replicated_reset(&self);
+    /// This node has just become the Raft leader (once per term it wins).
+    ///
+    /// Called from the cluster engine's leadership watch, and when the
+    /// observer is registered on a node that already leads. Like the other
+    /// callbacks it MUST be fast, non-blocking and infallible: an implementor
+    /// records the event and acts on it elsewhere.
+    fn on_leadership_acquired(&self);
 }
 
-pub use engine::{ClusterBuildError, ClusterEngine, ClusterError, ClusterStorageAdapter};
+pub use engine::{
+    is_not_leader, ClusterBuildError, ClusterEngine, ClusterError, ClusterStorageAdapter,
+};
 pub use log_store::{HearthLogReader, HearthLogStore};
 pub use network::{HearthNetworkFactory, PeerFaults};
 pub use server::{serve, IncomingRpcDispatch, NoopDispatch, RaftRpcHandler};

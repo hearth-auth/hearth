@@ -275,6 +275,23 @@ const REALM_RETIRING_KEY_PREFIX: &str = "realm:retiring:";
 /// Format: `realm:saml_key:{uuid}` — PKCS#8 DER bytes.
 const REALM_SAML_KEY_PREFIX: &str = "realm:saml_key:";
 
+/// Prefix for the per-realm RSA key that signs RS256 ID tokens (task 26.55).
+///
+/// Format: `realm:idtoken_rsa:{uuid}` — PKCS#8 DER, HKEY-enveloped when a KEK
+/// is configured. Stored under the system realm like every other signing key.
+/// Distinct from the SAML key: a SAML SP pins that key's certificate, and the
+/// two rotate on unrelated schedules.
+const REALM_ID_TOKEN_RSA_KEY_PREFIX: &str = "realm:idtoken_rsa:";
+
+/// Prefix for retiring RSA ID-token keys inside their rotation grace period.
+///
+/// Format: `realm:idtoken_rsa_retiring:{realm_uuid}:{deadline_secs:020}:{key_id}`
+/// — the same layout as [`REALM_RETIRING_KEY_PREFIX`], so the deadline and
+/// `kid` parse the same way. It does not start with
+/// [`REALM_ID_TOKEN_RSA_KEY_PREFIX`] (`_` sorts after `:`), so a scan of the
+/// active keys never picks up a retiring one.
+const REALM_ID_TOKEN_RSA_RETIRING_PREFIX: &str = "realm:idtoken_rsa_retiring:";
+
 /// Prefix for SAML registered Service Providers (per realm).
 ///
 /// Format: `saml:sp:{sp_key}` — JSON-serialized `SamlServiceProvider`.
@@ -648,6 +665,28 @@ pub(crate) fn encode_control_epoch() -> Vec<u8> {
     b"sys:control:epoch".to_vec()
 }
 
+/// Records that `realm_id` rotated away from the Ed25519 signing key `key_id`.
+///
+/// Format: `realm:retired:{realm_uuid}:ed25519:{key_id}` — value: the time the
+/// key was retired, in Unix seconds (decimal). Stored under the system realm.
+/// Written in the same atomic batch as every rotation of the realm's key — for
+/// the key it retires and for every retiring key it purges — and by a restore
+/// that displaces a live key; never deleted, not even with the realm. It holds
+/// no key material — only the identifier a backup restore checks so that an
+/// archive older than a rotation (for instance one made before a key
+/// compromise) cannot reinstall the retired key.
+pub(crate) fn encode_realm_retired_signing_kid(realm_id: &RealmId, key_id: &str) -> Vec<u8> {
+    format!("realm:retired:{}:ed25519:{key_id}", realm_id.as_uuid()).into_bytes()
+}
+
+/// Records that `realm_id` rotated away from the RS256 ID-token key `key_id`.
+///
+/// Format: `realm:retired:{realm_uuid}:rs256:{key_id}`; the RSA twin of
+/// [`encode_realm_retired_signing_kid`], written and read the same way.
+pub(crate) fn encode_realm_retired_id_token_rsa_kid(realm_id: &RealmId, key_id: &str) -> Vec<u8> {
+    format!("realm:retired:{}:rs256:{key_id}", realm_id.as_uuid()).into_bytes()
+}
+
 /// Storage key for the KEK enrolment marker.
 ///
 /// Written once, the first time a KEK-configured process opens a store. Its
@@ -718,14 +757,7 @@ pub(crate) fn realm_saml_key_scan_prefix() -> Vec<u8> {
 /// outgoing key signed. Returns `None` when the key does not match the
 /// expected format.
 pub(crate) fn parse_retiring_key_id(key_bytes: &[u8]) -> Option<String> {
-    let key_str = std::str::from_utf8(key_bytes).ok()?;
-    let after_prefix = key_str.strip_prefix(REALM_RETIRING_KEY_PREFIX)?;
-    // "{uuid}:" is 37 chars, "{deadline:020}:" is 21 more.
-    let key_id = after_prefix.get(58..)?;
-    if key_id.is_empty() {
-        return None;
-    }
-    Some(key_id.to_string())
+    parse_retiring_kid_after(key_bytes, REALM_RETIRING_KEY_PREFIX)
 }
 
 /// Parses the deadline (Unix seconds) encoded in a retiring-key storage key.
@@ -734,15 +766,92 @@ pub(crate) fn parse_retiring_key_id(key_bytes: &[u8]) -> Option<String> {
 /// [`encode_realm_retiring_key`]. Returns `None` when the key does not match
 /// the expected format.
 pub(crate) fn parse_retiring_key_deadline(key_bytes: &[u8]) -> Option<u64> {
+    parse_retiring_deadline_after(key_bytes, REALM_RETIRING_KEY_PREFIX)
+}
+
+/// Shared parser for the `kid` segment of a
+/// `{prefix}{uuid}:{deadline:020}:{kid}` retiring-key storage key.
+fn parse_retiring_kid_after(key_bytes: &[u8], prefix: &str) -> Option<String> {
     let key_str = std::str::from_utf8(key_bytes).ok()?;
-    // key format: "realm:retiring:{uuid}:{deadline:020}:{kid}"
+    let after_prefix = key_str.strip_prefix(prefix)?;
+    // "{uuid}:" is 37 chars, "{deadline:020}:" is 21 more.
+    let key_id = after_prefix.get(58..)?;
+    if key_id.is_empty() {
+        return None;
+    }
+    Some(key_id.to_string())
+}
+
+/// Shared parser for the deadline segment of a
+/// `{prefix}{uuid}:{deadline:020}:{kid}` retiring-key storage key.
+fn parse_retiring_deadline_after(key_bytes: &[u8], prefix: &str) -> Option<u64> {
+    let key_str = std::str::from_utf8(key_bytes).ok()?;
     // After the prefix comes "{uuid}:", then the deadline field, then ":{kid}"
-    let after_prefix = key_str.strip_prefix(REALM_RETIRING_KEY_PREFIX)?;
+    let after_prefix = key_str.strip_prefix(prefix)?;
     // Skip the UUID segment (36 chars) + ":"
     let after_uuid = after_prefix.get(37..)?;
     // Deadline is the next 20 chars
     let deadline_str = after_uuid.get(..20)?;
     deadline_str.parse::<u64>().ok()
+}
+
+// ===== RS256 ID-token key encoding (task 26.55) =====
+
+/// Storage key for a realm's active RSA ID-token signing key.
+///
+/// Format: `realm:idtoken_rsa:{uuid}`, stored under the system realm.
+pub(crate) fn encode_realm_id_token_rsa_key(realm_id: &RealmId) -> Vec<u8> {
+    format!("{REALM_ID_TOKEN_RSA_KEY_PREFIX}{}", realm_id.as_uuid()).into_bytes()
+}
+
+/// Storage key for a retiring RSA ID-token key.
+///
+/// Format: `realm:idtoken_rsa_retiring:{realm_uuid}:{deadline_secs:020}:{key_id}`
+/// — the layout of [`encode_realm_retiring_key`], under its own prefix.
+pub(crate) fn encode_realm_id_token_rsa_retiring_key(
+    realm_id: &RealmId,
+    deadline_secs: u64,
+    key_id: &str,
+) -> Vec<u8> {
+    format!(
+        "{REALM_ID_TOKEN_RSA_RETIRING_PREFIX}{}:{:020}:{key_id}",
+        realm_id.as_uuid(),
+        deadline_secs
+    )
+    .into_bytes()
+}
+
+/// Scan prefix for one realm's retiring RSA ID-token keys.
+///
+/// Format: `realm:idtoken_rsa_retiring:{realm_uuid}:`
+pub(crate) fn realm_id_token_rsa_retiring_scan_prefix(realm_id: &RealmId) -> Vec<u8> {
+    format!(
+        "{REALM_ID_TOKEN_RSA_RETIRING_PREFIX}{}:",
+        realm_id.as_uuid()
+    )
+    .into_bytes()
+}
+
+/// Scan prefix covering every realm's active RSA ID-token key — used by the
+/// KEK enrolment sweep.
+pub(crate) fn realm_id_token_rsa_key_scan_prefix() -> Vec<u8> {
+    REALM_ID_TOKEN_RSA_KEY_PREFIX.as_bytes().to_vec()
+}
+
+/// Scan prefix covering every realm's retiring RSA ID-token keys — used by
+/// the KEK enrolment sweep.
+pub(crate) fn realm_id_token_rsa_retiring_all_scan_prefix() -> Vec<u8> {
+    REALM_ID_TOKEN_RSA_RETIRING_PREFIX.as_bytes().to_vec()
+}
+
+/// Parses the deadline of a retiring RSA ID-token key storage key.
+pub(crate) fn parse_id_token_rsa_retiring_deadline(key_bytes: &[u8]) -> Option<u64> {
+    parse_retiring_deadline_after(key_bytes, REALM_ID_TOKEN_RSA_RETIRING_PREFIX)
+}
+
+/// Parses the `kid` of a retiring RSA ID-token key storage key.
+pub(crate) fn parse_id_token_rsa_retiring_key_id(key_bytes: &[u8]) -> Option<String> {
+    parse_retiring_kid_after(key_bytes, REALM_ID_TOKEN_RSA_RETIRING_PREFIX)
 }
 
 /// Returns `true` when `key` holds raw cryptographic material (private keys,
@@ -752,6 +861,8 @@ pub(crate) fn parse_retiring_key_deadline(key_bytes: &[u8]) -> Option<u64> {
 /// - `realm:key:*`           — per-realm Ed25519 signing keys (PKCS#8 DER)
 /// - `realm:retiring:*`      — retiring per-realm Ed25519 signing keys
 /// - `realm:saml_key:*`      — per-realm SAML signing keys
+/// - `realm:idtoken_rsa:*`   — per-realm RSA ID-token signing keys
+/// - `realm:idtoken_rsa_retiring:*` — retiring RSA ID-token signing keys
 /// - `sys:global:key`        — server-wide Phase-0 fallback signing key
 /// - `sys:oidc:rsa:key`      — server-wide OIDC RSA-2048 signing key
 /// - `sys:oidc:rsa:retiring:*` — retiring OIDC RSA keys
@@ -761,6 +872,8 @@ pub(crate) fn is_key_material(key: &[u8]) -> bool {
     key.starts_with(REALM_KEY_PREFIX.as_bytes())
         || key.starts_with(REALM_RETIRING_KEY_PREFIX.as_bytes())
         || key.starts_with(REALM_SAML_KEY_PREFIX.as_bytes())
+        || key.starts_with(REALM_ID_TOKEN_RSA_KEY_PREFIX.as_bytes())
+        || key.starts_with(REALM_ID_TOKEN_RSA_RETIRING_PREFIX.as_bytes())
         || key.starts_with(b"sys:oidc:rsa:retiring:")
         || key == b"sys:global:key"
         || key == b"sys:oidc:rsa:key"
@@ -994,9 +1107,18 @@ pub(crate) fn encode_jwt_bearer_jti(jti: &str) -> Vec<u8> {
 ///
 /// Format: `oauth:ca-jti:{jti}`
 ///
-/// Used for RFC 7523 §2.2 `private_key_jwt` JTI replay prevention.
+/// Used for RFC 7523 §2.2 `private_key_jwt` JTI replay prevention. The value
+/// is an 8-byte little-endian `i64`: the Unix-seconds instant (assertion `exp`
+/// plus clock skew) after which the periodic cleanup sweep may reclaim it.
 pub(crate) fn encode_client_assertion_jti(jti: &str) -> Vec<u8> {
     format!("{CLIENT_ASSERTION_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all `private_key_jwt` assertion JTIs in a realm.
+///
+/// Used by the periodic cleanup sweep to reclaim expired replay markers.
+pub(crate) fn client_assertion_jti_scan_prefix() -> Vec<u8> {
+    CLIENT_ASSERTION_JTI_PREFIX.as_bytes().to_vec()
 }
 
 /// Encodes the storage key for a JAR (RFC 9101) signed request object JTI.
@@ -3109,5 +3231,57 @@ mod tests {
         assert_eq!(parse_retiring_key_deadline(&encoded), Some(1_764_000_000));
         assert_eq!(parse_retiring_key_id(&encoded).as_deref(), Some("kid-abc"));
         assert!(parse_retiring_key_id(b"realm:key:whatever").is_none());
+    }
+
+    /// The RSA ID-token key families (task 26.55) use their own prefixes, and
+    /// neither they nor the Ed25519 families can be mistaken for one another:
+    /// a scan or a parser for one family must never pick up the other's rows.
+    #[test]
+    fn id_token_rsa_key_layout_is_disjoint_from_every_other_key_family() {
+        let realm =
+            RealmId::new(Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid"));
+        assert_eq!(
+            encode_realm_id_token_rsa_key(&realm),
+            b"realm:idtoken_rsa:11111111-2222-3333-4444-555555555555".to_vec()
+        );
+
+        let retiring = encode_realm_id_token_rsa_retiring_key(&realm, 1_764_000_000, "kid-rsa");
+        assert_eq!(
+            parse_id_token_rsa_retiring_deadline(&retiring),
+            Some(1_764_000_000)
+        );
+        assert_eq!(
+            parse_id_token_rsa_retiring_key_id(&retiring).as_deref(),
+            Some("kid-rsa")
+        );
+        assert!(retiring.starts_with(&realm_id_token_rsa_retiring_scan_prefix(&realm)));
+
+        // Cross-family parsing refuses.
+        assert!(parse_retiring_key_deadline(&retiring).is_none());
+        let ed_retiring = encode_realm_retiring_key(&realm, 1_764_000_000, "kid-ed");
+        assert!(parse_id_token_rsa_retiring_deadline(&ed_retiring).is_none());
+
+        // The active-key scan range excludes retiring rows, and no Ed25519
+        // or realm-record scan range covers either RSA family.
+        let in_range = |key: &[u8], prefix: &[u8]| key >= prefix && key < &prefix_end(prefix)[..];
+        let active = encode_realm_id_token_rsa_key(&realm);
+        assert!(in_range(&active, &realm_id_token_rsa_key_scan_prefix()));
+        assert!(!in_range(&retiring, &realm_id_token_rsa_key_scan_prefix()));
+        assert!(in_range(
+            &retiring,
+            &realm_id_token_rsa_retiring_all_scan_prefix()
+        ));
+        for other in [
+            realm_id_scan_prefix(),
+            realm_signing_key_scan_prefix(),
+            realm_retiring_key_all_scan_prefix(),
+            realm_saml_key_scan_prefix(),
+            legacy_oidc_rsa_scan_prefix(),
+        ] {
+            assert!(!in_range(&active, &other));
+            assert!(!in_range(&retiring, &other));
+        }
+        assert!(is_key_material(&active));
+        assert!(is_key_material(&retiring));
     }
 }

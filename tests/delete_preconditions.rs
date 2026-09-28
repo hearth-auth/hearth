@@ -165,6 +165,8 @@ async fn deleting_a_yaml_managed_application_is_refused_by_the_engine() {
                 trust_level: ClientTrustLevel::default(),
                 declared_scopes: Vec::new(),
                 consent_spans_orgs: false,
+                id_token_signed_response_alg: None,
+                ..Default::default()
             },
         )
         .expect("import client under a YAML-shaped ID");

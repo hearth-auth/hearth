@@ -15,7 +15,7 @@ use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 /// Sets up a storage engine with pre-populated hot-tier data.
 ///
 /// Writes `count` key-value pairs and reads each once to promote into the
-/// hot tier (lock-free `ArcSwap` path).
+/// hot tier (lock-free `EpochCell` path).
 fn setup_hot_tier(count: usize) -> (tempfile::TempDir, EmbeddedStorageEngine, RealmId) {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = StorageConfig::dev(dir.path().to_path_buf());

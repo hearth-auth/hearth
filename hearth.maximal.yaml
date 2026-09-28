@@ -407,6 +407,7 @@ realms:
         trust_level: third_party            # first_party | third_party
         declared_scopes: [openid, profile, email, billing:manage]
         consent_spans_orgs: false
+        id_token_signed_response_alg: RS256 # EdDSA (default) | RS256 — ID tokens only
       mobile-app:
         name: "Customer Mobile App"
         slug: mobile-app

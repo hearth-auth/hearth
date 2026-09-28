@@ -86,10 +86,12 @@ reason = "BoringSSL is not an approved crypto backend."
 name = "boring-sys"
 reason = "BoringSSL is not an approved crypto backend."
 
-# aws-lc-rs is permitted for exactly one purpose: rcgen's RSA-2048 key
-# generation, which `ring` cannot do and which replaces the `rsa` crate
-# (unpatched RUSTSEC-2023-0071, Marvin Attack). Any other parent — a TLS
-# provider default, say — is the accidental third backend the audit found.
+# aws-lc-rs is permitted for exactly one purpose: rcgen's RSA key generation
+# (RSA-2048 SAML signing keys, and RSA-3072 keys for RS256 ID tokens — task
+# 26.55), which `ring` cannot do and which replaces the `rsa` crate
+# (unpatched RUSTSEC-2023-0071, Marvin Attack). Signing and verification stay
+# on `ring`. Any other parent — a TLS provider default, say — is the
+# accidental third backend the audit found.
 [[bans.deny]]
 name = "aws-lc-rs"
 wrappers = ["rcgen"]
@@ -113,3 +115,12 @@ reason = "Not an approved HTTP client; use ureq."
 [[bans.deny]]
 name = "isahc"
 reason = "Not an approved HTTP client; use ureq."
+
+# Concurrency primitives. `arc-swap` 1.9.2 corrupts the heap under the
+# `load` + `rcu` pattern (tasks 26.1 and 26.5: 3 failures in 150 loaded runs
+# under MALLOC_CHECK_=3, and no release that fixes it). Every call site moved
+# to `core::EpochCell` (hot path) or `core::SwapCell` (off it);
+# tests/arc_swap_removed.rs guards the manifests, this guards the graph.
+[[bans.deny]]
+name = "arc-swap"
+reason = "Corrupts the heap under load + rcu (tasks 26.1/26.5); use core::EpochCell or core::SwapCell."

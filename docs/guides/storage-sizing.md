@@ -19,8 +19,8 @@ before quoting any row.
 
 | Tier | Implementation | Medium | Planning p50 | Planning p99 |
 |------|---------------|--------|-------------|-------------|
-| Hot tier | `HashMap` + `ArcSwap` | DRAM | < 5 µs | < 10 µs |
-| Memtable | `BTreeMap` + read lock | DRAM | < 20 µs | < 100 µs |
+| Hot tier | `HashMap` + `EpochCell` (epoch-reclaimed, lock-free) | DRAM | < 5 µs | < 10 µs |
+| Memtable | `crossbeam_skiplist::SkipMap` + `EpochCell` (lock-free) | DRAM | < 20 µs | < 100 µs |
 | SST files (warm page cache) | `memmap2` read-only mmap + Bloom filter | DRAM (page cache) | < 10 µs | < 100 µs |
 | SST files (cold page fault) | `memmap2` read-only mmap + Bloom filter | NVMe | < 100 µs | < 5 ms |
 
@@ -51,8 +51,8 @@ not this table, as authoritative for capacity planning.
 
 ## Hot tier memory model
 
-The hot tier stores entries in a `HashMap<CompositeKey, HotEntry>` wrapped in
-`ArcSwap`. Each entry consists of:
+The hot tier stores entries in a `HashMap<CompositeKey, HotEntry>` held in an
+`EpochCell` (`src/core/epoch_cell.rs`). Each entry consists of:
 
 - **Key**: `RealmId` (16 bytes UUID) + key bytes (variable; typically 16–64 bytes for UUIDs or email strings)
 - **Value**: `Vec<u8>` heap allocation (serialised entity; typically 200–500 bytes for sessions/users)
@@ -111,7 +111,7 @@ storage:
 ### Datasets that fit in hot tier
 
 When the active working set fits within hot tier capacity, all reads are
-lock-free `ArcSwap` loads. A p99 under 10 µs is the **design target** for a single-realm
+lock-free, epoch-pinned `EpochCell` loads. A p99 under 10 µs is the **design target** for a single-realm
 deployment with ≤ 1 M active sessions on a node with ≥ 4 GiB RAM — it is not a published
 measurement. The CI gate for this path admits up to 100 µs p99, and no p99 read figure has been
 cleared for publication; the measured p50 for a hot-tier session lookup is 0.118 µs, engine plane

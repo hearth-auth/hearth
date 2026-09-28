@@ -6,13 +6,533 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+<!-- GA software-blocker fixes (branch fix/ga-software-blockers). -->
+
+### Security
+- **A system-realm backup export or restore requires `hearth.admin`** — `POST /admin/backup` and
+  `POST /admin/backup/restore` accepted any sub-admin permission (`hearth.users.admin`,
+  `hearth.realm.admin`, …) plus `hearth.export`, and a system-realm caller's backup reaches every
+  realm. A delegated system-realm operator could export every realm and, with a signed archive,
+  resurrect deleted operators and revoked grants, overwrite every operator's password hash and
+  factors, reinstall a rotated-away system signing key, or rewrite any tenant realm. A system-realm
+  caller now needs `hearth.admin` itself (`403` otherwise, before anything is read or written).
+  The `hearth.export` description no longer claims `hearth.admin` was already required.
+- **Every backup restore requires `hearth.admin`** — a tenant sub-admin (`hearth.users.admin`,
+  `hearth.realm.admin`, `hearth.clients.admin`, `hearth.agents.admin`) holding `hearth.export`
+  could restore a signed archive of its own realm and bring back what its permission never
+  reaches: role assignments an administrator had revoked (live role assignment needs
+  `hearth.realm.admin`), clients, agents and retiring signing keys. `POST /admin/backup/restore`
+  now requires `hearth.admin` (carried by the seeded `realm.admin` role) plus `hearth.export`,
+  whatever realm the caller is scoped to, and answers `403` before the export rate limit, so a
+  refused caller spends no quota. Export is unchanged: a tenant sub-admin with `hearth.export`
+  still backs its realm up. **Breaking** for a backup account that restores with a sub-admin
+  permission: grant it `hearth.admin` in the realm (for example through `realm.admin`).
+- **A restore never reinstalls a system signing key the realm rotated away from** — an archive made
+  before a key rotation (for instance after a compromise) could put the retired key back as the
+  live system key, or reinstate a retiring key a revoking rotation had purged. Rotations of the
+  system key now record every key they retire; a restore refuses such a key in every mode (dry run
+  included), before writing anything. `--mode overwrite` alone no longer replaces a live system
+  key: it takes the new `hearth backup restore --replace-system-signing-key`, and the HTTP restore
+  never replaces it.
+- **A restore never reinstates a revoked tenant signing key** — a `skip` or `merge` restore into a
+  live tenant realm reinstalled every retiring key the archive carried, so after a revoking rotation
+  (`grace_period_secs=0`, the remedy for a leaked key) restoring an archive made inside the earlier
+  grace window put the revoked key back, verifying tokens again until its original deadline —
+  reachable over HTTP by a tenant caller with `hearth.export`. The same held for the RS256 ID-token
+  key. Every rotation, in every realm and for both key families, now records the keys it retires
+  and purges in the same atomic write as the rotation (a crash can no longer leave a new key whose
+  predecessor is unrecorded); a restore that replaces a live key records the displaced one. A
+  restore refuses an archived retiring key so recorded (reported as an error on that key), and
+  refuses a realm restored as new — including one deleted since the archive was made — whose
+  archived active key is recorded, before writing anything.
+- **A system-realm restore no longer writes OAuth consents or SCIM mappings** — like the other
+  records the live API never creates in the system realm, they are refused and reported.
+
+- **Heap corruption on the hot path fixed** — token validation, session lookup and storage reads no
+  longer use `arc-swap` 1.9.2, which corrupted the heap under concurrent `load` + `rcu` (3 crashes in
+  150 loaded runs under `MALLOC_CHECK_=3`). They now use `core::EpochCell`, an epoch-reclaimed cell with
+  a `crossbeam-epoch` collector of its own; 17,400 loaded runs under heap checking showed 0 errors. The
+  only hot-path allocation left is amortised collector bookkeeping while cells are written, at most one
+  per 1,024 reads on a thread. `arc-swap` is removed and banned in `deny.toml` (task 26.5).
+- **Revoking all of a user's sessions could miss one during a memtable flush** — `scan`/`scan_keys`
+  read the SST list before the memtable, so a flush that completed mid-scan hid the keys it moved and
+  `revoke_all_user_sessions` could leave a live session's tokens valid. Scans now read the memtable
+  first (task 26.5).
+- **SMS MFA fails closed.**
+  - `PATCH /admin/realms/{id}/config` and the admin console refuse (`400`) to enable `sms` in
+    `mfa_methods` while `sms.transport` is `log` outside `--dev`, and refuse unknown MFA method names —
+    the same rule startup validation applies, which now also covers the global `auth.mfa_methods`.
+  - The `log` SMS transport no longer writes the message body (the OTP) to the log outside `--dev`.
+  - SMS OTPs are no longer keyed with an all-zero HMAC key when `HEARTH_SMS_OTP_HMAC_KEY` is unset:
+    outside `--dev` SMS OTP issue and verify are refused. The email-OTP key no longer falls back to a
+    public constant in production.
+  - A user whose enrolled SMS or email-OTP factor cannot be delivered is sent to the OTP challenge,
+    which fails, instead of getting a session on the password alone.
+- **MFA OTP submit no longer trusts the client** — the MFA challenge took the OTP nonce and factor
+  from the submitted form, so a user could choose the factor or nonce. Both now come from server-side
+  state bound to the login.
+- **Every browser `/ui/oauth/authorize` branch runs the same gates.** Signed request objects (JAR),
+  pushed requests (PAR), and the resumes after a required action or the SMS challenge used to issue a
+  code without the SMS MFA step (JAR), without the consent screen (all four) and ignoring `prompt`.
+  All branches now run required actions → SMS MFA → consent/`prompt` → issue. Third-party clients using
+  JAR or PAR now see the consent screen. A JAR's own `prompt` and `response_mode` claims take
+  precedence over the query string (RFC 9101 §4).
+- **SMS MFA and required actions now gate device approval** (`POST /ui/device`, RFC 8628).
+- **Stricter JAR on `/ui/oauth/authorize`** — a request object is refused with `400` before any MFA
+  step when its `response_type` is not `code`, its `state` is empty, its `redirect_uri` is not
+  registered, or it has no S256 PKCE.
+- **Required actions and MFA-enrolment requirements fail closed** — a storage or RBAC error while
+  reading the user, realm, client `mfa_required`, role assignments or enrolled factors used to read
+  as "nothing required". The request is now refused.
+- **Token introspection is for confidential clients only** — `POST /introspect`,
+  `/realms/{realm}/introspect` and gRPC `Introspect` require `client_secret_basic`,
+  `client_secret_post` or `private_key_jwt`. A public client or a wrong secret gets
+  `401 invalid_client`. Discovery no longer lists `none` for introspection (task 26.43). **Breaking**
+  for any public client that called `/introspect`.
+- **Hearth-generated client secrets are no longer Argon2id-hashed** — every authenticated
+  introspection verified the client secret with Argon2id, so each call cost a full KDF run: a
+  throughput collapse and a CPU/memory amplification vector. A secret Hearth mints itself
+  (`POST /register`, the console's new-application form, *Regenerate secret*) is now 256 bits from
+  the OS CSPRNG, stored as `$hearth-sha256$v=1$<base64 SHA-256>` and checked with one SHA-256 and a
+  constant-time compare. A caller-chosen secret (gRPC `RegisterClient`/`CreateApplication`,
+  `hearth.yaml` `applications[].client_secret`, Auth0/Keycloak import) stays on Argon2id, and
+  existing Argon2id hashes keep verifying; regenerate a secret to move a client onto the fast format.
+  An unknown or public `client_id` presenting a secret now costs one SHA-256, not an Argon2id run.
+  The console's generated secret was a 122-bit UUID; it is now 256 bits (task 26.43 follow-up).
+- **Concurrent revocations are no longer lost** — a validation that saw the control epoch move while
+  another request on the same node was still publishing a revocation reloaded the revoked-token list
+  from storage and could overwrite a revocation that landed in between: `POST /revoke` answered `200`
+  but the token kept introspecting and validating as active until the next reload or its expiry
+  (about 1 in 11 under 20 concurrent revokers). The same race could drop a DPoP key block, a realm
+  status change, or (in a cluster) the expiry sweep's removal of a revocation. Control-cache reloads
+  now run on a background thread and replay every change applied during their scan before they swap
+  the caches in. Token validation no longer reloads inline or takes a lock when another node asserts
+  a control; it signals the reloader, and the control binds on that node within the existing 200 ms
+  bound plus one reload (held back at most 100 ms while that node's own control writes are in
+  flight, so a node never reloads for a control it applied itself) (task 26.43 follow-up).
+- **Cluster: revoking a sessionless token on the leader took 10 s and then failed** — every node's
+  Raft observer, the leader's included, projected a replicated revocation by re-running the local
+  revocation path, which bumped the control epoch: a Raft proposal made from inside the state
+  machine's own apply, which waited for itself until `write_timeout`. `POST /revoke` of a
+  `client_credentials` token and consent revocation answered an error after the revocation had already
+  committed (measured on three nodes: 10.0 s against 10.3 ms for a normal write). The observer now only
+  updates the in-memory blocklist.
+- **A revoked session could stay valid on a busy node** — a validation that missed the session cache
+  read the session from storage and cached it afterwards; a revocation that landed in between evicted
+  nothing (the entry was not cached yet), so the live session read before it was cached and every
+  later validation of its tokens succeeded after `POST /revoke` or a logout had answered `200`. A
+  cache fill is now discarded whenever a session write, eviction or cache flush happened since its
+  read.
+- **A failed control-cache reload no longer fails open** — a reload recorded the control epoch before
+  it re-read storage and ignored read errors, so one failed scan left that node enforcing stale
+  revocations, DPoP blocks and realm statuses until the next control was asserted. The epoch is now
+  recorded only after every cache reloaded, and a failed reload is retried with backoff.
+- **System-realm revocations and DPoP blocks survive a restart** — the start-up and cluster reloads
+  skipped the system realm, so a revoked system-realm token (for example the console's or the
+  bootstrap system token) and a DPoP key blocked there became valid again after a restart or the first
+  reload.
+- **Cluster: a control asserted on the leader could never bind on a follower** — the control epoch
+  that tells other nodes to reload their revocation list, DPoP blocklist, realm statuses and sessions
+  was bumped with a read followed by a write, so two concurrent bumps could write the same value or
+  move it backwards. A follower that had already reloaded at the higher value then ignored the later
+  control: a realm suspension, DPoP key block or session revocation stayed unenforced on that node
+  until its next restart. The bump is now one atomic increment (a new Raft command whose value is
+  computed at apply time), counted exactly once per log entry even when a node applies an entry twice
+  after a snapshot install, and a node whose epoch a snapshot install lowered re-bases on it so later
+  controls still bind.
+  **Breaking** for clusters: this release needs a **full-cluster restart**, not a rolling upgrade —
+  an older node cannot decode the new command, so replication to it stalls (and a new-build leader
+  over older followers commits nothing), and an older binary cannot read the new Raft log, so
+  rolling a node back needs a copy of its data directory taken before the upgrade. A new-build node
+  logs `peer cannot decode this node's Raft log` when it meets an older one. Single-node deployments
+  are unaffected. A cluster whose Raft logs were purged — any node past about 5,000 applied
+  entries, so nearly every production cluster — **cannot be upgraded in place at all**: releases up
+  to v1.6.11 kept the applied index and membership in memory only, so such a node cannot restart on
+  either build, and with every node stopped there is no leader to re-seed from — so stopping it is
+  one-way, and the only rollback is rebuilding an older-build cluster from the same backup. Rebuild
+  it from a backup instead: take a backup over HTTP from the running old cluster with a
+  system-realm token, stop every node, restore the backup **offline** with `hearth backup restore`
+  into one empty data directory (with the old cluster's `HEARTH_MASTER_KEY`), copy that directory
+  to every node, and only then start the new cluster. Do not restore into a cluster that has
+  already started: start-up creates every realm `hearth.yaml` declares with a new id and signing
+  key, and the restore then skips each archived realm as a duplicate and leaves it empty under its
+  name. The v1.6.11 HTTP export does not carry the system realm (operator-console accounts, system
+  tokens and grants, the system signing key), so export it separately, offline, with this
+  release's `hearth backup create --realm 00000000-0000-0000-0000-000000000000` after stopping the
+  nodes, and restore both archives. The rebuild does not bring back sessions (every user signs in
+  again) or the revoked-token list (a revoked, unexpired sessionless token validates again; rotate
+  the realm's signing key if that matters).
+  See the upgrading guide, *Cluster upgrades* and *Upgrading a cluster whose Raft logs were
+  purged*.
+- **Cluster: a node restarts after its Raft log was purged** — the state machine kept its applied
+  index in memory only, so on every restart openraft re-applied the log from index 0; once a
+  snapshot had let the log be purged (with the default policy, after about 5,000 writes) the node
+  could not start again (`Failed to get log entries, expected index: [0, N)`). The applied index and
+  membership are now persisted with every applied entry, in the same atomic storage write as its
+  effect, and by every snapshot install; a restart resumes from them and re-applies nothing. A
+  plain write to the control-epoch counter (from an older binary) now moves the counter's
+  replay-guard with it, so re-applying it can no longer move the epoch backwards. **Breaking** for
+  a node already upgraded in place from an earlier release whose log was purged: it cannot restart
+  (it never could); startup now says so. While the rest of the cluster has a leader, re-seed it —
+  stop it, move its data directory (including `raft.db`) aside, start it empty, and the leader
+  sends it a snapshot. When no node can start (the full-cluster upgrade of a purged cluster),
+  rebuild the cluster from a backup as described above; the startup error says both.
+- **Cluster: a corrupted control-epoch row is repaired, and a failed bump is alertable** — a
+  control-epoch row that did not decode made the state machine refuse every later increment, so
+  control propagation stopped for good with only a warning on each serving node. The state machine
+  now repairs the row, identically on every node, to the incrementing entry's log index (above
+  every value ever handed out) and the bump succeeds. A bump that cannot be persisted is logged at
+  `ERROR`, counted in the new `hearth_control_epoch_bump_failures_total` metric, and no longer
+  forgotten: the control's row was already written and the admin call succeeded, but other nodes
+  learn of a realm status change, DPoP key block or session deletion only through the epoch, so a
+  bump lost to (for example) a leader change between the two Raft proposals left them enforcing the
+  stale control indefinitely. The failed bump is now owed, and a background thread (not the
+  control-cache reloader, which keeps reloading meanwhile) retries it with backoff (100 ms doubling
+  to 5 s) while the node still leads. A bump lost because leadership moved can never be made by the
+  old leader — followers do not forward writes — so **every node that becomes the Raft leader now
+  bumps the control epoch once**, which makes every node (the new leader included) reload and
+  enforce controls committed under the previous leader; the old leader drops what it owed when
+  refused as `NotLeader`. The new `hearth_control_epoch_bumps_owed` gauge (summed over the process)
+  counts controls still waiting — alert on it staying above 0: a node that believes it leads cannot
+  commit; step it down or restart it (clustering guide).
+- **Cluster: deleting a user ends its sessions on every node** — the delete removed the user's
+  sessions and evicted them from the serving node's cache only; another node that had one cached
+  kept accepting the deleted user's tokens (a cache hit never reads storage) until something else
+  asserted a control. Deleting a user with sessions now publishes a control like `POST /revoke` of a
+  session does, so every node drops its cached copies.
+- **Argon2id client-secret verification is admission-controlled** — a caller-chosen or legacy client
+  secret (gRPC `RegisterClient`, `hearth.yaml` `applications[].client_secret`, migration import, or
+  any secret stored before generated secrets moved to SHA-256) was verified with Argon2id directly
+  on a request worker, outside the KDF gate that bounds password hashing. `hearth.yaml` client ids
+  are computable, so an unauthenticated caller could force one Argon2id run per request at `/token`,
+  `/as/par`, `/introspect`, `/revoke`, `/device_authorization`, their realm twins and gRPC. These verifications
+  now take a permit from the same gate (`security.password.kdf.max_in_flight`), waiting for it
+  asynchronously (no thread is held while waiting), and run on the blocking pool; when no permit frees
+  within `max_queue_wait` the request gets `503` with `Retry-After` (`kdf_overloaded`, `error_code`
+  `HEARTH_RATE_LIMITED`; gRPC `UNAVAILABLE`). A burst of such requests larger than the blocking pool is served or shed; it cannot
+  hang the runtime. Hearth-generated (SHA-256) secrets are unaffected. Rotate config-managed and
+  legacy clients to generated secrets to take them off this path entirely. The permit covers the
+  Argon2id verification only — token signing, issuance and storage for `client_credentials` run
+  after it is released — and an Argon2id verification never runs on a request worker, even when an
+  admin rotates a client to an Argon2id secret mid-request (the request is re-dispatched through
+  the gate). In a FAPI 2.0 Advanced realm a secret is refused before the gate (`401`, naming
+  `private_key_jwt`) for every client, so a saturated gate no longer answers `503` for an Argon2id
+  client and `401` for an unknown one — a client-existence oracle.
+- **`grant_type=client_credentials` no longer reveals which clients exist** — an unknown
+  `client_id` was refused with `invalid_client` and a client without the grant with
+  `unsupported_grant_type`, both before the secret was checked, so anyone could enumerate client ids
+  and their grants without a secret. The client is now authenticated first, with the same work on
+  every arm; until it proves its secret (or `private_key_jwt` assertion) every caller gets the
+  wrong-secret answer, and only an authenticated client learns that it lacks the grant.
+- **Revocation only affects the caller's own tokens (RFC 7009 §2.1)** — `POST /revoke`, its realm twin
+  and gRPC `Revoke` revoke a token only when it was issued to the authenticated client; any other token
+  is left untouched and the endpoint still answers `200`. A `private_key_jwt` client must present its
+  `client_assertion` at `/revoke`. Discovery now lists `private_key_jwt` for revocation (task 26.43).
+- **`private_key_jwt` replay markers expire** — each assertion used at `/token`, `/introspect` or
+  `/revoke` left a marker that was never removed, so storage grew without limit. Markers now expire at
+  the assertion's `exp` plus clock skew and the cleanup sweep deletes them. Checking and recording a
+  `jti` is now one atomic step, so two concurrent copies of one assertion cannot both be accepted.
+- **Backup restore is fail-closed on unauthenticated archives.** Outside dev mode a restore needs a
+  manifest signature that verifies against `security.backup.verify_key`. With no key configured,
+  `POST /admin/backup/restore` refuses with `400`, and `hearth backup restore` refuses unless
+  `--allow-unsigned` is passed. A configured key is authoritative. `--skip-verify` is refused whenever
+  a verify key is configured (the signature covers only the manifest, members only by checksum).
+  Restore, `backup sign` and `POST /admin/backup/restore` read the archive through one private,
+  unlinked copy, so the bytes imported are the bytes verified; restore needs free `$TMPDIR` space equal
+  to the compressed archive. **Breaking** for operators who restore unsigned archives.
+- **`dev-endpoints` is no longer a default cargo feature** — a plain `cargo build --release` or
+  `cargo install` no longer includes `POST /admin/bootstrap`, `/dev/seed-*`, `/dev/probe-user` or the
+  hard-coded dev admin password. Build with `--features dev-endpoints` (or `make dev`) for local
+  development. `hearth serve --dev` on a binary without the feature logs how to rebuild.
+- **Constant-time secret comparisons** — the PKCE `code_verifier` check, WebAuthn/passkey challenges,
+  refresh-token reuse detection, federation confirm-link and consent tickets, the Basic-vs-body
+  `client_secret` agreement check and audit-log HMAC chain verification now compare in constant time.
+- **Pushed Authorization Requests authenticate the client (RFC 9126 §2)** — `POST /as/par` and
+  `POST /realms/{realm}/as/par` accepted any `client_id` without authentication, so anyone could push
+  scopes, a `resource`, a redirect URI, a request object or a `prompt` in a confidential client's
+  name. The client now authenticates as at the token endpoint: `client_secret_basic` (body
+  `client_id` optional), `client_secret_post` or `private_key_jwt`. Only a public client may push on
+  its `client_id` alone, and a public client presenting a secret is refused. Failures are `401
+  invalid_client` with `WWW-Authenticate: Basic`; Basic and body credentials naming different clients,
+  or an assertion combined with a secret, are `400 invalid_request`; a request object must name the
+  authenticated client; a shed Argon2id secret check is `503` + `Retry-After`. **Breaking** for
+  confidential clients — including every FAPI 2.0 client — that push without authenticating.
+- **`/as/par` is rate-limited, and `/introspect` and `/revoke` limit before authenticating** — pushed
+  authorization requests (and the realm twin) had no rate limit, and `/introspect` and `/revoke`
+  checked `security.rate_limiting.token_per_minute` only after verifying the client, so a flood of
+  wrong secrets was never limited and every one was hashed. All three now apply the `/token`
+  per-client limit first, keyed on the claimed `client_id` (body, else Basic username) or, with none,
+  on the client IP; past it they answer `429` with `Retry-After`. `/as/par` has its own bucket of
+  that size, so a login (one push, one code exchange) is not charged twice against one budget.
+- **FAPI 2.0 clients authenticate with their registered JWKS, and a client with keys is never
+  public** — `private_key_jwt` assertions were verified only against the separate
+  `assertion_public_key`, never against the `jwks` that FAPI 2.0 registration requires, and "public"
+  meant "no stored secret". A FAPI 2.0 client that registered only a JWKS therefore could not
+  authenticate with its keys, and `/as/par`, the `authorization_code`, `refresh_token` and
+  `device_code` grants at `/token` (and their realm twins) accepted it on its `client_id` alone.
+  Assertions now verify against the client's inline `jwks` too (PS256, ES256 or EdDSA; key chosen by
+  `kid`; RS256 is not accepted), the `refresh_token`, token-exchange and `device_code` grants accept
+  `client_assertion`, and any client holding a JWKS or an assertion key and no secret must
+  authenticate with `private_key_jwt` everywhere (gRPC, which carries no assertion outside
+  `DeviceAuthorize`, refuses it). A
+  client registered with only a `jwks_uri` cannot authenticate (key sets are not fetched).
+  **Breaking** for a secretless client that registered a JWKS (for example only to sign request
+  objects) and used `/token`, `/as/par` or `/revoke` on its `client_id` alone. **Migrating such a
+  client** — pick one:
+  - *keep it public*: remove its JWKS (`PATCH /admin/applications/{id}` with `"jwks": null`, or drop
+    `jwks` from its `hearth.yaml` application). It then authenticates with `none` + PKCE again, but
+    can no longer sign request objects (JAR);
+  - *make it confidential*: have it send `client_assertion_type` +
+    `client_assertion` (a `private_key_jwt` assertion signed with a key from the same JWKS, `aud` =
+    the realm issuer) at `/token`, `/as/par`, `/revoke` and `/device_authorization`. Its JWKS must
+    then satisfy the client-JWKS rules below (public signing keys, `kid`s when more than one).
+  A FAPI 2.0 client has only the second option.
+- **FAPI 2.0 Advanced realms require `private_key_jwt`** (`docs/specs/OIDC.md` §2.1.2 item 6) —
+  `client_secret_basic`, `client_secret_post` and `none` were accepted. `/token`, `/as/par`,
+  `/introspect`, `/revoke` and their realm twins now answer `401 invalid_client` with
+  `error_description` naming `private_key_jwt`, decided from the realm before any secret is hashed;
+  gRPC client authentication is refused in such a realm. A FAPI 2.0 client that somehow holds a
+  secret is refused the same way once the secret verifies. **Breaking** for clients of an Advanced
+  realm that authenticate with a secret or as public clients.
+- **A FAPI 2.0 client is never public** — `profile: fapi2` in `hearth.yaml` (and an admin update to the
+  FAPI 2.0 profile) produced a client with no keys, which counted as public: `/as/par` and the
+  `/token` code exchange accepted it on its `client_id` alone. A FAPI 2.0 client now always requires
+  `private_key_jwt` (one stored without keys fails closed everywhere), and registration, update and
+  reconcile refuse a FAPI 2.0 client that holds a secret (a Hearth-generated one included) or no key
+  Hearth can verify an assertion with — an inline `jwks` or an assertion key; a `jwks_uri` alone is
+  refused since it is never fetched. `hearth.yaml` applications gain `jwks` (the public JWK Set,
+  inline), required with `profile: fapi2`; `hearth config validate` and startup refuse a `fapi2`
+  application without `jwks` or with a secret, and an unknown `profile` value (it used to be read
+  as `standard`). **Breaking** for a `profile: fapi2` application without keys in `hearth.yaml`: add
+  its `jwks`.
+- **Dynamic Client Registration registers clients that can authenticate** — `POST /register` always
+  minted a secret and answered `token_endpoint_auth_method: client_secret_basic`, the realm route
+  always registered a public client, and both ignored `jwks`; in a FAPI 2.0 Advanced realm (which
+  refuses secrets and public clients) every DCR client was unusable. Both routes now read `jwks`
+  (RFC 7591 JWK Set, validated) and `token_endpoint_auth_method` (`client_secret_basic`,
+  `client_secret_post`, `private_key_jwt`, `none`): registering `jwks` defaults to
+  `private_key_jwt` with no secret; the response states the method that works, returns
+  `client_secret` only when one was minted, and echoes `jwks`. A FAPI 2.0 Advanced realm refuses
+  anything but `private_key_jwt` with an inline `jwks` (`400 invalid_client_metadata`), as do
+  `jwks` with `jwks_uri`, `private_key_jwt` with only a `jwks_uri`, and invalid keys. Engine
+  refusals at DCR are now `invalid_client_metadata` instead of `invalid_request`. **Breaking** for
+  a `/realms/{realm}/register` client that sends `jwks` (it was registered public and the keys were
+  dropped; it is now `private_key_jwt`): send `token_endpoint_auth_method: none` to stay public.
+- **Admin client registration accepts `jwks` and `profile`** — `POST /admin/applications` and
+  `POST /clients` refused (`422`) the `jwks`, `jwks_uri`, `profile` and
+  `authorization_signed_response_alg` fields the FAPI 2.0 guide documented, and
+  `PATCH /admin/applications/{id}` ignored them, so no REST path could register a
+  `private_key_jwt` client. They are now accepted (`jwks` as an object or a JSON string; `null`
+  clears it on PATCH), as is `response_types: ["code"]`.
+- **FAPI 2.0 `private_key_jwt` assertions need a string `aud`** — an assertion was accepted when
+  its `aud` array merely contained the realm issuer. For a FAPI 2.0 client or any client of a realm
+  with a `fapi_profile`, `aud` must now be the issuer as a single string (FAPI 2.0 Security Profile
+  §5.3.2.1). Other clients may still send an array containing the issuer (RFC 7523 §3).
+  **Breaking** for FAPI clients that send `aud` as an array.
+- **Client JWKS are validated** — a client's `jwks` (used for `private_key_jwt` assertions and
+  signed request objects) was stored unparsed, and at verification a key was picked by `kid` alone:
+  an encryption key, a key whose `kty` did not match its algorithm (EdDSA checked only `crv`), or a
+  duplicated `kid` (the first match won) could be used, and private key material was accepted and
+  stored. Registration (admin, gRPC, dynamic), update, `hearth.yaml` and verification now require
+  public signing keys only: at most 8 keys / 16 KiB, no `d`/`p`/`q`/`dp`/`dq`/`qi`/`oth`/`k`
+  (and no `kty: oct`), `use: sig` and `key_ops` including `verify` when present, `kty`/`crv`/`alg`
+  consistent (OKP/Ed25519, EC/P-256, RSA), unique `kid`s required when there is more than one key.
+  **Breaking** for a client registered with such a JWKS: re-register its public keys.
+- **A junk `client_assertion` no longer skips the client secret** — at the `authorization_code`
+  exchange (`/token` and `/realms/{realm}/token`) a client that holds a secret could redeem its code
+  with `client_assertion=junk` (no `client_assertion_type`, or a wrong one) and no secret, and got
+  tokens. A request carrying either `client_assertion` or `client_assertion_type` now always means
+  `private_key_jwt`, on every grant at `/token`, `/as/par`, `/introspect`, `/revoke`,
+  `/device_authorization` and their realm twins, and at gRPC `DeviceAuthorize`: the type must be `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`, the assertion
+  must be present and must verify for the named client, else `401 invalid_client`; beside a secret
+  it is `400 invalid_request`. Grants that do not authenticate the client (step-up MFA, jwt-bearer,
+  magic link) verify a presented assertion instead of ignoring it. **Breaking** for a client that
+  sends assertion fields it does not mean to use.
+- **`private_key_jwt` clients can use the device flow (RFC 8628 §3.1)** — `POST /device_authorization`
+  rejected `client_assertion` as an unknown field (`400`) and `/realms/{realm}/device_authorization`
+  ignored it (`401`), so a FAPI 2.0 client (JWKS, no secret) could never start a device flow. Both
+  routes (form or JSON) now accept and verify `client_assertion_type` + `client_assertion`, and gRPC
+  `DeviceAuthorizationRequest` gains the optional `client_assertion_type` (4) and `client_assertion`
+  (5) fields (JSON names `client_assertion_type`, `client_assertion`), verified the same way. Poll at
+  `/token` with the assertion as well.
+- **A backup restore no longer turns authenticated OAuth clients into public clients** — the export
+  wrote each client's stored secret hash, assertion key, JWKS and security profile, but the restore
+  read none of them and re-created every client as a secretless Standard client. After a restore,
+  anyone who knew a `client_id` could push to `/as/par`, start `/device_authorization`, redeem codes
+  with PKCE alone and refresh without client binding — including for FAPI 2.0 clients. A restore now
+  writes every credential and security field back in the single write that re-creates the client:
+  the secret hash verbatim (`$argon2id$` or `$hearth-sha256$v=1$`; any other format is refused, and
+  so is an `$argon2id$` hash whose cost is above the password verifier's ceilings — `m` 1 GiB, `t`
+  64, `p` 16 — which client-secret verification now also refuses without running the KDF), the
+  assertion key and JWKS (re-validated), `jwks_uri`, the profile, and the consent, logout, CORS, MFA,
+  JARM and lifecycle settings. A client that cannot be restored as strong as its source — an
+  unverifiable credential, or no credential although its grants need one — is not restored and is
+  listed with the reason in the restore report. The record is validated before anything is
+  written: an overwrite-mode restore used to delete the live client first, so a refused record left
+  the realm with neither — the live client is now kept — and a dry run, which counted every client
+  as created, now reports the clients the real restore would refuse. If you restored with an
+  earlier 1.x build, restore again or re-register the affected clients (backup guide, *Client
+  credentials*).
+- **Auth0 and Keycloak imports no longer create public clients from confidential ones** — a
+  confidential application whose export carried no secret (Auth0 exports usually omit them; a
+  partial Keycloak export masks them as `**********`) was imported with no secret, i.e. as a public
+  client; a masked Keycloak secret was even hashed as the client's secret. Such a client is now
+  skipped with a warning in the migration report; register it in Hearth instead.
+- **A `hearth.yaml` application can no longer be silently turned into a public client** — reconcile
+  treats YAML as authoritative for `jwks`, and `PATCH /admin/applications/{id}` accepted `jwks`,
+  `assertion_public_key` and `profile` on YAML-declared applications, so keys added over REST to a
+  secretless YAML application vanished at the next restart or SIGHUP and it became public. Now:
+  - **Breaking** for automation: `PATCH /admin/applications/{id}` answers `409`
+    `HEARTH_YAML_MANAGED_RESOURCE` to a change of `jwks`, `assertion_public_key` or `profile` on a
+    YAML-declared application (as the admin console and runtime delete already did); change them in
+    `hearth.yaml`. Other fields are unaffected.
+  - Reconcile refuses a YAML change that would remove the last credential of an application that
+    has one (dropping the `jwks` or the FAPI 2.0 profile of a secretless application), logs a
+    warning, reports it (`apps_refused` on reload) and leaves the application unchanged.
+  - Reconcile creates an application in one write with its profile and JWKS. It used to write a
+    public Standard client first and apply them in a second write, so a failed second write (for
+    example a FAPI 2.0 application asking for RS256 ID tokens) left a public client behind.
+
+### Added
+- **`hearth backup restore --replace-system-signing-key`** — with `--mode overwrite`, also replaces
+  the live system realm's signing key with the archived one (signing every operator out). Refused
+  outside overwrite mode, and never reinstalls a key the target rotated away from.
+- **Per-client RS256 ID tokens (OIDC interop, task 26.55)** — a client can set
+  `id_token_signed_response_alg` to `RS256` or `EdDSA` on Dynamic Client Registration, admin REST,
+  gRPC (new field on `RegisterClientRequest`, `UpdateClientRequest`, `OAuthClient`), the admin console
+  and `hearth.yaml` (`applications.<slug>.id_token_signed_response_alg`). It defaults to `RS256` on
+  Dynamic Client Registration (OpenID Connect Registration §2) and to `EdDSA` everywhere else;
+  existing clients keep `EdDSA`. **Only ID tokens change**: access, refresh, logout and all other
+  tokens stay Ed25519, and neither Hearth nor the SDKs accept an RS256 token as an access token.
+  - An RSA-3072 realm key is created the first time a client in the realm selects RS256. It is sealed
+    under the KEK, published in the realm JWKS, rotated with the realm signing key under the same
+    grace window, and carried by backup/restore.
+  - Discovery advertises `id_token_signing_alg_values_supported: ["RS256", "EdDSA"]`.
+  - RS256 is refused under FAPI 2.0 (a `fapi2` client or a realm with a `fapi_profile`).
+- `hearth backup keygen`, `hearth backup sign`, `hearth backup create --sign-key`, and
+  `hearth backup restore --verify-key` / `--allow-unsigned`; `hearth backup inspect` shows whether an
+  archive is signed.
+- `POST /realms/{realm}/as/par` accepts `prompt`.
+
+### Changed
+- **`POST /admin/cluster/transfer-leadership` refuses what it cannot do (task 26.60)** — a body naming
+  `target_node_id` gets `422` and leadership does not move (openraft 0.9.25 cannot hand leadership to
+  a chosen node; before, the server stepped down anyway and answered `200`). Any other body field gets
+  `400`. Send no body, or `{}`, for a plain step-down.
+- **`prompt=none` never shows UI** (OIDC Core §3.1.2.1) — a silent request that needs a required
+  action gets `error=interaction_required`; on a realm that requires the SMS factor it gets
+  `error=login_required` and no text is sent.
+- Authorization error redirects (`consent_required`, `login_required`, `access_denied`, request
+  errors) use the request's `response_mode`, including a signed JARM `response` for `*.jwt` modes.
+- The Rust SDK adds `HearthClient::register_client_with_token`; the token-less `register_client` is
+  deprecated.
+
+### Deprecated
+- The `exact_target` field of the `POST /admin/cluster/transfer-leadership` `200` response is always
+  `false`. It stays for 1.x clients and will be removed in 2.0; read `new_leader_id` instead.
+
+### Removed
+- **Email reputation `domain_has_no_mx` flag** — the built-in adapter never performed a DNS/MX lookup,
+  so the flag was always `false`. It is removed from `EmailReputationVerdict`, and the docs now say no
+  MX lookup is performed. Registration behaviour does not change.
+
+### Fixed
+- **A REST `500` now leaves its cause in the server log** — the REST error mapping answered `500`
+  with a deliberately vague body and logged nothing, and the HTTP trace layer records only the
+  status, so a `500` could not be explained from the log. It is now logged at `ERROR`
+  (`request failed with an internal error`), as gRPC already logged `internal gRPC error`. The
+  response body is unchanged. Both lines log the error's kind and a PII-safe form of its message:
+  e-mail addresses (an SMTP rejection names the recipient), values after secret-looking keys
+  (`password=`, `token:`, `Authorization: Bearer …`) and long opaque tokens are masked.
+- **E-mail transports no longer log the recipient's address** — the SMTP, SendGrid, Postmark,
+  Mailgun and Mailtrap senders, and the production `log` transport, logged every recipient in full
+  at `INFO`/`WARN`. They now log it masked (`a***@example.com`). The dev-only `log` transport still
+  logs the whole message, so its links stay clickable.
+- **A large audit restore no longer freezes the node** — the audit import of a backup restore held
+  the realm's audit-chain lock for the whole import: a scan decoding every existing event, every
+  chunk's fsync, for archives up to 4 GiB. Audit writes to that realm run on the async runtime's
+  worker threads, so each one blocked a worker until the runtime stalled — token validation for
+  every realm included. The existing events are now read before the lock, the lock is taken per
+  512-event chunk for its hashing and write only (never across the fsync), and a live audit write
+  lands between chunks with the chain still verifying.
+- **A restore whose audit import fails part-way keeps the realm's chain anchor** — the anchor that
+  lets verification tell an erased audit log from one that never existed was recorded only after
+  the last chunk, so a failure after earlier chunks were written left those without it.
+- **Argon2id costs above the verifier ceilings are refused at start-up** — `auth.password_memory_cost`
+  / `password_time_cost` and their `realms.<name>` overrides had lower bounds only. Above the
+  ceilings every stored-hash verifier enforces (1 GiB memory, 64 passes), Hearth minted client
+  secrets and recovery codes that verification always refused. Such a value is now a configuration
+  error naming the ceiling, in every mode.
+- **Backup/restore brings back operator-console access** — `hearth backup restore` refused the
+  system realm (`operation not permitted on the system realm: import_realm`) and aborted, so an
+  unfiltered `hearth backup create` archive could not be restored without `--realm`, and a rebuilt
+  instance had no supported way back into `/ui/admin`. Restore now imports the system realm's
+  operator accounts (password hashes and second factors), roles, groups and role assignments, audit
+  log and signing key (with its retiring keys), with the same skip / merge / overwrite / dry-run
+  rules and validation as every other realm. Its signing key replaces the key of a system realm
+  that holds no operator (a fresh data directory), so pre-backup system tokens keep their `kid`;
+  a live system realm keeps its key unless `--mode overwrite --replace-system-signing-key`, and a
+  key the target rotated away from is never reinstalled (see *Security*). The same
+  `--allow-missing-signing-key` rule applies. `POST /admin/backup` by a system-realm caller holding
+  `hearth.admin` now includes the system realm (appended to a full export, or alone with
+  `?realm=system`); a tenant-scoped caller never exports it, and its restore of an archive carrying
+  it — or any realm but its own — is refused (`403`) before its first write, audit event included.
+  Organizations, invitations, agents, IdPs, federation links, SAML service providers and SAML or
+  RS256 ID-token keys in a system-realm archive are refused and reported, as the live API never
+  creates them there. `hearth backup restore` ends by saying how many operator accounts it
+  restored, kept or refused and what it did with the system signing key, and says plainly when
+  operator-console access did not come back; `--dry-run` reports the key outcome the real run
+  would have. HTTP exports from v1.6.11 and earlier do not contain the system realm.
+- **Restored audit history keeps a live realm's chain verifiable** — archived audit events were
+  appended with their original timestamps, so into any realm that already held newer events (every
+  HTTP system-realm restore, a CLI restore into a directory with operators, a tenant merged into a
+  live realm) they sorted before the events they chained after and `verify_integrity` failed; a
+  repeated restore duplicated every event. Restored events are now appended at the end of the
+  destination chain — keeping their timestamps only into an empty chain, otherwise stamped with the
+  restore time — each marked with `metadata.backup_restore.original_timestamp`, and an event the
+  realm already holds is skipped. `POST /admin/backup/restore` records its `BackupRestored` event
+  after the import.
+- `Authorization: Basic base64("<client_id>:")` (an empty password) now means "no secret" on every
+  endpoint. A public client identifying itself this way could redeem its code at `/token` but was
+  refused (`401`) at `/as/par` and `/revoke`, where the empty password read as a wrong secret.
+- A `503 kdf_overloaded` body (a password or client-secret hash shed by the KDF admission gate) now
+  carries `error_code: "HEARTH_RATE_LIMITED"`, like every other error body.
+- **SDK client registration authenticates (Rust, Python, PHP)** — Rust and Python sent `POST /clients`
+  with no `Authorization` header and with `name` instead of `client_name`. PHP's `registerClient`
+  accepts an RFC 7591 initial access token. Rust and Python `AdminClient` create/update now send the
+  server's wire shape (`client_name`, proto enum names), so `update_client` really renames.
+- The RFC 8707 `resource`, the PAR origin, the proved `amr` and `response_mode` are no longer dropped
+  on the JAR, PAR, SMS-challenge and consent paths. `response_mode=fragment` now returns the code in
+  the fragment.
+- PAR requests honour `prompt`.
+- Device-grant (RFC 8628) tokens are attributed to the polling client. Revoking an RFC 8693
+  exchanged token no longer ends the subject's session.
+- A read racing a memtable flush could briefly miss an acknowledged key; a flush now parks the full
+  memtable before it installs the empty one.
+- Compaction releases the deleted SST files it merged instead of keeping them mapped until the next
+  flush.
+- Backup manifest signatures verify reliably (the checksum map serialized in a random order).
+  `POST /admin/backup/restore` signature refusals return the documented `error` codes.
+- The OpenAPI entry for `POST /admin/cluster/transfer-leadership` lists its real responses.
+- The admin console's *New application* form now shows a confidential application's generated
+  secret once. It used to discard it (redirecting to a page that never showed a secret), so the new
+  client could not authenticate until its secret was regenerated. The form redirects to the
+  application's page, which shows the secret from a single-use, session-bound, five-minute
+  server-side reveal (never in a URL; `Cache-Control: no-store`), so reloading the page neither
+  registers a duplicate application nor shows the secret again. *Regenerate secret* works the same
+  way, so a reload no longer rotates the secret a second time. Behind a load balancer without
+  session affinity the page after the redirect may land on another node and show no secret;
+  regenerate it there.
+
+<!-- End of GA software-blocker fixes. -->
+
 ### Fixed
 - **The Go and TypeScript SDKs can authenticate client registration and authorization** — `POST /clients`
   and `POST /authorize` are admin operations, and neither SDK ever sent an `Authorization` header, so both
   answered `401` for every caller. `registerClient` / `RegisterClient` and `authorize` / `Authorize` now
   take an optional access token (a trailing optional argument in TypeScript, a variadic one in Go, so no
-  existing caller breaks). **The other five SDKs have the same gap and are not fixed here** — the Python
-  SDK's own docstring says registration "requires admin/realm token" while sending none. Only Go and
+  existing caller breaks). The Rust, Python and PHP SDKs had the same gap; their fix is in the
+  GA software-blocker entries at the top of this section. Only Go and
   TypeScript run integration tests against a live server, which is why only they exposed it.
 - **The container image builds again** — `src/protocol/web/openapi.rs` embeds the vendored Swagger UI
   assets with `include_str!()`, and the Dockerfile never copied `vendor/` into the build stage, so
@@ -2127,9 +2647,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   kept out of production by a runtime boolean alone, so the handlers and the hard-coded
   `admin@hearth.test` password shipped in every binary, and the *embedded* path — a library consumer
   who builds the router and serves it themselves — had no bind-address constraint at all, unlike
-  `hearth serve --dev`. Three gates now apply: a new `dev-endpoints` cargo feature (on by default
-  for local development, **off** in the shipped container image, which builds with
-  `--no-default-features`), the existing `dev_mode` route-table check, and a per-request guard that
+  `hearth serve --dev`. Three gates now apply: a new `dev-endpoints` cargo feature (opt-in: it is
+  **not** a default feature, so a plain `cargo build` and the shipped container image both leave it
+  out; see the GA software-blocker entries at the top of this section), the existing `dev_mode` route-table check, and a per-request guard that
   answers `404` to any peer that is not loopback. The refusal is byte-identical to a production
   build's, so a scanner cannot tell the two apart.
 - **SAML signature discovery is bounded to a direct child (§25.6)** — `<ds:Signature>`

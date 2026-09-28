@@ -13,7 +13,7 @@ make setup            # enables repo git hooks
 make tailwind-install # downloads Tailwind CLI (needed for CSS changes only)
 
 # Start the dev server
-make dev              # = cargo run -- serve --dev
+make dev              # = cargo run --features dev-endpoints -- serve --dev
 ```
 
 The server binds to `http://127.0.0.1:8420` with in-memory storage and the

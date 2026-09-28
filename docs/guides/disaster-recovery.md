@@ -123,6 +123,7 @@ This usually indicates one of:
 
    hearth backup restore \
      --input /backups/latest.hearth-backup \
+     --config /etc/hearth/hearth.yaml \
      --data-dir /var/lib/hearth/data-restored
 
    # Cut over only after the restore reports success.
@@ -157,7 +158,14 @@ This usually indicates one of:
    ```bash
    hearth backup create --data-dir /var/lib/hearth/data --output /tmp/post-recovery.hearth-backup
    hearth backup verify --input /tmp/post-recovery.hearth-backup
+   rm /tmp/post-recovery.hearth-backup
    ```
+
+   This archive is a checksum scan, not a restore point: it is unsigned, so
+   `hearth backup restore` refuses it outside dev mode. If you want a
+   post-recovery restore point, take a signed one into your backup directory
+   (`hearth backup create --sign-key /etc/hearth/backup-signing.pem --output
+   /backups/…`) — see [Signed archives](./backup.md#signed-archives).
 
 ---
 
@@ -399,6 +407,12 @@ The node re-joins the cluster, the leader detects that it is behind, and
 re-sends the snapshot. Phase 1 + Phase 2 run to completion; the marker
 is removed automatically.
 
+If the node's Raft log has been purged, this restart is refused instead
+(`this node's Raft log is purged through index N but its data directory
+holds no persisted applied state …`): Phase 1 removed the node's persisted
+applied index, and the log no longer holds the entries to rebuild from.
+Use the clean-slate path below.
+
 **Cluster is unavailable or you want a clean slate:**
 
 Wipe the data directory entirely and let the node stream a fresh snapshot on join:
@@ -468,6 +482,9 @@ rejoined empty.
    # the highest user/credential counts.
    ```
 
+   These archives are unsigned and only for `inspect`; restore refuses them.
+   The restorable copies are the signed backups in step 3.
+
    Sessions are **not** in the manifest, so this comparison cannot tell you
    which side served more logins — only which side holds more durable
    records. `hearth backup create` takes an exclusive lock on the data
@@ -479,10 +496,17 @@ rejoined empty.
    hearth backup create \
      --data-dir /var/lib/hearth/data \
      --include-audit \
+     --sign-key /etc/hearth/backup-signing.pem \
      --output /backups/divergence-$(hostname)-$(date +%s).hearth-backup
    ```
 
-   These backups are evidence — store them off-cluster.
+   These backups are evidence — store them off-cluster. Sign them as they are
+   taken: restore refuses an unsigned archive outside dev mode, and if you
+   later need to restore a losing node's data you should not have to fetch the
+   private signing key in the middle of an incident. If that key lives only on
+   a separate backup host, omit `--sign-key` here and run `hearth backup sign`
+   on each archive there before step 5 wipes anything
+   ([Signed archives](./backup.md#signed-archives)).
 
 4. **Bootstrap the authoritative node alone.** Edit its `hearth.yaml` to
    list only itself in `cluster.peers`, start it, and confirm it elects
@@ -587,6 +611,12 @@ tokens fail. Never use a window after a compromise.
    The response reports `"grace_period_secs":0` — the retired key is
    revoked. This is the correct call for an incident.
 
+   The rotation also records, in the same atomic write, every key it
+   retires or revokes. A later backup restore — even of an archive made
+   before the rotation, and even after the realm is deleted — refuses to
+   reinstall any of them, so restoring an old backup cannot undo the
+   revocation.
+
    For a **planned** rotation, ask for a window explicitly:
 
    ```bash
@@ -676,13 +706,23 @@ post-restore validation checklist appropriate for an incident.
    mkdir -p /var/lib/hearth/data
    hearth backup restore \
      --input /backups/latest.hearth-backup \
+     --config /etc/hearth/hearth.yaml \
      --data-dir /var/lib/hearth/data
    ```
 
    Exit code `0` means every record imported cleanly. Exit `1` means
    partial success — read the report carefully; some realms/users may be
-   missing. Exit `2` means the archive is unreadable; try the previous
-   backup.
+   missing. Exit `2` means the archive is unreadable or was refused; try the
+   previous backup.
+
+   Restore authenticates the archive first: its manifest signature must verify
+   against `security.backup.verify_key` (read from `--config`, or pass
+   `--verify-key`). An unsigned archive, a bad signature, or no configured key
+   is refused before anything is written — see
+   [Signed archives](./backup.md#signed-archives). In an incident, do **not**
+   reach for `--allow-unsigned` to get past a refusal: an archive that fails
+   authentication may be the attacker's. Use it only for an archive whose
+   origin you have established out of band.
 
 3. **Verify signing-key continuity.** Hearth's restore preserves the
    per-realm Ed25519 signing key (HEA-745). A token issued before backup
@@ -698,7 +738,44 @@ post-restore validation checklist appropriate for an incident.
    # They MUST match.
    ```
 
-4. **Run the test-restore drill checklist** (below) against the new
+4. **Confirm operator-console access.** The restore's last lines say what it
+   did with the **system realm** — the realm that holds every operator-console
+   account — based on what was actually imported:
+
+   - `System realm: N operator-console account(s) restored; …` — those
+     operators sign in at `/ui/admin/login` with their original passwords and
+     second factors (sessions are not restored, so everyone signs in again).
+     The line also says what happened to the system signing key; into an empty
+     data directory the archived key is installed, so system-realm tokens keep
+     their `kid`. Any operator reported as refused did **not** come back. Sign
+     in once now: the cluster endpoints (`/admin/cluster/*`) and every
+     cross-realm operation need a system-realm token.
+   - `System realm: this restore did NOT restore operator-console access — …`
+     — the archive carried the system realm but no operator came back from it
+     (each was already present and kept, or was refused). Existing operators
+     keep their current credentials; check the counts it prints.
+   - `This restore does not contain the system realm …` — the archive brought
+     back no operator account, and a restored store holds realms, so the
+     first-run setup URL is not issued. Restore the system realm from another
+     archive **before** you start the server: an unfiltered
+     `hearth backup create` (it includes the system realm), or a
+     `POST /admin/backup` made by a system-realm caller on this release or
+     later. HTTP exports from v1.6.11 and earlier never carried it. A second
+     restore into the same data directory adds it:
+
+     ```bash
+     hearth backup restore \
+       --input /backups/system-realm.hearth-backup \
+       --config /etc/hearth/hearth.yaml \
+       --data-dir /var/lib/hearth/data
+     ```
+
+   Tenant realms' own admins keep working against `/admin` with their realm's
+   `X-Realm-ID` either way. See
+   [Restoring the system realm](./backup.md#restoring-the-system-realm) for the
+   skip / merge / overwrite rules and who may restore it.
+
+5. **Run the test-restore drill checklist** (below) against the new
    deployment to confirm functional parity, then cut over traffic.
 
 ---
@@ -821,6 +898,7 @@ Run this drill quarterly. An untested backup is not a backup.
    ```bash
    hearth backup restore \
      --input /backups/latest.hearth-backup \
+     --config /etc/hearth/hearth.yaml \
      --data-dir "$DRILL_DIR" \
      | tee /tmp/restore-report.txt
    echo "exit: $?"
@@ -845,8 +923,11 @@ Run this drill quarterly. An untested backup is not a backup.
    sleep 5
    ```
 
-5. **Verify functional invariants.** All four MUST pass; any failure is
-   a backup integrity bug — file an issue immediately.
+5. **Verify functional invariants.** All of them MUST pass; any failure is
+   a backup integrity bug — file an issue immediately. Also read the restore
+   report: a client it lists as not restored was refused because its archived
+   record could not be restored as strong as its source (see
+   [Client credentials](backup.md#client-credentials)).
 
    - [ ] JWKS responds for every realm in the manifest:
      ```bash
@@ -880,6 +961,14 @@ Run this drill quarterly. An untested backup is not a backup.
      `X-Realm-ID` is required on `/admin` routes; omitting it returns `400`,
      which `-fsS` surfaces as a drill failure indistinguishable from a real
      backup-integrity bug. Use the UUID of the realm the client belongs to.
+   - [ ] The same client is still **refused without its secret** — a restore
+     that dropped the credential would turn it into a public client that
+     anyone knowing its `client_id` can act as:
+     ```bash
+     curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8080/oauth/token \
+       -d grant_type=client_credentials -d client_id=<id>
+     # expect 401
+     ```
 
 6. **Tear down and document.**
 

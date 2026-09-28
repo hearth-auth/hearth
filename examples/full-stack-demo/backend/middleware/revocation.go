@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -41,6 +42,8 @@ import (
 // performed in one browser tab is observable in another within seconds.
 type RevocationChecker struct {
 	introspectURL string
+	clientID      string
+	clientSecret  string
 	httpClient    *http.Client
 	ttl           time.Duration
 
@@ -60,11 +63,18 @@ type revEntry struct {
 
 // NewRevocationChecker returns a checker that introspects tokens at
 // introspectURL — Hearth's realm-scoped `POST /realms/{realm}/introspect`
-// endpoint, which requires no client credentials and returns `{"active": bool}`
-// — and caches each verdict for ttl. A ttl of 0 disables caching.
-func NewRevocationChecker(introspectURL string, ttl time.Duration) *RevocationChecker {
+// endpoint, which returns `{"active": bool}` — and caches each verdict for ttl.
+// A ttl of 0 disables caching.
+//
+// Introspection is confidential-clients-only: Hearth answers `401
+// invalid_client` to a caller that does not authenticate. clientID and
+// clientSecret are the resource server's OWN confidential client credentials
+// (sent as `client_secret_basic`), never the SPA's public client id.
+func NewRevocationChecker(introspectURL, clientID, clientSecret string, ttl time.Duration) *RevocationChecker {
 	return &RevocationChecker{
 		introspectURL: introspectURL,
+		clientID:      clientID,
+		clientSecret:  clientSecret,
 		httpClient:    &http.Client{Timeout: 5 * time.Second},
 		ttl:           ttl,
 		nowFunc:       time.Now,
@@ -116,6 +126,9 @@ func (r *RevocationChecker) introspect(ctx context.Context, rawToken string) (bo
 		return false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// client_secret_basic (RFC 6749 §2.3.1): both halves are form-urlencoded
+	// before being joined, so a secret containing ':' or '%' survives intact.
+	req.SetBasicAuth(url.QueryEscape(r.clientID), url.QueryEscape(r.clientSecret))
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {

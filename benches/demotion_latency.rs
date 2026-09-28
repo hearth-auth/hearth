@@ -3,7 +3,7 @@
 //! Measures p99 read latency across three phases of a hot-tier demotion cycle
 //! to confirm that eviction does not cause read-latency spikes:
 //!
-//! - **Pre-demotion** — hot tier at capacity; all reads are lock-free `ArcSwap` loads.
+//! - **Pre-demotion** — hot tier at capacity; all reads are lock-free `EpochCell` loads.
 //! - **During demotion** — interleaved writes force clock-sweep evictions; reads
 //!   that miss the hot tier fall through to the memtable.
 //! - **Post-demotion** — evicted entries re-promoted on first re-read; subsequent

@@ -104,7 +104,12 @@ pub async fn admin_app_detail(
         Ok(Some(app)) => render(&AppDetailTemplate {
             app,
             realm_name: target.0.name().to_string(),
-            client_secret: None,
+            // A secret this session's create or regenerate just minted is
+            // shown here, once (post/redirect/get; HTML is `no-store`).
+            client_secret: state
+                .secret_reveals
+                .take(&session.session_id, &client_id)
+                .map(|secret| secret.as_str().to_string()),
             chrome: true,
             active: "applications",
             user_email: Some(session.user_email.clone()),
@@ -151,31 +156,20 @@ pub async fn admin_app_regenerate_secret(
     {
         Ok(new_secret) => {
             audit_app_event(&state, &session, &target.0, &client_id, "update");
-            // Re-fetch the client to render the detail page with the new secret.
-            match state.identity.get_client(target.id(), &client_id) {
-                Ok(Some(app)) => render(&AppDetailTemplate {
-                    app,
-                    realm_name: target.0.name().to_string(),
-                    client_secret: Some(new_secret),
-                    chrome: true,
-                    active: "applications",
-                    user_email: Some(session.user_email.clone()),
-                    is_admin: true,
-                    flash: None,
-                    csrf: session.csrf.clone(),
-                    narrow: false,
-                    product_name: state.product_name.clone(),
-                    logo_url: state.logo_url.clone(),
-                    realm_theme_url: state.realm_theme_url(),
-                    inline_theme_css: state.inline_theme_css(),
-                }),
-                _ => Redirect::to(&format!(
-                    "/ui/admin/realms/{}/applications/{}",
-                    target.0.name(),
-                    client_id.as_uuid()
-                ))
-                .into_response(),
-            }
+            // Post/redirect/get: the application's page shows the new secret
+            // once, from the server-side reveal, so a reload cannot rotate it
+            // again.
+            state.secret_reveals.stash(
+                &session.session_id,
+                &client_id,
+                zeroize::Zeroizing::new(new_secret),
+            );
+            Redirect::to(&format!(
+                "/ui/admin/realms/{}/applications/{}",
+                target.0.name(),
+                client_id.as_uuid()
+            ))
+            .into_response()
         }
         Err(IdentityError::InvalidClient) => {
             super::handlers_common::not_found("Application not found")
@@ -218,6 +212,42 @@ fn audit_app_event(
 }
 
 // ---------------------------------------------------------------------------
+// ID-token signing algorithm (task 26.55)
+// ---------------------------------------------------------------------------
+
+/// Whether FAPI 2.0 applies to a client of `realm` with `profile`, which makes
+/// the engine refuse RS256 ID tokens for it: FAPI 2.0 Security Profile §5.4.1
+/// permits only PS256, ES256 and EdDSA.
+///
+/// The forms use this only to stop offering RS256. The engine makes the
+/// decision itself, with the same test, and the handlers render its
+/// [`IdentityError::FapiViolation`] as a form error, so a form that still
+/// offers RS256 gets a readable refusal.
+fn fapi_forbids_rs256(realm: &Realm, profile: crate::identity::ClientProfile) -> bool {
+    profile.is_fapi2() || realm.config().fapi_profile.is_some()
+}
+
+/// The ID-token algorithm an edit-form post changes a client to, if any.
+///
+/// The edit form always posts the radio's value, so getting the stored value
+/// back is no change, just as an omitted field is none on the REST and gRPC
+/// updates. Forwarding it anyway would re-validate a choice nobody made: an
+/// RS256 client whose realm has since turned on a `fapi_profile` could not be
+/// saved at all, even for an unrelated field. An empty value (no radio posted,
+/// as when the selected one is disabled) is no change either. `stored` is
+/// `None` when the client could not be read; the value is then forwarded and
+/// the engine answers for the client.
+fn changed_id_token_alg(
+    submitted: &str,
+    stored: Option<crate::identity::IdTokenSigningAlg>,
+) -> Option<String> {
+    if submitted.is_empty() || stored.is_some_and(|alg| alg.as_str() == submitted) {
+        return None;
+    }
+    Some(submitted.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Application create
 // ---------------------------------------------------------------------------
 
@@ -239,6 +269,10 @@ struct AppNewTemplate {
     form_declared_scopes: String,
     form_client_logo_url: String,
     form_access_token_authorization: String,
+    /// `"EdDSA"` or `"RS256"` — the client's ID-token signing algorithm.
+    form_id_token_signed_response_alg: String,
+    /// The realm has a `fapi_profile`, so RS256 is not offered.
+    fapi_forbids_rs256: bool,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -253,10 +287,10 @@ struct AppNewTemplate {
 }
 
 impl AppNewTemplate {
-    fn blank(realm_name: String, session: &super::auth::UiSession, state: &Arc<WebState>) -> Self {
+    fn blank(realm: &Realm, session: &super::auth::UiSession, state: &Arc<WebState>) -> Self {
         Self {
             error: None,
-            realm_name,
+            realm_name: realm.name().to_string(),
             form_client_name: String::new(),
             form_slug: String::new(),
             form_client_type: "public".to_string(),
@@ -270,6 +304,10 @@ impl AppNewTemplate {
             form_declared_scopes: String::new(),
             form_client_logo_url: String::new(),
             form_access_token_authorization: "embedded".to_string(),
+            // Hearth's administrative default; RS256 is opt-in (task 26.55).
+            form_id_token_signed_response_alg: "EdDSA".to_string(),
+            // The console registers standard-profile clients only.
+            fapi_forbids_rs256: fapi_forbids_rs256(realm, crate::identity::ClientProfile::Standard),
             chrome: true,
             active: "applications",
             user_email: Some(session.user_email.clone()),
@@ -292,11 +330,7 @@ pub async fn admin_app_create_form(
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
 ) -> Response {
-    render(&AppNewTemplate::blank(
-        target.0.name().to_string(),
-        &session,
-        &state,
-    ))
+    render(&AppNewTemplate::blank(&target.0, &session, &state))
 }
 
 #[derive(Debug, Deserialize)]
@@ -327,6 +361,10 @@ pub struct AppCreateForm {
     pub client_logo_url: String,
     #[serde(default)]
     pub access_token_authorization: String,
+    /// `"EdDSA"` or `"RS256"`; empty keeps the default (create) or the
+    /// current value (edit). The engine refuses anything else.
+    #[serde(default)]
+    pub id_token_signed_response_alg: String,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
 }
@@ -356,11 +394,11 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         grant_types.push("authorization_code".to_string());
     }
 
-    let client_secret = if form.client_type == "confidential" {
-        Some(uuid::Uuid::new_v4().to_string())
-    } else {
-        None
-    };
+    // A confidential client's secret is minted here, by Hearth: 256 CSPRNG
+    // bits (it used to be a 122-bit UUID v4), carried as a
+    // `GeneratedClientSecret` so the engine stores it in the fast format.
+    let generated_client_secret =
+        (form.client_type == "confidential").then(crate::identity::GeneratedClientSecret::generate);
 
     let trust_level = if form.trust_level == "first_party" {
         ClientTrustLevel::FirstParty
@@ -396,7 +434,8 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
     RegisterClientRequest {
         client_name: form.client_name.clone(),
         redirect_uris,
-        client_secret,
+        client_secret: None,
+        generated_client_secret,
         grant_types,
         require_consent: form.require_consent == "1",
         client_logo_url,
@@ -409,6 +448,8 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         jwks: None,
         jwks_uri: None,
         authorization_signed_response_alg: None,
+        id_token_signed_response_alg: (!form.id_token_signed_response_alg.is_empty())
+            .then(|| form.id_token_signed_response_alg.clone()),
         profile: crate::identity::ClientProfile::Standard,
         mfa_required: None,
     }
@@ -427,25 +468,35 @@ pub async fn admin_app_create_submit(
     }
 
     let req = parse_app_create_form(&form);
-    let client_secret = req.client_secret.clone();
     let realm_name = target.0.name().to_string();
 
     match state.identity.register_client(target.id(), &req) {
         Ok(client) => {
             audit_app_event(&state, &session, &target.0, client.client_id(), "create");
-            let secret_param = client_secret
-                .map(|_s| format!("?secret_shown=1"))
-                .unwrap_or_default();
+            // A confidential client's secret exists only in this request:
+            // storage keeps its hash. It is held server-side for this session
+            // and shown once by the page this redirect lands on — never in a
+            // URL, a redirect or a log. Post/redirect/get matters: answering
+            // this POST with the secret meant a reload re-submitted the form
+            // (the CSRF token is per session) and registered a duplicate.
+            if let Some(secret) = &req.generated_client_secret {
+                state.secret_reveals.stash(
+                    &session.session_id,
+                    client.client_id(),
+                    zeroize::Zeroizing::new(secret.expose().to_string()),
+                );
+            }
             Redirect::to(&format!(
-                "/ui/admin/realms/{}/applications/{}{}",
+                "/ui/admin/realms/{}/applications/{}",
                 realm_name,
                 client.client_id().as_uuid(),
-                secret_param,
             ))
             .into_response()
         }
-        Err(IdentityError::InvalidInput { reason }) => {
-            let mut tpl = AppNewTemplate::blank(realm_name, &session, &state);
+        // A FAPI refusal (RS256 in a realm with a `fapi_profile`, task 26.55)
+        // is the operator's to fix, like any invalid input: say why.
+        Err(IdentityError::InvalidInput { reason } | IdentityError::FapiViolation { reason }) => {
+            let mut tpl = AppNewTemplate::blank(&target.0, &session, &state);
             tpl.error = Some(reason);
             tpl.form_client_name = form.client_name.clone();
             tpl.form_slug = form.slug.clone();
@@ -460,11 +511,15 @@ pub async fn admin_app_create_submit(
             tpl.form_declared_scopes = form.declared_scopes.clone();
             tpl.form_client_logo_url = form.client_logo_url.clone();
             tpl.form_access_token_authorization = form.access_token_authorization.clone();
+            // No radio posted keeps the default rather than selecting none.
+            if !form.id_token_signed_response_alg.is_empty() {
+                tpl.form_id_token_signed_response_alg = form.id_token_signed_response_alg.clone();
+            }
             render(&tpl)
         }
         Err(e) => {
             tracing::warn!(error = %e, "register_client failed");
-            let mut tpl = AppNewTemplate::blank(realm_name, &session, &state);
+            let mut tpl = AppNewTemplate::blank(&target.0, &session, &state);
             tpl.error = Some("Unable to register application right now.".to_string());
             render(&tpl)
         }
@@ -493,6 +548,15 @@ struct AppEditTemplate {
     form_declared_scopes: String,
     form_client_logo_url: String,
     form_access_token_authorization: String,
+    /// `"EdDSA"` or `"RS256"` — the client's ID-token signing algorithm.
+    form_id_token_signed_response_alg: String,
+    /// FAPI 2.0 applies to the client (its profile or its realm's), so RS256
+    /// is not offered.
+    fapi_forbids_rs256: bool,
+    /// The client is stored as RS256 although FAPI 2.0 applies — its realm
+    /// turned a `fapi_profile` on after it registered — so the engine refuses
+    /// the grants that would issue it an ID token.
+    id_token_grants_refused: bool,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -509,7 +573,7 @@ struct AppEditTemplate {
 impl AppEditTemplate {
     fn from_client(
         app: OAuthClient,
-        realm_name: String,
+        realm: &Realm,
         session: &super::auth::UiSession,
         state: &Arc<WebState>,
     ) -> Self {
@@ -541,11 +605,15 @@ impl AppEditTemplate {
             _ => "embedded",
         }
         .to_string();
+        let id_token_alg = app.id_token_signed_response_alg();
+        let fapi_forbids_rs256 = fapi_forbids_rs256(realm, app.profile());
+        let id_token_grants_refused =
+            fapi_forbids_rs256 && id_token_alg == crate::identity::IdTokenSigningAlg::Rs256;
 
         Self {
             app,
             error: None,
-            realm_name,
+            realm_name: realm.name().to_string(),
             form_client_name: String::new(),
             form_slug: slug,
             form_redirect_uris: redirect_uris,
@@ -558,6 +626,9 @@ impl AppEditTemplate {
             form_declared_scopes: declared_scopes,
             form_client_logo_url: client_logo_url,
             form_access_token_authorization: access_token_authorization_mode,
+            form_id_token_signed_response_alg: id_token_alg.as_str().to_string(),
+            fapi_forbids_rs256,
+            id_token_grants_refused,
             chrome: true,
             active: "applications",
             user_email: Some(session.user_email.clone()),
@@ -601,8 +672,7 @@ pub async fn admin_app_edit_form(
                     secure,
                 );
             }
-            let realm_name = target.0.name().to_string();
-            let mut tpl = AppEditTemplate::from_client(app.clone(), realm_name, &session, &state);
+            let mut tpl = AppEditTemplate::from_client(app.clone(), &target.0, &session, &state);
             tpl.form_client_name = app.client_name().to_string();
             render(&tpl)
         }
@@ -640,6 +710,10 @@ pub struct AppEditForm {
     pub client_logo_url: String,
     #[serde(default)]
     pub access_token_authorization: String,
+    /// `"EdDSA"` or `"RS256"`; empty keeps the default (create) or the
+    /// current value (edit). The engine refuses anything else.
+    #[serde(default)]
+    pub id_token_signed_response_alg: String,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
 }
@@ -665,19 +739,22 @@ pub async fn admin_app_edit_submit(
         Err(_) => return super::handlers_common::not_found("Application not found"),
     };
 
-    if let Ok(Some(existing)) = state.identity.get_client(target.id(), &client_id) {
-        if existing.is_yaml_managed() {
-            return super::templates::redirect_with_flash(
-                &format!(
-                    "/ui/admin/realms/{}/applications/{}",
-                    target.0.name(),
-                    client_id.as_uuid()
-                ),
-                "This application is managed by hearth.yaml and cannot be edited via the UI.",
-                "error",
-                secure,
-            );
-        }
+    let existing = state
+        .identity
+        .get_client(target.id(), &client_id)
+        .ok()
+        .flatten();
+    if existing.as_ref().is_some_and(OAuthClient::is_yaml_managed) {
+        return super::templates::redirect_with_flash(
+            &format!(
+                "/ui/admin/realms/{}/applications/{}",
+                target.0.name(),
+                client_id.as_uuid()
+            ),
+            "This application is managed by hearth.yaml and cannot be edited via the UI.",
+            "error",
+            secure,
+        );
     }
 
     let redirect_uris: Vec<String> = form
@@ -757,7 +834,14 @@ pub async fn admin_app_edit_submit(
         assertion_public_key: None,
         access_token_authorization,
         authorization_signed_response_alg: None,
+        id_token_signed_response_alg: changed_id_token_alg(
+            &form.id_token_signed_response_alg,
+            existing
+                .as_ref()
+                .map(OAuthClient::id_token_signed_response_alg),
+        ),
         profile: None,
+        jwks: None,
         mfa_required: None,
     };
 
@@ -776,13 +860,20 @@ pub async fn admin_app_edit_submit(
         Err(IdentityError::InvalidClient) => {
             super::handlers_common::not_found("Application not found")
         }
-        Err(IdentityError::InvalidInput { reason }) => {
+        // A FAPI refusal (RS256 where FAPI 2.0 applies, task 26.55) is the
+        // operator's to fix, like any invalid input: say why.
+        Err(IdentityError::InvalidInput { reason } | IdentityError::FapiViolation { reason }) => {
             match state.identity.get_client(target.id(), &client_id) {
                 Ok(Some(app)) => {
-                    let mut tpl = AppEditTemplate::from_client(app, realm_name, &session, &state);
+                    let mut tpl = AppEditTemplate::from_client(app, &target.0, &session, &state);
                     tpl.error = Some(reason);
                     tpl.form_client_name = form.client_name.clone();
                     tpl.form_access_token_authorization = form.access_token_authorization.clone();
+                    // No radio posted keeps the stored value selected.
+                    if !form.id_token_signed_response_alg.is_empty() {
+                        tpl.form_id_token_signed_response_alg =
+                            form.id_token_signed_response_alg.clone();
+                    }
                     render(&tpl)
                 }
                 _ => super::handlers_common::server_error(),
@@ -842,5 +933,77 @@ pub async fn admin_app_delete(
             tracing::warn!(error = %e, "delete_client failed");
             super::handlers_common::server_error()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_form(body: &str) -> AppCreateForm {
+        serde_urlencoded::from_str(body).expect("create form parses")
+    }
+
+    /// Task 26.55: the console's ID-token algorithm radio reaches the engine
+    /// verbatim — the engine validates it — and an unset radio keeps the
+    /// administrative default (EdDSA) rather than inventing a value.
+    #[test]
+    fn create_form_carries_the_id_token_signing_algorithm() {
+        let base = "client_name=Console+App&redirect_uris=https%3A%2F%2Fapp.example.com%2Fcb";
+        let rs256 = parse_app_create_form(&create_form(&format!(
+            "{base}&id_token_signed_response_alg=RS256"
+        )));
+        assert_eq!(rs256.id_token_signed_response_alg.as_deref(), Some("RS256"));
+
+        let unset = parse_app_create_form(&create_form(base));
+        assert_eq!(unset.id_token_signed_response_alg, None);
+    }
+
+    /// Task 26.55: the edit form always posts the ID-token radio, so only a
+    /// value that differs from the stored one is a change. Re-posting the
+    /// stored RS256 must not reach the engine, which would refuse it once the
+    /// realm has a `fapi_profile`, and block an unrelated edit.
+    #[test]
+    fn edit_form_forwards_only_a_changed_id_token_algorithm() {
+        use crate::identity::IdTokenSigningAlg::{EdDsa, Rs256};
+
+        assert_eq!(changed_id_token_alg("RS256", Some(Rs256)), None);
+        assert_eq!(changed_id_token_alg("EdDSA", Some(EdDsa)), None);
+        assert_eq!(
+            changed_id_token_alg("RS256", Some(EdDsa)).as_deref(),
+            Some("RS256")
+        );
+        assert_eq!(
+            changed_id_token_alg("EdDSA", Some(Rs256)).as_deref(),
+            Some("EdDSA")
+        );
+        // No radio posted is no change.
+        assert_eq!(changed_id_token_alg("", Some(Rs256)), None);
+        // An unreadable client: forward, and let the engine answer for it,
+        // including a value it refuses.
+        assert_eq!(
+            changed_id_token_alg("HS256", None).as_deref(),
+            Some("HS256")
+        );
+    }
+
+    /// The console mints a confidential client's secret itself, so it must be
+    /// a [`crate::identity::GeneratedClientSecret`] — 256 CSPRNG bits, stored
+    /// as a fast SHA-256 digest — never a caller-chosen `client_secret` (which
+    /// the engine must store as Argon2id). The old code minted a UUID v4:
+    /// 122 bits, and on the Argon2id path.
+    #[test]
+    fn confidential_create_form_uses_a_generated_client_secret() {
+        let base = "client_name=Console+App&redirect_uris=https%3A%2F%2Fapp.example.com%2Fcb";
+        let conf = parse_app_create_form(&create_form(&format!("{base}&client_type=confidential")));
+        assert!(
+            conf.client_secret.is_none(),
+            "a console-minted secret must not travel as a caller-chosen one"
+        );
+        assert!(conf.generated_client_secret.is_some());
+
+        let public = parse_app_create_form(&create_form(&format!("{base}&client_type=public")));
+        assert!(public.client_secret.is_none());
+        assert!(public.generated_client_secret.is_none());
     }
 }

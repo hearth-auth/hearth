@@ -80,6 +80,12 @@ message RegisterClientRequest {
   // Trust level for this client.  Unspecified defaults to ThirdParty on the
   // DCR path.  The authenticated admin create path respects this field.
   optional ClientTrustLevel trust_level = 6;
+  // JWS algorithm for this client's ID tokens (OIDC Dynamic Client
+  // Registration 1.0 s2): "RS256" or "EdDSA"; anything else is rejected.
+  // Omitted means RS256 on the dynamic registration path (the OIDC default)
+  // and EdDSA on the authenticated admin path. Only ID tokens are affected;
+  // access and refresh tokens are always EdDSA.
+  optional string id_token_signed_response_alg = 7 [json_name = "id_token_signed_response_alg"];
 }
 
 // Request to update an existing OAuth 2.0 client.
@@ -90,6 +96,8 @@ message UpdateClientRequest {
   optional AccessTokenAuthorization access_token_authorization = 4;
   // Trust level override.  Omit to leave unchanged.
   optional ClientTrustLevel trust_level = 5;
+  // ID-token signing algorithm: "RS256" or "EdDSA". Omit to leave unchanged.
+  optional string id_token_signed_response_alg = 6 [json_name = "id_token_signed_response_alg"];
 }
 
 // A registered OAuth 2.0 client.
@@ -101,6 +109,8 @@ message OAuthClient {
   bool is_confidential = 5;
   repeated string grant_types = 6;
   AccessTokenAuthorization access_token_authorization = 7;
+  // The algorithm this client's ID tokens are signed with: "RS256" or "EdDSA".
+  string id_token_signed_response_alg = 8 [json_name = "id_token_signed_response_alg"];
 }
 
 // A cursor-based page of OAuth clients.
@@ -132,6 +142,14 @@ message DeviceAuthorizationRequest {
   // is preferred and takes precedence; this is the client_secret_post
   // fallback. Public clients omit it.
   optional string client_secret = 3;
+  // private_key_jwt client authentication (RFC 7523 s2.2, RFC 8628 s3.1):
+  // must be "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" when
+  // present. A request carrying either assertion field is authenticated by
+  // the assertion alone; combining it with a secret is refused.
+  optional string client_assertion_type = 4 [json_name = "client_assertion_type"];
+  // The signed client assertion JWT (RFC 7523 s2.2), `aud` = the realm
+  // issuer.
+  optional string client_assertion = 5 [json_name = "client_assertion"];
 }
 
 // Response from a device authorization request (RFC 8628 s3.2).

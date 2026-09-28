@@ -81,7 +81,7 @@ pub struct Budget {
 ///
 /// `journey_name` is the Goose transaction/request name (e.g. `"validate"`,
 /// `"session_lookup"`; the compound revoke sub-requests are `"revoke_mint"`,
-/// `"revoke"`, `"revoke_revalidate"`).
+/// `"revoke_precheck"`, `"revoke"`, `"revoke_revalidate"`).
 #[must_use]
 pub fn budget_for(journey_name: &str) -> Option<Budget> {
     let (engine, http) = match journey_name {
@@ -104,7 +104,8 @@ pub fn budget_for(journey_name: &str) -> Option<Budget> {
             SPEC_P99_ENGINE_TOKEN_ISSUANCE_US,
             HTTP_BUDGET_P99_ISSUANCE_US,
         ),
-        // revoke_mint / revoke / revoke_revalidate: compound, no atomic target.
+        // revoke_mint / revoke_precheck / revoke / revoke_revalidate: compound,
+        // no atomic target.
         _ => return None,
     };
     Some(Budget {

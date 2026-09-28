@@ -252,7 +252,8 @@ impl TestCluster {
             let storage_config = StorageConfig::dev(data_dir.clone());
             let storage =
                 Arc::new(EmbeddedStorageEngine::open(storage_config).expect("storage engine"));
-            let sm = HearthStateMachine::new(Arc::clone(&storage) as Arc<dyn StorageEngine>);
+            let sm = HearthStateMachine::new(Arc::clone(&storage) as Arc<dyn StorageEngine>)
+                .expect("state machine");
             let factory =
                 InMemoryNetworkFactory::new(id, Arc::clone(&registry), Arc::clone(&partitioned));
             let raft = openraft::Raft::<HearthRaftConfig>::new(
@@ -846,7 +847,8 @@ async fn simulation_rolling_restart_zero_errors() {
         let storage_config = StorageConfig::dev(cluster.nodes[restart_pos].data_dir.clone());
         let storage =
             Arc::new(EmbeddedStorageEngine::open(storage_config).expect("reopen storage"));
-        let sm = HearthStateMachine::new(Arc::clone(&storage) as Arc<dyn StorageEngine>);
+        let sm = HearthStateMachine::new(Arc::clone(&storage) as Arc<dyn StorageEngine>)
+            .expect("state machine");
         let factory = InMemoryNetworkFactory::new(
             restart_id,
             Arc::clone(&cluster.registry),
@@ -985,4 +987,120 @@ async fn simulation_snapshot_catchup_new_follower() {
             "AC-4 FAIL: token key={i} missing on cold node {cold_id} after snapshot catch-up"
         );
     }
+}
+
+// ── H1: restart after the log was purged ──────────────────────────────────────
+
+/// Given a cluster whose snapshot policy purges the Raft log (every 10
+/// entries, keeping none), when a follower is restarted in place, it comes
+/// back: it resumes from its persisted applied index instead of asking the log
+/// for index 0 (which the purge removed), and it does not re-count an
+/// increment it had already applied.
+///
+/// Before the applied state was persisted, the restart failed inside
+/// `Raft::new` ("Failed to get log entries, expected index: [0, N)") once the
+/// log had been purged — with the default policy, after about 5,000 writes.
+#[tokio::test]
+async fn simulation_restart_after_log_purge() {
+    let mut cluster = TestCluster::new(3, SnapshotPolicy::LogsSinceLast(10)).await;
+    let counter = b"counter".to_vec();
+    let increment = RaftCommand::IncrementU64 {
+        leader_timestamp: 0,
+        realm: cluster.realm.clone(),
+        key: counter.clone(),
+    };
+
+    let mut last_idx = 0;
+    let mut increments = 0_u64;
+    for i in 0u8..40 {
+        last_idx = cluster.write_kv(&[i], &[i]).await;
+        if i % 4 == 0 {
+            let leader = cluster.leader_idx().expect("leader");
+            last_idx = cluster.nodes[leader]
+                .raft()
+                .client_write(increment.clone())
+                .await
+                .expect("increment")
+                .log_id
+                .index;
+            increments += 1;
+        }
+    }
+    cluster
+        .wait_applied(last_idx, Duration::from_secs(10))
+        .await;
+
+    let leader = cluster.leader_idx().expect("leader");
+    let follower = (0..3).find(|&i| i != leader).expect("a follower");
+    // The follower's own snapshot policy purges its log too.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while cluster.nodes[follower]
+        .raft()
+        .metrics()
+        .borrow()
+        .purged
+        .is_none()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the follower never purged its log"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await; // AUDIT: justified-sleep: polling Raft metrics, no event-driven alternative
+    }
+
+    let restart_id = cluster.crash_node(follower).await;
+    let log_store = HearthLogStore::open(&cluster.nodes[follower].log_db_path).expect("reopen log");
+    let storage = Arc::new(
+        EmbeddedStorageEngine::open(StorageConfig::dev(cluster.nodes[follower].data_dir.clone()))
+            .expect("reopen storage"),
+    );
+    let sm = HearthStateMachine::new(Arc::clone(&storage) as Arc<dyn StorageEngine>)
+        .expect("state machine");
+    let factory = InMemoryNetworkFactory::new(
+        restart_id,
+        Arc::clone(&cluster.registry),
+        Arc::clone(&cluster.partitioned),
+    );
+    let restarted = openraft::Raft::<HearthRaftConfig>::new(
+        restart_id,
+        Arc::clone(&cluster.raft_config),
+        factory,
+        log_store,
+        sm,
+    )
+    .await
+    .expect("a follower whose log was purged must restart in place");
+    // Before it is reachable again (not yet registered), its applied index
+    // can only come from its own disk.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !restarted
+        .metrics()
+        .borrow()
+        .last_applied
+        .is_some_and(|l| l.index >= last_idx)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the restarted node resumes from its persisted applied index"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await; // AUDIT: justified-sleep: polling Raft metrics, no event-driven alternative
+    }
+    cluster.register(restart_id, restarted.clone());
+    cluster.restore_node(follower, restarted, Arc::clone(&storage));
+
+    // It keeps applying new entries after the restart.
+    let after = cluster.write_kv(b"after-restart", b"v").await;
+    cluster.wait_applied(after, Duration::from_secs(10)).await;
+    assert_eq!(
+        cluster.read_from(follower, b"after-restart"),
+        Some(b"v".to_vec())
+    );
+    for i in 0u8..40 {
+        assert_eq!(cluster.read_from(follower, &[i]), Some(vec![i]), "key {i}");
+    }
+    assert_eq!(
+        cluster.read_from(follower, &counter),
+        Some(increments.to_le_bytes().to_vec()),
+        "every increment counted exactly once across the restart"
+    );
 }

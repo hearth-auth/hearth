@@ -46,6 +46,7 @@
 //! add queue latency. The *calibrated production default* is refined by the
 //! C7/HEA-1875 saturation sweep.
 
+use std::cell::Cell;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -127,7 +128,7 @@ enum Pool {
 /// Cheap to clone conceptually via the process-global [`gate`]; typically there
 /// is exactly one instance for the whole server.
 pub struct KdfGate {
-    semaphore: Semaphore,
+    semaphore: std::sync::Arc<Semaphore>,
     max_queue_wait: Duration,
     retry_after: Duration,
     permits: usize,
@@ -174,7 +175,7 @@ impl KdfGate {
     fn build(config: KdfGateConfig, pool: Pool) -> Self {
         let permits = config.max_in_flight.max(1);
         Self {
-            semaphore: Semaphore::new(permits),
+            semaphore: std::sync::Arc::new(Semaphore::new(permits)),
             max_queue_wait: config.max_queue_wait,
             retry_after: config.retry_after,
             permits,
@@ -212,51 +213,154 @@ impl KdfGate {
     {
         let metrics = crate::metrics::metrics();
 
-        // Route in-flight / shed telemetry to this gate's pool so admin sheds
-        // are alertable and each `*_in_flight` gauge stays bounded by its own
-        // permit ceiling (HEA-1894).
-        let (in_flight, shed_total) = match self.pool {
-            Pool::Shared => (&metrics.kdf_in_flight, &metrics.kdf_shed_total),
-            Pool::Admin => (&metrics.kdf_admin_in_flight, &metrics.kdf_admin_shed_total),
-        };
-
         // Bounded wait for a permit. Past the budget we shed instead of queueing
-        // unboundedly — the crux of R1.
+        // unboundedly — the crux of R1. The wait is ASYNC: a waiter holds no
+        // blocking-pool thread and no worker, so any number of waiters can
+        // queue without starving the runtime, and the shed timer always runs.
         let wait_start = Instant::now();
-        let permit = match tokio::time::timeout(self.max_queue_wait, self.semaphore.acquire()).await
+        let permit = match tokio::time::timeout(
+            self.max_queue_wait,
+            std::sync::Arc::clone(&self.semaphore).acquire_owned(),
+        )
+        .await
         {
             Ok(Ok(permit)) => permit,
             // Semaphore closed — only happens on shutdown; treat as overload so
             // the caller sheds cleanly rather than panicking mid-auth.
-            Ok(Err(_closed)) => {
-                shed_total.inc();
-                return Err(KdfGateError::Overloaded {
-                    retry_after: self.retry_after,
-                });
-            }
-            Err(_elapsed) => {
-                shed_total.inc();
-                return Err(KdfGateError::Overloaded {
-                    retry_after: self.retry_after,
-                });
-            }
+            Ok(Err(_)) | Err(_) => return Err(self.shed()),
         };
         metrics
             .kdf_queue_wait_seconds
             .observe(wait_start.elapsed().as_secs_f64());
 
-        // Permit held for the duration of the compute; released on drop after
-        // the blocking task joins.
-        in_flight.inc();
+        // Permit and in-flight gauge are both RAII and live INSIDE the blocking
+        // task: they are released when the Argon2id run actually ends — on
+        // success, on panic, and when the caller is dropped mid-run (a
+        // disconnected client), which must neither leak the gauge nor free the
+        // permit while the run still holds its memory.
+        let in_flight = InFlight::enter(self, permit);
         let compute_start = Instant::now();
-        let result = tokio::task::spawn_blocking(f).await;
+        let result = tokio::task::spawn_blocking(move || {
+            let _in_flight = in_flight;
+            let _admitted = Admitted::enter();
+            f()
+        })
+        .await;
         metrics
             .kdf_compute_seconds
             .observe(compute_start.elapsed().as_secs_f64());
-        in_flight.dec();
-        drop(permit);
 
         result.map_err(KdfGateError::Join)
+    }
+
+    /// Runs `f` on the CALLING thread under a permit taken without waiting.
+    ///
+    /// For synchronous code that finds it must run Argon2id and has no way to
+    /// wait asynchronously (an engine method called directly rather than
+    /// through an async entry point that routes it via [`Self::run`]). It
+    /// NEVER waits: when no permit is free right now, the op is shed at once.
+    /// Waiting here would either block a runtime worker on a permit another
+    /// task must be polled to release, or — with `block_in_place` — consume a
+    /// blocking-pool thread per waiter, which deadlocks a runtime once the
+    /// waiters outnumber the pool. Taking a permit keeps the process-wide
+    /// `permits × memory` bound.
+    ///
+    /// Inside a closure this gate already admitted, `f` runs directly: taking a
+    /// second permit while holding one could exhaust the pool.
+    ///
+    /// # Errors
+    ///
+    /// [`KdfGateError::Overloaded`] when no permit is free (`f` did not run).
+    pub fn try_run_inline<F, T>(&self, f: F) -> Result<T, KdfGateError>
+    where
+        F: FnOnce() -> T,
+    {
+        if ADMITTED.get() {
+            return Ok(f());
+        }
+        let Ok(permit) = std::sync::Arc::clone(&self.semaphore).try_acquire_owned() else {
+            return Err(self.shed());
+        };
+        crate::metrics::metrics()
+            .kdf_queue_wait_seconds
+            .observe(0.0);
+        let _in_flight = InFlight::enter(self, permit);
+        let compute_start = Instant::now();
+        let out = {
+            let _admitted = Admitted::enter();
+            f()
+        };
+        crate::metrics::metrics()
+            .kdf_compute_seconds
+            .observe(compute_start.elapsed().as_secs_f64());
+        Ok(out)
+    }
+
+    /// Counts a shed on this gate's pool and builds the error.
+    fn shed(&self) -> KdfGateError {
+        let metrics = crate::metrics::metrics();
+        match self.pool {
+            Pool::Shared => metrics.kdf_shed_total.inc(),
+            Pool::Admin => metrics.kdf_admin_shed_total.inc(),
+        }
+        KdfGateError::Overloaded {
+            retry_after: self.retry_after,
+        }
+    }
+
+    /// This gate's in-flight gauge. Routed per pool so admin sheds are
+    /// alertable and each `*_in_flight` gauge stays bounded by its own permit
+    /// ceiling (HEA-1894).
+    fn in_flight_gauge(&self) -> &'static prometheus::Gauge {
+        let metrics = crate::metrics::metrics();
+        match self.pool {
+            Pool::Shared => &metrics.kdf_in_flight,
+            Pool::Admin => &metrics.kdf_admin_in_flight,
+        }
+    }
+}
+
+/// One admitted op: holds its permit and counts itself in the pool's
+/// in-flight gauge until dropped — on success, panic, or cancellation alike.
+struct InFlight {
+    gauge: &'static prometheus::Gauge,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl InFlight {
+    fn enter(gate: &KdfGate, permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        let gauge = gate.in_flight_gauge();
+        gauge.inc();
+        Self {
+            gauge,
+            _permit: permit,
+        }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.gauge.dec();
+    }
+}
+
+thread_local! {
+    /// Set while this thread runs a closure a [`KdfGate`] admitted.
+    static ADMITTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks the current thread as running an admitted KDF closure until dropped.
+struct Admitted(bool);
+
+impl Admitted {
+    fn enter() -> Self {
+        Self(ADMITTED.replace(true))
+    }
+}
+
+impl Drop for Admitted {
+    fn drop(&mut self) {
+        ADMITTED.set(self.0);
     }
 }
 
@@ -408,6 +512,121 @@ mod tests {
         );
         // A second sequential op also succeeds, proving the permit was freed.
         assert_eq!(gate.run(|| 1_u32 + 1).await.expect("admitted"), 2);
+    }
+
+    /// The synchronous path never waits: with the only permit held it sheds
+    /// at once, and the op does not run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn try_run_inline_sheds_at_once_when_no_permit_is_free() {
+        let gate = std::sync::Arc::new(KdfGate::new(KdfGateConfig {
+            max_in_flight: 1,
+            max_queue_wait: Duration::from_secs(30),
+            retry_after: Duration::from_secs(4),
+        }));
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let g = gate.clone();
+            tokio::spawn(async move {
+                g.run(move || {
+                    let _ = held_tx.send(());
+                    let _ = release_rx.recv_timeout(Duration::from_secs(30));
+                })
+                .await
+            })
+        };
+        held_rx.await.expect("holder admitted");
+
+        let started = Instant::now();
+        let mut ran = false;
+        let outcome = gate.try_run_inline(|| ran = true);
+        assert!(
+            matches!(outcome, Err(KdfGateError::Overloaded { retry_after }) if retry_after == Duration::from_secs(4)),
+            "no free permit must shed, got {outcome:?}"
+        );
+        assert!(!ran, "a shed op must not run");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the synchronous path must not wait out the 30 s queue budget"
+        );
+
+        release_tx.send(()).expect("release");
+        assert!(holder.await.expect("joins").is_ok());
+        assert_eq!(gate.try_run_inline(|| 9_u8).expect("admitted"), 9);
+        assert_eq!(gate.available_permits(), 1, "the inline permit is returned");
+    }
+
+    /// A panicking inline op releases its permit and its in-flight count.
+    /// (The first synchronous path decremented the gauge only after `f`
+    /// returned, so a panic leaked it for the life of the process.)
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn a_panicking_inline_op_releases_its_permit_and_gauge() {
+        let gate = KdfGate::new_admin(KdfGateConfig {
+            max_in_flight: 1,
+            max_queue_wait: Duration::from_millis(10),
+            retry_after: Duration::from_secs(1),
+        });
+        let before = crate::metrics::metrics().kdf_admin_in_flight.get();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = gate.try_run_inline(|| panic!("argon2 blew up"));
+        }));
+        assert!(panicked.is_err(), "the op's panic propagates");
+        assert_eq!(gate.available_permits(), 1, "permit returned after a panic");
+        assert_eq!(
+            crate::metrics::metrics().kdf_admin_in_flight.get(),
+            before,
+            "in-flight gauge restored after a panic"
+        );
+    }
+
+    /// A caller dropped mid-run (a disconnected client) keeps its permit until
+    /// the blocking op really ends, then releases permit and gauge.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::float_cmp)]
+    async fn a_cancelled_run_holds_its_permit_until_the_op_ends() {
+        let gate = std::sync::Arc::new(KdfGate::new_admin(KdfGateConfig {
+            max_in_flight: 1,
+            max_queue_wait: Duration::from_millis(10),
+            retry_after: Duration::from_secs(1),
+        }));
+        let before = crate::metrics::metrics().kdf_admin_in_flight.get();
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let caller = {
+            let g = gate.clone();
+            tokio::spawn(async move {
+                g.run(move || {
+                    let _ = held_tx.send(());
+                    let _ = release_rx.recv_timeout(Duration::from_secs(30));
+                    let _ = done_tx.send(());
+                })
+                .await
+            })
+        };
+        held_rx.await.expect("admitted");
+        caller.abort();
+        let _ = caller.await;
+        assert_eq!(
+            gate.available_permits(),
+            0,
+            "the op still runs, so its permit is still held"
+        );
+        release_tx.send(()).expect("release");
+        done_rx.await.expect("op finished");
+        // The guard drops right after the closure returns on the blocking
+        // thread; wait for that deterministically via the permit.
+        let permit = tokio::time::timeout(Duration::from_secs(5), gate.semaphore.acquire())
+            .await
+            .expect("permit released once the op ended")
+            .expect("open");
+        drop(permit);
+        assert_eq!(
+            crate::metrics::metrics().kdf_admin_in_flight.get(),
+            before,
+            "in-flight gauge restored after a cancelled caller"
+        );
     }
 
     /// A `max_in_flight` of 0 is clamped to 1 rather than producing a gate that

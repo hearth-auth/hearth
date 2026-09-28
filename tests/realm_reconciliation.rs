@@ -472,6 +472,81 @@ realms:
     );
 }
 
+/// Task 26.55 — `id_token_signed_response_alg` is a YAML application key.
+/// `RS256` lands on the client (provisioning the realm's RSA ID-token key),
+/// and YAML stays authoritative: dropping the key reverts the client to the
+/// EdDSA default on the next reconcile.
+#[tokio::test]
+async fn reconcile_applies_id_token_signed_response_alg_from_yaml() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("hearth.yaml");
+    let config_with = |alg_line: &str| {
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+realms:
+  rs256demo:
+    applications:
+      legacy-rp:
+        name: "Legacy RP"
+        redirect_uris:
+          - "https://rp.example.com/callback"
+        grant_types:
+          - authorization_code
+{alg_line}
+"#
+            ),
+        )
+        .expect("write config");
+        Config::from_file_as_dev(&path).expect("config must parse")
+    };
+    let find_client = || {
+        let realm = identity
+            .get_realm_by_name("rs256demo")
+            .expect("lookup realm")
+            .expect("realm exists");
+        let client = identity
+            .list_clients(realm.id(), &hearth::core::PageRequest::new(0, 10))
+            .expect("list clients")
+            .items
+            .into_iter()
+            .find(|c| c.client_name() == "Legacy RP")
+            .expect("client exists");
+        (realm, client)
+    };
+
+    let config = config_with("        id_token_signed_response_alg: RS256");
+    reconcile_realms(identity, harness.authz(), &config).expect("reconcile");
+    let (realm, client) = find_client();
+    assert_eq!(
+        client.id_token_signed_response_alg(),
+        hearth::identity::IdTokenSigningAlg::Rs256
+    );
+    assert_eq!(
+        identity
+            .realm_jwks(realm.id())
+            .expect("jwks")
+            .keys
+            .iter()
+            .filter(|k| k.kty == "RSA" && k.alg == "RS256")
+            .count(),
+        1,
+        "an RS256 application provisions and publishes the realm's RSA key"
+    );
+
+    let config = config_with("");
+    reconcile_realms(identity, harness.authz(), &config).expect("reconcile again");
+    let (_realm, client) = find_client();
+    assert_eq!(
+        client.id_token_signed_response_alg(),
+        hearth::identity::IdTokenSigningAlg::EdDsa,
+        "YAML is authoritative: without the key the client reverts to EdDSA"
+    );
+}
+
 /// Task 25.27 — `trust_asserted_email` must survive the YAML → `IdpConfig` hop.
 ///
 /// This repo has repeatedly shipped a config key that parsed, validated and
@@ -545,4 +620,74 @@ async fn reconcile_federation_carries_trust_asserted_email_to_the_idp() {
         "an omitted trust_asserted_email must default to false: turning it on \
          lets the upstream IdP claim any address in the realm"
     );
+}
+
+/// `profile: fapi2` in `hearth.yaml` used to set the profile on a client with
+/// no keys, which then counted as PUBLIC (`/as/par` accepted it on its
+/// `client_id` alone). A FAPI 2.0 application now declares its `jwks`, which
+/// reconcile stores, and one without keys is refused before startup.
+#[tokio::test]
+async fn reconcile_fapi2_application_carries_its_jwks() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("hearth.yaml");
+    let write = |app_lines: &str| {
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+realms:
+  fapidemo:
+    applications:
+      bank-rp:
+        name: "Bank RP"
+        redirect_uris:
+          - "https://rp.example.com/callback"
+        grant_types:
+          - authorization_code
+        profile: fapi2
+{app_lines}
+"#
+            ),
+        )
+        .expect("write config");
+        Config::from_file_as_dev(&path)
+    };
+
+    let err = write("").expect_err("a keyless fapi2 application must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("jwks"), "the refusal must name jwks: {msg}");
+
+    let config = write(
+        r"        jwks:
+          keys:
+            - kty: OKP
+              crv: Ed25519
+              kid: k1
+              alg: EdDSA
+              use: sig
+              x: 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+    )
+    .expect("fapi2 with an inline JWKS is valid");
+    reconcile_realms(identity, harness.authz(), &config).expect("reconcile");
+    let realm = identity
+        .get_realm_by_name("fapidemo")
+        .expect("lookup realm")
+        .expect("realm exists");
+    let client = identity
+        .list_clients(realm.id(), &hearth::core::PageRequest::new(0, 10))
+        .expect("list clients")
+        .items
+        .into_iter()
+        .find(|c| c.client_name() == "Bank RP")
+        .expect("client exists");
+    assert!(client.profile().is_fapi2());
+    let jwks: serde_json::Value =
+        serde_json::from_str(client.jwks().expect("the JWKS is stored")).expect("JSON");
+    assert_eq!(jwks["keys"][0]["kid"], "k1");
+    assert!(!client.is_public(), "a FAPI 2.0 client is never public");
+
+    // Idempotent: a second reconcile changes nothing and does not fail.
+    reconcile_realms(identity, harness.authz(), &config).expect("reconcile again");
 }

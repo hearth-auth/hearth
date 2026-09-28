@@ -7,6 +7,7 @@
 pub mod approval_notifier;
 pub mod claims_config;
 pub(crate) mod cleanup;
+pub mod client_auth;
 pub(crate) mod credentials;
 pub mod device_fingerprint;
 pub mod device_fp;
@@ -72,7 +73,8 @@ pub mod keys_test_helpers {
 
 pub use credentials::{
     hash_password, validate_argon2_cost, verify_password_with_pepper, CleartextPassword,
-    CredentialConfig, PepperConfig, PepperKey, StoredCredential, OWASP_ARGON2_MIN_MEMORY_KIB_T1,
+    CredentialConfig, PepperConfig, PepperKey, StoredCredential, ARGON2_MAX_MEMORY_KIB,
+    ARGON2_MAX_PARALLELISM, ARGON2_MAX_TIME_COST, OWASP_ARGON2_MIN_MEMORY_KIB_T1,
     OWASP_ARGON2_MIN_MEMORY_KIB_T2,
 };
 pub use email::{
@@ -80,6 +82,7 @@ pub use email::{
     MailgunEmailSender, MailtrapEmailSender, PostmarkEmailSender, SendgridEmailSender,
     SharedEmailSender, StubHttpTransport,
 };
+pub(crate) use engine::client_jwks::validate_client_jwks;
 pub use engine::cross_realm::{find_system_sourced_cross_realm_policies, SystemSourcedPolicy};
 pub use engine::{
     EmbeddedIdentityEngine, IdentityConfig, RateLimitConfig, SessionConfig, TokenIssuanceContext,
@@ -95,11 +98,12 @@ pub use oidc::{
     AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientProfile,
     ClientTrustLevel, CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
-    IntrospectionResponse, JarClaims, JwtBearerRequest, OAuthClient, OidcConfig,
-    OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse,
-    PushedAuthorizationRequest, PushedAuthorizationResponse, RefreshBindContext,
-    RegisterClientRequest, ResponseMode, StepUpMfaGrantRequest, TokenExchangeRequest,
-    TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest, UserInfoResponse,
+    GeneratedClientSecret, IdTokenSigningAlg, IntrospectionResponse, JarClaims, JwtBearerRequest,
+    OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest,
+    PasswordGrantResponse, PushedAuthorizationRequest, PushedAuthorizationResponse,
+    RefreshBindContext, RegisterClientRequest, ResponseMode, StepUpMfaGrantRequest,
+    TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
+    UserInfoResponse,
 };
 pub use session_version::{SessionVersionStore, SvDeltaEntry, SvDeltaResponse, SvSnapshotResponse};
 pub use sms::{
@@ -111,8 +115,10 @@ pub use step_up::{
 };
 pub use tokens::{
     decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
-    verify_token_signature, CnfClaim, IssueTokenRequest, Jwk, JwksDocument, JwtAssertionClaims,
-    SigningKey, TokenClaims, TokenConfig, TokenPair, REQUIRED_ACTION_TOKEN_TYPE,
+    verify_rs256_id_token_signature, verify_token_signature, CnfClaim, IssueTokenRequest, Jwk,
+    JwksDocument, JwtAssertionClaims, RsaIdTokenSigningKey, SigningKey, TokenClaims, TokenConfig,
+    TokenPair, REQUIRED_ACTION_TOKEN_TYPE, RSA_ID_TOKEN_MIN_MODULUS_BITS,
+    RSA_ID_TOKEN_MODULUS_BITS,
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
@@ -886,6 +892,12 @@ pub trait IdentityEngine: Send + Sync {
     /// Validates the client, redirect URI, and PKCE (required for public
     /// clients), then stores the parameters under a 90-second TTL.
     /// Returns a `request_uri` the client passes to `/authorize`.
+    ///
+    /// `request.client_id` is trusted as the pushing client: the caller MUST
+    /// have authenticated it first (RFC 9126 §2 — a confidential client with
+    /// the method it uses at the token endpoint, a public client by
+    /// `client_id`). A request object's `iss` and `client_id` are checked
+    /// against it here.
     fn push_authorization_request(
         &self,
         realm_id: &RealmId,
@@ -1387,10 +1399,48 @@ pub trait IdentityEngine: Send + Sync {
         client_secret: Option<&str>,
     ) -> Result<(), IdentityError>;
 
-    /// Updates an existing OAuth client's fields.
+    /// Authenticates a caller that MUST be a confidential client — the
+    /// token-introspection endpoint (RFC 7662 §2.1, task 26.43).
     ///
-    /// Only non-`None` fields in the request are applied.
+    /// Unlike [`authenticate_client`](Self::authenticate_client), a public
+    /// client is refused: its `client_id` is public by construction, so
+    /// accepting it alone would let anyone read token metadata. Only a client
+    /// with a stored secret hash that `client_secret` matches is accepted.
+    /// `private_key_jwt` clients authenticate through
+    /// [`verify_client_assertion`](Self::verify_client_assertion) instead.
+    ///
+    /// Returns `Err(IdentityError::InvalidClientSecret)` for every failure
+    /// (unknown, public, missing or wrong secret). The work done depends only
+    /// on the caller's input: a presented secret costs exactly one
+    /// verification on every arm, and no secret costs none, so response time
+    /// does not reveal whether a client exists or which type it is.
+    fn authenticate_confidential_client(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        client_secret: Option<&str>,
+    ) -> Result<(), IdentityError>;
+
+    /// Updates an existing OAuth client's fields — the runtime surfaces
+    /// (REST, gRPC, admin console).
+    ///
+    /// Only non-`None` fields in the request are applied. A change to the
+    /// credentials or security profile (`jwks`, `assertion_public_key`,
+    /// `profile`) of a `hearth.yaml`-managed client is refused with
+    /// [`IdentityError::YamlManagedResource`]: YAML is authoritative for those
+    /// fields, so the next reconcile would silently undo it — and undoing
+    /// runtime-added keys on a secretless client would make it public.
     fn update_client(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        request: &UpdateClientRequest,
+    ) -> Result<OAuthClient, IdentityError>;
+
+    /// Applies a `hearth.yaml` reconcile to an existing client. Only
+    /// configuration reconciliation calls this: it is [`Self::update_client`]
+    /// without the YAML-managed gate (the YAML is the source of the change).
+    fn update_client_from_config(
         &self,
         realm_id: &RealmId,
         client_id: &crate::core::ClientId,
@@ -1951,17 +2001,107 @@ pub trait IdentityEngine: Send + Sync {
         request: &ImportUserRequest,
     ) -> Result<User, IdentityError>;
 
-    /// Imports an OAuth 2.0 client from an external system.
+    /// Imports a user into the reserved system realm — the restore twin of
+    /// [`create_admin_user`](Self::create_admin_user).
     ///
-    /// Preserves the source-system client identifier if provided. The
-    /// supplied `client_secret` (if any) is hashed with Argon2id at
-    /// import time — the source system's hashed secret is not reusable
-    /// because Hearth's storage format requires Argon2id.
+    /// Applies exactly `import_user`'s validation; only the system-realm
+    /// guard is bypassed. This is the sole path by which a backup restore
+    /// writes an operator account. It performs no authorization: the caller
+    /// (the backup importer, driven by the CLI or by a system-realm HTTP
+    /// caller) is responsible for having established system-realm authority.
+    /// It does not grant any role; restored role assignments do.
+    fn import_admin_user(&self, request: &ImportUserRequest) -> Result<User, IdentityError>;
+
+    /// Installs a restored system-realm Ed25519 signing key, re-sealed under
+    /// **this** node's KEK.
+    ///
+    /// The system realm always exists — engine construction seeds it with a
+    /// fresh key — so its key cannot travel with an `import_realm` call the
+    /// way a tenant realm's does. Outcome:
+    ///
+    /// - [`ImportOutcome::Skipped`] when the archived key is already the
+    ///   active one, or when the system realm holds operator accounts and
+    ///   `overwrite` is `false`: a live system realm keeps the key its live
+    ///   tokens are signed with.
+    /// - [`ImportOutcome::Created`] when the system realm holds no user (the
+    ///   seeded state, whose key has signed nothing): the archived key
+    ///   replaces the seeded one, so tokens issued before the backup verify.
+    /// - [`ImportOutcome::Overwritten`] when `overwrite` replaced a live key.
+    ///   Tokens signed by the replaced key stop verifying at once.
+    ///
+    /// A replacement bumps the persisted key epoch and evicts every key cache,
+    /// as a rotation does. Material that does not load is refused.
+    fn import_system_realm_signing_key(
+        &self,
+        pkcs8: &[u8],
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Predicts, without writing anything, what
+    /// [`import_system_realm_signing_key`](Self::import_system_realm_signing_key)
+    /// would do with `pkcs8` and `overwrite` — the same outcome, or the same
+    /// refusal. A dry-run restore reports this rather than assuming the key
+    /// would be installed.
+    fn preview_system_realm_signing_key(
+        &self,
+        pkcs8: &[u8],
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Refuses, without writing anything, archived key material that a restore
+    /// would install as `realm_id`'s ACTIVE keys when the realm rotated away
+    /// from it: its kid is recorded retired (by a rotation, a revoking
+    /// rotation, or a restore that displaced it — the record outlives the
+    /// realm), or it is one of the realm's retiring keys. `signing_key_pkcs8`
+    /// is the Ed25519 key, `id_token_rsa_pkcs8` the RS256 ID-token key.
+    ///
+    /// A restore runs this before its first write, so a refusal leaves the
+    /// target untouched; the installing calls ([`import_realm`](Self::import_realm),
+    /// [`import_realm_id_token_rsa_key`](Self::import_realm_id_token_rsa_key))
+    /// refuse the same keys themselves.
+    ///
+    /// # Errors
+    /// [`IdentityError::InvalidInput`] for a rotated-away key; a decode error
+    /// for material that does not load.
+    fn check_archived_realm_keys(
+        &self,
+        realm_id: &RealmId,
+        signing_key_pkcs8: Option<&[u8]>,
+        id_token_rsa_pkcs8: Option<&[u8]>,
+    ) -> Result<(), IdentityError>;
+
+    /// Imports an OAuth 2.0 client: from an external system, a Hearth
+    /// backup, or `hearth.yaml` reconciliation.
+    ///
+    /// Preserves the source-system client identifier if provided. A supplied
+    /// plaintext `client_secret` is hashed with Argon2id; a supplied
+    /// `client_secret_hash` (a Hearth backup) is validated and stored
+    /// verbatim. Every credential and security field (secret, assertion key,
+    /// JWKS, profile, …) is validated as a registration validates it and
+    /// written in the single write that creates the client.
     fn import_client(
         &self,
         realm_id: &RealmId,
         request: &ImportClientRequest,
     ) -> Result<OAuthClient, IdentityError>;
+
+    /// Runs every validation [`import_client`](Self::import_client) applies
+    /// to `request`, without writing anything and without checking whether a
+    /// client with its id already exists.
+    ///
+    /// A backup restore calls it before an overwrite deletes the live client
+    /// (so a record that would be refused never costs the live one) and in a
+    /// dry run (so the report lists what the real restore would refuse).
+    /// `import_client` builds its client with the same code, so the two can
+    /// never disagree. For an RS256 client it also loads the realm's RSA
+    /// ID-token key, so a stored key that will not unwrap or decode is refused
+    /// here rather than after an overwrite deleted the live client (a realm
+    /// with no key yet is not provisioned by the validation).
+    fn validate_import_client(
+        &self,
+        realm_id: &RealmId,
+        request: &ImportClientRequest,
+    ) -> Result<(), IdentityError>;
 
     /// Bulk-seeds synthetic demo users for the large-scale demo seeder.
     ///
@@ -2534,6 +2674,50 @@ pub trait IdentityEngine: Send + Sync {
     /// them to an archive. Used exclusively by the backup exporter.
     fn export_realm_signing_key_pkcs8(&self, realm_id: &RealmId) -> Result<Vec<u8>, IdentityError>;
 
+    /// Returns the realm's RS256 ID-token signing key as plaintext PKCS#8, or
+    /// `None` when no client in the realm has ever selected RS256 (task 26.55).
+    ///
+    /// Unsealed for the same reason as
+    /// [`export_realm_saml_key`](Self::export_realm_saml_key): the destination's
+    /// KEK is a different key. The caller MUST encrypt the bytes before they
+    /// leave the process. Used exclusively by the backup exporter.
+    fn export_realm_id_token_rsa_key(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, IdentityError>;
+
+    /// Installs a restored RS256 ID-token signing key, re-sealed under **this**
+    /// node's KEK, so every ID token it signed before the backup still verifies
+    /// against the restored realm's JWKS.
+    ///
+    /// Refuses material that is not an RSA private key of at least 2048 bits,
+    /// so an unusable key fails the restore instead of the first RS256 login
+    /// after it. An existing key is kept unless `overwrite`.
+    fn import_realm_id_token_rsa_key(
+        &self,
+        realm_id: &RealmId,
+        pkcs8: &[u8],
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns the realm's retiring RS256 ID-token keys still inside their
+    /// rotation grace window, as plaintext PKCS#8 — the RS256 twin of
+    /// [`export_retiring_signing_keys`](Self::export_retiring_signing_keys).
+    fn export_retiring_id_token_rsa_keys(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<RetiringSigningKeyExport>, IdentityError>;
+
+    /// Re-installs one retiring RS256 ID-token key under its original `kid`
+    /// and **absolute** deadline, re-sealed under this node's KEK. Returns
+    /// [`ImportOutcome::Skipped`] when the deadline has already passed.
+    fn import_retiring_id_token_rsa_key(
+        &self,
+        realm_id: &RealmId,
+        key: &RetiringSigningKeyExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
     /// Returns the underlying storage engine's backup-consistency barrier, or
     /// `None` if snapshot isolation is unavailable (HEA-2167).
     ///
@@ -2610,15 +2794,23 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Verifies an SMS OTP previously issued by `issue_sms_otp`.
     ///
+    /// `phone` is the number the caller expects the code to have been sent
+    /// to — the challenged user's own verified number, or the number being
+    /// enrolled. The code verifies only if it was issued to that same number,
+    /// so a genuine nonce + code obtained for one phone cannot prove
+    /// possession of another. Never pass a number taken from the request
+    /// when a stored one exists.
+    ///
     /// Loads the pending record, checks expiry and attempt count, increments
     /// attempts, verifies HMAC in constant time via `ring::hmac::verify`.
     /// On success deletes the record (replay prevention). Returns
     /// `InvalidSmsOtp` for any failure (not-found, expired, wrong code,
-    /// exhausted).
+    /// wrong recipient, exhausted).
     fn verify_sms_otp(
         &self,
         realm_id: &RealmId,
         nonce: &str,
+        phone: &str,
         candidate_code: &str,
         otp_hmac_key_bytes: &[u8],
         now_unix_ts: u64,
@@ -2645,15 +2837,20 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Verifies an Email OTP previously issued by `issue_email_otp`.
     ///
+    /// `email` is the address the caller expects the code to have been sent
+    /// to (the challenged user's own address). The code verifies only if it
+    /// was issued to that same address — see [`Self::verify_sms_otp`].
+    ///
     /// Loads the pending record, checks expiry and attempt count, increments
     /// attempts, verifies HMAC in constant time via `ring::hmac::verify`.
     /// On success deletes the record (replay prevention). Returns
     /// `InvalidEmailOtp` for any failure (not-found, expired, wrong code,
-    /// exhausted).
+    /// wrong recipient, exhausted).
     fn verify_email_otp(
         &self,
         realm_id: &RealmId,
         nonce: &str,
+        email: &str,
         candidate_code: &str,
         otp_hmac_key_bytes: &[u8],
         now_unix_ts: u64,

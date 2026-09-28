@@ -18,9 +18,9 @@ use crate::identity::error::IdentityError;
 use crate::identity::keys;
 use crate::identity::oidc::{
     ApplicationStatus, AuthorizationRequest, AuthorizationResponse, BackchannelTarget,
-    CodeChallengeMethod, FrontchannelTarget, OAuthClient, OidcDiscoveryDocument, OidcTokenResponse,
-    RegisterClientRequest, ResponseMode, RpLogoutRequest, RpLogoutResult, StoredAuthorizationCode,
-    StoredDeviceCode, StoredGrantFamily, TokenExchangeRequest,
+    ClientProfile, CodeChallengeMethod, FrontchannelTarget, OAuthClient, OidcDiscoveryDocument,
+    OidcTokenResponse, RegisterClientRequest, ResponseMode, RpLogoutRequest, RpLogoutResult,
+    StoredAuthorizationCode, StoredDeviceCode, StoredGrantFamily, TokenExchangeRequest,
 };
 use crate::identity::tokens::{self, Audience, LogoutTokenClaims, TokenClaims};
 use crate::identity::types::{
@@ -174,10 +174,23 @@ impl EmbeddedIdentityEngine {
             request.grant_types.clone()
         };
 
-        let mut client = if let Some(ref secret) = request.client_secret {
-            // Confidential client — hash the secret with Argon2id
-            let secret_hash =
-                credentials::hash_raw_secret(secret.as_bytes(), &self.config.credential)?;
+        let secret_hash = match (&request.client_secret, &request.generated_client_secret) {
+            (Some(_), Some(_)) => {
+                return Err(IdentityError::InvalidInput {
+                    reason: "client_secret and generated_client_secret are mutually exclusive"
+                        .to_string(),
+                });
+            }
+            // A caller-chosen secret has unknown entropy: Argon2id.
+            (Some(secret), None) => Some(credentials::hash_raw_secret(
+                secret.as_bytes(),
+                &self.config.credential,
+            )?),
+            // A Hearth-generated secret carries 256 CSPRNG bits: fast SHA-256.
+            (None, Some(generated)) => Some(credentials::hash_generated_client_secret(generated)),
+            (None, None) => None,
+        };
+        let mut client = if let Some(secret_hash) = secret_hash {
             OAuthClient::new_confidential(
                 client_id.clone(),
                 client_name,
@@ -213,6 +226,9 @@ impl EmbeddedIdentityEngine {
         client.set_declared_scopes(request.declared_scopes.clone());
         client.set_consent_spans_orgs(request.consent_spans_orgs);
         client.set_access_token_authorization(request.access_token_authorization);
+        if let Some(jwks) = request.jwks.as_deref() {
+            Self::check_client_jwks(jwks)?;
+        }
         client.set_jwks(request.jwks.clone());
         client.set_jwks_uri(request.jwks_uri.clone());
         if let Some(ref alg) = request.authorization_signed_response_alg {
@@ -225,33 +241,29 @@ impl EmbeddedIdentityEngine {
             }
             client.set_authorization_signed_response_alg(Some(alg.clone()));
         }
-
-        // FAPI 2.0 registration constraints.
-        if request.profile.is_fapi2() {
-            // FAPI2 clients must not use client_secret — private_key_jwt only.
-            if request.client_secret.is_some() {
-                return Err(IdentityError::FapiViolation {
-                    reason: "FAPI 2.0 clients must not use client_secret; \
-                             register with jwks or jwks_uri for private_key_jwt authentication"
-                        .to_string(),
-                });
-            }
-            // FAPI2 clients must have a registered JWKS (inline or by URI).
-            if request.jwks.is_none() && request.jwks_uri.is_none() {
-                return Err(IdentityError::FapiViolation {
-                    reason: "FAPI 2.0 clients must register a JWKS (jwks or jwks_uri) \
-                             for private_key_jwt client authentication"
-                        .to_string(),
-                });
-            }
-        }
         client.set_profile(request.profile);
+        // FAPI 2.0 registration constraints: private_key_jwt only, with keys
+        // Hearth can verify (FAPI 2.0 Security Profile §5.3.2.1).
+        Self::check_fapi2_client_keys(&client)?;
         if request.mfa_required.is_some() {
             client.set_mfa_required(request.mfa_required);
         }
         if !request.cors_origins.is_empty() {
             client.set_cors_origins(request.cors_origins.clone());
         }
+
+        // ID-token signing algorithm (task 26.55). `None` is the administrative
+        // default, EdDSA; both Dynamic Client Registration handlers resolve an
+        // omitted value to RS256 (OIDC Registration §2) — EdDSA in a FAPI
+        // realm — before reaching here. Resolved last among the validations and
+        // persisted explicitly; RS256 is refused under FAPI 2.0 (§5.4.1) and
+        // otherwise provisions the realm's RSA key before the client exists.
+        let fapi = request.profile.is_fapi2() || self.realm_enforces_fapi(realm_id)?;
+        client.set_id_token_signed_response_alg(self.resolve_client_id_token_alg(
+            realm_id,
+            request.id_token_signed_response_alg.as_deref(),
+            fapi,
+        )?);
 
         // Serialize and persist
         let client_bytes =
@@ -637,16 +649,11 @@ impl EmbeddedIdentityEngine {
         // 10. JARM — if a JWT response mode was requested OR the client enforces JARM,
         //     sign the response. When the client has `authorization_signed_response_alg`
         //     set, any plain response_mode is upgraded to query.jwt (JARM §4).
-        let response_mode = if client.authorization_signed_response_alg().is_some() {
-            let requested = request.response_mode.clone().unwrap_or(ResponseMode::Query);
-            if requested.is_jarm() {
-                requested
-            } else {
-                ResponseMode::QueryJwt
-            }
-        } else {
-            request.response_mode.clone().unwrap_or(ResponseMode::Query)
-        };
+        //     The web layer's error redirects use the same rule.
+        let response_mode = ResponseMode::effective(
+            request.response_mode.as_ref(),
+            client.authorization_signed_response_alg().is_some(),
+        );
         if response_mode.is_jarm() {
             let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
             let now_secs = self.clock.now().as_micros() / 1_000_000;
@@ -684,6 +691,9 @@ impl EmbeddedIdentityEngine {
             ));
         }
 
+        // A plain mode is `query` or `fragment`. `fragment` is advertised in
+        // discovery and accepted above, but the response used to be built as
+        // `query` regardless, so the code always travelled in the query string.
         Ok(AuthorizationResponse::new(
             raw_code,
             request.state.clone(),
@@ -691,7 +701,8 @@ impl EmbeddedIdentityEngine {
             // 22.3: the JAR-effective, registration-validated URI — never the
             // caller's outer `redirect_uri`, which a JAR may have overridden.
             request.redirect_uri.clone(),
-        ))
+        )
+        .with_plain_response_mode(response_mode))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -762,17 +773,17 @@ impl EmbeddedIdentityEngine {
         }
 
         // 6b. Authenticate the client if a private_key_jwt assertion was provided.
-        // If no assertion is supplied, we must still block private_key_jwt-only clients
-        // (those with an assertion_public_key but no client_secret_hash) from silently
-        // bypassing client authentication.
-        const PRIVATE_KEY_JWT_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
-        if request.client_assertion_type.as_deref() == Some(PRIVATE_KEY_JWT_TYPE) {
-            let assertion = request.client_assertion.as_deref().ok_or_else(|| {
-                IdentityError::InvalidClientAssertion {
-                    reason: "client_assertion is required when client_assertion_type is set"
-                        .to_string(),
-                }
-            })?;
+        // A request carrying EITHER assertion field attempted private_key_jwt: a
+        // wrong or missing type, or a type with no assertion, is refused here
+        // rather than read as "no assertion" (which let a secret-holding client
+        // redeem its code with a junk assertion and no secret). If no assertion
+        // is supplied, we must still block private_key_jwt-only clients
+        // (those with an assertion_public_key but no client_secret_hash) from
+        // silently bypassing client authentication.
+        if let Some(assertion) = crate::identity::client_auth::presented_client_assertion(
+            request.client_assertion_type.as_deref(),
+            request.client_assertion.as_deref(),
+        )? {
             self.verify_client_assertion(realm_id, &request.client_id, assertion)?;
         } else {
             // No assertion presented — reject if the client is registered for private_key_jwt
@@ -785,9 +796,7 @@ impl EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?
             {
                 if let Ok(client) = serde_json::from_slice::<OAuthClient>(&client_bytes) {
-                    if client.assertion_public_key().is_some()
-                        && client.client_secret_hash().is_none()
-                    {
+                    if client.requires_client_assertion() {
                         return Err(IdentityError::InvalidClientAssertion {
                             reason: "client_assertion is required for private_key_jwt clients"
                                 .to_string(),
@@ -806,9 +815,9 @@ impl EmbeddedIdentityEngine {
                     reason: "code_verifier is required when code_challenge was used".to_string(),
                 })?;
 
-            // Compute S256: BASE64URL(SHA256(code_verifier))
-            let computed_challenge = Self::pkce_s256_challenge(verifier);
-            if computed_challenge != *challenge {
+            // Compute S256: BASE64URL(SHA256(code_verifier)) and compare in
+            // constant time.
+            if !Self::pkce_s256_verifier_matches(verifier, challenge) {
                 return Err(IdentityError::InvalidGrant {
                     reason: "PKCE code_verifier does not match code_challenge".to_string(),
                 });
@@ -925,6 +934,14 @@ impl EmbeddedIdentityEngine {
 
         // 9. (Code already consumed atomically in step 3 — no further write needed.)
 
+        // 9b. Resolve the key this client's ID token is signed with — Ed25519,
+        //     or the realm's RSA key for a client that registered RS256 (task
+        //     26.55) — before any side effect, so a key failure refuses the
+        //     grant rather than leaving a session behind it.
+        let signing_key = self.get_signing_key_or_default(realm_id);
+        let id_token_signer =
+            self.id_token_signer(realm_id, Some(&client), std::sync::Arc::clone(&signing_key))?;
+
         // 10. Create a session for the user (OAuth code exchange — no browser context).
         //     The MFA proof is inherited: an authorization code is only minted by
         //     `/authorize`, which requires a live UI session, and that session
@@ -941,9 +958,9 @@ impl EmbeddedIdentityEngine {
         // 11. Create grant family for refresh token rotation
         let family_id = uuid::Uuid::new_v4().to_string();
 
-        // 12. Issue tokens with family ID
+        // 12. Issue tokens with family ID. Access and refresh tokens are always
+        //     Ed25519, whatever the client's ID-token algorithm.
         let iat = now.as_micros() / 1_000_000;
-        let signing_key = self.get_signing_key_or_default(realm_id);
 
         // Apply per-realm token TTL overrides.
         let (access_ttl_secs, refresh_ttl_secs) = self.effective_token_ttl_secs(realm_id);
@@ -1119,8 +1136,8 @@ impl EmbeddedIdentityEngine {
             sv: None,
         };
         let id_token =
-            signing_key
-                .issue_token(&id_token_claims)
+            id_token_signer
+                .sign(&id_token_claims)
                 .map_err(|e| IdentityError::SigningError {
                     reason: format!("failed to issue ID token: {e}"),
                 })?;
@@ -1377,52 +1394,62 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::oidc::ClientCredentialsRequest,
     ) -> Result<crate::identity::oidc::ClientCredentialsResponse, IdentityError> {
-        // 1. Load the client
+        // 1. Load the client — absence is not reported yet.
         let client_key = keys::encode_oauth_client(&request.client_id);
-        let client_bytes = self
+        let existing: Option<OAuthClient> = self
             .storage
             .get(realm_id, &client_key)
             .map_err(Self::storage_err)?
-            .ok_or(IdentityError::InvalidClient)?;
-        let client: OAuthClient =
-            serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
+            .map(|bytes| {
+                serde_json::from_slice::<OAuthClient>(&bytes).map_err(|e| {
+                    IdentityError::Serialization {
+                        reason: e.to_string(),
+                    }
+                })
+            })
+            .transpose()?;
 
-        // 2. Verify this client supports client_credentials grant
+        // 2. Authenticate the client BEFORE saying anything about it. An
+        // unknown client and a client without this grant used to be refused
+        // (`InvalidClient`, `UnsupportedGrantType`) before any secret check,
+        // which told an unauthenticated caller whether a client id exists and
+        // which grants it has. Every arm now does the same work — one
+        // verification of the presented secret, against a dummy when there is
+        // no stored hash (22.25) — and gets one answer until it proves the
+        // secret. A presented assertion field means private_key_jwt: it is
+        // verified — or, malformed, refused — and never falls through to the
+        // secret check.
+        if let Some(assertion) = crate::identity::client_auth::presented_client_assertion(
+            request.client_assertion_type.as_deref(),
+            request.client_assertion.as_deref(),
+        )? {
+            self.verify_client_assertion(realm_id, &request.client_id, assertion)?;
+        } else {
+            self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;
+            let secret = request
+                .client_secret
+                .as_deref()
+                .ok_or(IdentityError::InvalidClientSecret)?;
+            let stored_hash = existing.as_ref().and_then(OAuthClient::client_secret_hash);
+            if !Self::verify_presented_client_secret(stored_hash, secret)? {
+                return Err(IdentityError::InvalidClientSecret);
+            }
+            if let Some(client) = existing.as_ref() {
+                Self::refuse_secret_for_fapi2_client(client)?;
+            }
+        }
+        // A verified assertion or secret implies the client exists; the check
+        // stays for the type system and costs nothing.
+        let Some(client) = existing else {
+            return Err(IdentityError::InvalidClientSecret);
+        };
+
+        // 3. Only an authenticated client learns that it lacks the grant.
         if !client
             .grant_types()
             .contains(&"client_credentials".to_string())
         {
             return Err(IdentityError::UnsupportedGrantType);
-        }
-
-        // 3. Authenticate client: private_key_jwt takes precedence over client_secret
-        const PRIVATE_KEY_JWT_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
-        if request.client_assertion_type.as_deref() == Some(PRIVATE_KEY_JWT_TYPE) {
-            let assertion = request.client_assertion.as_deref().ok_or_else(|| {
-                IdentityError::InvalidClientAssertion {
-                    reason: "client_assertion is required when client_assertion_type is set"
-                        .to_string(),
-                }
-            })?;
-            self.verify_client_assertion(realm_id, &request.client_id, assertion)?;
-        } else {
-            let secret = request
-                .client_secret
-                .as_deref()
-                .ok_or(IdentityError::InvalidClientSecret)?;
-            // 22.25 (audit 2026-08-28 §4.25#3): a presented secret costs one
-            // Argon2id verification whatever the client turns out to be. A
-            // client with no stored hash used to return before hashing, so the
-            // response time told the caller the client's type.
-            if !self.verify_presented_client_secret(
-                realm_id,
-                client.client_secret_hash(),
-                secret,
-            )? {
-                return Err(IdentityError::InvalidClientSecret);
-            }
         }
 
         self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
@@ -1682,25 +1709,7 @@ impl EmbeddedIdentityEngine {
                 reason: e.to_string(),
             })?;
 
-        let pk_b64 =
-            client
-                .assertion_public_key()
-                .ok_or_else(|| IdentityError::InvalidClientAssertion {
-                    reason: "no assertion public key registered for this client".to_string(),
-                })?;
-        let pk_bytes =
-            URL_SAFE_NO_PAD
-                .decode(pk_b64)
-                .map_err(|_| IdentityError::InvalidClientAssertion {
-                    reason: "client has an invalid assertion public key".to_string(),
-                })?;
-
-        // Verify EdDSA signature — rejects alg:none, HMAC, RSA, etc.
-        let claims = tokens::verify_assertion_signature(assertion, &pk_bytes).map_err(|_| {
-            IdentityError::InvalidClientAssertion {
-                reason: "assertion signature verification failed".to_string(),
-            }
-        })?;
+        let claims = Self::verify_client_assertion_signature(&client, assertion)?;
 
         // iss MUST equal client_id (RFC 7523 §3)
         if claims.iss != client_id.to_string() {
@@ -1733,9 +1742,20 @@ impl EmbeddedIdentityEngine {
             });
         }
 
-        // aud MUST contain this realm's token endpoint URL
+        // aud MUST name this realm's issuer. Under FAPI 2.0 — a FAPI 2.0
+        // client, or any client of a realm with a `fapi_profile` — it must BE
+        // the issuer, as a single string (FAPI 2.0 Security Profile
+        // §5.3.2.1); elsewhere RFC 7523 §3 lets the issuer be one value of an
+        // array.
         let expected_aud = self.realm_issuer_url(realm_id);
-        if !claims.aud.contains(&expected_aud) {
+        let aud_ok = match &claims.aud {
+            crate::identity::tokens::Audience::Single(aud) => *aud == expected_aud,
+            multi @ crate::identity::tokens::Audience::Multi(_) => {
+                !(client.profile().is_fapi2() || self.realm_enforces_fapi(realm_id)?)
+                    && multi.contains(&expected_aud)
+            }
+        };
+        if !aud_ok {
             return Err(IdentityError::InvalidClientAssertion {
                 reason: "aud claim does not match the token endpoint issuer".to_string(),
             });
@@ -1752,22 +1772,110 @@ impl EmbeddedIdentityEngine {
             })?;
 
         // JTI replay protection — each JTI may only be used once per realm.
+        //
+        // The marker stores the instant after which the assertion can no
+        // longer verify anywhere (`exp` + clock skew, 8-byte LE i64 Unix
+        // seconds) so `cleanup::sweep_client_assertion_jtis` can reclaim it,
+        // exactly like the JAR, DPoP and nonce sentinels. This runs once per
+        // assertion-authenticated request at `/token`, `/introspect` and
+        // `/revoke`; a marker with no expiry leaked one row per request for
+        // the life of the realm. `exp` is already capped at
+        // `MAX_ASSERTION_LIFETIME_SECS` above, so no marker outlives
+        // now + 5 min + skew.
+        //
+        // `put_if_absent` is atomic (Raft-routed in cluster mode), so two
+        // concurrent presentations of one assertion cannot both pass. Any
+        // existing marker refuses — including one past its expiry that the
+        // sweep has not reached yet, which only ever refuses a *new*
+        // assertion reusing an old `jti`.
         let jti_key = keys::encode_client_assertion_jti(jti);
-        if self
+        let marker_expires_at = claims.exp.saturating_add(CLOCK_SKEW_SECS);
+        let fresh = self
             .storage
-            .get(realm_id, &jti_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
+            .put_if_absent(realm_id, &jti_key, &marker_expires_at.to_le_bytes())
+            .map_err(Self::storage_err)?;
+        if !fresh {
             return Err(IdentityError::InvalidClientAssertion {
                 reason: "assertion jti has already been used (replay)".to_string(),
             });
         }
-        self.storage
-            .put(realm_id, &jti_key, b"1")
-            .map_err(Self::storage_err)?;
 
         Ok(())
+    }
+
+    /// Verifies a `private_key_jwt` assertion's signature with the keys the
+    /// client registered and returns its claims (not yet validated).
+    ///
+    /// Two key sources, tried in order:
+    ///
+    /// 1. the dedicated `assertion_public_key` (raw Ed25519, `alg` EdDSA);
+    /// 2. the client's registered `jwks` — the keys FAPI 2.0 registration
+    ///    requires — with the key chosen by the JWS `kid` (or the only key) and
+    ///    `alg` one of PS256, ES256, EdDSA (FAPI 2.0 Security Profile §5.4).
+    ///
+    /// A client registered with only a `jwks_uri` cannot be verified: Hearth
+    /// does not fetch client key sets, so such a client must register its keys
+    /// inline.
+    fn verify_client_assertion_signature(
+        client: &OAuthClient,
+        assertion: &str,
+    ) -> Result<crate::identity::tokens::JwtAssertionClaims, IdentityError> {
+        let refused = |reason: &str| IdentityError::InvalidClientAssertion {
+            reason: reason.to_string(),
+        };
+        if client.assertion_public_key().is_none() && client.jwks().is_none() {
+            return Err(refused(if client.jwks_uri().is_some() {
+                "the client registered only a jwks_uri, which is not fetched; register its keys \
+                 inline as jwks"
+            } else {
+                "no assertion public key or jwks registered for this client"
+            }));
+        }
+
+        if let Some(pk_b64) = client.assertion_public_key() {
+            let pk_bytes = URL_SAFE_NO_PAD
+                .decode(pk_b64)
+                .map_err(|_| refused("client has an invalid assertion public key"))?;
+            // EdDSA only — rejects alg:none, HMAC, RSA, etc.
+            if let Ok(claims) = tokens::verify_assertion_signature(assertion, &pk_bytes) {
+                return Ok(claims);
+            }
+            if client.jwks().is_none() {
+                return Err(refused("assertion signature verification failed"));
+            }
+        }
+
+        let Some(jwks) = client.jwks() else {
+            return Err(refused("assertion signature verification failed"));
+        };
+        #[derive(serde::Deserialize)]
+        struct AssertionHeader {
+            alg: String,
+            #[serde(default)]
+            kid: Option<String>,
+        }
+        let parts: Vec<&str> = assertion.split('.').collect();
+        let [header_b64, payload_b64, signature_b64] = parts.as_slice() else {
+            return Err(refused("malformed assertion"));
+        };
+        let header: AssertionHeader = URL_SAFE_NO_PAD
+            .decode(header_b64)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .ok_or_else(|| refused("invalid assertion header"))?;
+        super::client_jwks::verify_with_client_jwks(
+            [header_b64, payload_b64, signature_b64],
+            &header.alg,
+            header.kid.as_deref(),
+            jwks,
+            super::client_jwks::CLIENT_ASSERTION_ALGS,
+        )
+        .map_err(|_| refused("assertion signature verification failed"))?;
+        URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .ok_or_else(|| refused("invalid assertion claims"))
     }
 
     pub(super) fn verify_jar_inner(
@@ -1776,7 +1884,6 @@ impl EmbeddedIdentityEngine {
         client_id: &crate::core::ClientId,
         request_jwt: &str,
     ) -> Result<crate::identity::oidc::JarClaims, IdentityError> {
-        use crate::identity::federation::oidc as fed_oidc;
         use crate::identity::oidc::JarClaims;
 
         #[derive(serde::Deserialize)]
@@ -1835,182 +1942,16 @@ impl EmbeddedIdentityEngine {
             reason: "client has no registered jwks for JAR verification".to_string(),
         })?;
 
-        // 4. Parse the JWKS and select the matching key.
-        #[derive(serde::Deserialize)]
-        struct JwksContainer {
-            keys: Vec<fed_oidc::Jwk>,
-        }
-        let jwks: JwksContainer =
-            serde_json::from_str(jwks_json).map_err(|_| IdentityError::InvalidJar {
-                reason: "client jwks is not valid JSON".to_string(),
-            })?;
-
-        let kid = header.kid.as_deref();
-        let selected = if let Some(k) = kid {
-            jwks.keys.iter().find(|j| j.kid.as_deref() == Some(k))
-        } else if jwks.keys.len() == 1 {
-            jwks.keys.first()
-        } else {
-            None
-        }
-        .ok_or_else(|| IdentityError::InvalidJar {
-            reason: "no matching key found in client jwks".to_string(),
-        })?;
-
-        // 5. Verify signature based on key type.
-        match alg {
-            "EdDSA" => {
-                if selected.crv.as_deref() != Some("Ed25519") {
-                    return Err(IdentityError::InvalidJar {
-                        reason: "EdDSA JWK must have crv=Ed25519".to_string(),
-                    });
-                }
-                let x_b64 = selected
-                    .x
-                    .as_deref()
-                    .ok_or_else(|| IdentityError::InvalidJar {
-                        reason: "EdDSA JWK missing 'x' parameter".to_string(),
-                    })?;
-                let pk_bytes =
-                    URL_SAFE_NO_PAD
-                        .decode(x_b64)
-                        .map_err(|_| IdentityError::InvalidJar {
-                            reason: "EdDSA JWK 'x' is not valid base64url".to_string(),
-                        })?;
-                let signing_input = format!("{}.{}", parts[0], parts[1]);
-                let sig_bytes =
-                    URL_SAFE_NO_PAD
-                        .decode(parts[2])
-                        .map_err(|_| IdentityError::InvalidJar {
-                            reason: "invalid signature encoding".to_string(),
-                        })?;
-                let public_key =
-                    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &pk_bytes);
-                public_key
-                    .verify(signing_input.as_bytes(), &sig_bytes)
-                    .map_err(|_| IdentityError::InvalidJar {
-                        reason: "EdDSA signature verification failed".to_string(),
-                    })?;
-            }
-            "RS256" => {
-                fed_oidc::verify_rs256(request_jwt, selected).map_err(|_| {
-                    IdentityError::InvalidJar {
-                        reason: "RS256 signature verification failed".to_string(),
-                    }
-                })?;
-            }
-            "PS256" => {
-                if selected.kty != "RSA" {
-                    return Err(IdentityError::InvalidJar {
-                        reason: "PS256 requires an RSA key (kty=RSA)".to_string(),
-                    });
-                }
-                let n_b64 = selected
-                    .n
-                    .as_deref()
-                    .ok_or_else(|| IdentityError::InvalidJar {
-                        reason: "PS256 JWK missing 'n' parameter".to_string(),
-                    })?;
-                let e_b64 = selected
-                    .e
-                    .as_deref()
-                    .ok_or_else(|| IdentityError::InvalidJar {
-                        reason: "PS256 JWK missing 'e' parameter".to_string(),
-                    })?;
-                let n = URL_SAFE_NO_PAD
-                    .decode(n_b64)
-                    .map_err(|_| IdentityError::InvalidJar {
-                        reason: "PS256 JWK 'n' is not valid base64url".to_string(),
-                    })?;
-                let e = URL_SAFE_NO_PAD
-                    .decode(e_b64)
-                    .map_err(|_| IdentityError::InvalidJar {
-                        reason: "PS256 JWK 'e' is not valid base64url".to_string(),
-                    })?;
-                let signing_input = format!("{}.{}", parts[0], parts[1]);
-                let sig_bytes =
-                    URL_SAFE_NO_PAD
-                        .decode(parts[2])
-                        .map_err(|_| IdentityError::InvalidJar {
-                            reason: "invalid signature encoding".to_string(),
-                        })?;
-                let components = ring::signature::RsaPublicKeyComponents {
-                    n: n.as_slice(),
-                    e: e.as_slice(),
-                };
-                components
-                    .verify(
-                        &ring::signature::RSA_PSS_2048_8192_SHA256,
-                        signing_input.as_bytes(),
-                        &sig_bytes,
-                    )
-                    .map_err(|_| IdentityError::InvalidJar {
-                        reason: "PS256 signature verification failed".to_string(),
-                    })?;
-            }
-            "ES256" => {
-                if selected.kty != "EC" {
-                    return Err(IdentityError::InvalidJar {
-                        reason: "ES256 requires an EC key (kty=EC)".to_string(),
-                    });
-                }
-                if selected.crv.as_deref() != Some("P-256") {
-                    return Err(IdentityError::InvalidJar {
-                        reason: "ES256 JWK must have crv=P-256".to_string(),
-                    });
-                }
-                let x_b64 = selected
-                    .x
-                    .as_deref()
-                    .ok_or_else(|| IdentityError::InvalidJar {
-                        reason: "ES256 JWK missing 'x' parameter".to_string(),
-                    })?;
-                let y_b64 = selected
-                    .y
-                    .as_deref()
-                    .ok_or_else(|| IdentityError::InvalidJar {
-                        reason: "ES256 JWK missing 'y' parameter".to_string(),
-                    })?;
-                let x_bytes =
-                    URL_SAFE_NO_PAD
-                        .decode(x_b64)
-                        .map_err(|_| IdentityError::InvalidJar {
-                            reason: "ES256 JWK 'x' is not valid base64url".to_string(),
-                        })?;
-                let y_bytes =
-                    URL_SAFE_NO_PAD
-                        .decode(y_b64)
-                        .map_err(|_| IdentityError::InvalidJar {
-                            reason: "ES256 JWK 'y' is not valid base64url".to_string(),
-                        })?;
-                // ring expects uncompressed point: 0x04 || x || y
-                let mut pk_bytes = Vec::with_capacity(1 + x_bytes.len() + y_bytes.len());
-                pk_bytes.push(0x04);
-                pk_bytes.extend_from_slice(&x_bytes);
-                pk_bytes.extend_from_slice(&y_bytes);
-                let signing_input = format!("{}.{}", parts[0], parts[1]);
-                let sig_bytes =
-                    URL_SAFE_NO_PAD
-                        .decode(parts[2])
-                        .map_err(|_| IdentityError::InvalidJar {
-                            reason: "invalid signature encoding".to_string(),
-                        })?;
-                let public_key = ring::signature::UnparsedPublicKey::new(
-                    &ring::signature::ECDSA_P256_SHA256_FIXED,
-                    &pk_bytes,
-                );
-                public_key
-                    .verify(signing_input.as_bytes(), &sig_bytes)
-                    .map_err(|_| IdentityError::InvalidJar {
-                        reason: "ES256 signature verification failed".to_string(),
-                    })?;
-            }
-            _ => {
-                return Err(IdentityError::InvalidJar {
-                    reason: format!("unsupported JAR signing algorithm '{alg}'"),
-                })
-            }
-        }
+        // 4–5. Select the key by `kid` and verify the signature (shared with
+        // `private_key_jwt` assertions verified against the client's JWKS).
+        super::client_jwks::verify_with_client_jwks(
+            [parts[0], parts[1], parts[2]],
+            alg,
+            header.kid.as_deref(),
+            jwks_json,
+            super::client_jwks::JAR_ALGS,
+        )
+        .map_err(|reason| IdentityError::InvalidJar { reason })?;
 
         // 6. Decode claims.
         let claims_bytes =
@@ -2346,6 +2287,17 @@ impl EmbeddedIdentityEngine {
                 }
                 drop(poll_guard);
 
+                // Resolve the client's ID-token signer (task 26.55) before the
+                // session exists, so a key failure leaves nothing behind. A
+                // client deleted since it started the flow keeps the EdDSA
+                // behaviour this path always had.
+                let device_client = self.get_client(realm_id, client_id)?;
+                let id_token_signer = self.id_token_signer(
+                    realm_id,
+                    device_client.as_ref(),
+                    self.get_or_load_realm_signing_key(realm_id)?,
+                )?;
+
                 // Issue tokens like exchange_authorization_code (device flow — no browser context).
                 // The MFA proof is inherited: the device code reached `Approved`
                 // only because a browser user approved it from a live session,
@@ -2358,7 +2310,22 @@ impl EmbeddedIdentityEngine {
                         ..Default::default()
                     },
                 )?;
-                let token_pair = self.issue_tokens(realm_id, user_id, session.id())?;
+                // The grant is issued TO the polling client: record it on the
+                // grant family, as the authorization-code grant does. Minting
+                // with the default (clientless) context left the family with
+                // no owner, so RFC 7009 ownership resolved to no client and
+                // the device client's own `/revoke` answered 200 while its
+                // refresh token and session stayed live. It also skipped the
+                // client's claim profile and the refresh-time client binding.
+                let token_pair = self.issue_tokens_with_context(
+                    realm_id,
+                    user_id,
+                    session.id(),
+                    &super::TokenIssuanceContext {
+                        client_id: Some(client_id.clone()),
+                        ..Default::default()
+                    },
+                )?;
 
                 // Issue ID token
                 // iss MUST match the discovery document's issuer (OIDC Core §2)
@@ -2390,8 +2357,7 @@ impl EmbeddedIdentityEngine {
                     custom: std::collections::BTreeMap::new(),
                     sv: None,
                 };
-                let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
-                let id_token = signing_key.issue_token(&id_token_claims).map_err(|e| {
+                let id_token = id_token_signer.sign(&id_token_claims).map_err(|e| {
                     IdentityError::SigningError {
                         reason: format!("failed to issue ID token: {e}"),
                     }
@@ -2449,6 +2415,7 @@ impl EmbeddedIdentityEngine {
             effective_code_challenge_method,
             effective_nonce,
             effective_response_mode,
+            effective_prompt,
         ) = if let Some(ref jar_jwt) = request.request {
             let jar = self.verify_jar(realm_id, &request.client_id, jar_jwt)?;
             // JAR client_id claim must match the outer client_id.
@@ -2480,6 +2447,9 @@ impl EmbeddedIdentityEngine {
                 jar.nonce.or_else(|| request.nonce.clone()),
                 // JAR response_mode takes precedence over the outer param (RFC 9101 §4).
                 jar.response_mode.or_else(|| request.response_mode.clone()),
+                // So does its `prompt`. Dropping the claim here left a pushed
+                // request object's `prompt=none` showing the consent page.
+                jar.prompt.or_else(|| request.prompt.clone()),
             )
         } else {
             (
@@ -2492,6 +2462,7 @@ impl EmbeddedIdentityEngine {
                 request.code_challenge_method.clone(),
                 request.nonce.clone(),
                 request.response_mode.clone(),
+                request.prompt.clone(),
             )
         };
 
@@ -2562,6 +2533,7 @@ impl EmbeddedIdentityEngine {
             code_challenge_method: effective_code_challenge_method,
             nonce: effective_nonce,
             response_mode: effective_response_mode,
+            prompt: effective_prompt.filter(|p| !p.is_empty()),
             created_at: now,
             expires_at,
             used: false,
@@ -2644,6 +2616,63 @@ impl EmbeddedIdentityEngine {
         format!("sha256:{}", digest.get(..16).unwrap_or(digest.as_str()))
     }
 
+    /// Whether `claims` belong to a token issued to `client` (RFC 7009 §2.1).
+    ///
+    /// The issuing client is, in order:
+    /// 1. the outermost `act.sub` — an RFC 8693 exchanged (delegated) token is
+    ///    issued to the client that performed the exchange, which Hearth
+    ///    records as the current actor (RFC 8693 §4.1; the exchange enforces
+    ///    `act.sub` == the authenticated client). It inherits the subject
+    ///    token's `fid`, `sid` and `sub`, so reading those would hand it to
+    ///    the SUBJECT's client. `act.sub` is either `client_<uuid>` (from an
+    ///    `actor_token`) or the bare UUID; both parse as a `ClientId`, and
+    ///    anything else owns nothing;
+    /// 2. `azp` — set on ID tokens and any token bound to an authorized party;
+    /// 3. the grant family's `client_id` — every user access and refresh token
+    ///    minted by a grant carries its family id in `fid`;
+    /// 4. `sub` — for a sessionless `client_credentials` token, whose subject
+    ///    is the client itself.
+    ///
+    /// Audience membership deliberately does NOT count: a resource server
+    /// named in `aud` received the token, it was not issued it, and it must
+    /// not be able to end the user's session. A token no client was issued —
+    /// a Hearth first-party session token, or a family whose owning client is
+    /// unrecorded or already swept — belongs to no client and yields `false`
+    /// (fail closed).
+    fn token_issued_to_client(
+        &self,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+        client: &crate::core::ClientId,
+    ) -> Result<bool, IdentityError> {
+        if let Some(act) = claims.act.as_ref() {
+            return Ok(act.sub.parse::<crate::core::ClientId>().ok().as_ref() == Some(client));
+        }
+        let client_str = client.to_string();
+        if let Some(azp) = claims.azp.as_deref() {
+            return Ok(azp == client_str);
+        }
+        if let Some(ref fid) = claims.fid {
+            let family_key = keys::encode_grant_family(fid);
+            let Some(bytes) = self
+                .storage
+                .get(realm_id, &family_key)
+                .map_err(Self::storage_err)?
+            else {
+                return Ok(false);
+            };
+            let family: StoredGrantFamily =
+                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            return Ok(family.client_id.as_ref() == Some(client));
+        }
+        if claims.sid == "none" {
+            return Ok(claims.sub == client_str);
+        }
+        Ok(false)
+    }
+
     pub(super) fn revoke_token_inner(
         &self,
         realm_id: &RealmId,
@@ -2652,7 +2681,11 @@ impl EmbeddedIdentityEngine {
         // RFC 7009: invalid tokens → 200 OK (no error). Signature
         // verification prevents forged tokens from targeting real sessions
         // or grant families for revocation.
-        let Ok(claims) = self.verify_token_signature_for_realm(realm_id, &request.token) else {
+        //
+        // An RS256 ID token (task 26.55) is verified too, so a client that
+        // selected RS256 can still end a session with its ID token, exactly as
+        // an EdDSA client can. The RS256 path yields only `id_token` claims.
+        let Ok(claims) = self.verify_realm_issued_id_token(realm_id, &request.token) else {
             return Ok(());
         };
 
@@ -2661,9 +2694,32 @@ impl EmbeddedIdentityEngine {
             return Ok(()); // Silent success per RFC 7009
         }
 
+        // RFC 7009 §2.1: the server "verifies whether the token was issued to
+        // the client making the revocation request". Without this, any
+        // authenticated client — and a public client authenticates on its
+        // `client_id` alone — could end the session or grant family behind
+        // any token it held: a resource server that legitimately received a
+        // user's token, or anyone holding a leaked one. A foreign token is a
+        // silent no-op (RFC 7009 §2.2), exactly like an invalid one.
+        if let Some(revoking) = request.revoking_client_id.as_ref() {
+            if !self.token_issued_to_client(realm_id, &claims, revoking)? {
+                tracing::debug!(
+                    realm_id = %realm_id,
+                    "revocation ignored: token was not issued to the revoking client"
+                );
+                return Ok(());
+            }
+        }
+
         match claims.token_type.as_str() {
+            // A delegated (RFC 8693 exchanged) token carries the subject
+            // token's `sid`, but it was issued to the exchanging client, not
+            // to the subject's. Ending that shared session would revoke the
+            // subject client's own tokens — the cross-client revocation the
+            // ownership check above exists to prevent — so it falls through
+            // to the JTI blocklist arm below and dies alone.
             "access" | "id_token" => {
-                if claims.sid != "none" {
+                if claims.sid != "none" && claims.act.is_none() {
                     // Session-bound token: revoke via session.
                     //
                     // The outcome is PROPAGATED, not discarded. RFC 7009 §2.2
@@ -2684,7 +2740,8 @@ impl EmbeddedIdentityEngine {
                         }
                     }
                 } else if let Some(ref jti) = claims.jti {
-                    // Sessionless token (e.g., client_credentials): revoke via JTI blocklist.
+                    // Sessionless token (e.g., client_credentials) or a
+                    // delegated token: revoke via JTI blocklist.
                     // Store the token's exp so the hot-path projection can self-evict expired entries.
                     // Propagated for the same reason as the session arm above:
                     // the cache insert below would otherwise mask a failed
@@ -3167,6 +3224,7 @@ impl EmbeddedIdentityEngine {
         client_id: &ClientId,
         client_secret: &str,
     ) -> Result<(), IdentityError> {
+        self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;
         let client_key = keys::encode_oauth_client(client_id);
         let client_bytes = self
             .storage
@@ -3189,7 +3247,7 @@ impl EmbeddedIdentityEngine {
             })
             .transpose()?;
         let stored_hash = existing.as_ref().and_then(OAuthClient::client_secret_hash);
-        let matched = self.verify_presented_client_secret(realm_id, stored_hash, client_secret)?;
+        let matched = Self::verify_presented_client_secret(stored_hash, client_secret)?;
         // Only now is the outcome decided — every arm has already paid for the
         // same single verification.
         let Some(client) = existing.as_ref() else {
@@ -3198,32 +3256,121 @@ impl EmbeddedIdentityEngine {
         if client.client_secret_hash().is_none() || !matched {
             return Err(IdentityError::InvalidClientSecret);
         }
+        Self::refuse_secret_for_fapi2_client(client)
+    }
+
+    /// Refuses secret-based and public (`none`) client authentication in a
+    /// realm whose FAPI profile is Advanced (`docs/specs/OIDC.md` §2.1.2 item
+    /// 6: only `private_key_jwt`). Runs before any secret is hashed, on every
+    /// arm alike: the answer depends on the realm, never on the client.
+    pub(super) fn refuse_secrets_in_fapi_advanced_realm(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<(), IdentityError> {
+        use crate::identity::types::FapiProfile;
+        let advanced = self
+            .get_realm(realm_id)?
+            .is_some_and(|realm| realm.config().fapi_profile == Some(FapiProfile::Advanced));
+        if advanced {
+            return Err(IdentityError::PrivateKeyJwtRequired);
+        }
+        Ok(())
+    }
+
+    /// Refuses a FAPI 2.0 client that authenticated with a secret (it may hold
+    /// none — registration refuses one — but a secret set by any other route
+    /// must not authenticate it). Called only AFTER the secret verified, so
+    /// the refusal tells nothing to a caller who does not hold it.
+    fn refuse_secret_for_fapi2_client(client: &OAuthClient) -> Result<(), IdentityError> {
+        if client.profile().is_fapi2() {
+            return Err(IdentityError::PrivateKeyJwtRequired);
+        }
         Ok(())
     }
 
     /// Verifies a **presented** client secret, doing the same amount of
-    /// Argon2id work whether or not `stored_hash` exists (22.25).
+    /// work whether or not `stored_hash` exists (22.25).
     ///
-    /// When the client is unknown, or is a public client with no stored
-    /// secret, the verification runs against a dummy hash minted from this
-    /// realm's own `CredentialConfig` — same algorithm, same cost parameters,
-    /// same wall-clock cost as a real one — and the answer is `false`.
+    /// A stored hash is verified by its format
+    /// ([`credentials::verify_client_secret`]): a Hearth-generated secret is
+    /// one SHA-256, a caller-chosen or legacy one is Argon2id. When the client
+    /// is unknown, or is a public client with no stored secret, the presented
+    /// secret costs one FAST verification against a dummy — the cost of the
+    /// common, generated-secret arm — and the answer is `false`.
+    ///
+    /// The dummy is deliberately not Argon2id (26.43 follow-up). Every
+    /// server-issued secret is now on the fast format, so an Argon2id dummy
+    /// would make an unknown `client_id` measurably SLOWER than a real one
+    /// (the existence oracle 22.25 closed, inverted) and let anyone burn an
+    /// Argon2id run per request with random client ids. The residual: a
+    /// client still holding an Argon2id hash (caller-chosen via gRPC,
+    /// `hearth.yaml`, a migration import, or created before this change) is
+    /// slower to verify than the other arms, which reveals that such a client
+    /// exists. Rotating its secret moves it onto the fast format.
     ///
     /// Callers must decide the outcome *after* this returns; returning early
     /// on a missing client or missing hash is exactly the bug this closes.
+    ///
+    /// An Argon2id verification runs behind the process-wide KDF admission
+    /// gate: the client ids of `hearth.yaml` applications are UUID v5 values
+    /// anyone can compute, so without the gate an unauthenticated caller could
+    /// force one Argon2id run per request. The protocol layer reaches this
+    /// through the async entry points in [`crate::identity::client_auth`],
+    /// which verify the secret inside the gate (waiting for a permit
+    /// asynchronously) and run the engine call in a scope carrying the result:
+    /// here that result is used, and a hash the scope has no result for (a
+    /// secret rotated between the entry point's lookup and this call) is NOT
+    /// hashed on the caller's thread — the call fails and the entry point
+    /// re-dispatches it through the gate. A direct synchronous call outside any
+    /// scope (a test, a caller that bypassed the entry points) takes a permit
+    /// only if one is free right now and otherwise sheds — it never waits,
+    /// because waiting from synchronous code on a runtime is what deadlocked
+    /// the runtime. When the gate sheds, this returns
+    /// [`IdentityError::KdfOverloaded`] and the protocol layer answers `503`
+    /// with `Retry-After`. The fast format never touches the gate.
     pub(super) fn verify_presented_client_secret(
-        &self,
-        realm_id: &RealmId,
         stored_hash: Option<&str>,
         presented: &str,
     ) -> Result<bool, IdentityError> {
         match stored_hash {
-            Some(hash) => credentials::verify_raw_secret(presented.as_bytes(), hash),
+            Some(hash) if credentials::is_fast_client_secret_hash(hash) => {
+                credentials::verify_client_secret(presented.as_bytes(), hash)
+            }
+            Some(hash) => {
+                match crate::identity::client_auth::scoped_argon2_verification(
+                    hash,
+                    presented.as_bytes(),
+                ) {
+                    crate::identity::client_auth::ScopedArgon2::Verified(matched) => {
+                        return Ok(matched)
+                    }
+                    // Never hash on the entry point's (worker) thread: fail
+                    // the call; the entry point verifies against this hash
+                    // through the gate and runs the call again. The error is
+                    // discarded there.
+                    crate::identity::client_auth::ScopedArgon2::Redispatch => {
+                        return Err(IdentityError::KdfOverloaded {
+                            retry_after: std::time::Duration::from_secs(1),
+                        })
+                    }
+                    crate::identity::client_auth::ScopedArgon2::NotScoped => {}
+                }
+                let secret = zeroize::Zeroizing::new(presented.as_bytes().to_vec());
+                let hash = hash.to_string();
+                match crate::identity::gate()
+                    .try_run_inline(move || credentials::verify_raw_secret(&secret, &hash))
+                {
+                    Ok(verified) => verified,
+                    Err(crate::identity::KdfGateError::Overloaded { retry_after }) => {
+                        Err(IdentityError::KdfOverloaded { retry_after })
+                    }
+                    Err(e) => Err(IdentityError::Internal {
+                        reason: format!("client secret verification failed: {e}"),
+                    }),
+                }
+            }
             None => {
-                let dummy = self.dummy_hash_for_realm(realm_id);
-                // Result discarded on purpose: the work is the point, and a
-                // dummy hash can never match a caller-supplied secret.
-                let _ = credentials::verify_raw_secret(presented.as_bytes(), &dummy)?;
+                credentials::verify_dummy_client_secret(presented.as_bytes());
                 Ok(false)
             }
         }
@@ -3298,32 +3445,124 @@ impl EmbeddedIdentityEngine {
         // never of what the lookup found:
         //
         //   * a secret was presented  → exactly one verification on every arm,
-        //     against the stored hash when there is one and against a
-        //     realm-parameterised dummy when there is not;
+        //     against the stored hash when there is one and against a fast
+        //     dummy when there is not (see `verify_presented_client_secret`);
         //   * no secret was presented → no verification on any arm.
         //
         // Costing the no-secret case nothing keeps the public-client token path
         // — the common browser flow, which legitimately authenticates by
-        // `client_id` alone — off the Argon2id path entirely.
+        // `client_id` alone — off every hash entirely.
+        //
+        // A FAPI 2.0 Advanced realm accepts neither a secret nor `none`: this
+        // path only ever authenticates one of the two, so it refuses first.
+        self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;
         let client = self.get_client(realm_id, client_id)?;
 
         let Some(secret) = client_secret else {
             return match client.as_ref() {
                 // Public client: no secret needed, client_id alone suffices.
-                Some(c) if c.client_secret_hash().is_none() => Ok(()),
+                // A secretless client with an assertion key or a JWKS is not
+                // public — it authenticates with `private_key_jwt` only.
+                Some(c) if c.is_public() => Ok(()),
                 _ => Err(IdentityError::InvalidClientSecret),
             };
         };
 
         let stored_hash = client.as_ref().and_then(OAuthClient::client_secret_hash);
-        let is_public = client.is_some() && stored_hash.is_none();
-        let matched = self.verify_presented_client_secret(realm_id, stored_hash, secret)?;
+        let is_public = client.as_ref().is_some_and(OAuthClient::is_public);
+        let matched = Self::verify_presented_client_secret(stored_hash, secret)?;
         if is_public {
             // A stray secret on a public client is ignored, as before.
             return Ok(());
         }
         if !matched {
             return Err(IdentityError::InvalidClientSecret);
+        }
+        client
+            .as_ref()
+            .map_or(Ok(()), Self::refuse_secret_for_fapi2_client)
+    }
+
+    /// Confidential-only twin of [`Self::authenticate_client_inner`] for the
+    /// introspection endpoint (RFC 7662 §2.1, task 26.43).
+    ///
+    /// Keeps the 22.25 cost rule — hashing work is a function of whether the
+    /// caller presented a secret, never of what the lookup found — and differs
+    /// only in the decision: a client with no stored hash (public, or
+    /// `private_key_jwt`-only) is refused rather than accepted, AFTER the one
+    /// verification a presented secret always costs.
+    pub(super) fn authenticate_confidential_client_inner(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        client_secret: Option<&str>,
+    ) -> Result<(), IdentityError> {
+        self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;
+        let client = self.get_client(realm_id, client_id)?;
+        // No secret: refuse on every arm without hashing. A public client has
+        // nothing else to prove, so it cannot pass here.
+        let Some(secret) = client_secret else {
+            return Err(IdentityError::InvalidClientSecret);
+        };
+        let stored_hash = client.as_ref().and_then(OAuthClient::client_secret_hash);
+        let matched = Self::verify_presented_client_secret(stored_hash, secret)?;
+        // `matched` is false whenever there is no stored hash (the dummy never
+        // matches), so an unknown or public client is refused here too.
+        if stored_hash.is_none() || !matched {
+            return Err(IdentityError::InvalidClientSecret);
+        }
+        client
+            .as_ref()
+            .map_or(Ok(()), Self::refuse_secret_for_fapi2_client)
+    }
+
+    /// Refuses a client JWKS that is not a bounded set of public signing keys
+    /// ([`super::client_jwks::validate_client_jwks`]).
+    pub(super) fn check_client_jwks(jwks: &str) -> Result<(), IdentityError> {
+        super::client_jwks::validate_client_jwks(jwks).map_err(|reason| {
+            IdentityError::InvalidInput {
+                reason: format!("invalid jwks: {reason}"),
+            }
+        })
+    }
+
+    /// Refuses an assertion key that is not a base64url-encoded 32-byte
+    /// Ed25519 public key.
+    pub(super) fn check_assertion_public_key(key: &str) -> Result<(), IdentityError> {
+        let decoded = URL_SAFE_NO_PAD
+            .decode(key)
+            .map_err(|_| IdentityError::InvalidInput {
+                reason: "assertion_public_key must be base64url-encoded".to_string(),
+            })?;
+        if decoded.len() != 32 {
+            return Err(IdentityError::InvalidInput {
+                reason: "assertion_public_key must be a 32-byte Ed25519 public key".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// FAPI 2.0 clients authenticate with `private_key_jwt` only, so a FAPI
+    /// 2.0 client must hold no secret and must hold a key Hearth can verify
+    /// an assertion with — an inline `jwks` or an assertion key; a `jwks_uri`
+    /// is never fetched. A no-op for any other profile.
+    pub(super) fn check_fapi2_client_keys(client: &OAuthClient) -> Result<(), IdentityError> {
+        if !client.profile().is_fapi2() {
+            return Ok(());
+        }
+        if client.client_secret_hash().is_some() {
+            return Err(IdentityError::FapiViolation {
+                reason: "FAPI 2.0 clients must not use a client secret; they authenticate with \
+                         private_key_jwt"
+                    .to_string(),
+            });
+        }
+        if !client.has_verifiable_assertion_keys() {
+            return Err(IdentityError::FapiViolation {
+                reason: "FAPI 2.0 clients authenticate with private_key_jwt and must register \
+                         their public keys inline (jwks); a jwks_uri is not fetched"
+                    .to_string(),
+            });
         }
         Ok(())
     }
@@ -3425,18 +3664,7 @@ impl EmbeddedIdentityEngine {
         if let Some(pk) = &request.assertion_public_key {
             // Validate base64url decodes to exactly 32 bytes (Ed25519 public key)
             if let Some(key_str) = pk {
-                let decoded =
-                    URL_SAFE_NO_PAD
-                        .decode(key_str)
-                        .map_err(|_| IdentityError::InvalidInput {
-                            reason: "assertion_public_key must be base64url-encoded".to_string(),
-                        })?;
-                if decoded.len() != 32 {
-                    return Err(IdentityError::InvalidInput {
-                        reason: "assertion_public_key must be a 32-byte Ed25519 public key"
-                            .to_string(),
-                    });
-                }
+                Self::check_assertion_public_key(key_str)?;
             }
             client.set_assertion_public_key(pk.clone());
         }
@@ -3455,21 +3683,48 @@ impl EmbeddedIdentityEngine {
             }
             client.set_authorization_signed_response_alg(alg_opt.clone());
         }
-        if let Some(profile) = request.profile {
-            if profile.is_fapi2() && client.client_secret_hash().is_some() {
-                return Err(IdentityError::FapiViolation {
-                    reason: "Cannot set FAPI 2.0 profile on a client with a client_secret; \
-                             remove the secret first or register a new FAPI2 client"
-                        .to_string(),
-                });
+        if let Some(jwks) = &request.jwks {
+            if let Some(jwks) = jwks.as_deref() {
+                Self::check_client_jwks(jwks)?;
             }
+            client.set_jwks(jwks.clone());
+        }
+        if let Some(profile) = request.profile {
             client.set_profile(profile);
+        }
+        // Judged on the client as it will be written: turning FAPI 2.0 on for
+        // a client without keys (what `hearth.yaml` reconcile did for
+        // `profile: fapi2`), or removing a FAPI 2.0 client's last key, would
+        // leave a client that cannot authenticate. Only a change to the
+        // profile or the keys is judged, so an unrelated update (a rename) of
+        // a client stored before this rule still succeeds — and that client
+        // fails closed anyway (`OAuthClient::requires_client_assertion`).
+        if request.profile.is_some()
+            || request.jwks.is_some()
+            || request.assertion_public_key.is_some()
+        {
+            Self::check_fapi2_client_keys(&client)?;
         }
         if let Some(mfa_req) = request.mfa_required {
             client.set_mfa_required(mfa_req);
         }
         if let Some(cors) = &request.cors_origins {
             client.set_cors_origins(cors.clone());
+        }
+        // ID-token signing algorithm (task 26.55): validated, and the realm's
+        // RSA key provisioned, before the change is persisted. `client` already
+        // carries any profile change above, so FAPI 2.0 (§5.4.1: no RS256) is
+        // judged on the client as it will be written — which also refuses
+        // moving an RS256 client to the FAPI 2.0 profile.
+        let fapi = client.profile().is_fapi2() || self.realm_enforces_fapi(realm_id)?;
+        if let Some(alg) = request.id_token_signed_response_alg.as_deref() {
+            client.set_id_token_signed_response_alg(self.resolve_client_id_token_alg(
+                realm_id,
+                Some(alg),
+                fapi,
+            )?);
+        } else if request.profile.is_some_and(ClientProfile::is_fapi2) {
+            Self::refuse_rs256_under_fapi(client.id_token_signed_response_alg(), fapi)?;
         }
 
         let updated_bytes =
@@ -3520,19 +3775,10 @@ impl EmbeddedIdentityEngine {
             });
         }
 
-        // Generate new random secret (32 bytes, base64url)
-        let rng = ring::rand::SystemRandom::new();
-        let mut secret_bytes = [0u8; 32];
-        rng.fill(&mut secret_bytes)
-            .map_err(|_| IdentityError::SigningError {
-                reason: "failed to generate random bytes for client secret".to_string(),
-            })?;
-        let plaintext_secret = URL_SAFE_NO_PAD.encode(secret_bytes);
-
-        // Hash with Argon2id
-        let secret_hash =
-            credentials::hash_raw_secret(plaintext_secret.as_bytes(), &self.config.credential)?;
-        client.set_client_secret_hash(secret_hash);
+        // A fresh 256-bit CSPRNG secret, stored in the fast format — rotation
+        // is also how a client with a legacy Argon2id hash moves onto it.
+        let secret = crate::identity::oidc::GeneratedClientSecret::generate();
+        client.set_client_secret_hash(credentials::hash_generated_client_secret(&secret));
 
         let updated_bytes =
             serde_json::to_vec(&client).map_err(|e| IdentityError::Serialization {
@@ -3550,7 +3796,7 @@ impl EmbeddedIdentityEngine {
             &client_id.as_uuid().to_string(),
         )?;
 
-        Ok(plaintext_secret)
+        Ok(secret.expose().to_string())
     }
 
     pub(super) fn delete_client_inner(
@@ -4206,14 +4452,16 @@ impl EmbeddedIdentityEngine {
     ) -> Result<RpLogoutResult, IdentityError> {
         // Resolve session ID and user ID from id_token_hint or explicit session_id.
         let (session_id, user_id) = if let Some(hint) = &request.id_token_hint {
-            // Verify the hint's Ed25519 signature against this realm's key
-            // (retiring keys included) BEFORE acting on any claim. Expiry is
+            // Verify the hint's signature against this realm's keys (retiring
+            // keys included) BEFORE acting on any claim: Ed25519, or — for a
+            // client that registered RS256 — the realm's RSA ID-token key
+            // (task 26.55), which only ever verifies an `id_token`. Expiry is
             // deliberately not enforced — OIDC RP-Initiated Logout §2 allows an
             // expired hint — but an unsigned or forged hint must revoke no
             // session and mint no logout token: otherwise an unauthenticated
             // caller sets `sub`/`sid` freely and gets a realm-signed logout
             // token for a victim (audit 2026-08-28 §4.2#3, §4.19#1).
-            let claims = self.verify_token_signature_for_realm(realm_id, hint)?;
+            let claims = self.verify_realm_issued_id_token(realm_id, hint)?;
             let sid = Self::parse_session_id_claim(&claims)?.ok_or(IdentityError::InvalidToken)?;
             let uid = Self::parse_user_id_claim(&claims)?;
             (sid, uid)

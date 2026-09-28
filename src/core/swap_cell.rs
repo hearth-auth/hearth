@@ -24,9 +24,9 @@
 //! # Where this may be used
 //!
 //! Everywhere *except* the hot path. `CLAUDE.md` forbids locks on the read path
-//! of `validate_token`, `lookup_session` and `lookup_user`; those sites need
-//! epoch-based reclamation instead and are enumerated in
-//! `reports/arc-swap-use-after-free-2026-09-21.md`.
+//! of `validate_token`, `lookup_session` and `lookup_user`; those sites use the
+//! epoch-reclaimed [`EpochCell`](crate::core::EpochCell) instead (task 26.5,
+//! enumerated in `reports/arc-swap-use-after-free-2026-09-21.md`).
 //!
 //! # Why this type lives in `core`
 //!

@@ -38,7 +38,7 @@ echo ""
 
 if [ ! -f "$BINARY" ]; then
     echo "Binary not found at $BINARY — building (debug)..."
-    cargo build 2>&1 | tail -5
+    cargo build --features dev-endpoints 2>&1 | tail -5
 fi
 
 echo "Starting hearth in single-node dev mode on port $PORT..."

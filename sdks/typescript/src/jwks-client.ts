@@ -137,7 +137,9 @@ export class JwksClient {
       const { payload } = await jwtVerify(token, ks, {
         issuer,
         audience,
-        // EdDSA only — Hearth never signs with RSA or ECDSA (§25.10).
+        // EdDSA only (§25.10). Hearth signs every access token with Ed25519;
+        // the RS256 key a realm JWKS may carry signs ID tokens only, and an ID
+        // token must never pass as an access token (task 26.55).
         algorithms: ["EdDSA"],
         clockTolerance,
       });

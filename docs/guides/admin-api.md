@@ -417,7 +417,7 @@ Creates a new OAuth client. Body fields:
 | `client_name` | ✅ | Human-readable name |
 | `redirect_uris` | — | Allowed redirect URIs (required for `authorization_code` clients) |
 | `grant_types` | — | Array: `authorization_code`, `client_credentials`, `refresh_token`, `device_code` |
-| `client_secret` | — | Client secret (omit for public clients). Argon2id-hashed before storage. |
+| `client_secret` | — | Ignored: this endpoint registers public clients and discards any supplied secret (HEA-1750). For a confidential client, register it with DCR (`POST /register`) or the admin console's new-application form, which issue a Hearth-generated secret. The console's *Regenerate secret* only rotates the secret of a client that is already confidential; it refuses a public client, so it cannot turn a client created here into a confidential one. |
 | `access_token_authorization` | — | Authorization mode: `"EMBEDDED"` (default), `"INTROSPECTION"`, `"DECISION"` |
 | `trust_level` | — | `"first_party"` or `"third_party"` (default). `first_party` clients receive full roles, permissions, and groups claims in issued JWTs. `third_party` clients receive a minimal claim set and trigger the OAuth consent screen. |
 
@@ -432,8 +432,8 @@ curl -X POST https://auth.example.com/admin/applications \
   -H "Content-Type: application/json" \
   -d '{
     "client_name": "Billing Service",
-    "grant_types": ["client_credentials"],
-    "client_secret": "long-random-secret",
+    "grant_types": ["authorization_code"],
+    "redirect_uris": ["https://billing.example.com/callback"],
     "access_token_authorization": "DECISION"
   }'
 ```

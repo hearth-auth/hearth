@@ -15,10 +15,11 @@ use crate::core::{ClientId, ImportOutcome, RealmId};
 use crate::identity::federation::saml::SamlServiceProvider;
 use crate::identity::federation::IdpConfig;
 use crate::identity::{
-    AgentExport, ClientTrustLevel, ConsentExport, CreateRealmRequest, FederationLinkExport,
-    IdentityEngine, IdentityError, ImportClientRequest, ImportUserRequest, MfaFactorExport,
-    Organization, OrganizationInvitation, OrganizationMembership, RawCredential, Realm,
-    RetiringSigningKeyExport, ScimMappingExport, User, Webhook,
+    AccessTokenAuthorization, AgentExport, ApplicationStatus, ClientProfile, ClientTrustLevel,
+    ConsentExport, CreateRealmRequest, FederationLinkExport, IdentityEngine, IdentityError,
+    ImportClientRequest, ImportUserRequest, MfaFactorExport, Organization, OrganizationInvitation,
+    OrganizationMembership, RawCredential, Realm, RetiringSigningKeyExport, ScimMappingExport,
+    User, Webhook,
 };
 use crate::rbac::{
     Group, GroupMembershipEdge, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport,
@@ -59,6 +60,8 @@ pub(crate) const RECOGNIZED_MEMBERS: &[&str] = &[
     "invitations.ndjson",
     "retiring_signing_keys.json",
     "signing_key.json",
+    "id_token_signing_key.json",
+    "retiring_id_token_signing_keys.json",
     "audit.ndjson",
     "audit_chain.json",
 ];
@@ -114,6 +117,16 @@ pub struct ImportOptions {
     /// manifest is caller-supplied and may name one realm while the archive
     /// carries another (audit 2026-08-28 §3 B1, §4.1#1).
     pub allowed_realm: Option<RealmId>,
+    /// Allow an `Overwrite` restore of the system realm to replace a **live**
+    /// system signing key — the key every live operator token is signed with.
+    ///
+    /// `Overwrite` alone replaces the system realm's operators but keeps its
+    /// live key; replacing it too takes this explicit opt-in (the CLI's
+    /// `--replace-system-signing-key`; the HTTP route never sets it). A seeded
+    /// system realm with no operator (a rebuilt data directory) takes the
+    /// archived key regardless: its key has signed nothing. Either way, a key
+    /// the target's system realm has rotated away from is never reinstalled.
+    pub replace_live_system_signing_key: bool,
 }
 
 /// Per-entity-type outcome counts for a single realm restore operation.
@@ -197,6 +210,10 @@ pub struct ImportReport {
     /// grace window had already closed by the time of the restore
     /// (OpenSpec 26.40).
     pub retiring_signing_keys: EntityCounts,
+    /// Outcome for the realm's RS256 ID-token signing key (0 or 1), task 26.55.
+    pub id_token_signing_key: EntityCounts,
+    /// Outcome counts for retiring RS256 ID-token signing keys (task 26.55).
+    pub retiring_id_token_signing_keys: EntityCounts,
     /// Outcome counts for restored audit events.
     pub audit_events: EntityCounts,
     /// Whether the archive's audit hashes were checked against the source
@@ -207,7 +224,9 @@ pub struct ImportReport {
     /// and the restored chain attests only to the restore, not to the source
     /// (audit 2026-08-28 §4.14#5).
     pub audit_chain_verified: bool,
-    /// Conflicts encountered — populated in Skip / Merge mode only.
+    /// Conflicts encountered in Skip / Merge mode, and every client that was
+    /// refused rather than restored weaker than its source (a missing or
+    /// unverifiable credential), each with its reason.
     pub conflicts: Vec<Conflict>,
 }
 
@@ -241,8 +260,13 @@ struct BackupCredential {
     created_at_micros: Option<i64>,
 }
 
-/// Minimal client fields extracted from an `OAuthClient` JSON line
+/// The client fields a restore carries, read from an `OAuthClient` JSON line
 /// (`clients.ndjson`). Field names match `OAuthClient`'s serde output.
+///
+/// Every credential and security field is read: the stored secret hash, the
+/// assertion key, the JWKS / `jwks_uri`, the profile. A restore that dropped
+/// them re-created every confidential and `private_key_jwt` client as a
+/// PUBLIC client — one anyone knowing its `client_id` could act as.
 #[derive(Deserialize)]
 struct BackupClient {
     client_id: String,
@@ -259,6 +283,88 @@ struct BackupClient {
     declared_scopes: Vec<String>,
     #[serde(default)]
     consent_spans_orgs: bool,
+    /// `"RS256"` / `"EdDSA"`; absent in archives written before task 26.55
+    /// (and on legacy client records), which restore as EdDSA.
+    #[serde(default)]
+    id_token_signed_response_alg: Option<String>,
+    /// The stored hash (`$argon2id$…` or `$hearth-sha256$v=1$…`), restored
+    /// verbatim.
+    #[serde(default)]
+    client_secret_hash: Option<String>,
+    #[serde(default = "default_true")]
+    require_consent: bool,
+    #[serde(default)]
+    client_logo_url: Option<String>,
+    #[serde(default)]
+    status: ApplicationStatus,
+    #[serde(default)]
+    backchannel_logout_uri: Option<String>,
+    #[serde(default)]
+    frontchannel_logout_uri: Option<String>,
+    #[serde(default)]
+    post_logout_redirect_uris: Vec<String>,
+    #[serde(default)]
+    cors_origins: Vec<String>,
+    #[serde(default)]
+    assertion_public_key: Option<String>,
+    #[serde(default)]
+    access_token_authorization: AccessTokenAuthorization,
+    #[serde(default)]
+    jwks: Option<String>,
+    #[serde(default)]
+    jwks_uri: Option<String>,
+    #[serde(default)]
+    authorization_signed_response_alg: Option<String>,
+    #[serde(default)]
+    profile: ClientProfile,
+    #[serde(default)]
+    mfa_required: Option<bool>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Grants only ever issued to a client that authenticates.
+const AUTHENTICATED_ONLY_GRANTS: [&str; 2] = [
+    "client_credentials",
+    "urn:ietf:params:oauth:grant-type:jwt-bearer",
+];
+
+impl BackupClient {
+    /// Whether the record holds any client credential, or is FAPI 2.0 (which
+    /// is never public).
+    fn holds_a_credential(&self) -> bool {
+        self.client_secret_hash.is_some()
+            || self.assertion_public_key.is_some()
+            || self.jwks.is_some()
+            || self.jwks_uri.is_some()
+            || self.profile.is_fapi2()
+    }
+
+    /// Why this record must not be restored, if it cannot be restored as
+    /// strong as its source.
+    ///
+    /// A record with no credential whose grants are only issued to an
+    /// authenticating client is one whose credential the archive did not
+    /// carry (a hand-built or pre-release archive; every 1.x export writes the
+    /// full record). Restoring it would create a PUBLIC client in place of a
+    /// confidential one, so it is refused and reported instead.
+    fn missing_credential(&self) -> Option<String> {
+        if self.holds_a_credential() {
+            return None;
+        }
+        let grant = self
+            .grant_types
+            .iter()
+            .find(|g| AUTHENTICATED_ONLY_GRANTS.contains(&g.as_str()))?;
+        Some(format!(
+            "the archived client record carries no credential (no client_secret_hash, \
+             assertion key or JWKS), yet its '{grant}' grant is only issued to a client that \
+             authenticates; restoring it would create a public client. Register the client \
+             again (or restore from an archive that carries its credential)"
+        ))
+    }
 }
 
 // ── BackupImporter ────────────────────────────────────────────────────────────
@@ -288,6 +394,74 @@ impl BackupImporter {
         }
     }
 
+    /// Refuses, before anything is written, an archive that carries a realm
+    /// outside `opts.allowed_realm` among the realms `slugs` names.
+    ///
+    /// [`import_realm`](Self::import_realm) makes the same check for its own
+    /// realm, but a caller restoring several realms one `import_realm` at a
+    /// time would have written every realm listed before the refused one.
+    /// Call this first with every slug the restore will import. Each realm's
+    /// ID is read from its decrypted `realm.json`, never from the
+    /// caller-supplied manifest. A no-op when `opts.allowed_realm` is `None`.
+    pub fn authorize_realms(
+        &self,
+        slugs: &[String],
+        reader: &ArchiveReader,
+        opts: &ImportOptions,
+    ) -> Result<(), BackupError> {
+        let Some(allowed) = &opts.allowed_realm else {
+            return Ok(());
+        };
+        let dek = Self::archive_dek(reader, opts)?;
+        for slug in slugs {
+            let member = format!("realms/{slug}/realm.json");
+            let raw = reader.read_file(&member)?.ok_or_else(|| {
+                BackupError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("realm.json not found for slug '{slug}'"),
+                ))
+            })?;
+            let bytes = match &dek {
+                Some(d) => decrypt_bytes(&raw, d)?,
+                None => Zeroizing::new(raw),
+            };
+            let realm: Realm = serde_json::from_slice(&bytes)?;
+            if realm.id() != allowed {
+                return Err(BackupError::RealmNotPermitted { slug: slug.clone() });
+            }
+        }
+        Ok(())
+    }
+
+    /// Unwraps the archive's data-encryption key, or `None` for an archive
+    /// whose sections are not encrypted.
+    fn archive_dek(
+        reader: &ArchiveReader,
+        opts: &ImportOptions,
+    ) -> Result<Option<Zeroizing<[u8; 32]>>, BackupError> {
+        if !reader.manifest.sections_encrypted {
+            return Ok(None);
+        }
+        let passphrase = opts.dek_passphrase.as_ref().ok_or_else(|| {
+            BackupError::Crypto(
+                "archive has sections_encrypted=true but no dek_passphrase was provided".into(),
+            )
+        })?;
+        let wrapped_b64 = reader.manifest.wrapped_dek_b64.as_deref().ok_or_else(|| {
+            BackupError::Crypto("sections_encrypted=true but wrapped_dek_b64 is absent".into())
+        })?;
+        let params = reader
+            .manifest
+            .dek_wrapping_params
+            .as_ref()
+            .ok_or_else(|| {
+                BackupError::Crypto(
+                    "sections_encrypted=true but dek_wrapping_params is absent".into(),
+                )
+            })?;
+        Ok(Some(unwrap_dek(wrapped_b64, params, passphrase)?))
+    }
+
     /// Restores one realm from `reader` using the archive slug `realm_slug`.
     ///
     /// The realm slug identifies which directory inside the archive to read
@@ -308,28 +482,7 @@ impl BackupImporter {
         let mut report = ImportReport::default();
 
         // ── Unwrap DEK (v2+ archives) ─────────────────────────────────────
-        let dek: Option<Zeroizing<[u8; 32]>> = if reader.manifest.sections_encrypted {
-            let passphrase = opts.dek_passphrase.as_ref().ok_or_else(|| {
-                BackupError::Crypto(
-                    "archive has sections_encrypted=true but no dek_passphrase was provided".into(),
-                )
-            })?;
-            let wrapped_b64 = reader.manifest.wrapped_dek_b64.as_deref().ok_or_else(|| {
-                BackupError::Crypto("sections_encrypted=true but wrapped_dek_b64 is absent".into())
-            })?;
-            let params = reader
-                .manifest
-                .dek_wrapping_params
-                .as_ref()
-                .ok_or_else(|| {
-                    BackupError::Crypto(
-                        "sections_encrypted=true but dek_wrapping_params is absent".into(),
-                    )
-                })?;
-            Some(unwrap_dek(wrapped_b64, params, passphrase)?)
-        } else {
-            None
-        };
+        let dek = Self::archive_dek(reader, opts)?;
 
         // Convenience closure: decrypt a section if the archive is encrypted.
         let try_decrypt = |raw: &[u8]| -> Result<Zeroizing<Vec<u8>>, BackupError> {
@@ -393,6 +546,29 @@ impl BackupImporter {
             );
         }
 
+        // ── RS256 ID-token key (task 26.55), same fail-closed rule ──────────
+        //
+        // An archive whose clients receive RS256 ID tokens must carry the key
+        // that signed them. Restoring without it would provision a fresh RSA
+        // key on the first RS256 client import, and every ID token issued
+        // before the backup would stop verifying. Checked before any write.
+        let id_token_rsa_pkcs8 = self.load_id_token_rsa_key(realm_slug, &files, dek.as_deref())?;
+        if id_token_rsa_pkcs8.is_none()
+            && archive_has_rs256_clients(realm_slug, &files, &try_decrypt)?
+        {
+            if !opts.allow_missing_signing_key {
+                return Err(BackupError::IdTokenSigningKeyMissing {
+                    slug: realm_slug.to_string(),
+                });
+            }
+            warn!(
+                slug = realm_slug,
+                "RS256 ID-token key not restored — proceeding under allow_missing_signing_key: \
+                 ID tokens issued before the backup will not verify against the freshly \
+                 generated key"
+            );
+        }
+
         // Parse realm.json — required.
         //
         // This runs BEFORE any write so the realm-authorization check below can
@@ -423,19 +599,63 @@ impl BackupImporter {
             }
         }
 
+        // ── Keys the realm rotated away from (before any write) ─────────────
+        //
+        // A realm restored as new (absent here, or deleted since the archive
+        // was made) takes the archive's active keys. The target may have
+        // rotated away from them — above all by a revoking rotation after a
+        // leak — and its record of that outlives the realm, so a refusal here
+        // leaves the target untouched instead of failing half-way through.
+        // A realm that exists keeps its own active keys (skip/merge) or is
+        // refused (overwrite); the retiring-key importers below check theirs.
+        if !realm.id().as_uuid().is_nil()
+            && self
+                .identity
+                .get_realm(realm.id())
+                .map_err(identity_to_backup_err)?
+                .is_none()
+        {
+            self.identity
+                .check_archived_realm_keys(
+                    realm.id(),
+                    signing_key_pkcs8.as_ref().map(|z| z.as_slice()),
+                    id_token_rsa_pkcs8.as_ref().map(|z| z.as_slice()),
+                )
+                .map_err(identity_to_backup_err)?;
+        }
+
+        // ── System realm signing key (before any other write) ───────────────
+        //
+        // The system realm (operator-console accounts) exists in every store —
+        // engine construction seeds it — so there is no realm record to
+        // create; its contents are imported into it below, with the same
+        // member importers and validation as any other realm. Only its signing
+        // key needs its own path, and it runs first so that a key the engine
+        // refuses (one the target rotated away from) fails the restore with
+        // nothing written. Reaching this point already required system-realm
+        // authority: a caller scoped to a tenant realm was refused just above.
+        if realm.id().as_uuid().is_nil() {
+            self.restore_system_realm_key(
+                signing_key_pkcs8.as_ref().map(|z| z.as_slice()),
+                opts,
+                &mut report,
+            )?;
+        }
+
         // ── Audit events (restored FIRST) ───────────────────────────────────
         //
         // Audit events are re-chained under the destination realm's HMAC key
         // (the source key is not portable), so the integrity hash changes but
-        // the event content is preserved. They MUST be restored before any
-        // other member: the identity/RBAC `import_*` calls below emit their own
-        // fresh audit events with current timestamps, so replaying the older
-        // historical events afterwards would interleave newer-then-older records
-        // and break the tamper-evident chain (verification walks events in
-        // timestamp order, which must equal insertion order). The exporter
-        // writes events in ascending-timestamp scan order, so NDJSON line order
-        // is already chronological. Each event carries its own realm ID, which
-        // equals the restored realm ID (restore never remaps realm IDs).
+        // the event content is preserved and each event is marked as restored.
+        // `import_events` appends them at the END of the destination chain: a
+        // realm that already holds events (a live system realm, a tenant merged
+        // into itself) gets them stamped with the import time, the original
+        // kept in the marker, so storage order stays chain order. They are
+        // restored before any other member so that, into an EMPTY realm, they
+        // keep their original timestamps ahead of the fresh events the
+        // identity/RBAC `import_*` calls below emit. The exporter writes events
+        // in ascending-timestamp scan order, so NDJSON line order is the
+        // source chain order.
         let audit_key = format!("realms/{realm_slug}/audit.ndjson");
         if let Some(raw) = files.get(&audit_key) {
             let decrypted = try_decrypt(raw)?;
@@ -497,16 +717,23 @@ impl BackupImporter {
                 }
             }
 
-            for event in &events {
-                if opts.dry_run {
-                    report.audit_events.created += 1;
-                    continue;
-                }
-                match self.audit.import_event(event) {
-                    Ok(()) => report.audit_events.created += 1,
+            if opts.dry_run {
+                report.audit_events.created += events.len() as u64;
+            } else {
+                // Appended at the END of the target realm's chain, marked as
+                // restored, deduplicated by event id — so a live realm keeps a
+                // verifiable chain and a repeated restore adds nothing.
+                match self.audit.import_events(realm.id(), &events) {
+                    Ok(outcome) => {
+                        report.audit_events.created += outcome.imported;
+                        report.audit_events.skipped += outcome.duplicates;
+                    }
                     Err(e) => {
-                        warn!(err = %e, "import audit event failed");
-                        report.audit_events.errored += 1;
+                        // Chunks written before the failure are durable and
+                        // chained; the count cannot tell which, so every event
+                        // is reported as not restored.
+                        warn!(err = %e, "import audit events failed");
+                        report.audit_events.errored += events.len() as u64;
                     }
                 }
             }
@@ -530,7 +757,10 @@ impl BackupImporter {
             config: Some(realm.config().clone()),
         };
 
-        let restored_realm_id = if opts.dry_run {
+        let restored_realm_id = if realm_id.as_uuid().is_nil() {
+            // Its signing key was restored above; there is no record to create.
+            realm_id
+        } else if opts.dry_run {
             // A dry run reports what the real restore would do. An overwrite
             // over a live realm is refused (B3), so the dry run must refuse
             // too rather than report a success the restore would not deliver
@@ -557,6 +787,36 @@ impl BackupImporter {
                 &mut report,
             )?
         };
+
+        // ── RS256 ID-token signing key (task 26.55) ─────────────────────────
+        //
+        // Restored BEFORE the clients: importing an RS256 client provisions the
+        // realm's RSA key when none exists, so the archived key must already be
+        // in place or a freshly generated one would take its slot.
+        if let Some(pkcs8) = id_token_rsa_pkcs8.as_ref() {
+            if opts.dry_run {
+                report.id_token_signing_key.created += 1;
+            } else {
+                match self.identity.import_realm_id_token_rsa_key(
+                    &restored_realm_id,
+                    pkcs8,
+                    opts.mode == RestoreMode::Overwrite,
+                ) {
+                    Ok(outcome) => tally(&mut report.id_token_signing_key, outcome),
+                    // Reported, not fatal: the system realm never holds one.
+                    Err(e @ IdentityError::SystemRealmProtected { .. }) => {
+                        warn!(realm = %realm_slug, err = %e, "RS256 ID-token key refused");
+                        report.id_token_signing_key.errored += 1;
+                        report.conflicts.push(Conflict {
+                            entity_type: "id_token_signing_key".to_string(),
+                            identifier: realm_slug.to_string(),
+                            reason: e.to_string(),
+                        });
+                    }
+                    Err(e) => return Err(BackupError::Engine(e.to_string())),
+                }
+            }
+        }
 
         // ── Users ──────────────────────────────────────────────────────────
         let users_key = format!("realms/{realm_slug}/users.ndjson");
@@ -779,9 +1039,23 @@ impl BackupImporter {
         if let Some(raw) = files.get(&saml_key_member) {
             let plaintext = try_decrypt(raw)?;
             if !opts.dry_run {
-                self.identity
+                match self
+                    .identity
                     .import_realm_saml_key(&restored_realm_id, &plaintext)
-                    .map_err(|e| BackupError::Engine(e.to_string()))?;
+                {
+                    Ok(()) => {}
+                    // Reported, not fatal: the rest of the realm still comes
+                    // back (the system realm never holds a SAML key).
+                    Err(e @ IdentityError::SystemRealmProtected { .. }) => {
+                        warn!(member = %saml_key_member, err = %e, "record refused");
+                        report.conflicts.push(Conflict {
+                            entity_type: "saml_signing_key".to_string(),
+                            identifier: saml_key_member.clone(),
+                            reason: e.to_string(),
+                        });
+                    }
+                    Err(e) => return Err(BackupError::Engine(e.to_string())),
+                }
             }
         }
 
@@ -833,6 +1107,19 @@ impl BackupImporter {
             |this, key: &RetiringSigningKeyExport| {
                 this.identity
                     .import_retiring_signing_key(&restored_realm_id, key, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/retiring_id_token_signing_keys.json"),
+            &try_decrypt,
+            opts,
+            &mut report.retiring_id_token_signing_keys,
+            |this, key: &RetiringSigningKeyExport| {
+                this.identity
+                    .import_retiring_id_token_rsa_key(&restored_realm_id, key, overwrite)
                     .map_err(|e| BackupError::Engine(e.to_string()))
             },
         )?;
@@ -924,7 +1211,92 @@ impl BackupImporter {
         Ok(Some(pkcs8))
     }
 
+    /// Decrypts `realms/<slug>/id_token_signing_key.json` (task 26.55).
+    ///
+    /// `Ok(None)` when the member is absent (the realm never had an RS256
+    /// client, or the archive predates RS256) or no DEK is available; a hard
+    /// error when it is present but cannot be decrypted.
+    fn load_id_token_rsa_key(
+        &self,
+        realm_slug: &str,
+        files: &std::collections::HashMap<String, Vec<u8>>,
+        dek: Option<&[u8; 32]>,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, BackupError> {
+        let member = format!("realms/{realm_slug}/id_token_signing_key.json");
+        let (Some(encrypted), Some(d)) = (files.get(&member), dek) else {
+            return Ok(None);
+        };
+        Ok(Some(decrypt_bytes(encrypted, d)?))
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
+
+    /// Restores the system realm's signing key, reported in `report.realms`
+    /// (the system realm's record is implicit, so its key IS its realm-level
+    /// outcome).
+    ///
+    /// The engine replaces the key only when the target's system realm holds
+    /// no operator account (the freshly seeded state of a rebuilt data
+    /// directory), or when `opts.mode` is `Overwrite` **and**
+    /// `opts.replace_live_system_signing_key` is set; otherwise the live key is
+    /// kept and the conflict reported. A key the target rotated away from is
+    /// refused outright (an error: nothing has been written yet). With no
+    /// archived key (possible only under `allow_missing_signing_key`, checked
+    /// by the caller) the target's key is kept.
+    fn restore_system_realm_key(
+        &self,
+        pkcs8: Option<&[u8]>,
+        opts: &ImportOptions,
+        report: &mut ImportReport,
+    ) -> Result<(), BackupError> {
+        let Some(pkcs8) = pkcs8 else {
+            report.realms.skipped += 1;
+            report.conflicts.push(Conflict {
+                entity_type: "realm".to_string(),
+                identifier: crate::identity::keys::SYSTEM_REALM_NAME.to_string(),
+                reason: "the archive carries no system signing key; the target's system \
+                         signing key was kept (allow_missing_signing_key)"
+                    .to_string(),
+            });
+            return Ok(());
+        };
+        let replace_live =
+            opts.mode == RestoreMode::Overwrite && opts.replace_live_system_signing_key;
+        // A dry run reports what the real run would do — the same outcome, or
+        // the same refusal — without writing.
+        let outcome = if opts.dry_run {
+            self.identity
+                .preview_system_realm_signing_key(pkcs8, replace_live)
+        } else {
+            self.identity
+                .import_system_realm_signing_key(pkcs8, replace_live)
+        };
+        match outcome {
+            Ok(ImportOutcome::Skipped) => {
+                report.realms.skipped += 1;
+                report.conflicts.push(Conflict {
+                    entity_type: "realm".to_string(),
+                    identifier: crate::identity::keys::SYSTEM_REALM_NAME.to_string(),
+                    reason: "the target's system signing key was kept: it is already the \
+                             archived key, or the system realm holds operator accounts (to \
+                             replace a live key, restore from the CLI in overwrite mode with \
+                             --replace-system-signing-key)"
+                        .to_string(),
+                });
+                Ok(())
+            }
+            Ok(outcome) => {
+                tally(&mut report.realms, outcome);
+                Ok(())
+            }
+            Err(e) => {
+                report.realms.errored += 1;
+                Err(BackupError::Engine(format!(
+                    "system realm signing key not restored: {e}"
+                )))
+            }
+        }
+    }
 
     fn import_realm_record(
         &self,
@@ -990,6 +1362,15 @@ impl BackupImporter {
         opts: &ImportOptions,
         report: &mut ImportReport,
     ) -> Result<(), BackupError> {
+        // Operator accounts go through `import_admin_user` — the only import
+        // path into the system realm, with `import_user`'s validation.
+        let import_one = |req: &ImportUserRequest| {
+            if realm_id.as_uuid().is_nil() {
+                self.identity.import_admin_user(req)
+            } else {
+                self.identity.import_user(realm_id, req)
+            }
+        };
         for line in ndjson.split(|&b| b == b'\n') {
             let line = trim_bytes(line);
             if line.is_empty() {
@@ -1015,7 +1396,7 @@ impl BackupImporter {
                 continue;
             }
 
-            match self.identity.import_user(realm_id, &req) {
+            match import_one(&req) {
                 Ok(_) => report.users.created += 1,
                 Err(IdentityError::DuplicateEmail) => {
                     match opts.mode {
@@ -1034,9 +1415,7 @@ impl BackupImporter {
                                     self.identity
                                         .delete_user(realm_id, existing.id())
                                         .map_err(identity_to_backup_err)?;
-                                    self.identity
-                                        .import_user(realm_id, &req)
-                                        .map_err(identity_to_backup_err)?;
+                                    import_one(&req).map_err(identity_to_backup_err)?;
                                     report.users.overwritten += 1;
                                 }
                                 Ok(None) => {
@@ -1060,6 +1439,7 @@ impl BackupImporter {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)] // one field mapping per archived client field
     fn import_clients(
         &self,
         ndjson: &[u8],
@@ -1075,6 +1455,17 @@ impl BackupImporter {
             let client: BackupClient = serde_json::from_slice(line)?;
             let client_id_str = client.client_id.clone();
 
+            if let Some(reason) = client.missing_credential() {
+                warn!(client_id = %client_id_str, "refusing to restore client: {reason}");
+                report.clients.errored += 1;
+                report.conflicts.push(Conflict {
+                    entity_type: "client".to_string(),
+                    identifier: client_id_str,
+                    reason,
+                });
+                continue;
+            }
+
             // Parse the prefixed client ID into a `ClientId`.
             let parsed_id: Option<ClientId> = client.client_id.parse().ok();
 
@@ -1082,7 +1473,9 @@ impl BackupImporter {
                 id: parsed_id,
                 client_name: client.client_name.clone(),
                 redirect_uris: client.redirect_uris,
-                client_secret: None, // secrets are not restored (hashed in archive)
+                // No plaintext exists; the stored hash is restored verbatim.
+                client_secret: None,
+                client_secret_hash: client.client_secret_hash,
                 grant_types: client.grant_types,
                 slug: if client.slug.is_empty() {
                     None
@@ -1092,7 +1485,37 @@ impl BackupImporter {
                 trust_level: client.trust_level,
                 declared_scopes: client.declared_scopes,
                 consent_spans_orgs: client.consent_spans_orgs,
+                id_token_signed_response_alg: client.id_token_signed_response_alg,
+                require_consent: Some(client.require_consent),
+                client_logo_url: client.client_logo_url,
+                status: client.status,
+                backchannel_logout_uri: client.backchannel_logout_uri,
+                frontchannel_logout_uri: client.frontchannel_logout_uri,
+                post_logout_redirect_uris: client.post_logout_redirect_uris,
+                cors_origins: client.cors_origins,
+                assertion_public_key: client.assertion_public_key,
+                access_token_authorization: client.access_token_authorization,
+                jwks: client.jwks,
+                jwks_uri: client.jwks_uri,
+                authorization_signed_response_alg: client.authorization_signed_response_alg,
+                profile: client.profile,
+                mfa_required: client.mfa_required,
             };
+
+            // Validate before anything is written or deleted — with exactly
+            // the rules `import_client` applies. A dry run reports what the
+            // real restore would refuse, and an overwrite never deletes a live
+            // client for a record that cannot replace it.
+            if let Err(e) = self.identity.validate_import_client(realm_id, &req) {
+                warn!(client_id = %client_id_str, err = %e, "refusing to restore client");
+                report.clients.errored += 1;
+                report.conflicts.push(Conflict {
+                    entity_type: "client".to_string(),
+                    identifier: client_id_str,
+                    reason: format!("client not restored: {e}"),
+                });
+                continue;
+            }
 
             if opts.dry_run {
                 report.clients.created += 1;
@@ -1114,7 +1537,14 @@ impl BackupImporter {
                             });
                         }
                         RestoreMode::Overwrite => {
-                            // Delete by client_id then re-import.
+                            // Delete by client_id then re-import. The record
+                            // was validated above — its fields, and for an
+                            // RS256 client that the realm's RSA key loads — so
+                            // the re-import can fail only on storage, or on
+                            // provisioning a realm RSA key that did not exist
+                            // yet (the restore imports the archived key before
+                            // any client), not on a rule that would have
+                            // refused it before the live client was deleted.
                             if let Some(ref cid) = req.id {
                                 if let Ok(()) = self.identity.delete_client(realm_id, cid) {
                                     match self.identity.import_client(realm_id, &req) {
@@ -1122,6 +1552,11 @@ impl BackupImporter {
                                         Err(e) => {
                                             warn!(client_id = %client_id_str, err = %e, "import_client retry failed");
                                             report.clients.errored += 1;
+                                            report.conflicts.push(Conflict {
+                                                entity_type: "client".to_string(),
+                                                identifier: client_id_str,
+                                                reason: format!("client not restored: {e}"),
+                                            });
                                         }
                                     }
                                 } else {
@@ -1134,8 +1569,16 @@ impl BackupImporter {
                     }
                 }
                 Err(e) => {
+                    // A client whose credential or profile does not validate
+                    // is refused rather than restored without it; the
+                    // operator sees why.
                     warn!(client_id = %client_id_str, err = %e, "import_client failed");
                     report.clients.errored += 1;
+                    report.conflicts.push(Conflict {
+                        entity_type: "client".to_string(),
+                        identifier: client_id_str,
+                        reason: format!("client not restored: {e}"),
+                    });
                 }
             }
         }
@@ -1144,6 +1587,31 @@ impl BackupImporter {
 }
 
 // ── Free helpers ─────────────────────────────────────────────────────────────
+
+/// Whether any client in the realm's `clients.ndjson` receives RS256 ID
+/// tokens (task 26.55) — the condition under which the archive MUST carry the
+/// realm's RS256 ID-token key.
+fn archive_has_rs256_clients(
+    realm_slug: &str,
+    files: &std::collections::HashMap<String, Vec<u8>>,
+    try_decrypt: &impl Fn(&[u8]) -> Result<Zeroizing<Vec<u8>>, BackupError>,
+) -> Result<bool, BackupError> {
+    let Some(raw) = files.get(&format!("realms/{realm_slug}/clients.ndjson")) else {
+        return Ok(false);
+    };
+    let decrypted = try_decrypt(raw)?;
+    for line in decrypted.split(|&b| b == b'\n') {
+        let line = trim_bytes(line);
+        if line.is_empty() {
+            continue;
+        }
+        let client: BackupClient = serde_json::from_slice(line)?;
+        if client.id_token_signed_response_alg.as_deref() == Some("RS256") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 /// Parses `credentials.ndjson` bytes into a map from raw user UUID string to
 /// [`RawCredential`].
@@ -1346,7 +1814,7 @@ mod tests {
                 },
                 audit_chain_included: false,
             }],
-            checksums: std::collections::HashMap::new(),
+            checksums: std::collections::BTreeMap::new(),
             sections_encrypted: true,
             wrapped_dek_b64: Some(wrapped_dek_b64),
             signing_key_dek_b64: None,
@@ -1362,7 +1830,7 @@ mod tests {
             .add_file(&format!("realms/{slug}/users.ndjson"), &users_encrypted)
             .expect("add users.ndjson");
         // Manually set checksums (finish guard requires sections_encrypted fields to be set)
-        manifest.checksums = std::collections::HashMap::new();
+        manifest.checksums = std::collections::BTreeMap::new();
         // Use a raw finish path that bypasses the guard by finishing directly.
         // The manifest already has sections_encrypted=true + wrapped_dek_b64 set.
         writer.finish(manifest).expect("finish archive");
@@ -1654,7 +2122,7 @@ mod tests {
                 record_counts: RecordCounts::default(),
                 audit_chain_included: false,
             }],
-            checksums: std::collections::HashMap::new(),
+            checksums: std::collections::BTreeMap::new(),
             sections_encrypted: true,
             wrapped_dek_b64: Some(wrapped_dek_b64),
             signing_key_dek_b64: None,
@@ -1740,7 +2208,7 @@ mod tests {
                 record_counts: RecordCounts::default(),
                 audit_chain_included: false,
             }],
-            checksums: std::collections::HashMap::new(),
+            checksums: std::collections::BTreeMap::new(),
             sections_encrypted: true,
             wrapped_dek_b64: Some(wrapped_dek_b64),
             signing_key_dek_b64: None,
@@ -1891,6 +2359,356 @@ mod tests {
         assert_eq!(
             restored_pkcs8, original_pkcs8,
             "restored signing key must byte-for-byte equal the original"
+        );
+    }
+
+    // ── Client credentials (a restore never yields a weaker client) ──────────
+
+    /// Restores one `clients.ndjson` line into a fresh realm and returns the
+    /// report, the realm, and the client id the line named.
+    fn restore_client_line(line: &serde_json::Value) -> (TestRig, RealmId, ClientId, ImportReport) {
+        let rig = make_rig();
+        let realm = rig
+            .identity
+            .create_realm(&crate::identity::CreateRealmRequest {
+                name: format!("client-restore-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let cid: ClientId = serde_json::from_value(line["client_id"].clone()).expect("client id");
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
+        let mut report = ImportReport::default();
+        let ndjson = format!("{line}\n");
+        importer
+            .import_clients(
+                ndjson.as_bytes(),
+                &realm,
+                &opts_with_passphrase(),
+                &mut report,
+            )
+            .expect("import_clients");
+        (rig, realm, cid, report)
+    }
+
+    fn client_line(extra: &serde_json::Value) -> serde_json::Value {
+        let mut line = serde_json::json!({
+            "client_id": ClientId::generate(),
+            "client_name": "Nightly M2M",
+            "redirect_uris": [],
+            "created_at": 0,
+            "grant_types": ["client_credentials"],
+        });
+        for (k, v) in extra.as_object().expect("object") {
+            line[k] = v.clone();
+        }
+        line
+    }
+
+    /// An archived client record that carries no credential although its
+    /// grants need one — `client_credentials` is only ever issued to a client
+    /// that authenticates — is what an archive that lost the credential looks
+    /// like. Restoring it would create a PUBLIC client for a confidential
+    /// one, so it is refused and reported, never restored.
+    #[test]
+    fn a_client_record_missing_the_credential_its_grants_need_is_refused() {
+        let (rig, realm, cid, report) = restore_client_line(&client_line(&serde_json::json!({})));
+        assert!(
+            rig.identity
+                .get_client(&realm, &cid)
+                .expect("get")
+                .is_none(),
+            "the client must not be restored as a public client"
+        );
+        assert_eq!(report.clients.errored, 1);
+        assert_eq!(report.clients.created, 0);
+        let conflict = report
+            .conflicts
+            .iter()
+            .find(|c| c.entity_type == "client")
+            .expect("the refusal must be reported");
+        assert!(
+            conflict.reason.contains("credential"),
+            "the report must say the credential is missing: {}",
+            conflict.reason
+        );
+    }
+
+    /// A stored hash in a format Hearth cannot verify is refused rather than
+    /// stored (it could never authenticate) or dropped (that would make the
+    /// client public).
+    #[test]
+    fn a_client_record_with_an_unknown_secret_hash_format_is_refused() {
+        for bad in [
+            "plaintext-secret",
+            "$pbkdf2-sha256$i=1000$c2FsdA$aGFzaA",
+            "$hearth-sha256$v=1$tooshort",
+            "$hearth-sha256$v=2$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "$argon2i$v=19$m=256,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaA",
+        ] {
+            let (rig, realm, cid, report) = restore_client_line(&client_line(
+                &serde_json::json!({"client_secret_hash": bad}),
+            ));
+            assert!(
+                rig.identity
+                    .get_client(&realm, &cid)
+                    .expect("get")
+                    .is_none(),
+                "{bad}: must not be restored"
+            );
+            assert_eq!(report.clients.errored, 1, "{bad}");
+            assert!(
+                report.conflicts.iter().any(|c| c.entity_type == "client"),
+                "{bad}: the refusal must be reported"
+            );
+        }
+    }
+
+    /// A stored Argon2id hash chooses its own cost. One above the password
+    /// verifier's ceilings (a four-terabyte `m`, four billion passes) would
+    /// make every authentication attempt for the client an allocation request
+    /// the attacker sized, so the restore refuses it and reports why.
+    #[test]
+    fn a_client_record_with_an_extreme_argon2_cost_is_refused() {
+        let hash = "$argon2id$v=19$m=4294967295,t=4294967295,p=1\
+                    $c29tZXNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ";
+        let (rig, realm, cid, report) = restore_client_line(&client_line(
+            &serde_json::json!({"client_secret_hash": hash}),
+        ));
+        assert!(
+            rig.identity
+                .get_client(&realm, &cid)
+                .expect("get")
+                .is_none(),
+            "a client whose hash sets an extreme cost must not be restored"
+        );
+        assert_eq!(report.clients.errored, 1);
+        let conflict = report
+            .conflicts
+            .iter()
+            .find(|c| c.entity_type == "client")
+            .expect("the refusal must be reported");
+        assert!(
+            conflict.reason.contains("argon2 parameter"),
+            "the report must name the cost parameter: {}",
+            conflict.reason
+        );
+    }
+
+    /// Restores one `clients.ndjson` line into an existing realm with `opts`.
+    fn restore_client_line_into(
+        rig: &TestRig,
+        realm: &RealmId,
+        line: &serde_json::Value,
+        opts: &ImportOptions,
+    ) -> ImportReport {
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
+        let mut report = ImportReport::default();
+        importer
+            .import_clients(format!("{line}\n").as_bytes(), realm, opts, &mut report)
+            .expect("import_clients");
+        report
+    }
+
+    /// A realm holding one live confidential client whose secret is
+    /// `live-secret`; returns the rig, the realm and the client's id.
+    fn realm_with_live_client() -> (TestRig, RealmId, ClientId) {
+        let rig = make_rig();
+        let realm = rig
+            .identity
+            .create_realm(&crate::identity::CreateRealmRequest {
+                name: format!("client-overwrite-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let cid = ClientId::generate();
+        rig.identity
+            .import_client(
+                &realm,
+                &crate::identity::ImportClientRequest {
+                    id: Some(cid.clone()),
+                    client_name: "Live M2M".to_string(),
+                    client_secret: Some("live-secret".to_string()),
+                    grant_types: vec!["client_credentials".to_string()],
+                    ..Default::default()
+                },
+            )
+            .expect("live client");
+        rig.identity
+            .authenticate_confidential_client(&realm, &cid, Some("live-secret"))
+            .expect("control: the live client authenticates before the restore");
+        (rig, realm, cid)
+    }
+
+    /// An archived record for `cid` that validates in every respect but its
+    /// JWKS, which is not a JWK set.
+    fn invalid_jwks_line(cid: &ClientId) -> serde_json::Value {
+        let mut line = client_line(&serde_json::json!({
+            "client_secret_hash": "$hearth-sha256$v=1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "jwks": "this is not a JWK set",
+        }));
+        line["client_id"] = serde_json::to_value(cid).expect("client id");
+        line
+    }
+
+    /// Overwrite mode used to delete the live client and only then try to
+    /// import the archived record, so a record that failed validation left
+    /// the realm with neither. The record is now validated first: the live
+    /// client survives, still authenticates, and the report says why the
+    /// archived record was refused.
+    #[test]
+    fn overwrite_keeps_the_live_client_when_the_archived_record_is_refused() {
+        let (rig, realm, cid) = realm_with_live_client();
+        let opts = ImportOptions {
+            mode: RestoreMode::Overwrite,
+            ..opts_with_passphrase()
+        };
+        let report = restore_client_line_into(&rig, &realm, &invalid_jwks_line(&cid), &opts);
+
+        let live = rig
+            .identity
+            .get_client(&realm, &cid)
+            .expect("get")
+            .expect("the live client must survive a refused overwrite");
+        assert_eq!(live.client_name(), "Live M2M", "and stay the live record");
+        rig.identity
+            .authenticate_confidential_client(&realm, &cid, Some("live-secret"))
+            .expect("the live client must still authenticate with its own secret");
+        assert_eq!(report.clients.overwritten, 0);
+        assert_eq!(report.clients.errored, 1);
+        let conflict = report
+            .conflicts
+            .iter()
+            .find(|c| c.entity_type == "client")
+            .expect("the refusal must be reported");
+        assert!(
+            conflict.reason.contains("not restored") && conflict.reason.contains("jwks"),
+            "the report must say why: {}",
+            conflict.reason
+        );
+    }
+
+    /// Control for the test above: a VALID archived record does replace the
+    /// live one in overwrite mode.
+    #[test]
+    fn overwrite_replaces_the_live_client_with_a_valid_archived_record() {
+        let (rig, realm, cid) = realm_with_live_client();
+        let mut line = client_line(&serde_json::json!({
+            "client_secret_hash": "$hearth-sha256$v=1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        }));
+        line["client_id"] = serde_json::to_value(&cid).expect("client id");
+        let opts = ImportOptions {
+            mode: RestoreMode::Overwrite,
+            ..opts_with_passphrase()
+        };
+        let report = restore_client_line_into(&rig, &realm, &line, &opts);
+        assert_eq!(report.clients.overwritten, 1, "{:?}", report.conflicts);
+        let restored = rig
+            .identity
+            .get_client(&realm, &cid)
+            .expect("get")
+            .expect("restored");
+        assert_eq!(restored.client_name(), "Nightly M2M");
+    }
+
+    /// A dry run used to count every client as created before validating it,
+    /// so it promised a restore the real run would refuse. It now runs the
+    /// same validation, reports the refusal, and still writes nothing.
+    #[test]
+    fn dry_run_reports_a_client_the_real_restore_would_refuse() {
+        let rig = make_rig();
+        let realm = rig
+            .identity
+            .create_realm(&crate::identity::CreateRealmRequest {
+                name: format!("client-dry-run-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let opts = ImportOptions {
+            dry_run: true,
+            ..opts_with_passphrase()
+        };
+
+        let bad_id = ClientId::generate();
+        let report = restore_client_line_into(&rig, &realm, &invalid_jwks_line(&bad_id), &opts);
+        assert_eq!(
+            report.clients.created, 0,
+            "a refused client is not 'created'"
+        );
+        assert_eq!(report.clients.errored, 1);
+        assert!(
+            report
+                .conflicts
+                .iter()
+                .any(|c| c.entity_type == "client" && c.reason.contains("jwks")),
+            "the dry run must report the refusal: {:?}",
+            report.conflicts
+        );
+
+        // Control: a valid record is still counted, and nothing is written.
+        let good = client_line(&serde_json::json!({
+            "client_secret_hash": "$hearth-sha256$v=1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        }));
+        let good_id: ClientId = serde_json::from_value(good["client_id"].clone()).expect("id");
+        let report = restore_client_line_into(&rig, &realm, &good, &opts);
+        assert_eq!(report.clients.created, 1, "{:?}", report.conflicts);
+        for cid in [&bad_id, &good_id] {
+            assert!(
+                rig.identity.get_client(&realm, cid).expect("get").is_none(),
+                "a dry run writes nothing"
+            );
+        }
+    }
+
+    /// Both stored formats come back verbatim; the client is not public.
+    #[test]
+    fn a_client_record_with_a_supported_hash_is_restored_verbatim() {
+        for hash in [
+            "$hearth-sha256$v=1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "$argon2id$v=19$m=256,t=1,p=1$48W7IQncfP/IRd+UEMNchQ$RVK0enJVqYZ2Ro4u93PK5B9jFWPeS0jq9iTiOAaI1uI",
+        ] {
+            let (rig, realm, cid, report) = restore_client_line(&client_line(
+                &serde_json::json!({"client_secret_hash": hash}),
+            ));
+            assert_eq!(report.clients.created, 1, "{hash}: {:?}", report.conflicts);
+            let client = rig
+                .identity
+                .get_client(&realm, &cid)
+                .expect("get")
+                .expect("restored");
+            assert_eq!(client.client_secret_hash(), Some(hash));
+            assert!(!client.is_public());
+        }
+    }
+
+    /// An archived (soft-deleted) client stays archived.
+    #[test]
+    fn an_archived_client_record_is_restored_archived() {
+        let (rig, realm, cid, _report) = restore_client_line(&client_line(&serde_json::json!({
+            "client_secret_hash": "$hearth-sha256$v=1$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "status": "archived",
+        })));
+        let client = rig
+            .identity
+            .get_client(&realm, &cid)
+            .expect("get")
+            .expect("restored");
+        assert_eq!(
+            client.status(),
+            crate::identity::ApplicationStatus::Archived
         );
     }
 }

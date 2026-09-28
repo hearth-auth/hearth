@@ -48,7 +48,7 @@ A `.hearth-backup` file is a zstd-compressed archive. Inside, each realm is stor
 | `realms/<slug>/users.ndjson` | User records (one JSON object per line) |
 | `realms/<slug>/credentials.ndjson` | Hashed credentials |
 | `realms/<slug>/mfa_factors.ndjson` | TOTP secrets, recovery codes and WebAuthn passkeys |
-| `realms/<slug>/clients.ndjson` | OAuth 2.0 application registrations |
+| `realms/<slug>/clients.ndjson` | OAuth 2.0 application registrations, including each client's credentials (see [Client credentials](#client-credentials)) |
 | `realms/<slug>/roles.ndjson` | RBAC role definitions |
 | `realms/<slug>/permissions.ndjson` | Permission definitions |
 | `realms/<slug>/groups.ndjson` | Group definitions |
@@ -103,6 +103,22 @@ window has already closed by the time you restore is skipped, because the origin
 would no longer accept it either; the restore report counts it under
 `retiring keys … skipped`.
 
+**A key a realm rotated away from never comes back.** Every signing-key
+rotation — of any realm, the system realm included, and of both the Ed25519
+key and the RS256 ID-token key — records every key it retires and every
+retiring key it purges (a revoking rotation, `grace_period_secs=0`, purges them
+all), in the same atomic write as the rotation itself. A restore that replaces
+a live key records the key it displaces the same way. A restore refuses an
+archived retiring key that record names once the target no longer holds it
+(reported as an error on that key, in `skip` and `merge` alike), and refuses a
+realm restored as new — absent from the target, or deleted since the archive
+was made — whose archived active key the record names, before writing
+anything. The record carries no key material and outlives the realm, so an
+archive made before you rotated a compromised key cannot put that key back into
+this data directory, even after the realm is deleted; restore a backup made
+after the rotation. A restore into a fresh, empty data directory has nothing to
+compare against, so restore the newest archive there.
+
 **Archives taken before these members existed do not contain them.** An older
 archive restores exactly as it did before: the members are simply absent, and
 absent means "there were none of these".
@@ -131,6 +147,97 @@ under a DEK wrapped with Argon2id from that passphrase. Treat the archive and
 the passphrase as you would the data directory itself. If you want an archive
 without it, name a single realm with `--realm <name>`.
 
+**Which archives contain it:**
+
+| Export | System realm included? |
+|---|---|
+| `hearth backup create` (no `--realm`) | **Yes** |
+| `hearth backup create --realm <tenant>` | No |
+| `hearth backup create --realm 00000000-0000-0000-0000-000000000000` | Yes, alone |
+| `POST /admin/backup` by a **system-realm** caller (nil `X-Realm-ID`, `hearth.admin` + `hearth.export`) | **Yes** — appended to a full export; `?realm=system` exports it alone |
+| `POST /admin/backup` by a tenant-scoped caller | **Never** — its own realm only; `?realm=system` is `403` |
+| `POST /admin/backup` from **v1.6.11 or earlier** | **No** — no HTTP export carried it before this release |
+
+`hearth backup inspect` lists the realms an archive carries; the system realm is
+the entry whose `realm_id` is `realm_00000000-0000-0000-0000-000000000000` (slug
+`system`).
+
+### Restoring the system realm
+
+`hearth backup restore` restores the system realm's contents — operator accounts
+with their password hashes and second factors, the system realm's roles, groups
+and role assignments (the `realm.admin` grant the console checks), its signing
+key and any retiring keys, and its audit log when the archive has one — into the
+target's system realm. Before this release it refused the system realm
+(`operation not permitted on the system realm: import_realm`) and aborted the
+whole restore.
+
+It follows the same rules as every other realm, with one difference that comes
+from the system realm always existing (engine construction seeds it, with a
+fresh signing key and no users, in every data directory):
+
+| Mode | Operator accounts and other records | System signing key |
+|---|---|---|
+| `skip` (default) / `merge` | Missing records are added; existing ones are kept (reported as conflicts) | Installed when the target's system realm **holds no user** — a fresh data directory, whose seeded key has signed nothing. Kept (reported as a conflict) when the target already has operators |
+| `overwrite` | Existing records are replaced by the archived ones | As `skip` — a live key is **kept** — unless you also pass `--replace-system-signing-key` (CLI only): then the live key is **replaced**, and every token it signed stops verifying at once |
+| `--dry-run` | Counted, nothing written | Reports what the real run would do — installed, kept, replaced or refused — and writes nothing |
+
+**A retired system key is never reinstalled.** Every rotation of the system
+realm's signing key records the key it retires (and every retiring key it
+purges), and so does a `--replace-system-signing-key` restore for the key it
+displaces. A restore refuses an archived system key that record names — or
+that is still one of the target's retiring keys — in every mode and even with
+`--replace-system-signing-key`, and refuses to reinstate an archived retiring
+key a revoking rotation purged. An archive made before you rotated a
+compromised key therefore cannot bring that key back into a live instance;
+restore a backup made after the rotation. The record lives in the data
+directory: a restore into a fresh, empty directory has nothing to compare
+against, so restore the newest archive there. `POST /admin/backup/restore`
+never replaces a live system key — the caller's own token is signed with it.
+
+A system-realm archive never writes, into the system realm, what the live API
+cannot create there: organizations (and their memberships and invitations),
+agents, external identity providers, federation links, SAML service providers,
+OAuth consents (they name a client, and the system realm has none), SCIM
+`externalId` mappings, and a SAML or RS256 ID-token signing key. Such a record is refused and reported,
+and the rest of the restore carries on.
+
+The system realm's record itself is not re-created; its contents are imported
+into the system realm that already exists. In the restore report the `realms`
+row of the `system` realm is the signing key's outcome.
+
+The fail-closed signing-key rule applies unchanged: an archive whose system realm
+carries no signing key is refused unless you pass `--allow-missing-signing-key`,
+in which case the accounts are restored and the target keeps the key it has.
+
+**Who may restore it.** The CLI (an operator with the data directory) and, over
+HTTP, a **system-realm caller holding `hearth.admin`** (plus `hearth.export`).
+A system-realm caller's backup export or restore reaches every realm — operator
+accounts and the system signing key included — so a system-realm operator
+delegated only a sub-admin permission (`hearth.users.admin`,
+`hearth.realm.admin`, …) is refused (`403`) even with `hearth.export`.
+
+**Every HTTP restore needs `hearth.admin`.** A restore writes users and their
+credentials, clients, roles and role assignments, agents and retiring signing
+keys at once — every sub-admin domain — so `POST /admin/backup/restore`
+requires `hearth.admin` (which the seeded `realm.admin` role carries) plus
+`hearth.export`, for a tenant-scoped caller too. A tenant sub-admin
+(`hearth.users.admin`, `hearth.realm.admin`, `hearth.clients.admin`,
+`hearth.agents.admin`) holding `hearth.export` may still **export** its own
+realm, but its restore is refused (`403`) before anything is read, written or
+counted against the hourly quota. A tenant-scoped caller's `POST /admin/backup/restore` is authorized against
+**every** realm in the archive before its first write: an archive carrying the
+system realm, or any other realm but its own, is refused with `403`, in every
+mode, and nothing — not even the restore's own audit event — is written.
+
+**After the restore** operators sign in at `/ui/admin/login` with their original
+passwords and second factors. Sessions are not restored (see
+[What a backup does not carry](#what-a-backup-does-not-carry)), so everyone signs
+in again. `hearth backup restore` ends by saying what actually happened: how many
+operator accounts it restored, kept (already present) or refused, and what it did
+with the system signing key. When it restored no operator from the archive it
+says that operator-console access did **not** come back.
+
 ### Audit chain verification
 
 Restore re-signs every imported audit event under the **destination** realm's
@@ -142,17 +249,135 @@ chain that does not match its own hashes aborts the restore with the index of
 the first broken link.
 
 The manifest records whether the chain material was written
-(`audit_chain_included`). Because the manifest is checksum-covered — and signed
-when `security.backup.verify_key` is configured — deleting `audit_chain.json`
-to reach the unverified path fails the restore rather than skipping the check.
+(`audit_chain_included`). Because the manifest is checksum-covered — and its
+signature is verified on every production restore (see
+[Signed archives](#signed-archives)) — deleting `audit_chain.json` to reach the
+unverified path fails the restore rather than skipping the check.
 
 Archives written before this member existed carry audit events with no chain
 material. Those still restore, with a warning: their restored chain attests to
 the restore, not to the source. Re-export to get a verifiable audit section.
 
+**Where restored events land.** Imported events are appended at the **end** of
+the destination realm's chain, never slotted in among — or re-signed together
+with — events the realm already holds, so the realm keeps verifying (`GET
+/admin/realms/{id}/audit/verify`) after a restore into a live instance. Every
+imported event carries a `backup_restore` entry in its metadata with its
+`original_timestamp`, so restored history is never mistaken for events this
+instance recorded. Into a realm with no audit event yet (a fresh data directory)
+events keep their original timestamps; into a realm that already has events
+each is stamped with the restore time, the original kept in the marker. An event
+the realm already holds (same id) is skipped, so restoring the same archive
+twice adds nothing. The `BackupRestored` event of `POST /admin/backup/restore`
+is recorded after the import, in the caller's realm.
+
+**A restore does not stall live audit writes.** Events are imported in atomic
+chunks of 512. The realm's audit chain is locked for one chunk's hashing and
+write at a time — never across its fsync, nor across the whole import — so
+audit writes to the same realm made while a large archive is restoring wait at
+most for one chunk, and the chain keeps verifying with them interleaved: once a
+live event lands between two chunks, the rest of the import is stamped after it.
+A chunk that fails leaves the chunks before it written and verifiable.
+
+### Signed archives
+
+Encryption and checksums do not prove **who** produced an archive: the
+checksums live in the very `manifest.json` an attacker would rewrite, and the
+encryption passphrase is shared by every operator who can run a restore. The
+only proof of origin is a detached **Ed25519 signature** over the manifest
+(`detached_signature_b64`). Because the manifest carries the SHA-256 of every
+member, signing it signs the whole archive.
+
+**Restore is fail-closed.** Outside dev mode an archive is restored only when
+its signature verifies against the configured verify key:
+
+| Verify key (`security.backup.verify_key` / `--verify-key`) | Archive | CLI `backup restore` | HTTP `POST /admin/backup/restore` |
+|---|---|---|---|
+| configured | signed with the matching key | restores | restores |
+| configured | unsigned, or signed with another key, or edited after signing | **refused** — `--allow-unsigned` does not override a configured key | **refused** (also in dev mode) |
+| not configured | any | **refused** unless `--allow-unsigned` is passed | **refused** outside dev mode — no override; `--dev` servers restore with a warning |
+
+The private key never needs to be on a server that restores. Keep it on the
+host that takes backups; give restoring instances only the public key.
+
+**One-time setup:**
+
+```bash
+# 1. Generate a key pair. Writes the private key (PEM, mode 0600) and prints
+#    the public verify_key.
+hearth backup keygen --output /etc/hearth/backup-signing.pem
+# → verify_key: <43-character base64url public key>
+
+# 2. Configure the public key on every instance that restores (hearth.yaml):
+#      security:
+#        backup:
+#          verify_key: "${HEARTH_BACKUP_VERIFY_KEY}"
+```
+
+A key from `openssl genpkey -algorithm ed25519 -out backup-signing.pem` works
+too; derive its `verify_key` with
+`openssl pkey -in backup-signing.pem -pubout -outform DER | tail -c 32 | basenc --base64url | tr -d '='`.
+
+**Signing:** pass `--sign-key` to `hearth backup create`, or sign an existing
+archive — including every archive downloaded from `POST /admin/backup`, which
+the server cannot sign because it holds no private key — with
+[`hearth backup sign`](#hearth-backup-sign).
+
+**Restoring without a key.** Archives created before this release are
+unsigned. Verify one (`hearth backup verify`), then either sign it with
+`hearth backup sign` or restore it with `hearth backup restore --allow-unsigned`
+— either way, only for an archive whose origin you have established out of
+band. `verify` passing does not establish it (see
+[`hearth backup sign`](#hearth-backup-sign)).
+
 ### Signing key encryption
 
 Every backup includes an AES-256-GCM encrypted copy of each realm's Ed25519 signing key, protected by a random 32-byte **DEK** (Data Encryption Key). The DEK itself is stored base64-encoded in `manifest.json`.
+
+A realm in which any client selected RS256 ID tokens (`id_token_signed_response_alg: RS256`) also has an RSA ID-token signing key. It travels the same way — `id_token_signing_key.json`, plus `retiring_id_token_signing_keys.json` for keys still inside a rotation grace window — and is re-sealed under the destination's KEK on restore, so ID tokens issued before the backup keep verifying against the restored JWKS. An archive whose clients receive RS256 ID tokens but which carries no restorable RSA key fails closed exactly like a missing Ed25519 key, with the same `--allow-missing-signing-key` override. An RS256 client comes back RS256 even in a realm with a `fapi_profile` (one that turned FAPI on after the client registered); there, as in the source, its ID-token grants are refused until it is switched to `EdDSA`.
+
+### Client credentials
+
+Each client record carries everything the client authenticates with: the
+stored client-secret **hash** (never a plaintext secret), the assertion public
+key, the inline `jwks` / `jwks_uri`, and the security `profile` (for example
+FAPI 2.0), together with its consent, logout, CORS, MFA, JARM and lifecycle
+settings. A restore writes them back in the same single write that re-creates
+the client, so a confidential or `private_key_jwt` client comes back exactly
+as strong as it was: it authenticates with the same secret or key, and is
+still refused without it. The secret hash is restored verbatim — only the two
+formats Hearth writes (`$argon2id$…` and `$hearth-sha256$v=1$…`) are accepted,
+and an `$argon2id$` hash whose cost is above the ceilings password
+verification enforces (`m` 1 GiB, `t` 64, `p` 16) is refused: the stored hash
+chooses the work every authentication attempt costs, so an archive must not
+be able to choose a four-terabyte allocation. Client-secret verification
+refuses such a hash too (the secret does not match, and the KDF never runs).
+
+A restore never re-creates a client weaker than its source. A client whose
+record does not restore — a secret hash in an unknown format or above the
+cost ceilings, a JWKS or
+assertion key that no longer validates, or a FAPI 2.0 client without a
+verifiable key — is **not restored** and is listed, with the reason, in the
+restore report (`errors` in the HTTP response, `conflicts` in the CLI output),
+and counted as `errored`. So is a record that carries no credential at all
+although its grants (`client_credentials`, `jwt-bearer`) are only ever issued
+to a client that authenticates: that is what an archive that lost the
+credential looks like, and restoring it would create a public client in place
+of a confidential one. Every archive written by a 1.x server carries the full
+record; this guards hand-built or edited archives. Register such a client
+again, or restore from an archive that carries its credential.
+
+The record is validated before anything is written or deleted, with exactly
+the rules the restore applies. In `--mode overwrite` a refused record
+therefore never costs the live client: the live client is kept unchanged (it
+still authenticates as before) and the refusal is reported. A `--dry-run`
+runs the same validation and reports the clients the real restore would
+refuse, instead of counting them as created.
+
+Before this release a restore dropped these fields and re-created **every**
+client as a public client. If you restored an archive with an earlier 1.x
+build, restore it again with this build (or re-register the affected
+clients).
 
 When `--encrypt` is passed, the DEK is additionally wrapped with a passphrase using **Argon2id** (m=65536, t=3, p=4) so that the archive is self-contained and the passphrase is the only external secret needed to restore signing keys. KDF parameters (algorithm, memory, iterations, parallelism, salt) are stored alongside the wrapped DEK in `manifest.json`.
 
@@ -180,6 +405,7 @@ hearth backup create [OPTIONS]
 | `--realm` | all realms | Export only this realm (name or UUID) |
 | `--include-audit` | off | Include audit events in the export (can be very large) |
 | `--encrypt` | off | Protect the signing-key DEK with an interactively-prompted passphrase |
+| `--sign-key` | none | Sign the manifest with this Ed25519 private key (PEM) so a production restore can authenticate it. Without it the archive is unsigned — see [Signed archives](#signed-archives) |
 | `--data-dir` | `data` | Path to the Hearth data directory |
 | `--config`, `-c` | none | Path to `hearth.yaml`, read for `security.key_encryption_key`. Needed for a KEK-encrypted store unless `HEARTH_KEK` is exported |
 
@@ -195,11 +421,12 @@ hearth backup create \
   --realm production \
   --output /backups/prod-$(date +%F).hearth-backup
 
-# Encrypted backup including audit log
+# Encrypted, signed backup including audit log
 hearth backup create \
   --data-dir /var/lib/hearth/data \
   --include-audit \
   --encrypt \
+  --sign-key /etc/hearth/backup-signing.pem \
   --output /backups/full-encrypted-$(date +%F).hearth-backup
 # → prompts: "Enter backup passphrase:"
 ```
@@ -222,9 +449,13 @@ hearth backup restore --input <archive> [OPTIONS]
 | `--realm` | all realms | Restore only this realm (by archive slug) |
 | `--mode` | `skip` | Conflict resolution: `skip` keeps existing records. `overwrite` is **refused** when the target realm is already present — see below |
 | `--dry-run` | off | Parse and report without writing anything |
-| `--skip-verify` | off | Skip the integrity check restore runs before it writes. Only for a very large archive already verified out of band |
+| `--skip-verify` | off | Skip the integrity check restore runs before it writes. Only for a very large archive already verified out of band. **Refused whenever a verify key is configured** — usable only together with `--allow-unsigned` (see below) |
 | `--allow-missing-signing-key` | off | Restore anyway when the archive has no restorable signing key, accepting a freshly generated key (see below) |
+| `--replace-system-signing-key` | off | With `--mode overwrite` only: also replace a **live** system realm's signing key with the archived one, signing every operator out. Never reinstalls a key the target rotated away from. See [Restoring the system realm](#restoring-the-system-realm) |
+| `--verify-key` | from `--config` | Base64url Ed25519 public key the archive's manifest must be signed with. Overrides `security.backup.verify_key` |
+| `--allow-unsigned` | off | Restore even though **no** verify key is configured, so the archive's origin is not authenticated. Never overrides a configured key. See [Signed archives](#signed-archives) |
 | `--data-dir` | `data` | Path to the target data directory |
+| `--config`, `-c` | none | Path to `hearth.yaml`, read for `security.backup.verify_key` and `security.key_encryption_key` |
 
 Restore prints a per-entity-type table of inserted and skipped counts, broken down by entity type (roles, permissions, groups, assignments, scopes, organizations, audit events). Exit `0` means all records imported cleanly; exit `1` means partial success (some records skipped or failed); exit `2` means a fatal error (archive unreadable, target unopenable, or unrecognized archive member).
 
@@ -234,19 +465,52 @@ Restore prints a per-entity-type table of inserted and skipped counts, broken do
 # Dry-run to preview what would be restored
 hearth backup restore \
   --input /backups/prod-2026-05-19.hearth-backup \
+  --config /etc/hearth/hearth.yaml \
   --dry-run
 
-# Full restore into an empty data directory
+# Full restore into an empty data directory; the verify key comes from the config
 hearth backup restore \
   --input /backups/prod-2026-05-19.hearth-backup \
+  --config /etc/hearth/hearth.yaml \
   --data-dir /var/lib/hearth/data-restored
 
-# Restore a single realm into a data directory where it is absent
+# Restore a single realm, passing the verify key directly
 hearth backup restore \
   --input /backups/prod-2026-05-19.hearth-backup \
+  --verify-key "$HEARTH_BACKUP_VERIFY_KEY" \
   --realm production \
   --data-dir /var/lib/hearth/data-restored
 ```
+
+> **Fail-closed on an unauthenticated archive (A-30).** Restore checks the
+> manifest signature before it verifies checksums or writes anything. With no
+> verify key configured it refuses and names the fix: configure
+> `security.backup.verify_key` (or pass `--verify-key`), or pass
+> `--allow-unsigned` for an archive whose origin you have verified out of band.
+> A configured key is authoritative — an unsigned or badly signed archive is
+> refused even with `--allow-unsigned`. Before this, the CLI restore never
+> checked the signature at all, and the HTTP restore skipped it whenever no key
+> was configured, which was the default.
+>
+> **A signed restore always verifies every member.** The signature covers
+> `manifest.json` only; each member is bound to it by the SHA-256 the manifest
+> records, and by nothing else — the importer does not re-hash what it imports.
+> `--skip-verify` skips exactly those checksums, so combining it with a verify
+> key would have logged "archive signature verified" over members anyone could
+> have replaced after signing. Restore therefore **refuses** `--skip-verify`
+> whenever a verify key is configured (exit `2`, before anything is written).
+> The flag remains only for an `--allow-unsigned` restore, where nothing is
+> being authenticated anyway.
+>
+> **What is imported is what was verified.** Restore reads the archive through
+> a private, unlinked copy taken when it starts (the HTTP endpoint streams the
+> upload into one), and every later pass — signature, checksums, import — reads
+> that copy. It used to reopen `--input` for each pass, so anyone able to write
+> that path could replace the archive after it had been verified and have the
+> replacement imported. The copy lives in the system temporary directory
+> (`$TMPDIR`) and needs as much free space there as the compressed archive.
+> `hearth backup sign` works the same way, so it signs exactly the members it
+> verified.
 
 > **Signing-key continuity.** Restore preserves each realm's Ed25519 signing key by default (HEA-745). Every JWT issued before backup keeps validating after restore, and the realm's published JWKS `kid` is unchanged. If you need a fresh key after restore — for example because the original key is suspected compromised — rotate it explicitly with `POST /admin/realms/{id}/rotate-signing-key`. There is no `hearth realm rotate-signing-key` CLI command; `hearth realm` has one subcommand, `create`. See the [Disaster Recovery Guide](./disaster-recovery.md#post-incident-signing-key-rotation) for the rotation procedure.
 >
@@ -316,6 +580,54 @@ hearth backup verify --input /backups/prod-2026-05-19.hearth-backup
 
 **Exit codes:** `0` all checksums match · `3` one or more checksums do not match.
 
+`verify` checks integrity, not origin: it does not check the manifest
+signature. Restore does.
+
+---
+
+### `hearth backup sign`
+
+Signs an existing archive's manifest with an Ed25519 private key, so a
+production restore can authenticate it (see [Signed archives](#signed-archives)).
+Use it for archives taken without `--sign-key`, including every archive from
+`POST /admin/backup`.
+
+`sign` verifies the archive's checksums first, but that proves only that the
+archive is **internally consistent** — every member matches the checksum the
+unsigned manifest records. It says nothing about where the archive came from:
+anyone who replaced a member can rewrite its checksum in that same manifest,
+and `sign` would then sign the replacement, which every production restore
+would accept. The signature is your statement that you produced the archive.
+Sign only archives you took yourself and moved over a trusted channel, into a
+directory no other user can write — never a file at a shared or predictable
+path such as `/tmp/latest.hearth-backup`.
+
+```
+hearth backup sign --input <archive> --key-file <key.pem> [--output <archive>]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--input`, `-i` | required | Archive to sign |
+| `--key-file` | required | Ed25519 private key (PEM, PKCS#8) — from `backup keygen` or `openssl genpkey -algorithm ed25519` |
+| `--output`, `-o` | `--input` | Where to write the signed archive; the input is replaced atomically by default |
+
+**Exit codes:** `0` signed · `2` error (unreadable key, integrity failure, I/O).
+
+---
+
+### `hearth backup keygen`
+
+Generates an Ed25519 key pair for signing archives. Writes the private key
+(PEM, PKCS#8, mode `0600`; refuses to overwrite an existing file) and prints
+the public `verify_key` to configure as `security.backup.verify_key`.
+
+```
+hearth backup keygen --output <key.pem>
+```
+
+**Exit codes:** `0` written · `2` error.
+
 ---
 
 ### `hearth backup inspect`
@@ -326,7 +638,7 @@ Prints a human-readable summary of the archive manifest without decompressing en
 hearth backup inspect --input <archive>
 ```
 
-Output includes: archive version, creation timestamp, Hearth version, per-realm record counts, whether signing keys are present, and whether the DEK is passphrase-protected.
+Output includes: archive version, creation timestamp, Hearth version, per-realm record counts, whether signing keys are present, whether the DEK is passphrase-protected, and whether the manifest is signed.
 
 ```bash
 hearth backup inspect --input /backups/prod-2026-05-19.hearth-backup
@@ -440,18 +752,25 @@ server process and needs no lock:
   >> /var/log/hearth/backup.log 2>&1
 ```
 
-The endpoint requires the `hearth.export` capability in addition to
-`hearth.admin`, and is rate-limited to **10 calls per hour per user**, which
+The endpoint requires the `hearth.export` capability in addition to an admin
+permission — `hearth.admin` itself for a system-realm caller, whose export
+covers every realm — and is rate-limited to **10 calls per hour per user**, which
 caps how tight a cadence you can schedule. Note that `POST /admin/backup` has
 no equivalent of the CLI's `--encrypt` flag; encrypt the resulting archive at
 rest yourself, or take encrypted archives from a stopped node with the CLI.
+
+The server holds no signing key, so these archives are **unsigned**, and a
+production restore refuses them until they are signed. Sign each one on the
+backup host as part of the same job (see
+[Verifying backups](#verifying-backups)).
 
 Use the CLI form only against a data directory no server is using:
 
 ```bash
 systemctl stop hearth
 hearth backup create --data-dir /var/lib/hearth/data \
-  --output /backups/hearth-$(date +%F).hearth-backup --encrypt
+  --output /backups/hearth-$(date +%F).hearth-backup --encrypt \
+  --sign-key /etc/hearth/backup-signing.pem
 systemctl start hearth
 ```
 
@@ -472,11 +791,24 @@ reads only the archive, so it works regardless of which path produced it and
 does not touch the data directory:
 
 ```bash
+# A private (0700) staging directory: `sign` vouches for whatever file sits at
+# the path it is given, so no other user may be able to write that path.
+STAGE=$(mktemp -d) || exit 1
+trap 'rm -rf "$STAGE"' EXIT
+ARCHIVE="$STAGE/hearth-$(date +%F-%H%M%S).hearth-backup"
+
 curl -fsS -X POST -H "Authorization: Bearer $HEARTH_ADMIN_TOKEN" \
-  "http://127.0.0.1:8420/admin/backup" -o /tmp/latest.hearth-backup \
-  && hearth backup verify --input /tmp/latest.hearth-backup \
-  && mv /tmp/latest.hearth-backup /backups/
+  "http://127.0.0.1:8420/admin/backup" -o "$ARCHIVE" \
+  && hearth backup verify --input "$ARCHIVE" \
+  && hearth backup sign --input "$ARCHIVE" \
+       --key-file /etc/hearth/backup-signing.pem \
+  && mv "$ARCHIVE" /backups/
 ```
+
+`verify` and `sign` here establish integrity and then origin only because this
+job downloaded the archive itself, over the loopback admin listener, into a
+directory only it can write. Do not point `sign` at an archive you did not
+produce this way.
 
 An unverified backup is not a backup. Fold the `verify` step into the same
 scheduled job so a corrupt archive fails the run loudly instead of sitting
@@ -489,16 +821,17 @@ undetected until a restore.
 # 2. Create an empty data directory
 mkdir -p /var/lib/hearth/data
 
-# 3. Restore
+# 3. Restore (the config supplies security.backup.verify_key)
 hearth backup restore \
   --input /backups/prod-2026-05-19.hearth-backup \
+  --config /etc/hearth/hearth.yaml \
   --data-dir /var/lib/hearth/data
 
 # 4. Start the server
 hearth serve -c /etc/hearth/hearth.yaml
 ```
 
-For cluster mode, after the restore completes, bootstrap the new node into the cluster normally (it starts with data already populated rather than replaying the entire Raft log from peers).
+For cluster mode, restore once into one empty data directory and copy that directory to **every** node before the cluster first starts; never restore into a cluster that has already started (its start-up has created every declared realm under a new id), and never run the restore once per node (each run writes its own keys, so the nodes would diverge). The upgrading guide's [rebuild procedure](./upgrading.md#cluster-purged-log-upgrade) gives the steps. To replace one node of a cluster that still has a leader, do not restore at all: start it with an empty data directory and the leader sends it a snapshot.
 
 ---
 

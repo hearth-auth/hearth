@@ -39,7 +39,9 @@ use hearth::rbac::{
     AssignRoleRequest, CreateRoleRequest, EmbeddedRbacEngine, Permission, RbacEngine, RoleId,
     Scope, Subject,
 };
-use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
+use hearth::storage::{
+    EmbeddedStorageEngine, ScanEntry, StorageConfig, StorageEngine, StorageError,
+};
 use tempfile::TempDir;
 
 // ── Throwaway mTLS bundle (same convention as tests/cluster_grpc_loopback.rs) ─
@@ -111,8 +113,18 @@ struct ThreeNodeCluster {
 /// `main.rs` does (including the `ReplicatedWriteObserver` wiring).
 type AppStack = (Arc<EmbeddedRbacEngine>, Arc<EmbeddedIdentityEngine>);
 
-fn app_stack_over(cluster: &Arc<ClusterEngine>, clock: &Arc<FakeClock>) -> AppStack {
+/// Wraps one node's storage handle (the node's Raft id, its adapter) before
+/// the application stack is built over it — the seam a test uses to inject a
+/// storage fault on one node.
+type StorageWrap = dyn Fn(u64, Arc<dyn StorageEngine>) -> Arc<dyn StorageEngine> + Send + Sync;
+
+fn app_stack_over_wrapped(
+    cluster: &Arc<ClusterEngine>,
+    clock: &Arc<FakeClock>,
+    wrap: &StorageWrap,
+) -> AppStack {
     let storage: Arc<dyn StorageEngine> = Arc::new(ClusterStorageAdapter::new(Arc::clone(cluster)));
+    let storage = wrap(cluster.node_id().unwrap_or(0), storage);
     app_stack_over_storage(cluster, &storage, clock)
 }
 
@@ -154,6 +166,23 @@ fn app_stack_over_storage(
 
 impl ThreeNodeCluster {
     async fn build(clock: &Arc<FakeClock>) -> Self {
+        Self::build_with(clock, &|_, storage| storage).await
+    }
+
+    /// As [`Self::build`], with each node's storage handle passed through
+    /// `wrap` before its application stack is built.
+    async fn build_with(clock: &Arc<FakeClock>, wrap: &StorageWrap) -> Self {
+        Self::build_inner(clock, wrap, None).await
+    }
+
+    /// As [`Self::build`], with every node's data directory a copy of `seed`
+    /// made before the node first starts (a data directory populated offline,
+    /// such as by `hearth backup restore`).
+    async fn build_seeded(clock: &Arc<FakeClock>, seed: &Path) -> Self {
+        Self::build_inner(clock, &|_, storage| storage, Some(seed)).await
+    }
+
+    async fn build_inner(clock: &Arc<FakeClock>, wrap: &StorageWrap, seed: Option<&Path>) -> Self {
         let tempdir = tempfile::tempdir().unwrap();
         let (ca_path, leaf_certs) = generate_cluster_certs(tempdir.path(), 3);
         let ports = pick_free_loopback_ports(3);
@@ -166,6 +195,9 @@ impl ThreeNodeCluster {
             let node_id = (i + 1) as u64;
             let data_dir = tempdir.path().join(format!("node-{node_id}-data"));
             std::fs::create_dir_all(&data_dir).unwrap();
+            if let Some(seed) = seed {
+                copy_dir(seed, &data_dir);
+            }
             let storage_cfg = StorageConfig::dev(data_dir);
             let storage = Arc::new(EmbeddedStorageEngine::open(storage_cfg.clone()).unwrap());
             let (cert_path, key_path) = leaf_certs[i].clone();
@@ -219,7 +251,8 @@ impl ThreeNodeCluster {
             .iter()
             .position(|e| e.raft_metrics().map(|m| m.id) == Some(leader_id))
             .unwrap();
-        let (leader_rbac, leader_identity) = app_stack_over(&engines[leader_idx], clock);
+        let (leader_rbac, leader_identity) =
+            app_stack_over_wrapped(&engines[leader_idx], clock, wrap);
 
         // Let the signing-key write reach every node before the followers'
         // constructors read it.
@@ -234,7 +267,7 @@ impl ThreeNodeCluster {
                     identity: Arc::clone(&leader_identity),
                 });
             } else {
-                let (rbac, identity) = app_stack_over(engine, clock);
+                let (rbac, identity) = app_stack_over_wrapped(engine, clock, wrap);
                 nodes.push(Node {
                     cluster: Arc::clone(engine),
                     rbac,
@@ -403,6 +436,151 @@ async fn a_control_asserted_on_the_leader_binds_on_both_followers() {
     cluster.shutdown();
 }
 
+/// Revoking a sessionless token on the LEADER completes promptly, succeeds,
+/// and binds on both followers.
+///
+/// The Raft observer runs on the leader's own state machine too. It used to
+/// project a replicated `oauth:revjti:` row by calling the local revocation
+/// path, which bumps the control epoch — a storage write, so a Raft proposal
+/// made from inside the state machine's own apply, which then waited for that
+/// apply. On a real three-node cluster a normal put took 10.3 ms and a
+/// revoked-JTI put took 10.0 s (`write_timeout`) and then failed, after the
+/// revocation row had already committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn revoking_a_sessionless_token_on_the_leader_is_prompt_and_binds_on_both_followers() {
+    use hearth::identity::{
+        ClientCredentialsRequest, ClientTrustLevel, GeneratedClientSecret, RegisterClientRequest,
+        TokenRevocationRequest,
+    };
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let cluster = ThreeNodeCluster::build(&clock).await;
+    let leader = cluster.leader();
+
+    let realm_id = leader
+        .identity
+        .create_realm(&CreateRealmRequest {
+            name: "three-node-revjti".to_string(),
+            config: Some(RealmConfig::default()),
+        })
+        .unwrap()
+        .id()
+        .clone();
+    let secret = GeneratedClientSecret::generate();
+    let client_id = leader
+        .identity
+        .register_client(
+            &realm_id,
+            &RegisterClientRequest {
+                client_name: "M2M".to_string(),
+                generated_client_secret: Some(secret.clone()),
+                grant_types: vec!["client_credentials".to_string()],
+                trust_level: ClientTrustLevel::FirstParty,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .client_id()
+        .clone();
+    let token = leader
+        .identity
+        .client_credentials_token(
+            &realm_id,
+            &ClientCredentialsRequest {
+                client_id: client_id.clone(),
+                client_secret: Some(secret.expose().to_string()),
+                scope: None,
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .unwrap()
+        .access_token()
+        .to_string();
+    cluster.converge().await;
+    for node in cluster.followers() {
+        node.identity
+            .validate_token(&realm_id, &token)
+            .unwrap_or_else(|e| panic!("node {} rejected a valid token: {e:?}", node.id()));
+    }
+
+    let started = Instant::now();
+    let outcome = leader.identity.revoke_token(
+        &realm_id,
+        &TokenRevocationRequest {
+            token: token.clone(),
+            token_type_hint: Some("access_token".to_string()),
+            revoking_client_id: Some(client_id),
+        },
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        outcome.is_ok(),
+        "revoking on the leader failed after {elapsed:?}: {outcome:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "revoking a sessionless token on the leader took {elapsed:?}; the replicated-write \
+         observer must not write to storage from inside the state machine's apply"
+    );
+
+    cluster.converge().await;
+    for node in cluster.followers() {
+        assert!(
+            eventual_rejection(node, &realm_id, &token).await.is_some(),
+            "node {} still accepts a token the leader revoked",
+            node.id()
+        );
+    }
+
+    cluster.shutdown();
+}
+
+/// Real time a follower's background reloader gets to apply a control after
+/// replication has converged. The replicated epoch row signals the reloader
+/// from the state machine; the reload itself runs on the reloader thread,
+/// never on a validating one, so the bind is eventual.
+const RELOAD_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Validates `token` on `node` until it is rejected or [`RELOAD_DEADLINE`]
+/// passes; returns the rejection.
+async fn eventual_rejection(
+    node: &Node,
+    realm_id: &RealmId,
+    token: &str,
+) -> Option<hearth::identity::IdentityError> {
+    eventual_rejection_where(node, realm_id, token, |_| true).await
+}
+
+/// As [`eventual_rejection`], but keeps polling until the rejection is one
+/// `wanted` accepts — a follower can reject for an earlier reason (a missing
+/// session) before the reload that makes it reject for the asserted one.
+/// Returns the last rejection seen if none matched in time.
+async fn eventual_rejection_where(
+    node: &Node,
+    realm_id: &RealmId,
+    token: &str,
+    wanted: impl Fn(&hearth::identity::IdentityError) -> bool,
+) -> Option<hearth::identity::IdentityError> {
+    let deadline = Instant::now() + RELOAD_DEADLINE;
+    let mut last = None;
+    while Instant::now() < deadline {
+        if let Err(e) = node.identity.validate_token(realm_id, token) {
+            if wanted(&e) {
+                return Some(e);
+            }
+            last = Some(e);
+        }
+        // AUDIT: justified-sleep: poll interval of a deadline-bounded condition loop; the follower's background control reload exposes no completion signal to integration tests
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    last
+}
+
 /// A realm with one user, one live session and the access token bound to it.
 struct SeededRealm {
     realm_id: RealmId,
@@ -480,10 +658,8 @@ async fn assert_session_revocation_binds(
     clock.advance(1_000_000);
 
     for node in cluster.followers() {
-        let err = node
-            .identity
-            .validate_token(&seeded.realm_id, &seeded.access_token)
-            .err()
+        let err = eventual_rejection(node, &seeded.realm_id, &seeded.access_token)
+            .await
             .unwrap_or_else(|| {
                 panic!(
                     "node {} still accepts a token whose session the leader revoked",
@@ -555,16 +731,16 @@ async fn assert_realm_suspension_binds(
     clock.advance(1_000_000);
 
     for node in cluster.followers() {
-        let err = node
-            .identity
-            .validate_token(&seeded.realm_id, &fresh_token)
-            .err()
-            .unwrap_or_else(|| {
-                panic!(
-                    "node {} still validates tokens for a realm the leader suspended",
-                    node.id()
-                )
-            });
+        let err = eventual_rejection_where(node, &seeded.realm_id, &fresh_token, |e| {
+            matches!(e, hearth::identity::IdentityError::RealmSuspended)
+        })
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "node {} still validates tokens for a realm the leader suspended",
+                node.id()
+            )
+        });
         // Exactly `RealmSuspended`, not merely "some error". Suspension also
         // revokes the realm's sessions, so a follower that never reloaded
         // `realm_status_cache` still rejects the token — with `InvalidToken`,
@@ -933,6 +1109,431 @@ async fn a_follower_persists_and_clears_its_own_rate_limit_tracker_rows() {
          — a restart of that node would rehydrate a lockout for a user who has already \
          authenticated (26.49)"
     );
+
+    cluster.shutdown();
+}
+
+// ── Owed control-epoch bumps across a real leader change ─────────────────────
+
+/// A node's cluster storage handle whose `increment_u64` — the control-epoch
+/// bump — can be made to fail, standing in for a bump lost between the
+/// control row's Raft proposal and its own. Every other call passes through.
+struct IncrementFault {
+    inner: Arc<dyn StorageEngine>,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl StorageEngine for IncrementFault {
+    fn accepts_writes(&self) -> bool {
+        self.inner.accepts_writes()
+    }
+    fn put_node_local(&self, r: &RealmId, k: &[u8], v: &[u8]) -> Result<(), StorageError> {
+        self.inner.put_node_local(r, k, v)
+    }
+    fn delete_node_local(&self, r: &RealmId, k: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete_node_local(r, k)
+    }
+    fn get(&self, r: &RealmId, k: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.get(r, k)
+    }
+    fn put(&self, r: &RealmId, k: &[u8], v: &[u8]) -> Result<(), StorageError> {
+        self.inner.put(r, k, v)
+    }
+    fn delete(&self, r: &RealmId, k: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete(r, k)
+    }
+    fn scan(&self, r: &RealmId, a: &[u8], b: &[u8]) -> Result<Vec<ScanEntry>, StorageError> {
+        self.inner.scan(r, a, b)
+    }
+    fn put_batch(&self, r: &RealmId, e: &[(Vec<u8>, Vec<u8>)]) -> Result<(), StorageError> {
+        self.inner.put_batch(r, e)
+    }
+    fn write_batch(
+        &self,
+        r: &RealmId,
+        puts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> Result<(), StorageError> {
+        self.inner.write_batch(r, puts, deletes)
+    }
+    fn backup_barrier(&self) -> Option<Arc<std::sync::RwLock<()>>> {
+        self.inner.backup_barrier()
+    }
+    fn put_if_absent(&self, r: &RealmId, k: &[u8], v: &[u8]) -> Result<bool, StorageError> {
+        self.inner.put_if_absent(r, k, v)
+    }
+    fn increment_u64(&self, r: &RealmId, k: &[u8]) -> Result<u64, StorageError> {
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected: the control-epoch bump was lost",
+            )));
+        }
+        self.inner.increment_u64(r, k)
+    }
+    fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+        self.inner.list_realms()
+    }
+    fn begin_snapshot_restore(&self, id: &str) -> Result<(), StorageError> {
+        self.inner.begin_snapshot_restore(id)
+    }
+    fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
+        self.inner.complete_snapshot_restore()
+    }
+    fn flush_memtable(&self) -> Result<(), StorageError> {
+        self.inner.flush_memtable()
+    }
+}
+
+fn owed_gauge() -> f64 {
+    hearth::metrics::metrics().control_epoch_bumps_owed.get()
+}
+
+/// A control whose epoch bump failed on the leader must still bind on every
+/// other node after leadership moves.
+///
+/// Cluster storage does not forward a follower's write to the leader, so once
+/// the leader stepped down the bump it owed could never succeed: it retried
+/// every 5 s for as long as it lived, and nothing else bumped the epoch, so
+/// the other two nodes enforced the stale control (here: kept validating a
+/// suspended realm's token) until an unrelated control was asserted somewhere.
+///
+/// Now the node that wins the election bumps the epoch once, which orders
+/// after every row the old leader committed, so every node reloads; and the
+/// old leader, refused as `NotLeader`, drops what it owed.
+///
+/// Real sockets, a real step-down (`transfer_leadership`), no shortcut: the
+/// injected fault is only the loss of the one bump.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_control_whose_bump_failed_binds_everywhere_after_a_leader_change() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let faults: Arc<std::sync::Mutex<BTreeMap<u64, Arc<std::sync::atomic::AtomicBool>>>> =
+        Arc::default();
+    let registry = Arc::clone(&faults);
+    let wrap = move |id: u64, storage: Arc<dyn StorageEngine>| -> Arc<dyn StorageEngine> {
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        registry.lock().unwrap().insert(id, Arc::clone(&fail));
+        Arc::new(IncrementFault {
+            inner: storage,
+            fail,
+        })
+    };
+    let cluster = ThreeNodeCluster::build_with(&clock, &wrap).await;
+    let seeded = seed_realm_user_and_token(&cluster, &clock, "owed-bump-leader-change").await;
+    for node in &cluster.nodes {
+        node.identity
+            .validate_token(&seeded.realm_id, &seeded.access_token)
+            .unwrap_or_else(|e| panic!("node {} rejected a valid token: {e:?}", node.id()));
+    }
+
+    // The leader suspends the realm; the row commits, its epoch bump is lost.
+    let old_leader_id = cluster.leader_id;
+    let fail = Arc::clone(&faults.lock().unwrap()[&old_leader_id]);
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    cluster
+        .leader()
+        .identity
+        .update_realm(
+            &seeded.realm_id,
+            &UpdateRealmRequest {
+                name: None,
+                status: Some(RealmStatus::Suspended),
+                config: None,
+            },
+        )
+        .unwrap();
+    cluster.converge().await;
+    assert!(owed_gauge() >= 1.0, "precondition: the lost bump is owed");
+    clock.advance(1_000_000);
+    for node in cluster.followers() {
+        node.identity
+            .validate_token(&seeded.realm_id, &seeded.access_token)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "precondition: with the bump lost node {} should not know yet: {e:?}",
+                    node.id()
+                )
+            });
+    }
+
+    // Leadership moves. The fault clears, so the old leader's retries reach
+    // real cluster storage — which, on a follower, refuses them as NotLeader.
+    let new_leader_id = cluster
+        .leader()
+        .cluster
+        .transfer_leadership()
+        .await
+        .expect("step down");
+    assert_ne!(new_leader_id, old_leader_id);
+    fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    cluster.converge().await;
+    clock.advance(1_000_000);
+
+    for node in cluster.nodes.iter().filter(|n| n.id() != old_leader_id) {
+        let err = eventual_rejection_where(node, &seeded.realm_id, &seeded.access_token, |e| {
+            matches!(e, hearth::identity::IdentityError::RealmSuspended)
+        })
+        .await;
+        assert!(
+            matches!(err, Some(hearth::identity::IdentityError::RealmSuspended)),
+            "node {} (new leader: {}) never enforced a suspension whose bump the old \
+             leader lost: {err:?}",
+            node.id(),
+            node.id() == new_leader_id
+        );
+    }
+
+    // The old leader dropped the bumps it can no longer make.
+    let deadline = Instant::now() + RELOAD_DEADLINE;
+    while owed_gauge() > 0.0 && Instant::now() < deadline {
+        // AUDIT: justified-sleep: poll interval of a deadline-bounded condition loop on the owed-bumps gauge, which has no change notification
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        owed_gauge() < 0.5,
+        "the old leader still owes bumps it can never make: {}",
+        owed_gauge()
+    );
+
+    cluster.shutdown();
+}
+
+// ── Rebuilding a cluster from an offline-restored data directory ─────────────
+
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), to).unwrap();
+        }
+    }
+}
+
+/// Seeds `{root}/restored` the way the upgrading guide does: a store holding
+/// a realm, a user and an operator, exported with `hearth backup create`
+/// (unfiltered, so the system realm is in it) and restored with `hearth backup
+/// restore` into a new empty directory — one shared `HEARTH_MASTER_KEY`, no
+/// KEK file. Returns the restored directory, the realm and the user.
+fn seed_by_offline_restore(clock: &Arc<FakeClock>, root: &Path) -> (PathBuf, RealmId, UserId) {
+    // One HEARTH_MASTER_KEY for the source store, the CLI children and the
+    // nodes, as the guide requires. nextest runs each test in its own process.
+    const MASTER_KEY: &str = "0b5e55ed0b5e55ed0b5e55ed0b5e55ed0b5e55ed0b5e55ed0b5e55ed0b5e55ed";
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("HEARTH_MASTER_KEY", MASTER_KEY);
+    }
+    let source = root.join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    let (realm_id, user_id) = {
+        let storage: Arc<dyn StorageEngine> =
+            Arc::new(EmbeddedStorageEngine::open(StorageConfig::dev(source.clone())).unwrap());
+        let clock_dyn = Arc::clone(clock) as Arc<dyn Clock>;
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock_dyn),
+        )) as Arc<dyn AuditEngine>;
+        let identity = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            clock_dyn,
+            IdentityConfig {
+                credential: CredentialConfig::fast_for_testing(),
+                ..IdentityConfig::default()
+            },
+            audit,
+        )
+        .unwrap();
+        let realm = identity
+            .create_realm(&CreateRealmRequest {
+                name: "rebuilt".to_string(),
+                config: Some(RealmConfig::default()),
+            })
+            .unwrap();
+        let user = identity
+            .create_user(
+                realm.id(),
+                &CreateUserRequest {
+                    email: "survivor@rebuilt.test".to_string(),
+                    display_name: "Survivor".to_string(),
+                    first_name: String::new(),
+                    last_name: String::new(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        identity
+            .create_admin_user(&CreateUserRequest {
+                email: "operator@rebuilt.test".to_string(),
+                display_name: "Operator".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        (realm.id().clone(), user.id().clone())
+    };
+    // The source's storage lock is per-process; the CLI reads a copy.
+    let source_copy = root.join("source-copy");
+    copy_dir(&source, &source_copy);
+
+    let hearth = |args: &[&std::ffi::OsStr]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_hearth"))
+            .args(args)
+            .env_remove("HEARTH_KEK")
+            .env("HEARTH_MASTER_KEY", MASTER_KEY)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "hearth {args:?} failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let os = std::ffi::OsStr::new;
+    let archive = root.join("pre-upgrade.hearth-backup");
+    hearth(&[
+        os("backup"),
+        os("create"),
+        os("--data-dir"),
+        source_copy.as_os_str(),
+        os("--output"),
+        archive.as_os_str(),
+    ]);
+    let seed = root.join("restored");
+    std::fs::create_dir(&seed).unwrap(); // new and empty, as the guide's `mkdir`
+    hearth(&[
+        os("backup"),
+        os("restore"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--data-dir"),
+        seed.as_os_str(),
+        os("--allow-unsigned"),
+    ]);
+    assert!(
+        !seed.join("raft.db").exists(),
+        "a restore into an empty directory must leave no raft.db for the copies to carry"
+    );
+
+    (seed, realm_id, user_id)
+}
+
+/// The upgrading guide rebuilds a cluster whose Raft logs were purged by
+/// restoring the backup OFFLINE into one empty data directory and copying
+/// that directory to every node before the new cluster first starts.
+///
+/// Restoring into each node separately would not do: each restore builds its
+/// own engines on a cold store, and each writes its own random keys and
+/// timestamps, so the nodes would start with different state machines. A
+/// copy is byte-identical, and the fresh Raft log then applies the same
+/// entries on top of the same bytes everywhere. A restore through the new
+/// leader over HTTP is not a substitute either: realms come from
+/// `hearth.yaml`, so start-up has already created every declared realm under
+/// a new id (see `a_rebuild_restores_offline_before_the_first_start` in
+/// `src/main.rs`).
+///
+/// Here the seed goes through the real binary, as the guide does: a store
+/// holding a realm, a user and an operator is exported with `hearth backup
+/// create` (unfiltered, so it carries the system realm) and restored with
+/// `hearth backup restore` into an EMPTY directory — one shared
+/// `HEARTH_MASTER_KEY`, no KEK file. That directory (which must hold no
+/// `raft.db`) is copied to three new directories and the cluster started.
+/// Every node must start (a copied store has no persisted Raft state, which
+/// must not be mistaken for a purged log), see the realm under the same id and
+/// the operator in the system realm, keep both through realm reconciliation
+/// from `hearth.yaml` (what `serve` runs at start-up), and validate a token
+/// the leader signs with that realm's key; a write after start-up must
+/// replicate.
+///
+/// Not covered: the nodes are in-process `ClusterEngine`s, not `hearth serve`
+/// processes, and the source store is this build's, not a v1.6.11 one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_cluster_seeded_from_one_offline_restored_directory_serves_it_on_every_node() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let seed_root = tempfile::tempdir().unwrap();
+    let (seed, realm_id, user_id) = seed_by_offline_restore(&clock, seed_root.path());
+
+    let cluster = ThreeNodeCluster::build_seeded(&clock, &seed).await;
+
+    // Start-up reconciliation from `hearth.yaml`, which declares the same
+    // realm name: it must find the restored realm, not create a new one.
+    let config = hearth::config::Config {
+        realms: Some(std::collections::HashMap::from([(
+            "rebuilt".to_string(),
+            hearth::config::RealmYamlConfig::default(),
+        )])),
+        ..hearth::config::Config::default()
+    };
+    let leader = cluster.leader();
+    hearth::identity::reconcile::reconcile_realms(
+        leader.identity.as_ref(),
+        leader.rbac.as_ref(),
+        &config,
+    )
+    .unwrap();
+    clock.advance(1_000_000);
+    cluster.converge().await;
+
+    let system = RealmId::new(uuid::Uuid::nil());
+    for node in &cluster.nodes {
+        assert!(
+            node.identity
+                .get_user_by_email(&system, "operator@rebuilt.test")
+                .unwrap()
+                .is_some(),
+            "node {} lost the restored operator-console account",
+            node.id()
+        );
+    }
+    for node in &cluster.nodes {
+        let realm = node
+            .identity
+            .get_realm_by_name("rebuilt")
+            .unwrap()
+            .unwrap_or_else(|| panic!("node {} does not hold the restored realm", node.id()));
+        assert_eq!(realm.id(), &realm_id, "node {}", node.id());
+        assert!(
+            node.identity
+                .get_user(&realm_id, &user_id)
+                .unwrap()
+                .is_some(),
+            "node {} lost the restored user",
+            node.id()
+        );
+    }
+
+    // Sessions are not restored: sign in again on the leader.
+    let leader = cluster.leader();
+    let session = leader
+        .identity
+        .create_session(&realm_id, &user_id, &SessionContext::default())
+        .unwrap();
+    let token = leader
+        .identity
+        .issue_tokens(&realm_id, &user_id, session.id())
+        .unwrap()
+        .access_token()
+        .to_string();
+    clock.advance(1_000_000);
+    cluster.converge().await;
+    for node in cluster.followers() {
+        node.identity
+            .validate_token(&realm_id, &token)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "node {} rejected a token the leader signed with the restored realm's \
+                     key: {e:?}",
+                    node.id()
+                )
+            });
+    }
 
     cluster.shutdown();
 }

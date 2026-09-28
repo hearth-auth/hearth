@@ -118,13 +118,15 @@ impl crate::audit::AuditEngine for NotifyingAuditEngine {
         self.inner.on_replicated_snapshot();
     }
 
-    fn import_event(
+    fn import_events(
         &self,
-        event: &crate::audit::AuditEvent,
-    ) -> Result<(), crate::audit::AuditError> {
-        // Restore path: re-chain the event through the inner engine. No webhook
-        // broadcast — restore is an operator recovery action, not a live event.
-        self.inner.import_event(event)
+        realm_id: &crate::core::RealmId,
+        events: &[crate::audit::AuditEvent],
+    ) -> Result<crate::audit::AuditImportOutcome, crate::audit::AuditError> {
+        // Restore path: re-chain the events through the inner engine. No
+        // webhook broadcast — restore is an operator recovery action, not a
+        // live event.
+        self.inner.import_events(realm_id, events)
     }
 
     fn query(

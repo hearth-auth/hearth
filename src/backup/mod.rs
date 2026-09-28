@@ -31,6 +31,8 @@
 //! realms/<realm-slug>/invitations.ndjson
 //! realms/<realm-slug>/retiring_signing_keys.json (AES-256-GCM encrypted)
 //! realms/<realm-slug>/signing_key.json   (AES-256-GCM encrypted)
+//! realms/<realm-slug>/id_token_signing_key.json           (RS256 ID-token key; encrypted)
+//! realms/<realm-slug>/retiring_id_token_signing_keys.json (encrypted)
 //! realms/<realm-slug>/audit.ndjson       (optional)
 //! realms/<realm-slug>/audit_chain.json   (optional, with audit.ndjson)
 //! ```
@@ -65,6 +67,7 @@ mod encryption;
 mod error;
 mod export;
 mod import;
+mod signature;
 mod types;
 
 pub use encryption::{decrypt_archive, encrypt_archive};
@@ -73,12 +76,16 @@ pub use export::{decrypt_bytes, unwrap_dek, wrap_dek, BackupExporter, ExportOpti
 pub use import::{
     BackupImporter, Conflict, EntityCounts, ImportOptions, ImportReport, RestoreMode,
 };
+pub use signature::{
+    check_restore_signature, sign_archive, verify_manifest_signature, BackupSigningKey,
+    SignatureCheck,
+};
 pub use types::{
     BackupManifest, BackupRecord, DekWrappingParams, RealmManifest, RecordCounts, MANIFEST_VERSION,
 };
 
-use std::collections::HashMap;
-use std::io::Read;
+use std::collections::{BTreeMap, HashMap};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use hex::encode as hex_encode;
@@ -142,7 +149,7 @@ impl BackupArchive {
         let builder = tar::Builder::new(encoder);
         Ok(ArchiveWriter {
             builder,
-            checksums: HashMap::new(),
+            checksums: BTreeMap::new(),
         })
     }
 
@@ -155,6 +162,11 @@ impl BackupArchive {
     /// Returns [`BackupError::UnsupportedVersion`] when the archive's
     /// `format_version` is not exactly [`MANIFEST_VERSION`] — an *older*
     /// archive is rejected by the same branch as a newer one.
+    ///
+    /// The reader reopens `path` for every read, so two reads may see two
+    /// different files. That is fine for inspecting or verifying an archive;
+    /// anything that verifies and then imports must use
+    /// [`open_private_copy`](Self::open_private_copy) instead.
     pub fn open(path: &Path) -> Result<ArchiveReader, BackupError> {
         let manifest = read_manifest(path)?;
         if manifest.format_version != MANIFEST_VERSION {
@@ -162,7 +174,54 @@ impl BackupArchive {
         }
         Ok(ArchiveReader {
             manifest,
-            path: path.to_path_buf(),
+            source: ArchiveSource::Path(path.to_path_buf()),
+        })
+    }
+
+    /// Copies the archive at `path` into an anonymous temporary file and opens
+    /// the copy. Every later read comes from that copy, never from `path`.
+    ///
+    /// Use this — not [`open`](Self::open) — whenever the archive is checked
+    /// and then acted on, as a restore is: the signature and checksums are
+    /// verified in one pass and the members imported in another. A reader from
+    /// [`open`](Self::open) reopens `path` for each pass, so anyone able to
+    /// write `path` could replace the archive after it was verified and have
+    /// the replacement imported. The copy is unlinked from the moment it is
+    /// created (`tempfile::tempfile`), so nothing else can name it, let alone
+    /// change it.
+    ///
+    /// The copy lives in the system temporary directory and needs as much free
+    /// space there as the (compressed) archive occupies.
+    ///
+    /// # Errors
+    ///
+    /// As [`open`](Self::open), plus any I/O error making the copy.
+    pub fn open_private_copy(path: &Path) -> Result<ArchiveReader, BackupError> {
+        let mut source = std::fs::File::open(path)?;
+        let mut copy = tempfile::tempfile()?;
+        std::io::copy(&mut source, &mut copy)?;
+        Self::from_file(copy)
+    }
+
+    /// Opens an archive held in `file`, reading it from the start.
+    ///
+    /// Every read goes through this handle; no path is ever reopened. The
+    /// caller must make sure nothing else can write the file while the reader
+    /// lives — an anonymous `tempfile::tempfile()` the caller filled itself is
+    /// the intended source (see [`open_private_copy`](Self::open_private_copy)).
+    ///
+    /// # Errors
+    ///
+    /// As [`open`](Self::open).
+    pub fn from_file(mut file: std::fs::File) -> Result<ArchiveReader, BackupError> {
+        file.seek(SeekFrom::Start(0))?;
+        let manifest = manifest_from(&mut file)?;
+        if manifest.format_version != MANIFEST_VERSION {
+            return Err(BackupError::UnsupportedVersion(manifest.format_version));
+        }
+        Ok(ArchiveReader {
+            manifest,
+            source: ArchiveSource::Pinned(std::sync::Mutex::new(file)),
         })
     }
 }
@@ -174,7 +233,7 @@ impl BackupArchive {
 /// write the manifest and seal the archive.
 pub struct ArchiveWriter {
     builder: tar::Builder<zstd::Encoder<'static, std::fs::File>>,
-    checksums: HashMap<String, String>,
+    checksums: BTreeMap<String, String>,
 }
 
 impl ArchiveWriter {
@@ -207,7 +266,30 @@ impl ArchiveWriter {
     ///
     /// Returns [`BackupError::Crypto`] when `sections_encrypted=true` but the
     /// required DEK fields are absent or inconsistent.
-    pub fn finish(mut self, mut manifest: BackupManifest) -> Result<(), BackupError> {
+    pub fn finish(self, manifest: BackupManifest) -> Result<(), BackupError> {
+        self.finish_inner(manifest, None)
+    }
+
+    /// Like [`finish`](Self::finish), but signs the manifest with `key` once
+    /// its checksums are known, so a restore can authenticate the archive
+    /// against `security.backup.verify_key` (A-30).
+    ///
+    /// # Errors
+    ///
+    /// As [`finish`](Self::finish).
+    pub fn finish_signed(
+        self,
+        manifest: BackupManifest,
+        key: &BackupSigningKey,
+    ) -> Result<(), BackupError> {
+        self.finish_inner(manifest, Some(key))
+    }
+
+    fn finish_inner(
+        mut self,
+        mut manifest: BackupManifest,
+        signer: Option<&BackupSigningKey>,
+    ) -> Result<(), BackupError> {
         if manifest.sections_encrypted
             && (manifest.wrapped_dek_b64.is_none() || manifest.dek_wrapping_params.is_none())
         {
@@ -221,6 +303,12 @@ impl ArchiveWriter {
             ));
         }
         manifest.checksums = self.checksums;
+        // The signature covers the checksums, so it must be computed after
+        // they are set — and any stale signature must not survive.
+        manifest.detached_signature_b64 = None;
+        if let Some(key) = signer {
+            key.sign_manifest(&mut manifest)?;
+        }
 
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
 
@@ -242,13 +330,49 @@ impl ArchiveWriter {
 
 /// Reader for an existing `.hearth-backup` archive.
 ///
-/// Obtained via [`BackupArchive::open`]. The `manifest` field is populated
+/// Obtained via [`BackupArchive::open`], [`BackupArchive::open_private_copy`]
+/// or [`BackupArchive::from_file`]. The `manifest` field is populated
 /// on construction from the embedded `manifest.json`.
 #[derive(Debug)]
 pub struct ArchiveReader {
     /// The parsed manifest from `manifest.json`.
     pub manifest: BackupManifest,
-    path: PathBuf,
+    source: ArchiveSource,
+}
+
+/// Where an [`ArchiveReader`] reads its bytes from.
+#[derive(Debug)]
+enum ArchiveSource {
+    /// Reopened by path on every read ([`BackupArchive::open`]).
+    Path(PathBuf),
+    /// One handle, rewound for every read ([`BackupArchive::from_file`]). The
+    /// lock serialises passes, which would otherwise share the file offset.
+    Pinned(std::sync::Mutex<std::fs::File>),
+}
+
+/// A [`Read`] over a pinned archive file, holding its lock for one pass.
+struct PinnedRead<'a>(std::sync::MutexGuard<'a, std::fs::File>);
+
+impl Read for PinnedRead<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl ArchiveSource {
+    /// Returns a reader positioned at the start of the archive.
+    fn reader(&self) -> Result<Box<dyn Read + '_>, BackupError> {
+        match self {
+            Self::Path(path) => Ok(Box::new(std::fs::File::open(path)?)),
+            Self::Pinned(file) => {
+                let mut guard = file
+                    .lock()
+                    .map_err(|_| std::io::Error::other("archive reader lock poisoned"))?;
+                guard.seek(SeekFrom::Start(0))?;
+                Ok(Box::new(PinnedRead(guard)))
+            }
+        }
+    }
 }
 
 impl ArchiveReader {
@@ -263,8 +387,7 @@ impl ArchiveReader {
     /// decoder on every call — use [`read_all_realm_files`](Self::read_all_realm_files)
     /// when reading multiple files for the same realm.
     pub fn read_file(&self, archive_path: &str) -> Result<Option<Vec<u8>>, BackupError> {
-        let file = std::fs::File::open(&self.path)?;
-        let decoder = zstd::Decoder::new(file)?;
+        let decoder = zstd::Decoder::new(self.source.reader()?)?;
         let mut archive = tar::Archive::new(decoder);
         for entry in archive.entries()? {
             let mut entry = entry?;
@@ -288,8 +411,7 @@ impl ArchiveReader {
         slug: &str,
     ) -> Result<HashMap<String, Vec<u8>>, BackupError> {
         let prefix = format!("realms/{slug}/");
-        let file = std::fs::File::open(&self.path)?;
-        let decoder = zstd::Decoder::new(file)?;
+        let decoder = zstd::Decoder::new(self.source.reader()?)?;
         let mut archive = tar::Archive::new(decoder);
         let mut out = HashMap::new();
         for entry in archive.entries()? {
@@ -324,8 +446,7 @@ impl ArchiveReader {
     ///   manifest does not list. [`ArchiveWriter::add_file`] checksums every
     ///   member it appends, so an unlisted one was added after sealing.
     pub fn verify_checksums(&self) -> Result<usize, BackupError> {
-        let file = std::fs::File::open(&self.path)?;
-        let decoder = zstd::Decoder::new(file)?;
+        let decoder = zstd::Decoder::new(self.source.reader()?)?;
         let mut archive = tar::Archive::new(decoder);
 
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -374,8 +495,12 @@ impl ArchiveReader {
 
 /// Extracts and parses `manifest.json` from the archive at `path`.
 fn read_manifest(path: &Path) -> Result<BackupManifest, BackupError> {
-    let file = std::fs::File::open(path)?;
-    let decoder = zstd::Decoder::new(file)?;
+    manifest_from(std::fs::File::open(path)?)
+}
+
+/// Extracts and parses `manifest.json` from an archive stream.
+fn manifest_from(source: impl Read) -> Result<BackupManifest, BackupError> {
+    let decoder = zstd::Decoder::new(source)?;
     let mut archive = tar::Archive::new(decoder);
 
     for entry in archive.entries()? {
@@ -415,7 +540,7 @@ mod tests {
                 },
                 audit_chain_included: false,
             }],
-            checksums: HashMap::new(),
+            checksums: BTreeMap::new(),
             sections_encrypted: false,
             wrapped_dek_b64: None,
             dek_wrapping_params: None,
@@ -686,5 +811,52 @@ mod tests {
 
         let err = BackupArchive::open(path).expect_err("should fail");
         assert!(matches!(err, BackupError::ManifestNotFound));
+    }
+
+    /// Writes a one-member archive at `path` whose `users.ndjson` is `users`.
+    fn write_one_member(path: &Path, users: &[u8]) {
+        let mut writer = BackupArchive::create(path).expect("create");
+        writer
+            .add_file("realms/test-realm/users.ndjson", users)
+            .expect("add");
+        writer.finish(sample_manifest()).expect("finish");
+    }
+
+    /// A restore authenticates an archive, then reads it again to import it.
+    /// `ArchiveReader` used to reopen the source path on every read, so anyone
+    /// able to write that path could swap the file between the check and the
+    /// import. A private copy pins the bytes that were checked.
+    #[test]
+    fn private_copy_is_unaffected_by_later_changes_to_the_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("a.hearth-backup");
+        write_one_member(&path, b"{\"id\":\"original\"}\n");
+
+        let reader = BackupArchive::open_private_copy(&path).expect("open copy");
+
+        // Replace the source, in place, with a different but internally
+        // consistent archive — the swap an attacker would make.
+        write_one_member(&path, b"{\"id\":\"swapped\"}\n");
+        assert_eq!(reader.verify_checksums().expect("copy intact"), 1);
+        let files = reader
+            .read_all_realm_files("test-realm")
+            .expect("read copy");
+        assert_eq!(
+            files
+                .get("realms/test-realm/users.ndjson")
+                .map(Vec::as_slice),
+            Some(&b"{\"id\":\"original\"}\n"[..]),
+            "reads must come from the bytes that were opened, not the path"
+        );
+
+        // Removing the source does not matter either.
+        std::fs::remove_file(&path).expect("remove source");
+        assert_eq!(
+            reader
+                .read_file("realms/test-realm/users.ndjson")
+                .expect("read")
+                .as_deref(),
+            Some(&b"{\"id\":\"original\"}\n"[..])
+        );
     }
 }

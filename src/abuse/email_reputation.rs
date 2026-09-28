@@ -11,14 +11,15 @@
 //! 2. **Role-address detection** — flags addresses like `noreply@`, `admin@`,
 //!    `postmaster@` that are unlikely to belong to a real user.
 //!
-//! ## DNS MX validation (stub)
+//! ## No DNS / MX validation
 //!
-//! The plan calls for "DNS MX validity" checking but a proper MX lookup
-//! requires an async DNS resolver (`hickory-resolver` or equivalent), which
-//! is not yet a Hearth dependency.  The reference adapter sets
-//! `domain_has_no_mx = false` (assume domain is valid) and documents this
-//! clearly.  Add `hickory-resolver` and wire `lookup_mx()` when full MX
-//! verification is required (see HEA-1114 §4.2 P-5 notes).
+//! Hearth performs **no** DNS lookup of the email domain: it has no DNS
+//! resolver dependency, and [`EmailReputation::check`] is synchronous by
+//! contract.  A domain that does not exist, or has no MX record, is therefore
+//! never flagged.  An earlier `domain_has_no_mx` verdict flag was removed
+//! because nothing ever set it — it implied a check that did not happen.
+//! Deployments that need deliverability verification should confirm the
+//! address (email verification link) rather than rely on reputation.
 //!
 //! # Failure mode: fail-open
 //!
@@ -48,12 +49,6 @@ pub struct EmailReputationVerdict {
     /// The email domain appears in the disposable / temporary-email blocklist.
     pub is_disposable: bool,
 
-    /// The domain could not be confirmed to have an MX record.
-    ///
-    /// `false` (assume valid) in the built-in adapter — see module docs for
-    /// the DNS limitation.
-    pub domain_has_no_mx: bool,
-
     /// The local part is a well-known role address (`noreply`, `admin`,
     /// `postmaster`, etc.) that is unlikely to belong to an individual user.
     pub is_role_address: bool,
@@ -63,7 +58,7 @@ impl EmailReputationVerdict {
     /// `true` when none of the advisory flags are set.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        !self.is_disposable && !self.domain_has_no_mx && !self.is_role_address
+        !self.is_disposable && !self.is_role_address
     }
 }
 
@@ -130,8 +125,8 @@ pub struct EmailReputationConfig {
 ///    [`EmailReputationConfig::extra_disposable_domains`].
 /// 2. **Role-address check** — the local part (before `@`) is compared
 ///    against a list of well-known role prefixes.
-/// 3. **DNS MX check** — stub, always returns `domain_has_no_mx: false`.
-///    See module docs for the `hickory-resolver` upgrade path.
+///
+/// No DNS / MX lookup is performed (see module docs).
 ///
 /// # Domain normalisation
 ///
@@ -186,15 +181,10 @@ impl EmailReputation for BuiltinEmailReputation {
 
         let is_disposable = self.is_disposable_domain(&domain);
 
-        // DNS MX check stub — always false until hickory-resolver is wired.
-        // TODO: implement real MX lookup via hickory-resolver (HEA-1114 §4.2 P-5).
-        let domain_has_no_mx = false;
-
         let is_role_address = is_role_local_part(local);
 
         EmailReputationVerdict {
             is_disposable,
-            domain_has_no_mx,
             is_role_address,
         }
     }
@@ -1054,18 +1044,6 @@ mod tests {
     fn only_at_returns_clean() {
         let v = provider().check("@");
         assert!(v.is_clean());
-    }
-
-    // ── DNS MX check (stub) ─────────────────────────────────────────────────
-
-    /// The stub MX check always returns domain_has_no_mx = false (assume valid).
-    #[test]
-    fn mx_check_stub_always_false() {
-        let v = provider().check("user@example.com");
-        assert!(
-            !v.domain_has_no_mx,
-            "stub MX check must not set domain_has_no_mx"
-        );
     }
 
     // ── Operator-supplied extras ────────────────────────────────────────────

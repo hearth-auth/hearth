@@ -329,6 +329,23 @@ pub struct Metrics {
     /// exact condition the F2 isolation exists to prevent — the admin console
     /// shedding — without conflating it with tenant-realm login sheds.
     pub kdf_admin_shed_total: Counter,
+
+    /// Total control-epoch bumps that could not be persisted.
+    ///
+    /// A control (token or session revocation, DPoP key block, realm status
+    /// change) is applied on the node that served it and announced to the
+    /// others by bumping the replicated control epoch. A failed bump means the
+    /// other nodes do not reload for it until the next successful bump (which
+    /// reloads everything), so any increase is worth an alert in a cluster.
+    pub control_epoch_bump_failures_total: Counter,
+    /// Controls whose epoch bump failed and is still owed, summed over every
+    /// identity engine in the process: a background thread retries the bump
+    /// (with bounded backoff) until it succeeds, and a node refused as
+    /// `NotLeader` drops it (the new leader's election bump covers it); then
+    /// this returns to 0. Non-zero for long means a node that believes it
+    /// leads cannot commit, and other nodes are enforcing stale controls —
+    /// alert on it staying above 0.
+    pub control_epoch_bumps_owed: Gauge,
 }
 
 impl Metrics {
@@ -688,6 +705,26 @@ impl Metrics {
             .register(Box::new(kdf_admin_shed_total.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let control_epoch_bump_failures_total = Counter::new(
+            "hearth_control_epoch_bump_failures_total",
+            "Control-epoch bumps that could not be persisted (other nodes miss the control \
+             until the next successful bump)",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(control_epoch_bump_failures_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let control_epoch_bumps_owed = Gauge::new(
+            "hearth_control_epoch_bumps_owed",
+            "Controls whose control-epoch bump failed and is being retried; other nodes do \
+             not enforce them until it succeeds",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(control_epoch_bumps_owed.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         Self {
             registry,
             http_request_duration_seconds,
@@ -723,6 +760,8 @@ impl Metrics {
             kdf_compute_seconds,
             kdf_shed_total,
             kdf_admin_shed_total,
+            control_epoch_bump_failures_total,
+            control_epoch_bumps_owed,
         }
     }
 

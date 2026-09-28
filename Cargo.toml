@@ -23,7 +23,6 @@ name = "hearth"
 path = "src/main.rs"
 
 [dependencies]
-arc-swap = "1"
 askama = "0.12"
 hashbrown = "0.17"
 pbjson = "0.9"
@@ -37,6 +36,11 @@ ciborium = "0.2"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 crc32fast = "1"
+# Epoch-based reclamation behind `core::EpochCell`, the hot-path atomic-Arc
+# cell (task 26.5). It replaced `arc-swap`, whose 1.9.2 release corrupts the
+# heap under load + rcu (task 26.1); deny.toml bans it and
+# tests/arc_swap_removed.rs keeps it out of both lockfiles.
+# Already in the tree through crossbeam-skiplist; MIT/Apache-2.0.
 crossbeam-epoch = "0.9"
 crossbeam-skiplist = "0.1"
 data-encoding = "2"
@@ -68,10 +72,13 @@ pbkdf2 = { version = "0.12", default-features = false }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 quick-xml = "0.41"
-# rcgen with the `aws_lc_rs` backend provides RSA-2048 key generation
-# (the `ring` backend cannot generate RSA keys). This replaces the `rsa`
-# crate, which has no patched version for RUSTSEC-2023-0071 (Marvin Attack).
-rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
+# rcgen with the `aws_lc_rs` backend provides RSA key generation — RSA-2048
+# for SAML, RSA-3072 for RS256 ID tokens (the `ring` backend cannot generate
+# RSA keys). This replaces the `rsa` crate, which has no patched version for
+# RUSTSEC-2023-0071 (Marvin Attack). `zeroize` (no new crate: `zeroize` is
+# already a direct dependency) lets the ID-token key generator scrub rcgen's
+# internal copy of the PKCS#8 private key.
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem", "zeroize"] }
 hex = "0.4"
 sha2 = "0.10"
 subtle = "2"
@@ -144,15 +151,16 @@ rpassword = "7"
 secrecy = { version = "0.8", features = ["alloc"] }
 
 [features]
-# On by default so `make dev`, `cargo nextest` and the Playwright suite are
-# unaffected. The shipped container image builds with `--no-default-features`,
-# which is what actually keeps `/admin/bootstrap`, the `/dev/seed-*` family and
-# the hard-coded `admin@hearth.test` password out of the production binary
-# (audit §4.7#2, task 20.1). A runtime boolean left all of it compiled in.
-default = ["dev-endpoints"]
+# Empty on purpose. `dev-endpoints` compiles in `/admin/bootstrap`, the
+# `/dev/seed-*` family and the hard-coded `admin@hearth.test` password, so a
+# plain `cargo build --release` / `cargo install` must not carry it (audit
+# §4.7#2, task 20.1). Dev tooling opts in explicitly: `make dev`, `make test`,
+# `make check`, bacon and CI all pass `--features dev-endpoints`.
+default = []
 
 # Dev-only HTTP endpoints and the hard-coded dev admin credential.
-# Never enable for a production build.
+# Never enable for a production build. `hearth serve --dev` on a binary built
+# without it still starts, but logs that `/admin/bootstrap` is unavailable.
 dev-endpoints = []
 
 # Exposes internal test probes for use by the simulation crate. Never enable in production.

@@ -74,6 +74,10 @@ pub enum IdentityError {
     /// Intentionally vague — does not distinguish wrong vs. expired
     /// for enumeration resistance.
     InvalidClientSecret,
+    /// The client authenticated (or tried to) with a method its profile
+    /// forbids: a FAPI 2.0 Advanced realm, or a FAPI 2.0 client, accepts only
+    /// `private_key_jwt` (`docs/specs/OIDC.md` §2.1.2 item 6, §2.2).
+    PrivateKeyJwtRequired,
     /// The `private_key_jwt` client assertion is invalid (RFC 7523 §2.2).
     InvalidClientAssertion {
         /// Why the assertion was rejected.
@@ -204,8 +208,10 @@ pub enum IdentityError {
     /// A runtime mutation targeted a resource that `hearth.yaml` owns.
     ///
     /// Config-managed resources are reconciled from YAML at every startup, so
-    /// a runtime delete would be undone on the next boot. The operator removes
-    /// the declaration and restarts instead (audit 2026-08-28 §4.20#10).
+    /// a runtime delete — or a runtime change to an application's credentials
+    /// or security profile — would be undone on the next boot. The operator
+    /// changes or removes the declaration and restarts instead (audit
+    /// 2026-08-28 §4.20#10).
     YamlManagedResource {
         /// The kind of resource that was targeted (e.g. `"application"`).
         kind: &'static str,
@@ -383,6 +389,14 @@ pub enum IdentityError {
     EmailChangeTokenInvalid,
     /// The `prompt=none` silent-auth probe rate limit was exceeded (A-37).
     SilentAuthRateLimited,
+    /// An Argon2id verification (a caller-chosen or legacy client secret) was
+    /// shed by the process-wide KDF admission gate: no permit freed within
+    /// its queue budget. Protocol layers answer `503` with `Retry-After`,
+    /// the password paths' convention.
+    KdfOverloaded {
+        /// How long the caller should wait before retrying.
+        retry_after: std::time::Duration,
+    },
     /// A per-realm resource quota was exceeded (A-24).
     QuotaExceeded {
         /// Resource type that hit the limit.

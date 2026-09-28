@@ -48,7 +48,8 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::TokenExpired
         | IdentityError::InvalidCredential { .. }
         | IdentityError::InvalidClient
-        | IdentityError::InvalidClientSecret => (Code::Unauthenticated, err.to_string()),
+        | IdentityError::InvalidClientSecret
+        | IdentityError::PrivateKeyJwtRequired => (Code::Unauthenticated, err.to_string()),
         // Deliberately generic — internal reason MUST NOT reach the caller (enumeration resistance).
         IdentityError::InvalidClientAssertion { .. } => {
             (Code::Unauthenticated, "invalid_client".to_string())
@@ -107,6 +108,7 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             (Code::InvalidArgument, err.to_string())
         }
         IdentityError::SilentAuthRateLimited => (Code::ResourceExhausted, err.to_string()),
+        IdentityError::KdfOverloaded { .. } => (Code::Unavailable, err.to_string()),
         IdentityError::MfaRequired
         | IdentityError::AuthorizationPending
         | IdentityError::SlowDown
@@ -239,7 +241,12 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::ConfigInvalid { .. }
         | IdentityError::AuditFailure { .. }
         | IdentityError::Internal { .. } => {
-            tracing::error!(error = %err, "internal gRPC error");
+            // PII-safe: an internal error can wrap text Hearth did not
+            // write, such as an SMTP rejection naming the recipient.
+            tracing::error!(
+                error = %crate::protocol::redact::LogSafeError(&err),
+                "internal gRPC error"
+            );
             (Code::Internal, "internal error".to_string())
         }
         IdentityError::SessionVersionDisabled => (
@@ -366,10 +373,10 @@ pub fn extract_grpc_user_auth(
 /// values and delegates to the identity engine for verification. Confidential
 /// clients require the secret; public clients are accepted with ID alone.
 /// Returns `UNAUTHENTICATED` for any auth failure.
-pub fn verify_grpc_client_auth(
+pub async fn verify_grpc_client_auth(
     md: &MetadataMap,
     realm_id: &RealmId,
-    identity: &dyn crate::identity::IdentityEngine,
+    identity: &std::sync::Arc<dyn crate::identity::IdentityEngine>,
 ) -> Result<crate::core::ClientId, Status> {
     let raw_id = md
         .get(CLIENT_ID_META_KEY)
@@ -384,8 +391,115 @@ pub fn verify_grpc_client_auth(
 
     let secret = md.get(CLIENT_SECRET_META_KEY).and_then(|v| v.to_str().ok());
 
-    identity
-        .authenticate_client(realm_id, &client_id, secret)
+    crate::identity::client_auth::authenticate_client(identity, realm_id, &client_id, secret)
+        .await
         .map(|()| client_id)
-        .map_err(|_| Status::unauthenticated("invalid client credentials"))
+        .map_err(|e| client_auth_status(&e))
+}
+
+/// The status for a failed client authentication: `UNAVAILABLE` when the KDF
+/// admission gate shed an Argon2id secret verification (retry shortly),
+/// otherwise one opaque `UNAUTHENTICATED`.
+pub fn client_auth_status(err: &crate::identity::IdentityError) -> Status {
+    match err {
+        crate::identity::IdentityError::KdfOverloaded { .. } => {
+            Status::unavailable("server is busy verifying credentials; retry shortly")
+        }
+        crate::identity::IdentityError::PrivateKeyJwtRequired => {
+            Status::unauthenticated(err.to_string())
+        }
+        _ => Status::unauthenticated("invalid client credentials"),
+    }
+}
+
+/// Confidential-only twin of [`verify_grpc_client_auth`] for `Introspect`
+/// (RFC 7662 §2.1, task 26.43).
+///
+/// A public client's identifier is public, so it cannot authenticate an
+/// introspection caller: only a client whose stored secret matches
+/// `x-hearth-client-secret` is accepted. Returns `UNAUTHENTICATED` for any
+/// failure, with the same message as the permissive twin.
+pub async fn verify_grpc_confidential_client_auth(
+    md: &MetadataMap,
+    realm_id: &RealmId,
+    identity: &std::sync::Arc<dyn crate::identity::IdentityEngine>,
+) -> Result<crate::core::ClientId, Status> {
+    let raw_id = md
+        .get(CLIENT_ID_META_KEY)
+        .ok_or_else(|| Status::unauthenticated("missing x-hearth-client-id metadata"))?
+        .to_str()
+        .map_err(|_| Status::invalid_argument("x-hearth-client-id is not valid ASCII"))?;
+    let client_id = raw_id
+        .parse::<uuid::Uuid>()
+        .map(crate::core::ClientId::new)
+        .map_err(|_| Status::unauthenticated("invalid client credentials"))?;
+    let secret = md.get(CLIENT_SECRET_META_KEY).and_then(|v| v.to_str().ok());
+    crate::identity::client_auth::authenticate_confidential_client(
+        identity, realm_id, &client_id, secret,
+    )
+    .await
+    .map(|()| client_id)
+    .map_err(|e| client_auth_status(&e))
+}
+
+#[cfg(test)]
+mod internal_error_logging_tests {
+    //! An internal gRPC error is logged in a PII-safe form.
+    use super::identity_to_status;
+    use crate::identity::IdentityError;
+    use tonic::Code;
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture mutex").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for CaptureWriter {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn an_email_transport_error_is_logged_without_the_address() {
+        let err = IdentityError::Internal {
+            reason: format!(
+                "email OTP delivery failed: {}",
+                crate::identity::EmailError::Transport {
+                    reason: "550 5.1.1 <bob@corp.example.org>: mailbox unavailable".to_string(),
+                }
+            ),
+        };
+        let writer = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_max_level(tracing::Level::ERROR)
+            .with_ansi(false)
+            .finish();
+        let status = tracing::subscriber::with_default(subscriber, || identity_to_status(err));
+        let logs = String::from_utf8_lossy(&writer.0.lock().expect("capture mutex")).into_owned();
+        assert_eq!(status.code(), Code::Internal);
+        assert_eq!(status.message(), "internal error", "the status stays vague");
+        assert!(
+            logs.contains("ERROR") && logs.contains("mailbox unavailable"),
+            "the cause is logged: {logs:?}"
+        );
+        for leaked in ["bob", "corp.example.org"] {
+            assert!(
+                !logs.contains(leaked),
+                "the log must not carry {leaked:?}: {logs:?}"
+            );
+        }
+    }
 }

@@ -58,6 +58,8 @@
 //!
 //! * `read`     — `/introspect` + `/userinfo` + `/admin/users/{id}`. The number
 //!   directly comparable to competitors' published end-to-end HTTP figures.
+//!   `/introspect` is confidential-clients-only, so it authenticates with the
+//!   seed handle's confidential client (`cc_client_id`/`cc_client_secret`).
 //! * `issuance` — `POST /token` (`grant_type=client_credentials`): Ed25519 sign +
 //!   grant-family WAL `fsync`. This is a **production** grant — the seeder
 //!   registers a confidential `client_credentials` client and carries its
@@ -168,9 +170,11 @@ struct SeededRealm {
     /// rather than 404ing every request.
     #[serde(default)]
     realm_name: String,
-    client_id: String,
-    /// Confidential `client_credentials` client for the issuance plane (HEA-2003).
-    /// Empty on pre-HEA-2003 handles.
+    /// Confidential `client_credentials` client (HEA-2003). The issuance plane
+    /// mints with it, and the read plane authenticates `/introspect` with it:
+    /// introspection is confidential-clients-only, so the handle's public
+    /// `client_id` would draw `401 invalid_client` on every request. Empty on
+    /// pre-HEA-2003 handles.
     #[serde(default)]
     cc_client_id: String,
     /// Its secret (SECRET). Empty on pre-HEA-2003 handles.
@@ -303,11 +307,25 @@ fn build_corpus(
         if live.is_empty() {
             return Err("seed handle has no live tokens; increase --sessions-frac".into());
         }
+        // Introspection is confidential-clients-only: a `{token, client_id}`
+        // body from the public client is refused with `401 invalid_client`,
+        // which would turn every `introspect` request into an error and void
+        // the read plane. Authenticate as the seeded confidential client
+        // (`client_secret_post`, the same credential shape the issuance plane
+        // sends to `/token`).
+        if realm.cc_client_id.is_empty() || realm.cc_client_secret.is_empty() {
+            return Err(
+                "read plane requires a confidential client in the seed handle \
+                 (cc_client_id/cc_client_secret) to authenticate /introspect; re-seed \
+                 with a HEA-2003 seeder"
+                    .into(),
+            );
+        }
         // introspect
         for tok in &live {
             let body = format!(
-                "{{\"token\":\"{}\",\"client_id\":\"{}\"}}",
-                tok, realm.client_id
+                "{{\"token\":\"{}\",\"client_id\":\"{}\",\"client_secret\":\"{}\"}}",
+                tok, realm.cc_client_id, realm.cc_client_secret
             );
             templates.push(ReqTemplate {
                 bytes: build_request(
@@ -2132,7 +2150,6 @@ mod tests {
             realms: vec![SeededRealm {
                 realm_id: "r1".into(),
                 realm_name: "dev-realm".into(),
-                client_id: "c1".into(),
                 cc_client_id: String::new(),
                 cc_client_secret: String::new(),
                 users: vec![],
@@ -2149,6 +2166,68 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("no live tokens"), "{err}");
+    }
+
+    fn read_handle(cc_client_id: &str, cc_client_secret: &str) -> SeedHandle {
+        SeedHandle {
+            admin_token: String::new(),
+            realms: vec![SeededRealm {
+                realm_id: "r1".into(),
+                realm_name: "dev-realm".into(),
+                cc_client_id: cc_client_id.into(),
+                cc_client_secret: cc_client_secret.into(),
+                users: vec![],
+                tokens: vec![SeededToken {
+                    access_token: "tok-1".into(),
+                    revoked: false,
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn read_plane_introspects_as_the_confidential_client() {
+        // Task 26.43: `/introspect` refuses a public client (`{token, client_id}`
+        // with no secret) with 401 invalid_client. The read plane must carry the
+        // confidential client's credentials, or every introspect op is an error.
+        let target = Target {
+            authority: "a:80".into(),
+            host: "a".into(),
+            login_password: String::new(),
+        };
+        let corpus = build_corpus(
+            Plane::Read,
+            &target,
+            &read_handle("cc-1", "cc-secret"),
+            None,
+        )
+        .expect("read corpus builds with cc credentials");
+        let introspect = corpus
+            .templates
+            .iter()
+            .find(|t| t.op == "introspect")
+            .expect("read plane has an introspect template");
+        let req = String::from_utf8(introspect.bytes.clone()).expect("utf8");
+        assert!(req.starts_with("POST /introspect "), "{req}");
+        assert!(
+            req.contains("\"client_id\":\"cc-1\"")
+                && req.contains("\"client_secret\":\"cc-secret\""),
+            "introspect must authenticate as the confidential client: {req}"
+        );
+    }
+
+    #[test]
+    fn read_plane_errors_without_confidential_client() {
+        let target = Target {
+            authority: "a:80".into(),
+            host: "a".into(),
+            login_password: String::new(),
+        };
+        let err = match build_corpus(Plane::Read, &target, &read_handle("", ""), None) {
+            Ok(_) => panic!("read plane must fail without a confidential client"),
+            Err(e) => e,
+        };
+        assert!(err.contains("confidential client"), "{err}");
     }
 
     #[test]
@@ -2182,6 +2261,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "dev-endpoints")]
     #[test]
     fn issuance_plane_mints_over_production_client_credentials_grant() {
         // HEA-2003: the issuance plane must hit the production POST /token grant,
@@ -2192,7 +2272,6 @@ mod tests {
             realms: vec![SeededRealm {
                 realm_id: "r1".into(),
                 realm_name: "dev-realm".into(),
-                client_id: "c1".into(),
                 cc_client_id: "cc-1".into(),
                 cc_client_secret: "cc-secret".into(),
                 users: vec![],
@@ -2222,7 +2301,6 @@ mod tests {
             realms: vec![SeededRealm {
                 realm_id: "r1".into(),
                 realm_name: "dev-realm".into(),
-                client_id: "c1".into(),
                 cc_client_id: String::new(),
                 cc_client_secret: String::new(),
                 users: vec![SeededUser {
@@ -2253,7 +2331,6 @@ mod tests {
             realms: vec![SeededRealm {
                 realm_id: realm_id.into(),
                 realm_name: realm_name.into(),
-                client_id: "c1".into(),
                 cc_client_id: String::new(),
                 cc_client_secret: String::new(),
                 users: vec![SeededUser {

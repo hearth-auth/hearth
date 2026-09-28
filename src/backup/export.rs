@@ -569,6 +569,36 @@ impl BackupExporter {
         let encrypted = encrypt_bytes(&pkcs8, dek)?;
         writer.add_file(&format!("{prefix}/signing_key.json"), &encrypted)?;
 
+        // id_token_signing_key.json — the realm's RS256 ID-token key, present
+        // once any client in the realm selected RS256 (task 26.55). Without it
+        // a restore would provision a new RSA key and every ID token issued
+        // before the backup would stop verifying. Unsealed by the engine,
+        // DEK-encrypted here, re-sealed under the destination's KEK on import.
+        if let Some(rsa_pkcs8) = self
+            .identity
+            .export_realm_id_token_rsa_key(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?
+        {
+            let encrypted = encrypt_bytes(&rsa_pkcs8, dek)?;
+            writer.add_file(&format!("{prefix}/id_token_signing_key.json"), &encrypted)?;
+        }
+
+        // retiring_id_token_signing_keys.json — the RS256 twin of
+        // retiring_signing_keys.json: absolute deadlines, expired keys omitted.
+        let retiring_rsa = self
+            .identity
+            .export_retiring_id_token_rsa_keys(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.retiring_id_token_signing_keys = retiring_rsa.len() as u64;
+        if !retiring_rsa.is_empty() {
+            let data = to_ndjson(&retiring_rsa)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(
+                &format!("{prefix}/retiring_id_token_signing_keys.json"),
+                &encrypted,
+            )?;
+        }
+
         // audit.ndjson (optional), plus the chain material a restore needs to
         // check the exported hashes instead of discarding them (§4.14#5).
         let mut audit_chain_included = false;

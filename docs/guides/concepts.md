@@ -50,7 +50,7 @@ Request arrives at your API
 
 ### The tradeoff
 
-Because permissions are baked into the token, revoking a role does not immediately invalidate existing access tokens — it takes effect when the current token expires and the user fetches a new one. The default access token TTL is 15 minutes. For immediate revocation, revoke the user's refresh token via `POST /revoke`; this terminates the session and forces re-authentication.
+Because permissions are baked into the token, revoking a role does not immediately invalidate existing access tokens — it takes effect when the current token expires and the user fetches a new one. The default access token TTL is 15 minutes. For immediate revocation, revoke the user's refresh token via `POST /revoke`, authenticating as the client the token was issued to; this terminates the session and forces re-authentication. A client can revoke only its own tokens (RFC 7009 §2.1) — a token issued to another client is silently left alone.
 
 ### How roles, groups, and permissions compose
 
@@ -150,8 +150,8 @@ that application each mark the family revoked; the next refresh on it fails with
 | `POST /authorize` | Starts auth code flow (machine path — requires `Authorization: Bearer <token>`); returns a short-lived, single-use code. Token `sub` is used as the user identity. |
 | `POST /token` | Exchanges code → tokens, or rotates a refresh token |
 | `GET  /userinfo` | Returns scope-filtered profile claims for a valid access token |
-| `POST /revoke` | Revokes a refresh token and its entire grant family |
-| `POST /introspect` | Server-side token validation (RFC 7662); use when you can't verify Ed25519 locally |
+| `POST /revoke` | Revokes a refresh token and its entire grant family — only for the client the token was issued to |
+| `POST /introspect` | Server-side token validation (RFC 7662); use when you can't verify Ed25519 locally. Confidential clients only — a caller without a client secret or `private_key_jwt` assertion gets `401 invalid_client` |
 | `GET  /jwks` | Per-realm Ed25519 public keys for local JWT verification |
 
 ### JWKS and signing keys

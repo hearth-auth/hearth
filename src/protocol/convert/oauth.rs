@@ -24,6 +24,7 @@ impl From<&domain::OAuthClient> for pb::OAuthClient {
             is_confidential: c.is_confidential(),
             grant_types: c.grant_types().to_vec(),
             access_token_authorization: mode,
+            id_token_signed_response_alg: c.id_token_signed_response_alg().as_str().to_string(),
         }
     }
 }
@@ -64,7 +65,9 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             client_name: r.client_name,
             redirect_uris: r.redirect_uris,
             cors_origins: Vec::new(),
+            // Caller-chosen over the wire: unknown entropy, so Argon2id.
             client_secret: r.client_secret,
+            generated_client_secret: None,
             grant_types: if r.grant_types.is_empty() {
                 vec!["authorization_code".to_string()]
             } else {
@@ -88,6 +91,10 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             jwks: None,
             jwks_uri: None,
             authorization_signed_response_alg: None,
+            // Passed through verbatim: the engine validates it, and the
+            // dynamic-registration handler resolves an omitted value to RS256
+            // before calling the engine (task 26.55).
+            id_token_signed_response_alg: r.id_token_signed_response_alg,
             profile: domain::ClientProfile::Standard,
             mfa_required: None,
         }
@@ -145,7 +152,9 @@ impl From<pb::UpdateClientRequest> for domain::UpdateClientRequest {
                 }
             }),
             authorization_signed_response_alg: None,
+            id_token_signed_response_alg: r.id_token_signed_response_alg,
             profile: None,
+            jwks: None,
             mfa_required: None,
         }
     }
@@ -298,6 +307,8 @@ impl From<pb::TokenRevocationRequest> for domain::TokenRevocationRequest {
         Self {
             token: r.token,
             token_type_hint: r.token_type_hint,
+            // The gRPC handler sets the authenticated client after conversion.
+            revoking_client_id: None,
         }
     }
 }
@@ -445,11 +456,31 @@ mod tests {
             grant_types: vec![],
             access_token_authorization: 0, // Embedded
             trust_level: None,
+            id_token_signed_response_alg: Some("RS256".to_string()),
         };
         let domain = domain::RegisterClientRequest::from(proto);
         assert_eq!(domain.client_name, "My App");
         assert_eq!(domain.client_secret.as_deref(), Some("secret123"));
         assert_eq!(domain.grant_types, vec!["authorization_code"]);
+        assert_eq!(
+            domain.id_token_signed_response_alg.as_deref(),
+            Some("RS256"),
+            "the requested ID-token algorithm must reach the engine verbatim"
+        );
+    }
+
+    /// The wire form of a client always names the algorithm its ID tokens are
+    /// signed with (task 26.55).
+    #[test]
+    fn oauth_client_conversion_reports_the_id_token_signing_alg() {
+        let client = domain::OAuthClient::new(
+            ClientId::generate(),
+            "Alg App".to_string(),
+            vec!["https://app.example.com/cb".to_string()],
+            crate::core::Timestamp::from_micros(1),
+        );
+        let proto = pb::OAuthClient::from(&client);
+        assert_eq!(proto.id_token_signed_response_alg, "EdDSA");
     }
 
     /// HEA-1750 (A2): proto-registered clients must default to `ThirdParty`
@@ -464,6 +495,7 @@ mod tests {
             grant_types: vec![],
             access_token_authorization: 0,
             trust_level: None,
+            id_token_signed_response_alg: None,
         };
         let domain = domain::RegisterClientRequest::from(proto);
         assert_eq!(

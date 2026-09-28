@@ -125,13 +125,16 @@ pub trait IpReputationProvider: Send + Sync {
 
 ### Data structure
 
-`SpamhausDropProvider` holds a `Arc<ArcSwap<CidrFilter>>`.  The background
-refresh task builds a new `CidrFilter` from the downloaded DROP + EDROP text,
-then calls `ArcSwap::store(Arc::new(new_filter))` to replace it atomically.
-Hot-path reads call `ArcSwap::load()` (zero allocation, no locks), then perform
-a linear scan over the deny `Vec<Cidr>`.  For the current DROP list size (~800
-IPv4 + ~100 IPv6 CIDRs) this stays well under the 5 µs `AbuseGuard.check()`
-budget.
+`SpamhausDropProvider` holds an `Arc<SwapCell<CidrFilter>>` (`core::SwapCell`).
+The background refresh task builds a new `CidrFilter` from the downloaded DROP +
+EDROP text, then calls `SwapCell::store(Arc::new(new_filter))` to replace it
+atomically. Reads call `SwapCell::load()` — a read lock, on which readers never
+block one another, permitted here because reputation checks are not on the
+`validate_token` / `lookup_session` hot path — then perform a linear scan over
+the deny `Vec<Cidr>`.  For the current DROP list size (~800 IPv4 + ~100 IPv6
+CIDRs) this stays well under the 5 µs `AbuseGuard.check()` budget. (The filter
+was held in an `ArcSwap` until task 26.5; `arc-swap` is now banned, see
+`ARCHITECTURE.md` §9.1.)
 
 ### Outcome and caller contract
 
@@ -1457,31 +1460,28 @@ It is **not** on the `validate_token()` or `lookup_session()` hot path.
 
 `EmailReputation` is the P-5 extension point for email-address reputation checks.
 The built-in `BuiltinEmailReputation` reference adapter ships with Hearth.
-External adapters (Kickbox, ZeroBounce, NeverBounce) implement the trait and
-are wired at startup via `security.providers.email_reputation`.
+`security.providers.email_reputation.enabled` chooses between the built-in
+adapter and the no-op. External services (Kickbox, ZeroBounce, NeverBounce)
+can implement the trait, but there is no configuration key that loads one —
+wiring a third-party adapter is a code change.
 
 ### Verdict flags
 
 | Flag | Meaning |
 |------|---------|
 | `is_disposable` | Domain matched the bundled (~400-entry) disposable-domain list |
-| `domain_has_no_mx` | Domain could not be confirmed to have an MX record (see DNS note) |
 | `is_role_address` | Local part is a well-known role address (`noreply`, `admin`, etc.) |
 
 All flags are **advisory** — callers decide policy.  `is_clean()` is true only
-when all three flags are false.
+when both flags are false.
 
-### DNS MX validation (stub)
+### No DNS / MX lookup
 
-True MX validation requires an async DNS resolver (`hickory-resolver` or
-equivalent).  The built-in adapter sets `domain_has_no_mx = false` unconditionally
-(assume domain is valid).  To enable real MX checking:
-
-1. Add `hickory-resolver = "0.25"` to `Cargo.toml`.
-2. Implement `lookup_mx(domain)` in `BuiltinEmailReputation::check()` using the
-   `hickory_resolver::TokioAsyncResolver`.
-3. Change the trait signature to `async fn check` (requires `async-trait` or
-   native AFIT with a `Box<dyn Future>` return for dyn dispatch).
+Hearth performs no DNS lookup of the email domain — there is no resolver
+dependency and `check()` is synchronous by contract. A domain that does not
+exist or has no MX record is **not** flagged. (An earlier `no-MX` verdict flag
+was removed: nothing ever set it, so it implied a check that never ran.) Use
+email verification to establish that an address receives mail.
 
 ### Disposable-domain list
 
@@ -1654,9 +1654,9 @@ in each realm.  There is no cross-realm sharing.
 **Module:** `src/abuse/cidr`  
 **Storage prefix:** `abuse:{realm}:cidr:{allow|deny}:{seq}`
 
-Per-realm IPv4/IPv6 CIDR lists that gate every public auth request.  Loaded
-from storage by the admin plane and held in an `Arc<ArcSwap<CidrFilter>>`
-for zero-lock hot-path lookup.
+Per-realm IPv4/IPv6 CIDR lists that gate every public auth request.  The
+realm's `security.cidr_policy` is compiled into a `CidrFilter` on each
+pre-auth check (`abuse::runtime::compile_filter`); no shared cell holds it.
 
 ### Evaluation order
 
@@ -1691,8 +1691,8 @@ realms:
 
 - Admin UI action ("block this IP") wired to A-9 storage (tracked in
   the A-8 admin-abuse-dashboard stub).
-- Reload-on-change without restart (requires `ArcSwap` integration in
-  the realm-config reloader).
+- Reload-on-change without restart (requires a hot-swapped holder, such as
+  `core::SwapCell`, in the realm-config reloader).
 
 ---
 
@@ -2003,13 +2003,31 @@ signature verification.
 #### A-30.1 Separate `hearth.export` capability
 
 All data-export endpoints (`POST /admin/backup`, `GET /admin/users/export`,
-`GET /admin/realms/{r}/audit/export`) now require the caller's token to carry
-**both** `hearth.admin` AND `hearth.export` in the `permissions` claim.
+`GET /admin/realms/{r}/audit/export`) and `POST /admin/backup/restore` require
+the caller's token to carry `hearth.export` **in addition to** an admin
+permission in the `permissions` claim — `hearth.admin`, or the sub-admin
+permission the endpoint accepts. Two operations require `hearth.admin` itself,
+and refuse a sub-admin plus `hearth.export` (`403`):
+
+- **Every backup restore.** A restore writes users and credentials, clients,
+  roles and role assignments, agents and retiring signing keys at once — every
+  sub-admin domain, and no sub-admin permission is a superset of the others. A
+  tenant sub-admin could otherwise bring back, from a signed archive of its own
+  realm, a role assignment an administrator revoked (live role management needs
+  `hearth.realm.admin`), or clients and keys its permission never reaches.
+- **A backup export by a system-realm caller**, which is not scoped to one
+  realm (it reaches every realm, operator accounts and the system signing key
+  included).
+
+Both permission checks run before the per-export rate limit (A-30.2), so a
+refused caller sees `403`, never `429`, and spends no quota.
 
 - `hearth.export` is seeded in all realms and included in the `realm.admin` role
   by default.
-- Operators can grant it to dedicated service accounts (DR pipelines) without
-  granting full `hearth.admin`.
+- Operators can grant it to dedicated service accounts (DR pipelines) that
+  **export** a tenant realm without granting full `hearth.admin`; a service
+  account that backs up every realm from the system realm, or that restores
+  any realm, needs `hearth.admin`.
 - Fail-closed: missing permission → `403 Forbidden`.
 
 #### A-30.2 Per-export rate limit
@@ -2037,13 +2055,29 @@ security:
     verify_key: "<base64url-encoded 32-byte Ed25519 public key>"
 ```
 
-Behaviour:
+Behaviour (`crate::backup::check_restore_signature`, shared by the HTTP route
+and `hearth backup restore`):
 - **Key configured, signature present and valid** → restore proceeds.
-- **Key configured, signature absent or invalid** → `400 Bad Request` (fail-closed).
-- **Key not configured** → signature field is ignored (backwards-compatible).
+- **Key configured, signature absent or invalid** → refused (`400 Bad Request`
+  over HTTP with `error` = `missing_manifest_signature` or
+  `invalid_manifest_signature`, exit `2` on the CLI). Nothing overrides a
+  configured key, and the CLI refuses `--skip-verify` alongside one: the
+  signature covers only the manifest, and members are authenticated solely by
+  the manifest checksums that flag would skip.
+- **Key not configured** → refused outside dev mode (`error` =
+  `backup_verify_key_not_configured` over HTTP). The HTTP route has no
+  override; the CLI accepts `--allow-unsigned` as an explicit operator opt-in.
+  A `--dev` server restores with a warning.
 
-The signing tool signs `manifest.canonical_bytes()` with the operator's private
-key and writes the result to `detached_signature_b64` before creating the archive.
+Both restore paths read the archive through one private, unlinked copy, so the
+bytes imported are the bytes whose signature and checksums were verified — the
+input path is never reopened between the check and the import.
+
+Signing: `hearth backup create --sign-key <key.pem>` or `hearth backup sign`
+signs `manifest.canonical_bytes()` with the operator's Ed25519 private key
+(`hearth backup keygen` generates one) and writes the base64url result to
+`detached_signature_b64`. `checksums` is an ordered map so the canonical bytes
+are identical for signer and verifier.
 
 #### A-30.4 Per-export audit watermark
 

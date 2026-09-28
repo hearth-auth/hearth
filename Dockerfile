@@ -101,11 +101,12 @@ COPY vendor ./vendor
 # BUILD_VERSION=<git tag>; a non-release value (the `dev` default, `pr-N`)
 # deliberately leaves HEARTH_RELEASE_VERSION unset, and build.rs warns loudly.
 ARG BUILD_VERSION=dev
-# `--no-default-features` drops the `dev-endpoints` feature, so `/admin/bootstrap`,
-# the `/dev/seed-*` family and the hard-coded `admin@hearth.test` password are not
-# compiled into the shipped binary at all (audit §4.7#2, task 20.1). The runtime
-# `dev_mode` check and the per-request loopback guard remain as defence in depth
-# for anyone who builds with default features.
+# `dev-endpoints` is not a default feature, so `/admin/bootstrap`, the `/dev/seed-*`
+# family and the hard-coded `admin@hearth.test` password are not compiled into the
+# shipped binary at all (audit §4.7#2, task 20.1). `--no-default-features` is kept
+# as belt-and-braces: should anything ever be added to `default`, this image still
+# builds the minimal set. The runtime `dev_mode` check and the per-request loopback
+# guard remain as defence in depth for anyone who opts in to the feature.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \

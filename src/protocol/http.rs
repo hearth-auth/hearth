@@ -54,7 +54,7 @@ pub use state::AppState;
 pub(crate) use auth::AdminAuth;
 pub(crate) use auth::{
     extract_admin_auth, extract_cluster_admin_auth, require_admin_permission,
-    require_any_admin_permission,
+    require_any_admin_permission, require_superuser,
 };
 
 // Re-export all shared helpers so child handler modules can use `super::name`.
@@ -64,7 +64,7 @@ pub(crate) use auth::{
     check_token_rate_limit, emit_export_watermark, extract_bearer_token, extract_realm_id,
     extract_user_auth, identity_error_to_response, make_ip_rate_limit_response, now_micros,
     proto_to_rest_json, rbac_error_to_response, resolve_realm_by_name,
-    validate_user_token_with_dpop, verify_manifest_signature,
+    validate_user_token_with_dpop,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -141,8 +141,20 @@ where
     }
 }
 
+/// [`identity_error_to_response`](auth::identity_error_to_response) as a full
+/// response, adding what the tuple form cannot carry: a KDF shed
+/// ([`crate::identity::IdentityError::KdfOverloaded`]) becomes the gate's
+/// `503` with `Retry-After`.
+pub(crate) fn identity_error_response(err: &crate::identity::IdentityError) -> Response {
+    if let crate::identity::IdentityError::KdfOverloaded { retry_after } = err {
+        return kdf_shed_json_response(*retry_after);
+    }
+    auth::identity_error_to_response(err).into_response()
+}
+
 /// Builds the `503 Service Unavailable` JSON shed response for an overloaded
-/// KDF gate, carrying a `Retry-After` header (seconds, floored to 1).
+/// KDF gate, carrying a `Retry-After` header (seconds, floored to 1) and the
+/// `HEARTH_RATE_LIMITED` error code every other shed or rate-limit body uses.
 pub(crate) fn kdf_shed_json_response(retry_after: std::time::Duration) -> Response {
     let secs = retry_after.as_secs().max(1);
     let mut resp = (
@@ -150,6 +162,7 @@ pub(crate) fn kdf_shed_json_response(retry_after: std::time::Duration) -> Respon
         axum::Json(serde_json::json!({
             "error": "kdf_overloaded",
             "error_description": "Server is busy hashing credentials. Please retry shortly.",
+            "error_code": crate::protocol::error_codes::RATE_LIMITED,
         })),
     )
         .into_response();
@@ -626,13 +639,14 @@ pub fn router_with(state: Arc<AppState>, extra: Router) -> Router {
     // Dev-only endpoints. Three independent gates, because each closes a
     // different hole (audit §4.7#2, task 20.1):
     //
-    // 1. **Compile time** — the `dev-endpoints` cargo feature. It is on by
-    //    default so `make dev`, `cargo nextest` and the Playwright suite are
-    //    unaffected; the shipped container image builds with
-    //    `--no-default-features`, so these handlers are not in the production
-    //    binary at all. A runtime boolean alone left the code, the
-    //    hard-coded `admin@hearth.test` password and the seeding logic
-    //    compiled into every release.
+    // 1. **Compile time** — the `dev-endpoints` cargo feature. It is NOT a
+    //    default feature, so a plain `cargo build --release`, `cargo install`,
+    //    the release binaries and the container image carry none of these
+    //    handlers; `make dev`, `make test`, bacon and CI opt in with
+    //    `--features dev-endpoints`. A runtime boolean alone left the code,
+    //    the hard-coded `admin@hearth.test` password and the seeding logic
+    //    compiled into every release, and an opt-OUT default left them in any
+    //    build whose author did not know to pass `--no-default-features`.
     // 2. **Run time** — `state.dev_mode`, unchanged, so the routes are absent
     //    from the table in a non-dev process and cannot be fingerprinted.
     // 3. **Per request** — `dev_loopback_only`. `main.rs` refuses a non-

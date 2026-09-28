@@ -28,10 +28,12 @@ make tailwind-install  # downloads Tailwind standalone CLI to ui/tailwindcss
 | Command | What it does |
 |---------|-------------|
 | `make check` | clippy + fmt + nextest — run before every PR |
-| `make test` | `cargo nextest run --workspace` (PROTOC env var required) |
-| `make clippy` | `cargo clippy --all-targets -- -D warnings` |
+| `make test` | `cargo nextest run --workspace --features hearth/dev-endpoints` (PROTOC env var required) |
+| `make test-detached` | The full suite in one `--workspace` pass, detached from the caller — **agents MUST use this (or `scripts/run-detached.sh`) for any long run**; see "Long-running commands" below |
+| `make test-no-dev-endpoints` | Runs the tests that only compile WITHOUT `dev-endpoints` (the production feature set) — CI job `no-dev-endpoints` |
+| `make clippy` | `cargo clippy --all-targets -- -D warnings`, once without and once with `dev-endpoints` |
 | `make fmt` | `cargo fmt --check` |
-| `make build` | Tailwind CSS + `cargo build` |
+| `make build` | Tailwind CSS + `cargo build --features hearth/dev-endpoints` |
 | `make css` | Rebuilds `src/protocol/web/assets/app.css` from Tailwind |
 | `make css-check` | CI gate — fails if app.css is stale |
 | `bacon test` | TDD watch loop (configured in `bacon.toml`) |
@@ -87,13 +89,20 @@ Reports land in `tests/ui/reports/`:
 ### Quick Start
 
 ```bash
-make dev                              # cargo run -- serve --dev  (preferred)
+make dev                              # cargo run --features dev-endpoints -- serve --dev  (preferred)
 # or:
-cargo build --release
+cargo build --release --features dev-endpoints
 ./target/release/hearth serve --dev   # binds 127.0.0.1:8420, in-memory storage
 curl http://127.0.0.1:8420/health
 curl -X POST http://127.0.0.1:8420/admin/bootstrap  # dev-only, creates realm+admin+token
 ```
+
+`dev-endpoints` is **not** a default cargo feature: it compiles in `/admin/bootstrap`, the
+`/dev/seed-*` routes and the hard-coded dev admin password, so a plain `cargo build --release`
+is a production build without them. `make dev`, `make build`, `make test`, `make check`, bacon
+and CI opt in; a bare `cargo nextest run` compiles the bootstrap-dependent tests out (pass
+`--features dev-endpoints` to run them). `serve --dev` on a featureless binary logs a warning
+that bootstrap is unavailable.
 
 `--dev` auto-enables the in-process **mailcatcher** email transport. All outbound emails are captured and visible at `http://127.0.0.1:8420/dev/mail`. No Docker or external mail server needed.
 
@@ -231,7 +240,7 @@ Six modules with strict downward dependency flow:
 Hot path = `validate_token()`, `lookup_session()`, `lookup_user()` when data is in hot tier. Authorization is NOT on the hot path (permissions are embedded in the JWT at issue time).
 
 Hot path code MUST obey ALL of:
-1. **Zero heap allocations** — no `Box::new`, `Vec::new`, `String::from`, `format!()`, `to_string()`.
+1. **Zero heap allocations** — no `Box::new`, `Vec::new`, `String::from`, `format!()`, `to_string()`. One exception: `EpochCell`'s epoch-collector bookkeeping while cells are being written (at most 1 allocation per 1,024 loads per thread; see `docs/specs/ARCHITECTURE.md` §3.2). No other allocation, amortised or not.
 2. **No syscalls for reads** — serve from memory-mapped structures or in-process data.
 3. **No locks on read path** — no mutexes, no `RwLock` write locks. Use epoch-based reclamation.
 4. **No yielding** — MUST NOT `.await` on I/O. Complete synchronously.
@@ -260,6 +269,23 @@ Avoid false-confidence anti-patterns (vacuous `is_ok()`/`is_err()` asserts, zero
 
 - **Test runner**: `cargo nextest` only — never `cargo test`.
 - **Watch mode**: `bacon test` for TDD loop.
+- **Long-running commands (agents): run them detached.** Claude Code's background-task
+  monitor stops a *background* Bash command when the host's free memory is low, and it
+  counts reclaimable page cache (the cargo target dir) as used. It kills
+  `cargo nextest run --workspace` while tens of GB are still available. So:
+  - For the full suite, use `make test-detached`. For any other command that can run
+    longer than the 10-minute foreground limit (a `--workspace` build, clippy on
+    `--all-targets`, `make loadtest-smoke`, `make bench-gate`), use
+    `scripts/run-detached.sh run <name> -- <command>`.
+  - The command then belongs to the user's systemd manager, not to the Bash tool. If the
+    waiting call is stopped, the command keeps running: continue with
+    `scripts/run-detached.sh wait <id>` (the id is printed at start, the log path with
+    `scripts/run-detached.sh log <id>`).
+  - Do **NOT** start these as `run_in_background` Bash tasks, and do **NOT** work around
+    the monitor by splitting the suite into one cargo run per test binary. One
+    `--workspace` pass is much faster: nextest runs every binary's tests in parallel.
+  - Short, targeted runs (`--lib <filter>`, one `--test <name>`) stay in the foreground.
+  - Always pass `--no-fail-fast` to a full run (`make test-detached` does).
 - **No doctests — ever.** No `/// ```rust` fenced blocks in doc comments. Use `#[cfg(test)] mod tests` blocks or `tests/`. Runnable examples live under `examples/`.
 - **Property tests**: `proptest` (256 cases dev, 10k+ CI).
 - **Simulation**: real-thread crash-recovery tests (`hearth-simulation` crate) using `FaultFs` fault injection; no deterministic scheduler.
@@ -285,7 +311,7 @@ Avoid false-confidence anti-patterns (vacuous `is_ok()`/`is_err()` asserts, zero
 
 ## Security
 
-- **Signing**: Ed25519 only. No HS256, no `alg:none`.
+- **Signing**: Ed25519 for everything Hearth issues and validates. RS256 is permitted only for ID tokens, when a client requests it via `id_token_signed_response_alg` (OIDC Core interop). No HS256, no `alg:none`.
 - **Password hashing**: Argon2id, OWASP parameters. Off hot path.
 - **Crypto**: `ring` or `RustCrypto`. No hand-rolled crypto. Constant-time secret comparisons.
 - **Input validation**: Each layer validates its own invariants. Must not assume upstream validated.

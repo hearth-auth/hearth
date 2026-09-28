@@ -1,6 +1,6 @@
 //! Core types for the backup archive manifest and entity records.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -80,6 +80,10 @@ pub struct RecordCounts {
     /// window at export time (OpenSpec 26.40).
     #[serde(default)]
     pub retiring_signing_keys: u64,
+    /// Number of retiring RS256 ID-token signing keys still inside their
+    /// rotation grace window at export time (task 26.55).
+    #[serde(default)]
+    pub retiring_id_token_signing_keys: u64,
     /// Number of OAuth scope definitions.
     pub scopes: u64,
     /// Number of audit events exported (0 when audit export was omitted).
@@ -144,7 +148,11 @@ pub struct BackupManifest {
     /// One entry per realm included in the backup.
     pub realms: Vec<RealmManifest>,
     /// Lowercase-hex SHA-256 checksums keyed by archive-relative path.
-    pub checksums: HashMap<String, String>,
+    ///
+    /// A `BTreeMap`, not a `HashMap`, because the detached signature covers
+    /// the serialized manifest: the map must serialize in the same order for
+    /// the signer and for a verifier that parsed it back out of the archive.
+    pub checksums: BTreeMap<String, String>,
     /// When `true`, all bulk data sections are AES-256-GCM encrypted with the DEK in
     /// [`wrapped_dek_b64`](Self::wrapped_dek_b64). Always `true` for format v2+ archives.
     #[serde(default)]
@@ -159,15 +167,20 @@ pub struct BackupManifest {
     pub dek_wrapping_params: Option<DekWrappingParams>,
     /// Detached Ed25519 signature over the canonical manifest bytes (A-30).
     ///
-    /// When `Some`, the restore handler verifies this signature against the
-    /// operator public key configured in `security.backup_verify_key` before
-    /// applying the archive. If the key is configured and the signature is
-    /// absent or invalid, the restore is rejected (fail-closed).
+    /// Restore verifies this signature against the operator public key in
+    /// `security.backup.verify_key` (or `hearth backup restore --verify-key`)
+    /// before applying the archive; an absent or invalid signature is refused.
+    /// Outside dev mode a restore with no verify key configured is refused as
+    /// well, unless the CLI's `--allow-unsigned` is passed — see
+    /// [`super::check_restore_signature`].
     ///
-    /// The signature covers the manifest JSON serialized with this field set to
-    /// `null` (i.e. the serialization produced by `canonical_bytes()`).
+    /// The signature is base64url (no padding) and covers the manifest JSON
+    /// serialized with this field set to `null` (i.e. the serialization
+    /// produced by `canonical_bytes()`). Because the manifest carries the
+    /// SHA-256 of every member, it authenticates the whole archive.
     ///
-    /// Archives produced without operator signing omit this field entirely.
+    /// Set by `hearth backup create --sign-key` or `hearth backup sign`;
+    /// archives produced without a signing key omit this field entirely.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub detached_signature_b64: Option<String>,
     /// v1 per-realm signing-key DEK, base64-encoded (legacy, present in v1 archives only).
@@ -189,7 +202,7 @@ impl BackupManifest {
             hearth_version: env!("CARGO_PKG_VERSION").to_string(),
             created_at: Timestamp::now(),
             realms,
-            checksums: HashMap::new(),
+            checksums: BTreeMap::new(),
             sections_encrypted: false,
             wrapped_dek_b64: None,
             dek_wrapping_params: None,
@@ -323,6 +336,33 @@ mod tests {
             value.get("detached_signature_b64").is_none(),
             "detached_signature_b64 must be absent in canonical bytes"
         );
+    }
+
+    /// The signed payload must be byte-identical for the signer and for a
+    /// verifier that parsed the manifest back out of the archive.
+    ///
+    /// `checksums` was a `HashMap`, whose serialization order depends on a
+    /// per-instance random hasher seed. The signer serialized one order, the
+    /// restore deserialized into a fresh map and serialized another, and a
+    /// genuinely signed archive with more than one member failed verification.
+    #[test]
+    fn canonical_bytes_survive_a_parse_round_trip() {
+        let mut manifest = BackupManifest::new(vec![]);
+        for i in 0..64 {
+            manifest
+                .checksums
+                .insert(format!("realms/acme/file-{i}.ndjson"), format!("{i:064x}"));
+        }
+        let signed_payload = manifest.canonical_bytes().expect("canonical");
+        for _ in 0..8 {
+            let json = serde_json::to_vec_pretty(&manifest).expect("serialize");
+            let parsed: BackupManifest = serde_json::from_slice(&json).expect("parse");
+            assert_eq!(
+                parsed.canonical_bytes().expect("canonical"),
+                signed_payload,
+                "canonical bytes must not depend on map iteration order"
+            );
+        }
     }
 
     /// A manifest with a signature round-trips through serde correctly.

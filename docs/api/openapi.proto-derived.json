@@ -2004,6 +2004,18 @@
         },
         "scope": {
           "type": "string"
+        },
+        "clientSecret": {
+          "type": "string",
+          "description": "Client secret for a confidential client (RFC 8628 s3.1). HTTP Basic Auth\nis preferred and takes precedence; this is the client_secret_post\nfallback. Public clients omit it."
+        },
+        "client_assertion_type": {
+          "type": "string",
+          "description": "private_key_jwt client authentication (RFC 7523 s2.2, RFC 8628 s3.1):\nmust be \"urn:ietf:params:oauth:client-assertion-type:jwt-bearer\" when\npresent. A request carrying either assertion field is authenticated by\nthe assertion alone; combining it with a secret is refused."
+        },
+        "client_assertion": {
+          "type": "string",
+          "description": "The signed client assertion JWT (RFC 7523 s2.2), `aud` = the realm\nissuer."
         }
       },
       "description": "Request for the Device Authorization Grant (RFC 8628)."

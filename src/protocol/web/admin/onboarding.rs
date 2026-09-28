@@ -339,6 +339,7 @@ pub async fn admin_onboarding_app_post(
         redirect_uris: vec![redirect_uri.clone()],
         cors_origins: Vec::new(),
         client_secret: None,
+        generated_client_secret: None,
         grant_types,
         require_consent: true,
         client_logo_url: None,
@@ -350,6 +351,8 @@ pub async fn admin_onboarding_app_post(
         jwks: None,
         jwks_uri: None,
         authorization_signed_response_alg: None,
+        // Administrative default (EdDSA); editable afterwards (task 26.55).
+        id_token_signed_response_alg: None,
         profile: crate::identity::ClientProfile::Standard,
         mfa_required: None,
     };

@@ -402,6 +402,7 @@ async fn a6_bootstrap_returns_404_in_production_mode() {
 
 /// A-6 test 5: In dev mode (`AppState::new_dev`) the bootstrap endpoint must
 /// be registered and return 200 with a JSON body containing the admin credentials.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn a6_bootstrap_returns_200_in_dev_mode() {
     let harness = common::TestHarness::embedded()
@@ -711,6 +712,7 @@ async fn a13_none_attestation_rejected_when_not_allowed() {
 /// guard reads the socket peer straight out of `ConnectInfo`, treating its
 /// absence as remote — `tower::oneshot` installs none. Every real serve path
 /// sets it, so a test that drives the router directly has to supply it.
+#[cfg(feature = "dev-endpoints")]
 fn loopback_bootstrap_request() -> Request<Body> {
     let mut req = Request::builder()
         .method("POST")

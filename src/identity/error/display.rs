@@ -28,6 +28,11 @@ impl fmt::Display for IdentityError {
             Self::InvalidAuthorizationCode => write!(f, "invalid authorization code"),
             Self::InvalidGrant { reason } => write!(f, "invalid grant: {reason}"),
             Self::InvalidClientSecret => write!(f, "invalid client secret"),
+            Self::PrivateKeyJwtRequired => write!(
+                f,
+                "FAPI 2.0 requires private_key_jwt client authentication; \
+                 client_secret_basic, client_secret_post and none are not accepted"
+            ),
             Self::InvalidClientAssertion { reason } => {
                 write!(f, "invalid client assertion: {reason}")
             }
@@ -91,8 +96,9 @@ impl fmt::Display for IdentityError {
             ),
             Self::YamlManagedResource { kind } => write!(
                 f,
-                "this {kind} is managed by hearth.yaml and cannot be deleted at \
-                 runtime; remove its declaration and restart"
+                "this {kind} is managed by hearth.yaml: it cannot be deleted, and its \
+                 credentials and security profile cannot be changed, at runtime; change or \
+                 remove its declaration and restart"
             ),
             Self::RegistrationDisabled => write!(f, "self-service registration is disabled"),
             Self::RegistrationDomainNotAllowed { domain } => write!(
@@ -209,6 +215,9 @@ impl fmt::Display for IdentityError {
             }
             Self::SilentAuthRateLimited => {
                 write!(f, "too many silent-auth requests; slow down")
+            }
+            Self::KdfOverloaded { .. } => {
+                write!(f, "server is busy verifying credentials; retry shortly")
             }
             Self::SessionLimitExceeded { limit, active } => write!(
                 f,

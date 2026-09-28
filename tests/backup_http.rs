@@ -5,7 +5,7 @@
 //! - `POST /admin/backup/restore` — restore from a backup archive
 //! - Auth gating (403 for non-admin, 401 for missing token)
 //! - SEC-14: restore requires `hearth.export` capability (403 without it)
-//! - SEC-14: pre-restore audit event recorded before destructive write
+//! - SEC-14: every restore that runs is recorded in the audit log
 //! - Dry-run restore returns counts without writing
 //! - Round-trip: backup a realm, restore to a fresh realm
 
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hearth::audit::{AuditAction, AuditQuery};
-use hearth::backup::BackupArchive;
+use hearth::backup::{BackupArchive, BackupSigningKey};
 use hearth::core::RealmId;
 use hearth::identity::{CreateUserRequest, SessionContext};
 use hearth::protocol::http::{router, AppState, BACKUP_RESTORE_BODY_LIMIT};
@@ -25,9 +25,54 @@ use tower::ServiceExt as _;
 
 // ===== helpers =====
 
+/// Test-only Ed25519 backup signing key (PKCS#8 v1, as `openssl genpkey
+/// -algorithm ed25519` writes it). Its public half is [`TEST_VERIFY_KEY_B64`].
+const TEST_SIGNING_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIBJga6BJyucFOXunA+oAB3JEXBR0Q+ZWepPJ0QZdsprJ
+-----END PRIVATE KEY-----
+";
+const TEST_VERIFY_KEY_B64: &str = "5settUVm3ZDqg9RWtbbLjmbA1RK2KOvVu_PmihsFk-8";
+
+fn test_signing_key() -> BackupSigningKey {
+    BackupSigningKey::from_pem(TEST_SIGNING_KEY_PEM).expect("test signing key")
+}
+
+fn test_verify_key() -> [u8; 32] {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    URL_SAFE_NO_PAD
+        .decode(TEST_VERIFY_KEY_B64)
+        .expect("base64url")
+        .try_into()
+        .expect("32 bytes")
+}
+
+/// A production-mode app (not dev) with `security.backup.verify_key` set to
+/// [`TEST_VERIFY_KEY_B64`] — the configuration restore requires outside dev
+/// mode.
 async fn build_app(h: &common::TestHarness) -> axum::Router {
-    let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
-    router(state)
+    build_app_with(h, Some(test_verify_key()), false)
+}
+
+fn build_app_with(
+    h: &common::TestHarness,
+    verify_key: Option<[u8; 32]>,
+    dev_mode: bool,
+) -> axum::Router {
+    let state = if dev_mode {
+        AppState::new_dev(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+    } else {
+        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+    };
+    router(Arc::new(state.with_backup_verify_key(verify_key)))
+}
+
+/// Signs archive bytes with `key`, as `hearth backup sign` would.
+fn sign_bytes(archive: &[u8], key: &BackupSigningKey) -> Vec<u8> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("a.hearth-backup");
+    std::fs::write(&path, archive).expect("write");
+    hearth::backup::sign_archive(&path, &path, key).expect("sign");
+    std::fs::read(&path).expect("read")
 }
 
 async fn make_admin_token(h: &common::TestHarness, realm: &RealmId) -> String {
@@ -406,9 +451,10 @@ async fn backup_restore_requires_export_capability() {
     );
 }
 
-/// The restore endpoint emits a `BackupRestored` audit event BEFORE the
-/// destructive import begins (SEC-14). We verify this with a dry-run: even
-/// though no data is written, the audit record must be present.
+/// The restore endpoint records a `BackupRestored` audit event for every
+/// restore it runs (SEC-14) — AFTER the import, so the event never precedes
+/// the archived history the import adds to the same realm. We verify this with
+/// a dry-run: even though no data is written, the audit record must be present.
 #[tokio::test]
 async fn backup_restore_emits_pre_restore_audit_event() {
     set_master_key();
@@ -441,8 +487,7 @@ async fn backup_restore_emits_pre_restore_audit_event() {
         "dry-run with valid admin token must succeed"
     );
 
-    // The audit event must be present regardless of dry_run status — it is
-    // emitted before the import runs, not inside the success branch.
+    // The audit event must be present regardless of dry_run status.
     let events = h
         .audit()
         .query(&AuditQuery {
@@ -522,8 +567,25 @@ fn set_master_key() {
 /// A hand-built archive therefore cannot reach the restore path at all, so any
 /// test of restore behaviour must start from an archive the exporter produced.
 ///
+/// The archive is signed with [`test_signing_key`], so it verifies against the
+/// key [`build_app`] configures. Use [`export_unsigned_archive`] for the raw
+/// export.
+///
 /// The caller MUST have called [`set_master_key`] before building the harness.
 async fn export_archive(harness: &common::TestHarness, realm: &RealmId, token: &str) -> Vec<u8> {
+    sign_bytes(
+        &export_unsigned_archive(harness, realm, token).await,
+        &test_signing_key(),
+    )
+}
+
+/// Exports an archive through `POST /admin/backup` exactly as the server
+/// produced it: the server holds no signing key, so it is unsigned.
+async fn export_unsigned_archive(
+    harness: &common::TestHarness,
+    realm: &RealmId,
+    token: &str,
+) -> Vec<u8> {
     let app = build_app(harness).await;
     let resp = app
         .oneshot(
@@ -1096,4 +1158,1091 @@ async fn backup_restore_refuses_an_archive_that_fails_verification() {
         body.contains("integrity") && body.contains("users.ndjson"),
         "the refusal must say what is wrong and name the missing member; got: {body}"
     );
+}
+
+// ===== A-30: restore refuses archives it cannot authenticate =====
+//
+// An archive is encrypted and checksummed, but the checksums sit in the
+// manifest an attacker would rewrite and the passphrase is shared by every
+// operator who can restore. The detached manifest signature is the only proof
+// of origin, and the restore used to skip it whenever
+// `security.backup.verify_key` was unset — the default. Outside dev mode a
+// restore now requires a key and a valid signature.
+
+async fn dry_run_restore(
+    app: axum::Router,
+    realm: &RealmId,
+    token: &str,
+    archive: &[u8],
+) -> (StatusCode, String) {
+    let (ct, body_bytes) = multipart_body(archive);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup/restore?dry_run=true")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("content-type", ct)
+                .body(Body::from(body_bytes))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    let status = resp.status();
+    (
+        status,
+        String::from_utf8_lossy(&resp_bytes(resp).await).into_owned(),
+    )
+}
+
+#[tokio::test]
+async fn restore_without_a_verify_key_is_refused_outside_dev_mode() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = make_admin_token(&h, &realm).await;
+    let archive = export_archive(&h, &realm, &token).await;
+
+    // Control: the same archive restores once a key is configured.
+    let (ok, body) = dry_run_restore(build_app(&h).await, &realm, &token, &archive).await;
+    assert_eq!(ok, StatusCode::OK, "control must restore; got {body}");
+
+    let (status, body) =
+        dry_run_restore(build_app_with(&h, None, false), &realm, &token, &archive).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "no verify key in production must refuse; got {body}"
+    );
+    assert!(
+        body.contains("security.backup.verify_key"),
+        "the refusal must say how to configure the key; got {body}"
+    );
+    assert!(
+        body.contains("backup_verify_key_not_configured"),
+        "the refusal must carry a stable machine-readable code; got {body}"
+    );
+}
+
+#[tokio::test]
+async fn restore_without_a_verify_key_is_allowed_in_dev_mode() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = make_admin_token(&h, &realm).await;
+    let archive = export_unsigned_archive(&h, &realm, &token).await;
+
+    let (status, body) =
+        dry_run_restore(build_app_with(&h, None, true), &realm, &token, &archive).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "dev mode keeps unsigned restores; got {body}"
+    );
+}
+
+#[tokio::test]
+async fn unsigned_archive_is_refused_when_a_verify_key_is_configured() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = make_admin_token(&h, &realm).await;
+    let archive = export_unsigned_archive(&h, &realm, &token).await;
+
+    // Dev mode does not relax a configured key.
+    for dev in [false, true] {
+        let (status, body) = dry_run_restore(
+            build_app_with(&h, Some(test_verify_key()), dev),
+            &realm,
+            &token,
+            &archive,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "dev={dev}: {body}");
+        assert!(body.contains("unsigned"), "dev={dev}: {body}");
+        // The documented contract token (CHANGELOG, HEA-1206) survives.
+        assert!(
+            body.contains("missing_manifest_signature"),
+            "dev={dev}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn archive_signed_by_another_key_is_refused() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = make_admin_token(&h, &realm).await;
+    let (other, _pem) = BackupSigningKey::generate().expect("generate");
+    let archive = sign_bytes(&export_unsigned_archive(&h, &realm, &token).await, &other);
+
+    let (status, body) = dry_run_restore(build_app(&h).await, &realm, &token, &archive).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("signature is invalid"), "{body}");
+    assert!(body.contains("invalid_manifest_signature"), "{body}");
+}
+
+// ===== The system realm over HTTP (operator-console recovery) =====
+//
+// `POST /admin/backup` enumerated realms through `list_realms`, which hides
+// the system realm, so no HTTP export ever carried an operator account. It now
+// does — for a system-realm caller only. A tenant-scoped caller never exports
+// it and can never restore it.
+
+fn system_realm() -> RealmId {
+    RealmId::new(uuid::Uuid::nil())
+}
+
+/// Creates an operator in the system realm (as first-run setup does) and
+/// returns a system-realm access token for it.
+fn make_system_token(h: &common::TestHarness, email: &str) -> String {
+    let sys = system_realm();
+    let user = h
+        .identity()
+        .create_admin_user(&CreateUserRequest {
+            email: email.to_string(),
+            display_name: "Operator".into(),
+            ..Default::default()
+        })
+        .expect("operator");
+    h.rbac().seed_realm(&sys).expect("seed system roles");
+    let role = h
+        .rbac()
+        .get_role_by_name(&sys, "realm.admin")
+        .expect("role")
+        .expect("seeded");
+    h.rbac()
+        .assign_role(
+            &sys,
+            &AssignRoleRequest {
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("grant realm.admin");
+    let session = h
+        .identity()
+        .create_session(&sys, user.id(), &SessionContext::default())
+        .expect("session");
+    h.identity()
+        .issue_tokens(&sys, user.id(), session.id())
+        .expect("tokens")
+        .access_token()
+        .to_string()
+}
+
+async fn post_backup(h: &common::TestHarness, uri: &str, token: &str, realm: &RealmId) -> Vec<u8> {
+    let resp = build_app(h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "export {uri} must succeed");
+    resp_bytes(resp).await
+}
+
+fn archive_realm_ids(bytes: &[u8]) -> Vec<String> {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    std::fs::write(tmp.path(), bytes).expect("write");
+    let reader = BackupArchive::open(tmp.path()).expect("open archive");
+    reader.realms().iter().map(|r| r.realm_id.clone()).collect()
+}
+
+fn nil_realm_id_string() -> String {
+    format!("realm_{}", uuid::Uuid::nil())
+}
+
+#[tokio::test]
+async fn a_system_realm_export_carries_the_system_realm_and_a_tenant_export_never_does() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let tenant = h.create_realm();
+    h.rbac().seed_realm(&tenant).expect("seed");
+    let tenant_token = make_admin_token(&h, &tenant).await;
+    let system_token = make_system_token(&h, "operator@hearth.test");
+
+    // Full export by a system-realm caller: every tenant AND the system realm.
+    let ids =
+        archive_realm_ids(&post_backup(&h, "/admin/backup", &system_token, &system_realm()).await);
+    assert!(
+        ids.contains(&nil_realm_id_string()),
+        "a system-realm caller's full export must carry the system realm: {ids:?}"
+    );
+    assert!(
+        ids.contains(&format!("realm_{}", tenant.as_uuid())),
+        "and every tenant realm: {ids:?}"
+    );
+
+    // Named explicitly.
+    let ids = archive_realm_ids(
+        &post_backup(
+            &h,
+            "/admin/backup?realm=system",
+            &system_token,
+            &system_realm(),
+        )
+        .await,
+    );
+    assert_eq!(
+        ids,
+        vec![nil_realm_id_string()],
+        "?realm=system exports the system realm only"
+    );
+
+    // A tenant-scoped caller: never the system realm, with or without naming it.
+    let ids = archive_realm_ids(&post_backup(&h, "/admin/backup", &tenant_token, &tenant).await);
+    assert!(
+        !ids.contains(&nil_realm_id_string()),
+        "a tenant export must never carry the system realm: {ids:?}"
+    );
+    let resp = build_app(&h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup?realm=system")
+                .header("Authorization", format!("Bearer {tenant_token}"))
+                .header("X-Realm-ID", tenant.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a tenant caller naming the system realm is refused"
+    );
+}
+
+async fn post_restore(
+    h: &common::TestHarness,
+    uri: &str,
+    token: &str,
+    realm: &RealmId,
+    archive: &[u8],
+) -> (StatusCode, serde_json::Value) {
+    let (ct, body) = multipart_body(archive);
+    let resp = build_app(h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("content-type", ct)
+                .body(Body::from(body))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    let status = resp.status();
+    (status, resp_json(resp).await)
+}
+
+#[tokio::test]
+async fn only_a_system_realm_caller_restores_the_system_realm_over_http() {
+    set_master_key();
+    // Source: an operator to recover, exported by a system-realm caller.
+    let src = common::TestHarness::embedded().await.expect("src");
+    let src_token = make_system_token(&src, "recovered@hearth.test");
+    let archive = sign_bytes(
+        &post_backup(
+            &src,
+            "/admin/backup?realm=system",
+            &src_token,
+            &system_realm(),
+        )
+        .await,
+        &test_signing_key(),
+    );
+
+    let dst = common::TestHarness::embedded().await.expect("dst");
+    let tenant = dst.create_realm();
+    dst.rbac().seed_realm(&tenant).expect("seed");
+    let tenant_token = make_admin_token(&dst, &tenant).await;
+
+    // A tenant-scoped caller — even in overwrite mode — is refused, and no
+    // system-realm principal is created.
+    for uri in [
+        "/admin/backup/restore",
+        "/admin/backup/restore?mode=overwrite",
+        "/admin/backup/restore?realm=system",
+    ] {
+        let (status, body) = post_restore(&dst, uri, &tenant_token, &tenant, &archive).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {body}");
+    }
+    assert!(
+        dst.identity()
+            .get_user_by_email(&system_realm(), "recovered@hearth.test")
+            .expect("lookup")
+            .is_none(),
+        "a tenant-scoped restore must never create a system-realm principal"
+    );
+
+    // A system-realm caller restores it.
+    let dst_token = make_system_token(&dst, "live@hearth.test");
+    let (status, body) = post_restore(
+        &dst,
+        "/admin/backup/restore",
+        &dst_token,
+        &system_realm(),
+        &archive,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "system-realm restore: {body}");
+    assert_eq!(body["counts"]["system"]["users"]["created"], 1, "{body}");
+    assert!(
+        dst.identity()
+            .get_user_by_email(&system_realm(), "recovered@hearth.test")
+            .expect("lookup")
+            .is_some(),
+        "the archived operator is restored"
+    );
+    assert!(
+        dst.identity()
+            .get_user_by_email(&system_realm(), "live@hearth.test")
+            .expect("lookup")
+            .is_some(),
+        "the live operator is untouched"
+    );
+}
+
+/// Creates an operator in the system realm holding exactly `permissions`
+/// (through one custom role) and returns a system-realm access token for it.
+fn make_system_token_with(h: &common::TestHarness, email: &str, permissions: &[&str]) -> String {
+    use hearth::rbac::{CreateRoleRequest, Permission};
+    let sys = system_realm();
+    let user = h
+        .identity()
+        .create_admin_user(&CreateUserRequest {
+            email: email.to_string(),
+            display_name: "Delegated operator".into(),
+            ..Default::default()
+        })
+        .expect("operator");
+    h.rbac().seed_realm(&sys).expect("seed system roles");
+    let role = h
+        .rbac()
+        .create_role(
+            &sys,
+            &CreateRoleRequest {
+                name: format!("delegated-{}", uuid::Uuid::new_v4()),
+                description: None,
+                permissions: permissions
+                    .iter()
+                    .map(|p| Permission::new(*p).expect("permission"))
+                    .collect(),
+                parent_roles: vec![],
+                scope_kind: hearth::rbac::RoleScopeKind::Realm,
+                allow_reserved_permissions: true,
+            },
+        )
+        .expect("role");
+    h.rbac()
+        .assign_role(
+            &sys,
+            &AssignRoleRequest {
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("grant role");
+    let session = h
+        .identity()
+        .create_session(&sys, user.id(), &SessionContext::default())
+        .expect("session");
+    h.identity()
+        .issue_tokens(&sys, user.id(), session.id())
+        .expect("tokens")
+        .access_token()
+        .to_string()
+}
+
+async fn post_backup_status(
+    h: &common::TestHarness,
+    uri: &str,
+    token: &str,
+    realm: &RealmId,
+) -> StatusCode {
+    build_app(h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response")
+        .status()
+}
+
+/// A system-realm caller's backup reaches every realm — the system realm's
+/// operators and signing key included — so it needs `hearth.admin`, not just
+/// a sub-admin permission plus `hearth.export`. A delegated operator holding
+/// `hearth.users.admin` + `hearth.export` could otherwise resurrect deleted
+/// operators, overwrite every operator's password hash, or reinstall a rotated
+/// system signing key with a signed archive.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one scenario: four sub-admins refused, then the superuser
+async fn a_system_realm_backup_or_restore_needs_hearth_admin_not_a_sub_admin() {
+    set_master_key();
+    let src = common::TestHarness::embedded().await.expect("src");
+    let src_token = make_system_token(&src, "recovered@hearth.test");
+    let archive = sign_bytes(
+        &post_backup(
+            &src,
+            "/admin/backup?realm=system",
+            &src_token,
+            &system_realm(),
+        )
+        .await,
+        &test_signing_key(),
+    );
+
+    let dst = common::TestHarness::embedded().await.expect("dst");
+    let tenant = dst.create_realm();
+    dst.rbac().seed_realm(&tenant).expect("seed");
+    let tenant_archive = {
+        let tenant_token = make_admin_token(&dst, &tenant).await;
+        export_archive(&dst, &tenant, &tenant_token).await
+    };
+    let key_before = dst
+        .identity()
+        .export_realm_signing_key_pkcs8(&system_realm())
+        .expect("system key");
+
+    for sub_admin in [
+        "hearth.users.admin",
+        "hearth.realm.admin",
+        "hearth.clients.admin",
+        "hearth.agents.admin",
+    ] {
+        let token = make_system_token_with(
+            &dst,
+            &format!("{sub_admin}@hearth.test"),
+            &[sub_admin, "hearth.export"],
+        );
+        for uri in ["/admin/backup", "/admin/backup?realm=system"] {
+            assert_eq!(
+                post_backup_status(&dst, uri, &token, &system_realm()).await,
+                StatusCode::FORBIDDEN,
+                "{sub_admin} + hearth.export must not export {uri}"
+            );
+        }
+        for uri in [
+            "/admin/backup/restore",
+            "/admin/backup/restore?mode=merge",
+            "/admin/backup/restore?mode=overwrite",
+            "/admin/backup/restore?dry_run=true",
+        ] {
+            let (status, body) = post_restore(&dst, uri, &token, &system_realm(), &archive).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{sub_admin} + hearth.export must not restore the system realm ({uri}): {body}"
+            );
+            let (status, body) =
+                post_restore(&dst, uri, &token, &system_realm(), &tenant_archive).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{sub_admin} + hearth.export must not restore a tenant realm from the \
+                 system realm ({uri}): {body}"
+            );
+        }
+    }
+
+    // Nothing was written by any refused restore.
+    assert!(
+        dst.identity()
+            .get_user_by_email(&system_realm(), "recovered@hearth.test")
+            .expect("lookup")
+            .is_none(),
+        "a refused restore must not create the archived operator"
+    );
+    assert_eq!(
+        dst.identity()
+            .export_realm_signing_key_pkcs8(&system_realm())
+            .expect("system key"),
+        key_before,
+        "a refused restore must not touch the system signing key"
+    );
+    let restored_events = dst
+        .audit()
+        .query(&AuditQuery {
+            action: Some(AuditAction::BackupRestored),
+            ..AuditQuery::for_realm(system_realm())
+        })
+        .expect("audit query");
+    assert!(
+        restored_events.is_empty(),
+        "a refused restore records no BackupRestored event: {restored_events:?}"
+    );
+
+    // hearth.admin + hearth.export (and nothing else) is enough.
+    let admin = make_system_token_with(
+        &dst,
+        "superuser@hearth.test",
+        &["hearth.admin", "hearth.export"],
+    );
+    assert_eq!(
+        post_backup_status(&dst, "/admin/backup?realm=system", &admin, &system_realm()).await,
+        StatusCode::OK,
+        "hearth.admin + hearth.export exports the system realm"
+    );
+    let (status, body) = post_restore(
+        &dst,
+        "/admin/backup/restore",
+        &admin,
+        &system_realm(),
+        &archive,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "hearth.admin restores: {body}");
+    assert!(
+        dst.identity()
+            .get_user_by_email(&system_realm(), "recovered@hearth.test")
+            .expect("lookup")
+            .is_some(),
+        "the archived operator is restored"
+    );
+}
+
+/// A tenant caller's restore is authorized against EVERY realm in the archive
+/// before anything is written. An archive listing the caller's own realm first
+/// and the system realm second used to restore the caller's realm (and record
+/// a `BackupRestored` event in it) before the system realm was refused.
+#[tokio::test]
+async fn a_tenant_restore_naming_the_system_realm_is_refused_before_any_write() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let tenant = h.create_realm();
+    h.rbac().seed_realm(&tenant).expect("seed");
+    let tenant_token = make_admin_token(&h, &tenant).await;
+    let victim = h
+        .identity()
+        .create_user(
+            &tenant,
+            &CreateUserRequest {
+                email: "victim@backup-test.example".into(),
+                display_name: "Victim".into(),
+                ..Default::default()
+            },
+        )
+        .expect("user");
+
+    // A full export by a system-realm caller: the tenant realm, then the
+    // system realm.
+    let system_token = make_system_token(&h, "operator@hearth.test");
+    let archive = sign_bytes(
+        &post_backup(&h, "/admin/backup", &system_token, &system_realm()).await,
+        &test_signing_key(),
+    );
+    let ids = archive_realm_ids(&archive);
+    assert_eq!(
+        ids,
+        vec![format!("realm_{}", tenant.as_uuid()), nil_realm_id_string()],
+        "precondition: the caller's realm comes first"
+    );
+
+    h.identity()
+        .delete_user(&tenant, victim.id())
+        .expect("delete the user the archive still carries");
+
+    let (status, body) = post_restore(
+        &h,
+        "/admin/backup/restore",
+        &tenant_token,
+        &tenant,
+        &archive,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        h.identity()
+            .get_user_by_email(&tenant, "victim@backup-test.example")
+            .expect("lookup")
+            .is_none(),
+        "the caller's own realm must be untouched by a refused restore"
+    );
+    let events = h
+        .audit()
+        .query(&AuditQuery {
+            action: Some(AuditAction::BackupRestored),
+            ..AuditQuery::for_realm(tenant.clone())
+        })
+        .expect("audit query");
+    assert!(
+        events.is_empty(),
+        "a refused restore records nothing in the caller's realm: {events:?}"
+    );
+}
+
+/// Events in `realm` that a backup restore imported (carry the
+/// `backup_restore` marker).
+fn imported_events(h: &common::TestHarness, realm: &RealmId) -> usize {
+    h.audit()
+        .query(&AuditQuery::for_realm(realm.clone()))
+        .expect("audit query")
+        .iter()
+        .filter(|e| {
+            e.metadata
+                .as_ref()
+                .is_some_and(|m| m.get("backup_restore").is_some())
+        })
+        .count()
+}
+
+fn chain_ok(h: &common::TestHarness, realm: &RealmId) -> bool {
+    h.audit()
+        .verify_integrity(realm, None, None)
+        .expect("verify_integrity")
+}
+
+/// Restoring archived audit history into a LIVE realm — the system realm over
+/// HTTP, and a tenant realm merged into a live copy of itself — keeps that
+/// realm's tamper-evident chain verifiable. The archived events are older than
+/// the live ones; appended with their original timestamps they sorted before
+/// events they chained after, and verification (which walks storage order)
+/// failed. Restoring an archive whose events the realm already holds adds no
+/// duplicate.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one scenario across two instances
+async fn restoring_audit_history_into_a_live_realm_keeps_its_chain_verifiable() {
+    set_master_key();
+    let src = common::TestHarness::embedded().await.expect("src");
+    let tenant = src.create_realm();
+    src.rbac().seed_realm(&tenant).expect("seed");
+    let _ = make_admin_token(&src, &tenant).await;
+    let src_token = make_system_token(&src, "operator@hearth.test");
+    let first = sign_bytes(
+        &post_backup(
+            &src,
+            "/admin/backup?include_audit=true",
+            &src_token,
+            &system_realm(),
+        )
+        .await,
+        &test_signing_key(),
+    );
+    // More history at the source, then a second archive carrying it too.
+    let _ = make_admin_token(&src, &tenant).await;
+    let _ = make_system_token(&src, "second@hearth.test");
+    let second = sign_bytes(
+        &post_backup(
+            &src,
+            "/admin/backup?include_audit=true",
+            &src_token,
+            &system_realm(),
+        )
+        .await,
+        &test_signing_key(),
+    );
+
+    // Restoring into the source itself: every archived event is already
+    // there, so nothing is added and both chains still verify.
+    let (status, body) = post_restore(
+        &src,
+        "/admin/backup/restore?mode=merge",
+        &src_token,
+        &system_realm(),
+        &first,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(chain_ok(&src, &system_realm()), "src system chain verifies");
+    assert!(chain_ok(&src, &tenant), "src tenant chain verifies");
+    assert_eq!(imported_events(&src, &tenant), 0, "nothing is duplicated");
+
+    // A live instance with its own system-realm history.
+    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst_token = make_system_token(&dst, "dst-operator@hearth.test");
+    let (status, body) = post_restore(
+        &dst,
+        "/admin/backup/restore",
+        &dst_token,
+        &system_realm(),
+        &first,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        chain_ok(&dst, &system_realm()),
+        "the live system realm's audit chain must verify after the restore"
+    );
+    assert!(
+        chain_ok(&dst, &tenant),
+        "the restored tenant realm verifies"
+    );
+    let after_first = (
+        imported_events(&dst, &system_realm()),
+        imported_events(&dst, &tenant),
+    );
+    assert!(
+        after_first.0 > 0 && after_first.1 > 0,
+        "the archived history is imported and marked: {after_first:?}"
+    );
+
+    // The tenant realm is now live on dst and gains newer history; merging
+    // the second archive adds the source's later events after it.
+    let _ = make_admin_token(&dst, &tenant).await;
+    for round in 1..=2 {
+        let (status, body) = post_restore(
+            &dst,
+            "/admin/backup/restore?mode=merge",
+            &dst_token,
+            &system_realm(),
+            &second,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "round {round}: {body}");
+        assert!(
+            chain_ok(&dst, &system_realm()),
+            "round {round}: the system realm verifies"
+        );
+        assert!(
+            chain_ok(&dst, &tenant),
+            "round {round}: a tenant realm merged while live verifies"
+        );
+    }
+    let after_second = (
+        imported_events(&dst, &system_realm()),
+        imported_events(&dst, &tenant),
+    );
+    assert!(
+        after_second.0 > after_first.0 && after_second.1 > after_first.1,
+        "the second archive's later events are imported: {after_first:?} -> {after_second:?}"
+    );
+    let (status, body) = post_restore(
+        &dst,
+        "/admin/backup/restore?mode=merge",
+        &dst_token,
+        &system_realm(),
+        &second,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        (
+            imported_events(&dst, &system_realm()),
+            imported_events(&dst, &tenant)
+        ),
+        after_second,
+        "re-importing the same archive must not duplicate events"
+    );
+}
+
+// ── Restore needs the realm's full admin (M2) ─────────────────────────────────
+
+/// `POST uri` with an empty body on an existing `app`, returning the status.
+async fn post_status_on(app: &axum::Router, uri: &str, token: &str, realm: &RealmId) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response")
+        .status()
+}
+
+/// A restore of `archive` on an existing `app`, returning status and body.
+async fn post_restore_on(
+    app: &axum::Router,
+    uri: &str,
+    token: &str,
+    realm: &RealmId,
+    archive: &[u8],
+) -> (StatusCode, serde_json::Value) {
+    let (ct, body) = multipart_body(archive);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("content-type", ct)
+                .body(Body::from(body))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    let status = resp.status();
+    (status, resp_json(resp).await)
+}
+
+/// Creates a user in `realm` (the system realm through `create_admin_user`)
+/// holding exactly `permissions` through one custom role, and returns the user
+/// id and the role assignment.
+fn delegate(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    email: &str,
+    permissions: &[&str],
+) -> (hearth::core::UserId, hearth::rbac::RoleAssignment) {
+    let request = CreateUserRequest {
+        email: email.to_string(),
+        display_name: "Delegated".into(),
+        ..Default::default()
+    };
+    let user = if realm.as_uuid().is_nil() {
+        h.identity().create_admin_user(&request)
+    } else {
+        h.identity().create_user(realm, &request)
+    }
+    .expect("user");
+    h.rbac().seed_realm(realm).expect("seed roles");
+    let assignment = grant(h, realm, user.id(), permissions);
+    (user.id().clone(), assignment)
+}
+
+/// Grants `user` exactly `permissions` through a fresh custom role.
+fn grant(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    user: &hearth::core::UserId,
+    permissions: &[&str],
+) -> hearth::rbac::RoleAssignment {
+    use hearth::rbac::{CreateRoleRequest, Permission};
+    let role = h
+        .rbac()
+        .create_role(
+            realm,
+            &CreateRoleRequest {
+                name: format!("delegated-{}", uuid::Uuid::new_v4()),
+                description: None,
+                permissions: permissions
+                    .iter()
+                    .map(|p| Permission::new(*p).expect("permission"))
+                    .collect(),
+                parent_roles: vec![],
+                scope_kind: hearth::rbac::RoleScopeKind::Realm,
+                allow_reserved_permissions: true,
+            },
+        )
+        .expect("role");
+    h.rbac()
+        .assign_role(
+            realm,
+            &AssignRoleRequest {
+                subject: Subject::User(user.clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("grant role")
+}
+
+/// A fresh access token for `user` in `realm`.
+fn token_for(h: &common::TestHarness, realm: &RealmId, user: &hearth::core::UserId) -> String {
+    let session = h
+        .identity()
+        .create_session(realm, user, &SessionContext::default())
+        .expect("session");
+    h.identity()
+        .issue_tokens(realm, user, session.id())
+        .expect("tokens")
+        .access_token()
+        .to_string()
+}
+
+/// A restore writes across every sub-admin domain — users and credentials,
+/// clients, roles and role assignments, agents, signing keys — so it needs the
+/// realm's full admin permission, `hearth.admin` (which the seeded
+/// `realm.admin` role carries). A tenant sub-admin with `hearth.export` could
+/// otherwise bring back a role assignment an administrator revoked, which live
+/// role management reserves to `hearth.realm.admin`, and a `hearth.realm.admin`
+/// sub-admin could bring back users and clients. Export is unchanged: a
+/// tenant sub-admin with `hearth.export` still backs its realm up.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one scenario: four sub-admins refused, then the realm admin
+async fn a_tenant_restore_needs_the_realm_admin_not_a_sub_admin() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let tenant = h.create_realm();
+    h.rbac().seed_realm(&tenant).expect("seed");
+    let admin_token = make_admin_token(&h, &tenant).await;
+    let app = build_app(&h).await;
+
+    let (grantee, revoked) = delegate(
+        &h,
+        &tenant,
+        "grantee@backup-test.example",
+        &["hearth.realm.admin"],
+    );
+    let archive = export_archive(&h, &tenant, &admin_token).await;
+    h.rbac()
+        .unassign_role(&tenant, &revoked.id)
+        .expect("revoke the grant");
+
+    for sub_admin in [
+        "hearth.users.admin",
+        "hearth.realm.admin",
+        "hearth.clients.admin",
+        "hearth.agents.admin",
+    ] {
+        let (user, _) = delegate(
+            &h,
+            &tenant,
+            &format!("{sub_admin}@backup-test.example"),
+            &[sub_admin, "hearth.export"],
+        );
+        let token = token_for(&h, &tenant, &user);
+        for uri in [
+            "/admin/backup/restore",
+            "/admin/backup/restore?mode=merge",
+            "/admin/backup/restore?dry_run=true",
+        ] {
+            let (status, body) = post_restore_on(&app, uri, &token, &tenant, &archive).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{sub_admin} + hearth.export must not restore ({uri}): {body}"
+            );
+        }
+        assert_eq!(
+            post_status_on(&app, "/admin/backup", &token, &tenant).await,
+            StatusCode::OK,
+            "{sub_admin} + hearth.export still exports its own realm"
+        );
+    }
+
+    assert!(
+        h.rbac()
+            .list_user_assignments(&tenant, &grantee)
+            .expect("assignments")
+            .is_empty(),
+        "a refused restore must not bring the revoked grant back"
+    );
+    let restored_events = h
+        .audit()
+        .query(&AuditQuery {
+            action: Some(AuditAction::BackupRestored),
+            ..AuditQuery::for_realm(tenant.clone())
+        })
+        .expect("audit query");
+    assert!(
+        restored_events.is_empty(),
+        "a refused restore records no BackupRestored event: {restored_events:?}"
+    );
+
+    let (status, body) = post_restore_on(
+        &app,
+        "/admin/backup/restore?mode=merge",
+        &admin_token,
+        &tenant,
+        &archive,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the realm admin restores: {body}");
+    assert_eq!(
+        h.rbac()
+            .list_user_assignments(&tenant, &grantee)
+            .expect("assignments")
+            .len(),
+        1,
+        "the realm admin's restore brings the archived grant back"
+    );
+}
+
+// ── Check order (L7) ──────────────────────────────────────────────────────────
+
+/// The permission checks answer before the export rate limit: a caller whose
+/// hourly quota is spent and who lacks the permission a backup operation
+/// needs gets `403`, never `429`. The quota is spent with a full-admin token
+/// of the SAME user, then the user is demoted to a sub-admin; with the rate
+/// limit checked first the demoted token would see `429`.
+#[tokio::test]
+async fn the_permission_checks_answer_before_the_export_rate_limit() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let tenant = h.create_realm();
+    h.rbac().seed_realm(&tenant).expect("seed");
+    let admin_token = make_admin_token(&h, &tenant).await;
+    let tenant_archive = export_archive(&h, &tenant, &admin_token).await;
+    // One export per user per hour, so the quota is spent in one call.
+    let app = router(Arc::new(
+        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+            .with_backup_verify_key(Some(test_verify_key()))
+            .with_rate_limits(None, None, Some(1)),
+    ));
+
+    for (realm, uri) in [
+        (system_realm(), "/admin/backup?realm=system"),
+        (tenant.clone(), "/admin/backup"),
+    ] {
+        let (user, full) = delegate(
+            &h,
+            &realm,
+            &format!("quota-{}@hearth.test", uuid::Uuid::new_v4()),
+            &["hearth.admin", "hearth.export"],
+        );
+        let full_token = token_for(&h, &realm, &user);
+        assert_eq!(
+            post_status_on(&app, uri, &full_token, &realm).await,
+            StatusCode::OK,
+            "precondition: {uri} spends the user's one export"
+        );
+        assert_eq!(
+            post_status_on(&app, uri, &full_token, &realm).await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "precondition: {uri} — the user's export quota is spent"
+        );
+
+        h.rbac().unassign_role(&realm, &full.id).expect("demote");
+        grant(&h, &realm, &user, &["hearth.users.admin", "hearth.export"]);
+        let demoted = token_for(&h, &realm, &user);
+        if realm.as_uuid().is_nil() {
+            assert_eq!(
+                post_status_on(&app, uri, &demoted, &realm).await,
+                StatusCode::FORBIDDEN,
+                "a system-realm export by a sub-admin is refused before the quota"
+            );
+        }
+        let (status, body) = post_restore_on(
+            &app,
+            "/admin/backup/restore",
+            &demoted,
+            &realm,
+            &tenant_archive,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{realm:?}: a restore by a sub-admin is refused before the quota: {body}"
+        );
+    }
 }

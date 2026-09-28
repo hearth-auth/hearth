@@ -2543,6 +2543,31 @@ pub struct ApplicationYamlConfig {
     /// (DPoP, PAR, PKCE S256) regardless of the realm-level `fapi_profile`.
     #[serde(default)]
     pub profile: Option<String>,
+    /// The client's public JWK Set (RFC 7517), inline: a YAML mapping
+    /// `{keys: [...]}` or the same object as a JSON string. Its keys verify
+    /// the client's `private_key_jwt` assertions and signed request objects.
+    /// Required with `profile: fapi2`. Public keys only.
+    #[serde(default)]
+    pub jwks: Option<serde_json::Value>,
+    /// Algorithm this client's ID tokens are signed with
+    /// (`id_token_signed_response_alg`, OIDC Registration §2): `"EdDSA"` or
+    /// `"RS256"`. Absent means `"EdDSA"`. Only ID tokens are affected — access
+    /// and refresh tokens are always EdDSA. `RS256` provisions the realm's RSA
+    /// ID-token key on first use (task 26.55).
+    #[serde(default)]
+    pub id_token_signed_response_alg: Option<String>,
+}
+
+impl ApplicationYamlConfig {
+    /// The inline JWKS as the JSON string the engine stores: a JSON-string
+    /// value verbatim, a YAML mapping serialized. `None` when absent.
+    pub fn jwks_json(&self) -> Option<String> {
+        match self.jwks.as_ref()? {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => Some(s.clone()),
+            other => Some(other.to_string()),
+        }
+    }
 }
 
 /// YAML permission definition.

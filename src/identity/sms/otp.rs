@@ -4,7 +4,8 @@
 //!
 //! - 6-digit code generation with rejection sampling (no modular bias).
 //! - 128-bit CSPRNG nonce for the storage key (`sms:pending_otp:{nonce}`).
-//! - HMAC-SHA256 of the digits for tamper-proof storage.
+//! - HMAC-SHA256 of the recipient and the digits for tamper-proof storage; a
+//!   code verifies only for the phone or address it was sent to.
 //! - Constant-time verification via `ring::hmac::verify`.
 //! - Attempt tracking and expiry embedded in the stored record.
 //! - Per-phone resend throttle key derivation (first 8 hex chars of SHA-256).
@@ -120,19 +121,25 @@ fn default_otp_max_attempts() -> u32 {
 }
 
 impl StoredOtp {
-    /// Generates a 6-digit code and creates a `StoredOtp` record.
+    /// Generates a 6-digit code bound to `recipient` and creates a
+    /// `StoredOtp` record.
+    ///
+    /// `recipient` is the address the code is delivered to (the E.164 phone
+    /// number or the email address). It is folded into the MAC, so the code
+    /// verifies only against that same recipient — see [`Self::verify`].
     ///
     /// Returns `(plaintext_digits, stored_record)`. The caller must include
     /// the digits in the SMS body and discard them after sending.
     pub(crate) fn create(
         rng: &dyn SecureRandom,
         key_bytes: &[u8],
+        recipient: &str,
         expiry_unix_ts: u64,
         max_attempts: u32,
     ) -> Result<(Zeroizing<String>, Self), IdentityError> {
         let digits = generate_otp_digits(rng)?;
         let key = hmac::Key::new(hmac::HMAC_SHA256, key_bytes);
-        let tag = hmac::sign(&key, digits.as_bytes());
+        let tag = hmac::sign(&key, &otp_mac_input(recipient, &digits));
         let hmac_hex = hex_encode(tag.as_ref());
         let stored = Self {
             hmac_hex,
@@ -153,7 +160,14 @@ impl StoredOtp {
         self.attempt_count >= self.max_attempts
     }
 
-    /// Verifies `candidate_digits` against the stored HMAC in constant time.
+    /// Verifies `candidate_digits`, sent to `recipient`, against the stored
+    /// HMAC in constant time.
+    ///
+    /// The record names no user, so the recipient is what ties a code to the
+    /// person it was sent to: a genuine code delivered to one phone or inbox
+    /// must not prove possession of another. The caller passes the recipient
+    /// it expects (the challenged user's own number or address), never one
+    /// taken from the request.
     ///
     /// Uses `ring::hmac::verify` which performs a constant-time comparison
     /// of the recomputed HMAC against the stored tag bytes.
@@ -162,12 +176,17 @@ impl StoredOtp {
     pub(crate) fn verify(
         &self,
         candidate_digits: &str,
+        recipient: &str,
         key_bytes: &[u8],
     ) -> Result<(), IdentityError> {
         let stored_bytes = hex_decode(&self.hmac_hex).map_err(|_| IdentityError::InvalidSmsOtp)?;
         let key = hmac::Key::new(hmac::HMAC_SHA256, key_bytes);
-        hmac::verify(&key, candidate_digits.as_bytes(), &stored_bytes)
-            .map_err(|_| IdentityError::InvalidSmsOtp)
+        hmac::verify(
+            &key,
+            &otp_mac_input(recipient, candidate_digits),
+            &stored_bytes,
+        )
+        .map_err(|_| IdentityError::InvalidSmsOtp)
     }
 }
 
@@ -207,6 +226,27 @@ impl StoredResendCount {
 //  Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Domain-separation prefix of the OTP MAC input.
+///
+/// `v2` marks the recipient-bound format. Records written by the old format
+/// (a MAC over the bare digits) simply fail to verify, which is the safe
+/// outcome for a code that is at most minutes old.
+const OTP_MAC_DOMAIN: &[u8] = b"hearth-otp-v2\0";
+
+/// The bytes the OTP MAC covers: domain tag, length-prefixed recipient, digits.
+///
+/// The length prefix keeps the recipient/digits boundary unambiguous.
+fn otp_mac_input(recipient: &str, digits: &str) -> Zeroizing<Vec<u8>> {
+    let mut input = Zeroizing::new(Vec::with_capacity(
+        OTP_MAC_DOMAIN.len() + 8 + recipient.len() + digits.len(),
+    ));
+    input.extend_from_slice(OTP_MAC_DOMAIN);
+    input.extend_from_slice(&(recipient.len() as u64).to_be_bytes());
+    input.extend_from_slice(recipient.as_bytes());
+    input.extend_from_slice(digits.as_bytes());
+    input
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     bytes
         .iter()
@@ -237,6 +277,7 @@ mod tests {
     use ring::rand::SystemRandom;
 
     const TEST_KEY: &[u8] = b"hearth-test-hmac-key-32-bytes!!!";
+    const TEST_PHONE: &str = "+15555550123";
 
     // ── nonce ─────────────────────────────────────────────────────────────────
 
@@ -361,8 +402,9 @@ mod tests {
     fn create_otp_returns_valid_digits_and_record() {
         let rng = SystemRandom::new();
         let expiry = 9_999_999_999u64;
-        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, expiry, OTP_MAX_ATTEMPTS)
-            .expect("StoredOtp::create should succeed");
+        let (digits, stored) =
+            StoredOtp::create(&rng, TEST_KEY, TEST_PHONE, expiry, OTP_MAX_ATTEMPTS)
+                .expect("StoredOtp::create should succeed");
         assert_eq!(digits.len(), 6, "digits must be 6 chars");
         assert!(
             digits.chars().all(|c| c.is_ascii_digit()),
@@ -376,10 +418,11 @@ mod tests {
     #[test]
     fn verify_succeeds_with_correct_code() {
         let rng = SystemRandom::new();
-        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS)
-            .expect("StoredOtp::create should succeed");
+        let (digits, stored) =
+            StoredOtp::create(&rng, TEST_KEY, TEST_PHONE, 9_999_999_999, OTP_MAX_ATTEMPTS)
+                .expect("StoredOtp::create should succeed");
         assert!(
-            stored.verify(&digits, TEST_KEY).is_ok(),
+            stored.verify(&digits, TEST_PHONE, TEST_KEY).is_ok(),
             "verification must succeed with the correct code"
         );
     }
@@ -387,15 +430,16 @@ mod tests {
     #[test]
     fn verify_fails_with_wrong_code() {
         let rng = SystemRandom::new();
-        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS)
-            .expect("StoredOtp::create should succeed");
+        let (digits, stored) =
+            StoredOtp::create(&rng, TEST_KEY, TEST_PHONE, 9_999_999_999, OTP_MAX_ATTEMPTS)
+                .expect("StoredOtp::create should succeed");
         let wrong: String = if digits.as_str() == "000000" {
             "000001".to_string()
         } else {
             "000000".to_string()
         };
         assert!(
-            stored.verify(&wrong, TEST_KEY).is_err(),
+            stored.verify(&wrong, TEST_PHONE, TEST_KEY).is_err(),
             "verification must fail with a wrong code"
         );
     }
@@ -403,20 +447,65 @@ mod tests {
     #[test]
     fn verify_fails_with_wrong_key() {
         let rng = SystemRandom::new();
-        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS)
-            .expect("StoredOtp::create should succeed");
+        let (digits, stored) =
+            StoredOtp::create(&rng, TEST_KEY, TEST_PHONE, 9_999_999_999, OTP_MAX_ATTEMPTS)
+                .expect("StoredOtp::create should succeed");
         let other_key = b"a-completely-different-key!!!!!!!!";
         assert!(
-            stored.verify(&digits, other_key).is_err(),
+            stored.verify(&digits, TEST_PHONE, other_key).is_err(),
             "verification must fail with a different HMAC key"
         );
+    }
+
+    /// A genuine code sent to one recipient must not verify for another.
+    /// The record names no user, so without this binding a nonce + code a
+    /// caller obtained for their own phone passed someone else's challenge.
+    #[test]
+    fn verify_fails_for_a_different_recipient() {
+        let rng = SystemRandom::new();
+        let (digits, stored) =
+            StoredOtp::create(&rng, TEST_KEY, TEST_PHONE, 9_999_999_999, OTP_MAX_ATTEMPTS)
+                .expect("StoredOtp::create should succeed");
+        assert!(stored.verify(&digits, TEST_PHONE, TEST_KEY).is_ok());
+        assert!(
+            stored.verify(&digits, "+15555550999", TEST_KEY).is_err(),
+            "a code sent to one number must not verify for another"
+        );
+        assert!(
+            stored.verify(&digits, "", TEST_KEY).is_err(),
+            "nor for an empty recipient"
+        );
+    }
+
+    /// The recipient/digits boundary is unambiguous: shifting a character
+    /// from one to the other does not produce the same MAC input.
+    #[test]
+    fn mac_input_is_unambiguous_across_the_recipient_boundary() {
+        assert_ne!(
+            *otp_mac_input("+1555", "5123456"),
+            *otp_mac_input("+15555", "123456")
+        );
+    }
+
+    /// A record in the old format (MAC over the bare digits) does not verify
+    /// under the new, recipient-bound format — it fails closed.
+    #[test]
+    fn legacy_digits_only_mac_does_not_verify() {
+        let key = hmac::Key::new(hmac::HMAC_SHA256, TEST_KEY);
+        let legacy = StoredOtp {
+            hmac_hex: hex_encode(hmac::sign(&key, b"123456").as_ref()),
+            expiry_unix_ts: 9_999_999_999,
+            attempt_count: 0,
+            max_attempts: OTP_MAX_ATTEMPTS,
+        };
+        assert!(legacy.verify("123456", TEST_PHONE, TEST_KEY).is_err());
     }
 
     #[test]
     fn verify_fails_with_tampered_hmac_hex() {
         let rng = SystemRandom::new();
         let (digits, mut stored) =
-            StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS)
+            StoredOtp::create(&rng, TEST_KEY, TEST_PHONE, 9_999_999_999, OTP_MAX_ATTEMPTS)
                 .expect("StoredOtp::create should succeed");
         // Flip the first byte of the hex string.
         let original_first = stored
@@ -427,7 +516,7 @@ mod tests {
         let replacement = if original_first == 'a' { 'b' } else { 'a' };
         stored.hmac_hex = format!("{replacement}{}", &stored.hmac_hex[1..]);
         assert!(
-            stored.verify(&digits, TEST_KEY).is_err(),
+            stored.verify(&digits, TEST_PHONE, TEST_KEY).is_err(),
             "verification must fail when hmac_hex is tampered"
         );
     }
@@ -435,7 +524,7 @@ mod tests {
     #[test]
     fn is_expired_returns_true_when_past_expiry() {
         let rng = SystemRandom::new();
-        let (_, stored) = StoredOtp::create(&rng, TEST_KEY, 1_000u64, OTP_MAX_ATTEMPTS)
+        let (_, stored) = StoredOtp::create(&rng, TEST_KEY, TEST_PHONE, 1_000u64, OTP_MAX_ATTEMPTS)
             .expect("StoredOtp::create should succeed");
         assert!(
             stored.is_expired(1_001),
@@ -448,8 +537,9 @@ mod tests {
     #[test]
     fn is_exhausted_after_max_attempts() {
         let rng = SystemRandom::new();
-        let (_, mut stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS)
-            .expect("StoredOtp::create should succeed");
+        let (_, mut stored) =
+            StoredOtp::create(&rng, TEST_KEY, TEST_PHONE, 9_999_999_999, OTP_MAX_ATTEMPTS)
+                .expect("StoredOtp::create should succeed");
         assert!(!stored.is_exhausted(), "fresh OTP must not be exhausted");
         stored.attempt_count = OTP_MAX_ATTEMPTS - 1;
         assert!(
@@ -464,7 +554,7 @@ mod tests {
     fn per_realm_max_attempts_overrides_module_default() {
         let rng = SystemRandom::new();
         // Create an OTP with max_attempts = 2 (lower than the module default of 5).
-        let (_, mut stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, 2)
+        let (_, mut stored) = StoredOtp::create(&rng, TEST_KEY, TEST_PHONE, 9_999_999_999, 2)
             .expect("StoredOtp::create should succeed");
         assert!(!stored.is_exhausted(), "fresh OTP must not be exhausted");
         stored.attempt_count = 1;
@@ -547,8 +637,9 @@ mod tests {
     #[test]
     fn stored_otp_roundtrips_via_json() {
         let rng = SystemRandom::new();
-        let (_, original) = StoredOtp::create(&rng, TEST_KEY, 12_345_678, OTP_MAX_ATTEMPTS)
-            .expect("StoredOtp::create should succeed");
+        let (_, original) =
+            StoredOtp::create(&rng, TEST_KEY, TEST_PHONE, 12_345_678, OTP_MAX_ATTEMPTS)
+                .expect("StoredOtp::create should succeed");
         let json = serde_json::to_vec(&original).expect("StoredOtp should serialize to JSON");
         let restored: StoredOtp =
             serde_json::from_slice(&json).expect("StoredOtp should deserialize from JSON");

@@ -25,6 +25,8 @@ fuzz/corpus/
 # directory was never ignored: a local `cargo fuzz run` left multiple GB of
 # untracked files that a `git add -A` would happily stage.
 fuzz/target/
+# The same for the Miri / AddressSanitizer harness (`make miri`, `make asan`).
+unsafe-check/target/
 
 # Proptest regressions
 **/proptest-regressions/

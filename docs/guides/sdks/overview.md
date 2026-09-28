@@ -68,7 +68,9 @@ If you need to verify tokens from a language or framework that has no Hearth SDK
 GET /realms/<realm_id>/jwks
 ```
 
-Hearth signs all tokens with **Ed25519** (`alg: EdDSA`, `kty: OKP`). Your parser **must** support OKP keys — parsers that only handle EC or RSA keys will fail to load Hearth's JWKS. Compatible JWKS libraries: `jose` (Node/TypeScript), `lestrrat-go/jwx` (Go), `python-jose` (Python), `Auth0/java-jwt` (JVM).
+Hearth signs every access token with **Ed25519** (`alg: EdDSA`, `kty: OKP`). Your parser **must** support OKP keys — parsers that only handle EC or RSA keys will fail to load Hearth's JWKS. Compatible JWKS libraries: `jose` (Node/TypeScript), `lestrrat-go/jwx` (Go), `python-jose` (Python), `Auth0/java-jwt` (JVM).
+
+The JWKS can also carry an `RSA` key with `alg: RS256`: it signs **ID tokens** only, for clients registered with `id_token_signed_response_alg: RS256` (the OpenID Connect default, and what Dynamic Client Registration gives a client that omits the parameter). The SDKs' `verifyToken` verifies access tokens and keeps refusing RS256 even though that key is published — an ID token must never pass as a bearer token.
 
 ## Migrating from Keycloak?
 

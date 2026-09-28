@@ -71,6 +71,14 @@ pub struct CleanupStats {
     pub dpop_jtis_deleted: u64,
     /// Actor token JTI replay-cache entries swept (RFC 8693 B.5).
     pub actor_jtis_deleted: u64,
+    /// `private_key_jwt` client-assertion JTI replay markers (`oauth:ca-jti:`)
+    /// swept (RFC 7523 §2.2).
+    ///
+    /// One marker is written per assertion-authenticated request at the token
+    /// endpoint, `/introspect` and `/revoke`. It only has to outlive the
+    /// assertion it guards; past `exp` + clock skew the assertion fails its own
+    /// expiry check and the marker is dead weight.
+    pub client_assertion_jtis_deleted: u64,
     /// SAML SP-side request-state bags swept (`saml:state:`).
     ///
     /// This key space is written by an unauthenticated GET
@@ -129,6 +137,7 @@ impl CleanupStats {
             + self.jar_jtis_deleted
             + self.dpop_jtis_deleted
             + self.actor_jtis_deleted
+            + self.client_assertion_jtis_deleted
             + self.saml_states_deleted
             + self.saml_assertions_deleted
             + self.oidc_nonces_deleted
@@ -171,6 +180,8 @@ fn record<E: std::fmt::Display>(
     }
 }
 
+// One `record` call per key space; splitting it would only scatter the list.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn sweep_expired(
     realm_id: &RealmId,
     storage: &dyn StorageEngine,
@@ -238,6 +249,13 @@ pub(crate) fn sweep_expired(
         &mut errors,
         "actor JTI",
         sweep_actor_jtis(realm_id, storage, now_secs),
+    );
+    record(
+        realm_id,
+        &mut stats.client_assertion_jtis_deleted,
+        &mut errors,
+        "client-assertion JTI",
+        sweep_client_assertion_jtis(realm_id, storage, now_secs),
     );
     record(
         realm_id,
@@ -566,6 +584,41 @@ pub(crate) fn sweep_actor_jtis(
     now_secs: i64,
 ) -> Result<u64, crate::storage::StorageError> {
     let prefix = keys::actor_jti_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
+        let Ok(bytes) = entry.value.as_slice().try_into() else {
+            continue;
+        };
+        let expires_at = i64::from_le_bytes(bytes);
+        if expires_at <= now_secs {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
+/// Evicts expired `private_key_jwt` client-assertion JTI markers
+/// (`oauth:ca-jti:`, RFC 7523 §2.2 replay prevention).
+///
+/// `verify_client_assertion` writes one marker per assertion-authenticated
+/// request at the token endpoint, `/introspect` and `/revoke`. Each stores an
+/// 8-byte little-endian `i64`: the assertion's `exp` plus clock skew, in Unix
+/// seconds. Past that instant the assertion fails its own expiry check on every
+/// node, so the marker no longer prevents anything and is deleted here.
+///
+/// Rows that are not exactly 8 bytes are the legacy `b"1"` encoding, which
+/// records no expiry; they are left for realm-cascade deletion rather than
+/// guessed at.
+pub(crate) fn sweep_client_assertion_jtis(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now_secs: i64,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::client_assertion_jti_scan_prefix();
     let end = keys::prefix_end(&prefix);
     let entries = storage.scan(realm_id, &prefix, &end)?;
 
@@ -947,6 +1000,9 @@ mod tests {
             nonce: None,
             response_mode: None,
             authorization_signed_response_alg: None,
+            resource: None,
+            via_par: false,
+            amr_values: Vec::new(),
             created_at: Timestamp::from_micros(T0),
             expires_at: Timestamp::from_micros(T0 + TEN_MINUTES),
         };
@@ -985,6 +1041,9 @@ mod tests {
             nonce: None,
             response_mode: None,
             authorization_signed_response_alg: None,
+            resource: None,
+            via_par: false,
+            amr_values: Vec::new(),
             created_at: Timestamp::from_micros(T0),
             expires_at: Timestamp::from_micros(T0 + ONE_HOUR),
         };
@@ -1384,6 +1443,102 @@ mod tests {
             s.get(&realm, &bad_key).expect("get").is_some(),
             "malformed entry must be skipped, not deleted"
         );
+    }
+
+    // --- private_key_jwt client-assertion JTI sweep ---
+
+    fn seed_ca_jti(s: &EmbeddedStorageEngine, realm: &RealmId, jti: &str, expires_at: i64) {
+        s.put(
+            realm,
+            &keys::encode_client_assertion_jti(jti),
+            &expires_at.to_le_bytes(),
+        )
+        .expect("put client-assertion jti");
+    }
+
+    #[test]
+    fn sweep_client_assertion_jtis_deletes_expired_keeps_active() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+
+        seed_ca_jti(&s, &realm, "ca-expired", NOW_SECS - 1);
+        seed_ca_jti(&s, &realm, "ca-boundary", NOW_SECS);
+        seed_ca_jti(&s, &realm, "ca-active", NOW_SECS + 1);
+
+        let deleted = sweep_client_assertion_jtis(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(
+            deleted, 2,
+            "expired and exactly-now entries must be removed"
+        );
+        for (jti, present) in [
+            ("ca-expired", false),
+            ("ca-boundary", false),
+            ("ca-active", true),
+        ] {
+            assert_eq!(
+                s.get(&realm, &keys::encode_client_assertion_jti(jti))
+                    .expect("get")
+                    .is_some(),
+                present,
+                "{jti}: expected present={present}"
+            );
+        }
+    }
+
+    #[test]
+    fn sweep_client_assertion_jtis_leaves_legacy_and_malformed_rows() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+
+        seed_ca_jti(&s, &realm, "ca-expired", NOW_SECS - 1);
+        let legacy = keys::encode_client_assertion_jti("ca-legacy");
+        s.put(&realm, &legacy, b"1").expect("put legacy");
+
+        let deleted = sweep_client_assertion_jtis(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(deleted, 1, "only the expiry-carrying row is reclaimable");
+        assert!(
+            s.get(&realm, &legacy).expect("get").is_some(),
+            "a legacy b\"1\" row carries no expiry and must not be deleted"
+        );
+    }
+
+    #[test]
+    fn sweep_client_assertion_jtis_isolated_across_realms() {
+        let (s, _dir) = storage();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+
+        seed_ca_jti(&s, &realm_a, "ca-a", NOW_SECS - 1);
+        seed_ca_jti(&s, &realm_b, "ca-b", NOW_SECS - 1);
+
+        assert_eq!(
+            sweep_client_assertion_jtis(&realm_a, &s, NOW_SECS).expect("sweep a"),
+            1
+        );
+        assert!(
+            s.get(&realm_b, &keys::encode_client_assertion_jti("ca-b"))
+                .expect("get")
+                .is_some(),
+            "sweeping realm_a must not touch realm_b"
+        );
+    }
+
+    #[test]
+    fn sweep_expired_includes_client_assertion_jtis() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let clock = fake_clock(T0 + ONE_HOUR);
+        let now_secs = (T0 + ONE_HOUR) / 1_000_000;
+
+        seed_ca_jti(&s, &realm, "ca-expired", now_secs - 60);
+        seed_ca_jti(&s, &realm, "ca-live", now_secs + 60);
+
+        let stats = sweep_expired(&realm, &s, &clock, &CleanupConfig::default());
+        assert_eq!(
+            stats.client_assertion_jtis_deleted, 1,
+            "sweep_expired must include the client-assertion JTI sweep"
+        );
+        assert_eq!(stats.errors, 0);
     }
 
     // --- DPoP JTI sweep ---

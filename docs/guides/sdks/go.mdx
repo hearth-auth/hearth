@@ -393,8 +393,13 @@ Example with introspection mode:
 requireRead := hearth.RequirePermission(client, "docs.read", hearth.MiddlewareConfig{
     ExpectedMode: hearth.ModeIntrospection,
     ClientID:     "<resource-server-client-id>",
+    ClientSecret: os.Getenv("HEARTH_CLIENT_SECRET"),
 })
 ```
+
+Introspection serves **confidential clients only**: Hearth answers a public client with
+`401 invalid_client`, and `Client.Introspect` returns a `*ConfigurationError` without sending a
+request when `ClientSecret` is empty.
 
 </TabItem>
 <TabItem value="gin" label="Gin">

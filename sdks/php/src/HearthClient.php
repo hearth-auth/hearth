@@ -501,18 +501,27 @@ final class HearthClient
      * Registers a new OAuth client via Dynamic Client Registration (RFC 7591).
      *
      * The registration endpoint is discovered from the OIDC discovery document
-     * (`registration_endpoint` field).
+     * (`registration_endpoint` field). The credential it needs depends on the
+     * realm's `dcr_policy`:
      *
-     * @param array<string, mixed> $params Client metadata (e.g. `redirect_uris`, `client_name`).
+     * - `open` — anonymous; omit `$initialAccessToken`.
+     * - `authenticated` — an RFC 7591 §3.1 initial access token (a bearer token
+     *   issued by this realm) is required and is sent as `Authorization: Bearer`;
+     *   without it the server answers `401`.
+     * - `disabled` (the default) — the server answers `403`; create clients
+     *   through the admin API instead.
+     *
+     * @param array<string, mixed> $params             Client metadata (e.g. `redirect_uris`, `client_name`).
+     * @param string|null          $initialAccessToken Bearer token for realms with `dcr_policy: authenticated`.
      *
      * @throws ConfigurationException When the registration endpoint is absent from discovery.
      * @throws NetworkException       When the endpoint is unreachable.
      * @throws \RuntimeException      When the server returns an error response.
      */
-    public function registerClient(array $params): ClientRegistrationResponse
+    public function registerClient(array $params, ?string $initialAccessToken = null): ClientRegistrationResponse
     {
         $endpoint = $this->discoverEndpoint('registration_endpoint');
-        $data     = $this->postJson($endpoint, $params);
+        $data     = $this->postJson($endpoint, $params, $initialAccessToken);
 
         return ClientRegistrationResponse::fromArray($data);
     }

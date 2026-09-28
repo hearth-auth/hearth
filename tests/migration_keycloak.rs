@@ -405,3 +405,91 @@ async fn imported_realm_name_is_reserved_against_create_realm() {
         "creating a realm named \"acme\" after importing one must be rejected, got {err:?}"
     );
 }
+
+// ===== Confidential clients never import as public =====
+//
+// A confidential Keycloak client (`publicClient: false`) whose export carries
+// no usable secret — none at all, or the `**********` mask a partial export
+// writes — was imported with no secret, i.e. as a PUBLIC client anyone could
+// act as by its client_id. It is now refused with a warning; a public client
+// and a confidential one with its secret still import.
+
+#[tokio::test]
+async fn a_confidential_client_without_a_usable_secret_is_refused_not_made_public() {
+    let (identity, authz, _temp) = build_engines();
+    let importer = KeycloakImporter::new(Arc::clone(&identity), Arc::clone(&authz));
+    let mut export: serde_json::Value = serde_json::from_str(REALM_FIXTURE).expect("fixture");
+    let base = export["clients"][0].clone();
+    let variant = |id: &str, client_id: &str, secret: Option<&str>, public: bool| {
+        let mut c = base.clone();
+        c["id"] = serde_json::json!(id);
+        c["clientId"] = serde_json::json!(client_id);
+        c["publicClient"] = serde_json::json!(public);
+        match secret {
+            Some(s) => c["secret"] = serde_json::json!(s),
+            None => {
+                c.as_object_mut().expect("object").remove("secret");
+            }
+        }
+        c
+    };
+    export["clients"] = serde_json::json!([
+        variant(
+            "44444444-4444-4444-8444-444444444441",
+            "no-secret",
+            None,
+            false
+        ),
+        variant(
+            "44444444-4444-4444-8444-444444444442",
+            "masked",
+            Some("**********"),
+            false
+        ),
+        variant("44444444-4444-4444-8444-444444444443", "spa", None, true),
+        variant(
+            "44444444-4444-4444-8444-444444444444",
+            "with-secret",
+            Some("s3cret-value"),
+            false
+        ),
+    ]);
+    let export = KeycloakImporter::parse(export.to_string().as_bytes()).expect("parse");
+    let report = importer
+        .import_realm(&export, None, &ImportOptions::default())
+        .expect("import_realm");
+    let realm_id = report.realm_id.clone().expect("realm id");
+
+    let get = |uuid: &str| {
+        identity
+            .get_client(
+                &realm_id,
+                &hearth::core::ClientId::new(uuid.parse().expect("uuid")),
+            )
+            .expect("get client")
+    };
+    for (uuid, name) in [
+        ("44444444-4444-4444-8444-444444444441", "no-secret"),
+        ("44444444-4444-4444-8444-444444444442", "masked"),
+    ] {
+        assert!(
+            get(uuid).is_none(),
+            "{name}: a confidential client with no usable secret must not import as public"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains(name) && w.contains("secret")),
+            "{name}: the refusal must be reported; got {:?}",
+            report.warnings
+        );
+    }
+    assert!(get("44444444-4444-4444-8444-444444444443")
+        .expect("public client imports")
+        .is_public());
+    assert!(get("44444444-4444-4444-8444-444444444444")
+        .expect("confidential client with its secret imports")
+        .is_confidential());
+    assert_eq!(report.clients_imported, 2);
+}

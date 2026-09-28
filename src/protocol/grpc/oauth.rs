@@ -19,7 +19,7 @@ use crate::protocol::proto::identity::v1::o_auth_service_server::OAuthService;
 use super::auth::{authenticate_admin, grpc_require_permission};
 use super::convert::{
     extract_grpc_user_auth, extract_realm_id, identity_to_status, verify_grpc_client_auth,
-    CLIENT_ID_META_KEY,
+    verify_grpc_confidential_client_auth, CLIENT_ID_META_KEY,
 };
 use super::server::GrpcState;
 
@@ -102,15 +102,27 @@ impl OAuthService for OAuthSvc {
 
         // O2 (HEA-1755): confidential clients MUST authenticate on the
         // code-exchange path. Public (PKCE) and unknown clients pass through —
-        // the exchange enforces PKCE and surfaces invalid_grant for bad codes.
+        // the exchange enforces PKCE and surfaces invalid_grant for bad codes —
+        // except that a FAPI 2.0 Advanced realm accepts no public client.
+        // A client with keys instead of a secret is not public; this RPC
+        // carries no assertion, so it is refused (it exchanges over HTTP).
         if let Ok(Some(client)) = self
             .state
             .identity
             .get_client(&realm_id, &domain_req.client_id)
         {
-            if client.is_confidential() {
+            if client.is_public() {
+                crate::identity::client_auth::authenticate_client(
+                    &self.state.identity,
+                    &realm_id,
+                    &domain_req.client_id,
+                    None,
+                )
+                .await
+                .map_err(|e| super::convert::client_auth_status(&e))?;
+            } else {
                 let authenticated =
-                    verify_grpc_client_auth(&md, &realm_id, self.state.identity.as_ref())?;
+                    verify_grpc_client_auth(&md, &realm_id, &self.state.identity).await?;
                 if authenticated != domain_req.client_id {
                     return Err(Status::unauthenticated(
                         "client authentication does not match request client_id",
@@ -132,8 +144,26 @@ impl OAuthService for OAuthSvc {
         req: Request<pb::TokenRevocationRequest>,
     ) -> Result<Response<pb::OAuthEmpty>, Status> {
         let realm_id = extract_realm_id(req.metadata())?;
-        verify_grpc_client_auth(req.metadata(), &realm_id, self.state.identity.as_ref())?;
-        let body: domain::TokenRevocationRequest = req.into_inner().into();
+        let client_id =
+            verify_grpc_client_auth(req.metadata(), &realm_id, &self.state.identity).await?;
+        // `verify_grpc_client_auth` accepts any secretless client on its
+        // `client_id` alone. A `private_key_jwt` client is secretless but
+        // confidential, and this RPC carries no assertion, so it cannot
+        // authenticate here — refuse it rather than let anyone who knows its
+        // public identifier revoke as it (RFC 7009 §2.1). It revokes over
+        // HTTP with its assertion.
+        let client = self
+            .state
+            .identity
+            .get_client(&realm_id, &client_id)
+            .map_err(identity_to_status)?;
+        if client.is_some_and(|c| c.requires_client_assertion()) {
+            return Err(Status::unauthenticated("invalid client credentials"));
+        }
+        // RFC 7009 §2.1: revoke only a token issued to the authenticated
+        // client; any other token is a silent OK no-op, as on the HTTP routes.
+        let mut body: domain::TokenRevocationRequest = req.into_inner().into();
+        body.revoking_client_id = Some(client_id);
         self.state
             .identity
             .revoke_token(&realm_id, &body)
@@ -146,8 +176,15 @@ impl OAuthService for OAuthSvc {
         req: Request<pb::TokenIntrospectionRequest>,
     ) -> Result<Response<pb::IntrospectionResponse>, Status> {
         let realm_id = extract_realm_id(req.metadata())?;
-        verify_grpc_client_auth(req.metadata(), &realm_id, self.state.identity.as_ref())?;
-        let body: domain::TokenIntrospectionRequest = req.into_inner().into();
+        // Task 26.43: confidential clients only (RFC 7662 §2.1). The
+        // authenticated client is passed on so the RFC 7662 audience
+        // restriction applies here exactly as on the HTTP routes — this path
+        // used to pass `None`, which skipped it.
+        let client_id =
+            verify_grpc_confidential_client_auth(req.metadata(), &realm_id, &self.state.identity)
+                .await?;
+        let mut body: domain::TokenIntrospectionRequest = req.into_inner().into();
+        body.introspecting_client_id = Some(client_id);
         let resp = self
             .state
             .identity
@@ -180,6 +217,47 @@ impl OAuthService for OAuthSvc {
         // this check — but the handler decoded the field and dropped it
         // (task 23.9). Public clients pass through unchanged.
         //
+        // `private_key_jwt` (RFC 7523 §2.2): a request carrying either
+        // assertion field is authenticated by the assertion alone — never
+        // read as absent and sent on to the secret or public-client paths.
+        let presented = crate::identity::client_auth::presented_client_assertion(
+            body.client_assertion_type.as_deref(),
+            body.client_assertion.as_deref(),
+        );
+        if !matches!(presented, Ok(None)) {
+            // RFC 6749 §2.3: one authentication method per request.
+            if md.get(CLIENT_ID_META_KEY).is_some()
+                || body
+                    .client_secret
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+            {
+                return Err(Status::invalid_argument(
+                    "more than one client authentication method was used",
+                ));
+            }
+            let Some(assertion) = presented.map_err(|e| super::convert::client_auth_status(&e))?
+            else {
+                return Err(Status::unauthenticated("invalid client credentials"));
+            };
+            self.state
+                .identity
+                .verify_client_assertion(&realm_id, &client_id, assertion)
+                .map_err(|e| super::convert::client_auth_status(&e))?;
+            let resp = self
+                .state
+                .identity
+                .device_authorize(
+                    &realm_id,
+                    &DeviceAuthorizationRequest {
+                        client_id,
+                        scope: body.scope,
+                    },
+                )
+                .map_err(identity_to_status)?;
+            return Ok(Response::new(pb::DeviceAuthorizationResponse::from(&resp)));
+        }
+
         // The lookup fails closed: a storage error becomes an error to the
         // caller rather than a skipped gate.
         let client = self
@@ -187,12 +265,24 @@ impl OAuthService for OAuthSvc {
             .identity
             .get_client(&realm_id, &client_id)
             .map_err(identity_to_status)?;
-        if client.as_ref().is_some_and(|c| c.is_confidential()) {
+        // A FAPI 2.0 Advanced realm refuses a public client too (the engine's
+        // check answers for the realm); a client with keys instead of a secret
+        // is not public and, with no assertion on this RPC, is refused.
+        if client.as_ref().is_some_and(|c| c.is_public()) {
+            crate::identity::client_auth::authenticate_client(
+                &self.state.identity,
+                &realm_id,
+                &client_id,
+                None,
+            )
+            .await
+            .map_err(|e| super::convert::client_auth_status(&e))?;
+        } else if client.is_some() {
             if md.get(CLIENT_ID_META_KEY).is_some() {
                 // Metadata credentials are the gRPC analogue of HTTP Basic and
                 // take precedence, as the proto comment states.
                 let authenticated =
-                    verify_grpc_client_auth(&md, &realm_id, self.state.identity.as_ref())?;
+                    verify_grpc_client_auth(&md, &realm_id, &self.state.identity).await?;
                 if authenticated != client_id {
                     return Err(Status::unauthenticated(
                         "client authentication does not match request client_id",
@@ -200,10 +290,14 @@ impl OAuthService for OAuthSvc {
                 }
             } else {
                 // `client_secret_post` fallback: the request body's own field.
-                self.state
-                    .identity
-                    .authenticate_client(&realm_id, &client_id, body.client_secret.as_deref())
-                    .map_err(|_| Status::unauthenticated("invalid client credentials"))?;
+                crate::identity::client_auth::authenticate_client(
+                    &self.state.identity,
+                    &realm_id,
+                    &client_id,
+                    body.client_secret.as_deref(),
+                )
+                .await
+                .map_err(|e| super::convert::client_auth_status(&e))?;
             }
         }
 
@@ -226,11 +320,13 @@ impl OAuthService for OAuthSvc {
         let realm_id = extract_realm_id(req.metadata())?;
         let body = req.into_inner();
         let domain_req = proto_client_creds_to_domain(&body).map_err(Status::invalid_argument)?;
-        let resp = self
-            .state
-            .identity
-            .client_credentials_token(&realm_id, &domain_req)
-            .map_err(identity_to_status)?;
+        let resp = crate::identity::client_auth::client_credentials_token(
+            &self.state.identity,
+            &realm_id,
+            domain_req,
+        )
+        .await
+        .map_err(identity_to_status)?;
         Ok(Response::new(pb::ClientCredentialsResponse::from(&resp)))
     }
 

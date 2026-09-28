@@ -717,6 +717,17 @@ impl HearthClient {
         Ok(resp.json().await?)
     }
 
+    /// Register an OAuth client via `POST /clients` **without** credentials.
+    ///
+    /// `POST /clients` is an admin operation (it requires a bearer token
+    /// carrying `hearth.clients.admin`), so this call always fails with
+    /// `401 missing authorization header`. Use
+    /// [`register_client_with_token`](Self::register_client_with_token).
+    #[deprecated(
+        since = "1.0.1",
+        note = "POST /clients requires an admin bearer token and always answers 401 without \
+                one; use `register_client_with_token`"
+    )]
     pub async fn register_client(
         &self,
         req: &RegisterClientRequest,
@@ -724,6 +735,28 @@ impl HearthClient {
         let resp = self
             .http
             .post(format!("{}/clients", self.base_url))
+            .json(req)
+            .send()
+            .await?;
+        Self::check(&resp)?;
+        Ok(resp.json().await?)
+    }
+
+    /// Register an OAuth client via the admin `POST /clients` endpoint.
+    ///
+    /// `access_token` is sent as `Authorization: Bearer` and must carry
+    /// `hearth.clients.admin` (or `hearth.admin`) in the realm this client was
+    /// constructed for — the realm is taken from the `X-Realm-ID` header set by
+    /// [`HearthClient::new`]. The server answers `201 Created`.
+    pub async fn register_client_with_token(
+        &self,
+        req: &RegisterClientRequest,
+        access_token: &str,
+    ) -> Result<OAuthClient, HearthError> {
+        let resp = self
+            .http
+            .post(format!("{}/clients", self.base_url))
+            .bearer_auth(access_token)
             .json(req)
             .send()
             .await?;
@@ -1571,6 +1604,82 @@ mod tests {
         assert!(body.contains("code=auth-code-xyz"), "code missing: {body}");
     }
 
+    // ── register_client_with_token — POST /clients is an admin call ──────
+
+    /// Serve one request with `status` + `body`; return the raw request text.
+    async fn one_shot_server(
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let resp = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.flush().await.unwrap();
+            req
+        });
+        (format!("http://{addr}"), server)
+    }
+
+    #[tokio::test]
+    async fn register_client_with_token_sends_bearer_and_realm_headers() {
+        // The server's `POST /clients` answers `201 Created` with the proto
+        // `OAuthClient` shape (`client_id` / `client_name`).
+        let (base, server) = one_shot_server(
+            "201 Created",
+            r#"{"client_id":"c-1","client_name":"My App","redirect_uris":["https://app.example.com/cb"],"created_at":1,"is_confidential":true,"grant_types":["authorization_code"]}"#,
+        )
+        .await;
+
+        let client = HearthClient::new(base, "realm-1");
+        let created = client
+            .register_client_with_token(
+                &RegisterClientRequest {
+                    name: "My App".into(),
+                    redirect_uris: vec!["https://app.example.com/cb".into()],
+                    trust_level: None,
+                },
+                "admin-token-xyz",
+            )
+            .await
+            .expect("register_client_with_token");
+        assert_eq!(created.id, "c-1");
+        assert_eq!(created.name, "My App");
+        assert_eq!(
+            created.redirect_uris,
+            vec!["https://app.example.com/cb".to_string()]
+        );
+
+        let req = server.await.unwrap();
+        let (head, body) = req.split_once("\r\n\r\n").unwrap_or((&req, ""));
+        let head_lc = head.to_ascii_lowercase();
+        assert!(head.starts_with("POST /clients "), "wrong target: {head}");
+        assert!(
+            head_lc.contains("authorization: bearer admin-token-xyz"),
+            "Authorization header missing: {head}"
+        );
+        assert!(
+            head_lc.contains("x-realm-id: realm-1"),
+            "X-Realm-ID missing: {head}"
+        );
+        // The server deserializes the proto `RegisterClientRequest`, whose
+        // name field is `client_name`; an unknown `name` key is rejected.
+        let json: serde_json::Value = serde_json::from_str(body).expect("json body");
+        assert_eq!(json["client_name"], "My App", "body: {body}");
+        assert!(json.get("name").is_none(), "stale `name` key sent: {body}");
+    }
+
     // ── exchange_magic_link (C-12) ────────────────────────────────────────
 
     #[tokio::test]
@@ -1789,5 +1898,89 @@ mod tests {
         );
 
         assert_eq!(client.verify_token(&token).await.unwrap().subject(), "u");
+    }
+
+    // ── RS256 ID-token key in the JWKS (Hearth task 26.55) ───────────────
+    //
+    // A realm whose clients selected `id_token_signed_response_alg: RS256`
+    // publishes an RSA `id-token-signing` key beside its Ed25519 key.
+    // `verify_token` verifies ACCESS tokens, which Hearth signs with EdDSA
+    // only: it must keep parsing such a JWKS, keep verifying EdDSA tokens,
+    // and refuse an RS256 token even though the key that signed it is
+    // published — otherwise an ID token could be replayed as a bearer token.
+
+    const RSA_KID: &str = "rsa-id-token-key";
+
+    /// Signs `claims` RS256 with a fresh RSA key and returns the token plus
+    /// the RSA JWK Hearth would publish for that key.
+    fn make_rs256_jwt_and_jwk(claims: &serde_json::Value) -> (String, jsonwebtoken::jwk::Jwk) {
+        use rsa::pkcs1::EncodeRsaPrivateKey as _;
+        use rsa::traits::PublicKeyParts as _;
+        let key = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+        let der = key.to_pkcs1_der().unwrap();
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(RSA_KID.to_string());
+        let token = encode(&header, claims, &EncodingKey::from_rsa_der(der.as_bytes())).unwrap();
+        let jwk = serde_json::from_value(json!({
+            "kty": "RSA",
+            "alg": "RS256",
+            "use": "sig",
+            "kid": RSA_KID,
+            "n": URL_SAFE_NO_PAD.encode(key.n().to_bytes_be()),
+            "e": URL_SAFE_NO_PAD.encode(key.e().to_bytes_be()),
+            "x-key-role": "id-token-signing",
+        }))
+        .unwrap();
+        (token, jwk)
+    }
+
+    #[test]
+    fn a_jwks_with_an_rs256_id_token_key_still_parses() {
+        let (_pkcs8, pub_key) = make_ed25519_pkcs8();
+        let (_token, rsa_jwk) = make_rs256_jwt_and_jwk(&json!({ "sub": "u" }));
+        let doc = json!({
+            "keys": [
+                serde_json::to_value(&rsa_jwk).unwrap(),
+                serde_json::to_value(make_jwk("ed-1", &pub_key)).unwrap(),
+            ]
+        });
+        let set: jsonwebtoken::jwk::JwkSet =
+            serde_json::from_value(doc).expect("a mixed RSA + OKP JWKS must parse");
+        assert_eq!(set.keys.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn verify_token_still_accepts_eddsa_beside_a_published_rsa_key() {
+        let (pkcs8, pub_key) = make_ed25519_pkcs8();
+        let client = client_with_cached_jwk("ed-1", make_jwk("ed-1", &pub_key), None).await;
+        let (_token, rsa_jwk) = make_rs256_jwt_and_jwk(&json!({ "sub": "u" }));
+        client.jwks_cache.inject_for_test(RSA_KID, rsa_jwk).await;
+
+        let now = now_secs();
+        let token = make_test_jwt(
+            &json!({ "sub": "u", "iss": "https://auth.example.com", "exp": now + 3600, "iat": now }),
+            &pkcs8,
+            "ed-1",
+        );
+        assert_eq!(client.verify_token(&token).await.unwrap().subject(), "u");
+    }
+
+    #[tokio::test]
+    async fn verify_token_refuses_rs256_signed_by_a_published_rsa_key() {
+        let now = now_secs();
+        let (id_token, rsa_jwk) = make_rs256_jwt_and_jwk(&json!({
+            "sub": "u",
+            "iss": "https://auth.example.com",
+            "exp": now + 3600,
+            "iat": now,
+            "token_type": "id_token",
+        }));
+        let client = client_with_cached_jwk(RSA_KID, rsa_jwk, None).await;
+
+        let err = client.verify_token(&id_token).await.unwrap_err();
+        assert!(
+            matches!(err, HearthError::TokenInvalidError { .. }),
+            "an RS256 ID token must never verify as an access token, got {err:?}"
+        );
     }
 }

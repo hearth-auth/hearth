@@ -63,7 +63,7 @@ NODE_MAJOR=$(node -e "process.stdout.write(process.version.split('.')[0].slice(1
 
 echo "==> agent-auth smoke — building hearth (debug)"
 cd "$REPO_ROOT"
-PROTOC="${PROTOC:-protoc}" cargo build --bin hearth -q 2>&1
+PROTOC="${PROTOC:-protoc}" cargo build --bin hearth --features dev-endpoints -q 2>&1
 
 # ── 2. Start hearth --dev ────────────────────────────────────────────────────
 # --dev auto-enables agent_auth.capabilities.{identity,approval,advanced},

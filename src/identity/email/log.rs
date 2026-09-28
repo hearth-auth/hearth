@@ -63,7 +63,7 @@ impl EmailSender for LoggingEmailSender {
                 "email.send (log transport, dev): message logged instead of delivered"
             ),
             None => tracing::warn!(
-                recipient = %message.to,
+                recipient = %super::mask_email_address(&message.to),
                 "email.send (log transport): message not delivered and its body \
                  (which carries recovery links) is suppressed from the log — configure a \
                  real email.transport to deliver recovery mail"
@@ -94,6 +94,55 @@ mod tests {
         assert!(
             sender.loggable_body(&msg()).is_none(),
             "production log transport must not log the message body"
+        );
+    }
+
+    /// Captures what `f` logs at WARN and above, as plain text.
+    fn capture_warn_logs(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("capture mutex").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+            type Writer = Capture;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+        let writer = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = writer.0.lock().expect("capture mutex").clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[test]
+    fn production_sender_does_not_log_the_recipient_address() {
+        // CLAUDE.md: logs MUST NOT carry PII. The recipient is masked; the
+        // domain stays, so an operator can still tell which tenant it was.
+        let logs = capture_warn_logs(|| {
+            LoggingEmailSender::new()
+                .send(&msg())
+                .expect("a clean message is accepted");
+        });
+        assert!(
+            logs.contains("a***@example.com"),
+            "the masked recipient is logged: {logs:?}"
+        );
+        assert!(
+            !logs.contains("alice@example.com"),
+            "the full recipient address must not be logged: {logs:?}"
         );
     }
 

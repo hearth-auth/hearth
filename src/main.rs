@@ -151,6 +151,16 @@ enum BackupAction {
         #[arg(long)]
         encrypt: bool,
 
+        /// Sign the archive's manifest with this Ed25519 private key (PEM,
+        /// PKCS#8 — as written by `hearth backup keygen`).
+        ///
+        /// Outside dev mode a restore requires a signature that verifies
+        /// against `security.backup.verify_key` (A-30). Without this flag the
+        /// archive is unsigned and must be signed with `hearth backup sign`
+        /// before it can be restored in production.
+        #[arg(long, value_name = "KEY_FILE")]
+        sign_key: Option<PathBuf>,
+
         /// Path to the data directory.
         #[arg(long, default_value = "data")]
         data_dir: PathBuf,
@@ -197,6 +207,13 @@ enum BackupAction {
         /// 23.5, B-7). Pass this only when re-reading a very large archive is
         /// genuinely too expensive and it has already been verified out of
         /// band; a corrupt archive will then be applied without warning.
+        ///
+        /// Refused whenever a verify key is configured (`--verify-key` or
+        /// `security.backup.verify_key`): the signature covers only
+        /// `manifest.json`, and the archive's members are authenticated only
+        /// by the checksums this flag skips. A signed restore therefore always
+        /// verifies every member. The flag is usable only together with
+        /// `--allow-unsigned`, when nothing is being authenticated anyway.
         #[arg(long)]
         skip_verify: bool,
 
@@ -210,17 +227,82 @@ enum BackupAction {
         #[arg(long)]
         allow_missing_signing_key: bool,
 
+        /// With `--mode overwrite`, also replace the system realm's LIVE
+        /// signing key with the archived one.
+        ///
+        /// Overwrite alone replaces a live system realm's operator accounts but
+        /// keeps its signing key: every live operator token is signed with it,
+        /// and replacing it signs every operator out. Pass this to replace it
+        /// too. A system realm with no operator (a rebuilt, empty data
+        /// directory) takes the archived key without it. A key the target's
+        /// system realm has rotated away from is refused either way.
+        #[arg(long)]
+        replace_system_signing_key: bool,
+
+        /// Base64url Ed25519 public key the archive's manifest must be signed
+        /// with. Overrides `security.backup.verify_key` from `--config`.
+        #[arg(long, value_name = "BASE64URL")]
+        verify_key: Option<String>,
+
+        /// Restore even though no verify key is configured, so the archive's
+        /// origin is NOT authenticated.
+        ///
+        /// By default restore REFUSES unless the archive's manifest carries a
+        /// signature that verifies against `--verify-key` or
+        /// `security.backup.verify_key` (A-30): encryption and checksums do not
+        /// prove who wrote an archive. Pass this only for an archive whose
+        /// origin you have verified out of band. It never overrides a verify
+        /// key that IS configured — an unsigned or badly signed archive is
+        /// still refused then.
+        #[arg(long)]
+        allow_unsigned: bool,
+
         /// Path to the data directory.
         #[arg(long, default_value = "data")]
         data_dir: PathBuf,
 
-        /// Path to `hearth.yaml`, read for `security.key_encryption_key`.
+        /// Path to `hearth.yaml`, read for `security.key_encryption_key` and
+        /// `security.backup.verify_key`.
         ///
         /// Needed whenever the data directory's signing keys are encrypted at
         /// rest, which production requires. `HEARTH_KEK` takes precedence and
-        /// makes this flag unnecessary (task 26.21).
+        /// makes this flag unnecessary for the key-encryption key (task 26.21).
         #[arg(long, short)]
         config: Option<PathBuf>,
+    },
+    /// Sign an existing archive's manifest with an Ed25519 private key.
+    ///
+    /// Use this for archives produced without `--sign-key`, including every
+    /// archive downloaded from `POST /admin/backup` (the server holds no
+    /// signing key). The archive's checksums are verified first, but that
+    /// proves only that the archive is internally consistent, not where it came
+    /// from: anyone who rewrote a member can rewrite its checksum in the
+    /// unsigned manifest too. Signing vouches for the archive's origin, so sign
+    /// only archives you produced yourself and moved over a trusted channel
+    /// into a directory nobody else can write.
+    Sign {
+        /// Path to the archive to sign.
+        #[arg(long, short)]
+        input: PathBuf,
+
+        /// Ed25519 private key (PEM, PKCS#8) — as written by `backup keygen`.
+        #[arg(long, value_name = "KEY_FILE")]
+        key_file: PathBuf,
+
+        /// Where to write the signed archive. Defaults to replacing `--input`.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Generate an Ed25519 key pair for signing backup archives.
+    ///
+    /// Writes the private key (PEM, PKCS#8, mode 0600) to `--output` and
+    /// prints the public key to set as `security.backup.verify_key`. Keep the
+    /// private key off the servers that restore; they need only the public
+    /// key.
+    Keygen {
+        /// Where to write the private key. Refuses to overwrite a file.
+        #[arg(long, short)]
+        output: PathBuf,
     },
     /// Verify archive integrity by recomputing SHA-256 checksums.
     ///
@@ -584,6 +666,7 @@ async fn main() {
                     realm,
                     include_audit,
                     encrypt,
+                    sign_key,
                     data_dir,
                     config,
                 } => {
@@ -592,6 +675,7 @@ async fn main() {
                         realm.as_deref(),
                         include_audit,
                         encrypt,
+                        sign_key.as_deref(),
                         &data_dir,
                         config.as_deref(),
                     ) {
@@ -609,6 +693,9 @@ async fn main() {
                     dry_run,
                     skip_verify,
                     allow_missing_signing_key,
+                    replace_system_signing_key,
+                    verify_key,
+                    allow_unsigned,
                     data_dir,
                     config,
                 } => {
@@ -616,9 +703,14 @@ async fn main() {
                         &input,
                         realm.as_deref(),
                         &mode,
-                        dry_run,
-                        skip_verify,
-                        allow_missing_signing_key,
+                        RestoreFlags {
+                            dry_run,
+                            skip_verify,
+                            allow_missing_signing_key,
+                            allow_unsigned,
+                            replace_system_signing_key,
+                        },
+                        verify_key.as_deref(),
                         &data_dir,
                         config.as_deref(),
                     ) {
@@ -634,6 +726,24 @@ async fn main() {
                     Err(e) => {
                         tracing::error!("integrity failure: {e}");
                         3
+                    }
+                },
+                BackupAction::Sign {
+                    input,
+                    key_file,
+                    output,
+                } => match run_backup_sign(&input, &key_file, output.as_deref()) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        tracing::error!("error: {e}");
+                        2
+                    }
+                },
+                BackupAction::Keygen { output } => match run_backup_keygen(&output) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        tracing::error!("error: {e}");
+                        2
                     }
                 },
                 BackupAction::Inspect { input } => match run_backup_inspect(&input) {
@@ -780,16 +890,23 @@ fn loadtest_unthrottle_decision(
 /// The key cryptographically binds OTP codes to the server. It is required
 /// **only when SMS is actually enabled** — i.e. `sms.transport` is a real
 /// transport (Twilio, AWS SNS). The `log` transport dispatches no real SMS, so
-/// the key is optional there in *both* dev and production (HEA-2105/H): forcing
-/// it on every non-dev deployment, even ones with no SMS configured at all, was
-/// a needless operator burden. When the key is absent under the `log` transport
-/// the handlers substitute a deterministic dev key.
+/// the key is optional there (HEA-2105/H).
 ///
-/// Pure (no env access, no I/O) so the startup gate is unit tested; the caller
-/// reads the env var and maps the `Err` message onto the fatal-startup path.
+/// When the key is absent:
+/// * in dev mode a fresh random 32-byte key is generated for this process, so
+///   SMS MFA works out of the box against the (body-logging) dev transport;
+/// * otherwise the result is `None`, and every SMS OTP surface fails closed —
+///   no code is issued and no SMS challenge can pass. There is no fallback
+///   key: the handlers used to substitute an all-zero one, which made every
+///   stored OTP digest brute-forceable offline by anyone.
+///
+/// Pure apart from the OS RNG (no env access, no other I/O) so the startup gate
+/// is unit tested; the caller reads the env var and maps the `Err` message onto
+/// the fatal-startup path.
 fn resolve_sms_otp_hmac_key(
     env_value: Option<&str>,
     sms_transport: SmsTransport,
+    dev_mode: bool,
 ) -> Result<Option<Vec<u8>>, String> {
     match env_value {
         Some(key) if !key.is_empty() => {
@@ -808,6 +925,14 @@ fn resolve_sms_otp_hmac_key(
                 return Err("HEARTH_SMS_OTP_HMAC_KEY environment variable is required \
                      when sms.transport is not 'log' (a real SMS transport is configured)"
                     .into());
+            }
+            if dev_mode {
+                use ring::rand::SecureRandom as _;
+                let mut key = vec![0u8; 32];
+                ring::rand::SystemRandom::new()
+                    .fill(&mut key)
+                    .map_err(|_| "failed to generate a dev-mode SMS OTP HMAC key".to_string())?;
+                return Ok(Some(key));
             }
             Ok(None)
         }
@@ -990,6 +1115,11 @@ async fn run_serve(
              (3) setup token printed (truncated) in startup logs. \
              DO NOT expose this server on a non-loopback address."
         );
+    }
+    if let Some(notice) =
+        dev_endpoints_missing_notice(config.dev_mode, cfg!(feature = "dev-endpoints"))
+    {
+        warn!("{notice}");
     }
 
     // Canary: verify the embedded admin UI CSS contains the Hearth theme layer.
@@ -1557,14 +1687,18 @@ async fn run_serve(
     // SMS sender (default: log transport).
     // HEARTH_SMS_OTP_HMAC_KEY cryptographically binds OTP codes to the server.
     // It is required only when a real SMS transport is configured; the Log
-    // transport (dev or production) needs no key because no real SMS is sent
-    // (HEA-2105/H).
+    // transport needs no key because no real SMS is sent (HEA-2105/H). Without
+    // one, dev mode generates a per-process key and production SMS OTP fails
+    // closed.
     let sms_env = std::env::var("HEARTH_SMS_OTP_HMAC_KEY").ok();
     let sms_hmac_key_bytes: Option<Vec<u8>> =
-        resolve_sms_otp_hmac_key(sms_env.as_deref(), config.sms.transport)?;
+        resolve_sms_otp_hmac_key(sms_env.as_deref(), config.sms.transport, config.dev_mode)?;
     let sms_sender: SharedSmsSender = build_sms_sender(&config)?;
     if config.sms.transport == SmsTransport::Log && !config.dev_mode {
-        warn!("sms.transport = log is active outside dev mode — no real SMS messages will be sent");
+        warn!(
+            "sms.transport = log is active outside dev mode — no real SMS messages will be \
+             sent, SMS MFA cannot be enabled, and SMS OTP challenges fail closed"
+        );
     }
 
     // Ensure a first-run setup token exists BEFORE realm reconciliation.
@@ -2556,7 +2690,8 @@ async fn run_serve(
             .with_agent_approval(true)
             .with_agent_advanced(true)
             .with_email(Some(Arc::clone(&email_service)))
-            .with_public_base_url(public_base_url.clone()),
+            .with_public_base_url(public_base_url.clone())
+            .with_sms_transport(config.sms.transport),
         )
     } else {
         Arc::new(
@@ -2580,7 +2715,8 @@ async fn run_serve(
             .with_agent_approval(config.agent_auth.capabilities.approval)
             .with_agent_advanced(config.agent_auth.capabilities.advanced)
             .with_email(Some(Arc::clone(&email_service)))
-            .with_public_base_url(public_base_url.clone()),
+            .with_public_base_url(public_base_url.clone())
+            .with_sms_transport(config.sms.transport),
         )
     };
 
@@ -2635,6 +2771,7 @@ async fn run_serve(
     .with_default_realm(config.server.default_realm.clone())
     .with_config(Arc::new(config.clone()))
     .with_sms(sms_sender, sms_hmac_key_bytes)
+    .with_sms_transport(config.sms.transport)
     .with_abuse_guards(Arc::clone(&abuse_guards))
     .with_dev_mode(config.dev_mode);
 
@@ -3158,6 +3295,22 @@ fn print_startup_panel(
     }
 }
 
+/// The operator-facing notice for `serve --dev` on a binary compiled without
+/// the `dev-endpoints` cargo feature, or `None` when there is nothing to say.
+///
+/// `dev-endpoints` is not a default feature, so a plain `cargo build` produces
+/// a binary whose `--dev` mode has no `/admin/bootstrap` or `/dev/seed-*`
+/// routes. Without this notice the first sign is a bare `404` from the
+/// bootstrap call every dev recipe starts with.
+fn dev_endpoints_missing_notice(dev_mode: bool, compiled_in: bool) -> Option<&'static str> {
+    (dev_mode && !compiled_in).then_some(
+        "--dev is active but this binary was built WITHOUT the `dev-endpoints` cargo \
+         feature: POST /admin/bootstrap and the /dev/seed-* routes are NOT available and \
+         answer 404. Rebuild with `cargo build --features dev-endpoints` (or run \
+         `make dev`) to get them; otherwise create the first admin through /ui/setup.",
+    )
+}
+
 // Builds the logo + consolidated startup info panel as ordered display lines.
 // Split out from `print_startup_panel` so the content (notably the HEA-1799
 // unthrottled-rate-limiter banner) is unit-testable without a tracing sink.
@@ -3412,6 +3565,8 @@ fn build_sms_sender(config: &Config) -> Result<SharedSmsSender, Box<dyn std::err
     use hearth::identity::sms::http::UreqSmsTransport;
 
     Ok(match config.sms.transport {
+        // Only dev mode may log the body: it carries the one-time code.
+        SmsTransport::Log if config.dev_mode => Arc::new(LoggingSmsSender::new_dev()),
         SmsTransport::Log => Arc::new(LoggingSmsSender::new()),
         SmsTransport::Twilio => {
             let tw = config
@@ -3769,6 +3924,16 @@ fn run_config_reconciliation(
                 .iter()
                 .filter(|e| e.action == hearth::identity::reconcile::AppReconcileAction::Archived)
                 .count();
+            let app_refused = report
+                .applications
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.action,
+                        hearth::identity::reconcile::AppReconcileAction::Refused { .. }
+                    )
+                })
+                .count();
             info!(
                 realms_created = report.created.len(),
                 realms_updated = report.updated.len(),
@@ -3777,6 +3942,7 @@ fn run_config_reconciliation(
                 apps_created = app_created,
                 apps_updated = app_updated,
                 apps_archived = app_archived,
+                apps_refused = app_refused,
                 orgs = report.organizations.len(),
                 "configuration reconciliation complete"
             );
@@ -4259,10 +4425,15 @@ fn run_backup_create(
     realm_filter: Option<&str>,
     include_audit: bool,
     encrypt: bool,
+    sign_key: Option<&std::path::Path>,
     data_dir: &std::path::Path,
     config_path: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use hearth::backup::{BackupArchive, BackupExporter, BackupManifest, ExportOptions};
+
+    // Load the signing key before anything is opened or written, so a bad
+    // key path fails the command instead of an hour-long export.
+    let signer = sign_key.map(load_backup_signing_key).transpose()?;
     use hearth::core::RealmId;
     use uuid::Uuid;
 
@@ -4472,7 +4643,10 @@ fn run_backup_create(
         manifest.sections_encrypted = true;
         manifest.wrapped_dek_b64 = Some(wrapped_dek_b64);
         manifest.dek_wrapping_params = Some(wrapping_params);
-        writer.finish(manifest)?;
+        match &signer {
+            Some(key) => writer.finish_signed(manifest, key)?,
+            None => writer.finish(manifest)?,
+        }
         Ok(())
     };
 
@@ -4484,6 +4658,19 @@ fn run_backup_create(
     }
 
     tracing::info!("Backup written to: {}", out_path.display());
+    if let Some(key) = &signer {
+        tracing::info!(
+            "Manifest signed; restore verifies it with verify_key {}",
+            key.verify_key_b64()
+        );
+    } else {
+        tracing::warn!(
+            "This archive is UNSIGNED. Outside dev mode a restore refuses it until it is signed \
+             (`hearth backup sign --input {} --key-file <key.pem>`) — or pass `--sign-key` to \
+             `backup create`. See docs/guides/backup.md § 'Signed archives'.",
+            out_path.display()
+        );
+    }
     warn_unexported_families("This archive does NOT contain");
     Ok(())
 }
@@ -4510,6 +4697,78 @@ fn warn_unexported_families(lead: &str) {
     );
 }
 
+/// Boolean switches of `hearth backup restore`.
+#[allow(clippy::struct_excessive_bools)] // five independent CLI flags
+struct RestoreFlags {
+    dry_run: bool,
+    skip_verify: bool,
+    allow_missing_signing_key: bool,
+    allow_unsigned: bool,
+    replace_system_signing_key: bool,
+}
+
+/// Reads a backup signing key (PEM, PKCS#8 Ed25519) from `path`.
+fn load_backup_signing_key(
+    path: &std::path::Path,
+) -> Result<hearth::backup::BackupSigningKey, Box<dyn std::error::Error>> {
+    let pem = zeroize::Zeroizing::new(
+        std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read signing key '{}': {e}", path.display()))?,
+    );
+    hearth::backup::BackupSigningKey::from_pem(&pem)
+        .map_err(|e| format!("'{}': {e}", path.display()).into())
+}
+
+/// Resolves the Ed25519 public key a restore verifies against: `--verify-key`
+/// first, then `security.backup.verify_key` from `--config`.
+fn resolve_restore_verify_key(
+    flag: Option<&str>,
+    config_path: Option<&std::path::Path>,
+) -> Result<Option<[u8; 32]>, Box<dyn std::error::Error>> {
+    if let Some(encoded) = flag {
+        let yaml = hearth::config::BackupSecurityYaml {
+            verify_key: Some(encoded.to_string()),
+            ..Default::default()
+        };
+        return Ok(yaml
+            .verify_key_bytes()
+            .map_err(|reason| format!("--verify-key: {reason}"))?);
+    }
+    let Some(path) = config_path else {
+        return Ok(None);
+    };
+    // Unchecked for the same reason as `resolve_cli_kek`: this command needs
+    // one key out of the file, not a config that would pass `serve`.
+    let config = Config::from_file_unchecked(path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    Ok(config
+        .security
+        .backup
+        .verify_key_bytes()
+        .map_err(|reason| format!("security.backup.verify_key: {reason}"))?)
+}
+
+/// Parses `--mode`, refusing `--replace-system-signing-key` outside overwrite.
+fn restore_mode(
+    mode_str: &str,
+    replace_system_signing_key: bool,
+) -> Result<hearth::backup::RestoreMode, Box<dyn std::error::Error>> {
+    use hearth::backup::RestoreMode;
+    let mode = match mode_str {
+        "overwrite" => RestoreMode::Overwrite,
+        "merge" => RestoreMode::Merge,
+        _ => RestoreMode::Skip,
+    };
+    if replace_system_signing_key && mode != RestoreMode::Overwrite {
+        return Err(
+            "--replace-system-signing-key replaces a live system signing key and applies only \
+             with --mode overwrite"
+                .into(),
+        );
+    }
+    Ok(mode)
+}
+
 /// Runs `hearth backup restore`.
 ///
 /// Returns `Ok(true)` when some records were skipped or errored (exit code 1),
@@ -4518,21 +4777,61 @@ fn run_backup_restore(
     input: &std::path::Path,
     realm_slug: Option<&str>,
     mode_str: &str,
-    dry_run: bool,
-    skip_verify: bool,
-    allow_missing_signing_key: bool,
+    flags: RestoreFlags,
+    verify_key_flag: Option<&str>,
     data_dir: &std::path::Path,
     config_path: Option<&std::path::Path>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    use hearth::backup::{BackupArchive, BackupImporter, ImportOptions, RestoreMode};
-
-    let mode = match mode_str {
-        "overwrite" => RestoreMode::Overwrite,
-        "merge" => RestoreMode::Merge,
-        _ => RestoreMode::Skip,
+    use hearth::backup::{
+        check_restore_signature, BackupArchive, BackupImporter, ImportOptions, SignatureCheck,
     };
 
-    let reader = BackupArchive::open(input)?;
+    let RestoreFlags {
+        dry_run,
+        skip_verify,
+        allow_missing_signing_key,
+        allow_unsigned,
+        replace_system_signing_key,
+    } = flags;
+    let verify_key = resolve_restore_verify_key(verify_key_flag, config_path)?;
+
+    let mode = restore_mode(mode_str, replace_system_signing_key)?;
+
+    // The signature covers `manifest.json` only; each member is bound to it by
+    // the manifest's checksum, and nothing else — the importer does not hash
+    // what it imports. Skipping the checksums of a signed archive would log
+    // "signature verified" over members anyone could have replaced, so the
+    // combination is refused outright rather than half-honoured.
+    if skip_verify && verify_key.is_some() {
+        return Err(
+            "refusing --skip-verify: a backup verify key is configured, and the \
+             archive signature covers only manifest.json — its members are \
+             authenticated only by the checksums --skip-verify would skip. Restore \
+             without --skip-verify; a signed restore always verifies every member."
+                .into(),
+        );
+    }
+
+    // Read the archive through a private copy: the signature and checksums are
+    // checked in one pass and the members imported in later ones, and a reader
+    // that reopened `input` for each pass would import whatever sat at that
+    // path by then, not what was verified.
+    let reader = BackupArchive::open_private_copy(input)?;
+
+    // A-30: authenticate the archive before anything is read from it or
+    // written. This path never checked the signature at all — not even with a
+    // verify key configured — so any archive restored. Now a key and a valid
+    // signature are required unless the operator explicitly opts out.
+    match check_restore_signature(&reader.manifest, verify_key.as_ref(), allow_unsigned)? {
+        SignatureCheck::Verified => {
+            tracing::info!("archive signature verified against the backup verify key");
+        }
+        _ => tracing::warn!(
+            "--allow-unsigned: restoring '{}' WITHOUT signature verification — no verify key \
+             is configured, so the archive's origin has not been authenticated.",
+            input.display()
+        ),
+    }
 
     // Task 26.42: verify BEFORE anything is written.
     //
@@ -4596,6 +4895,7 @@ fn run_backup_restore(
         // directory, so it may restore every realm the archive contains. The
         // HTTP route scopes this to the caller's realm instead (B1).
         allowed_realm: None,
+        replace_live_system_signing_key: replace_system_signing_key,
     };
 
     let slugs: Vec<String> = if let Some(slug) = realm_slug {
@@ -4608,16 +4908,111 @@ fn run_backup_restore(
         tracing::info!("(dry-run: no data will be written)");
     }
 
+    // The system realm (nil UUID) holds every operator-console account. Say
+    // whether this restore brings it back: without it, nobody can sign in to
+    // `/ui/admin` on the restored store.
+    let system_realm_id = format!("realm_{}", uuid::Uuid::nil());
+    let system_slug = reader
+        .realms()
+        .iter()
+        .find(|r| r.realm_id == system_realm_id)
+        .map(|r| r.slug.clone())
+        .filter(|s| slugs.contains(s));
+
     let mut had_errors = false;
+    let mut system_report = None;
     for slug in &slugs {
         let report = importer.import_realm(slug, &reader, &opts)?;
         print_import_report(slug, &report);
         if import_report_had_errors(&report) {
             had_errors = true;
         }
+        if system_slug.as_ref() == Some(slug) {
+            system_report = Some(report);
+        }
     }
+    report_system_realm_restore(system_report.as_ref(), dry_run);
     warn_unexported_families("This restore did NOT bring back");
     Ok(had_errors)
+}
+
+/// Tells the operator whether a restore brought operator-console access back,
+/// from what the system realm's import actually did (`None`: the restore did
+/// not include the system realm).
+///
+/// It used to announce success whenever the archive merely contained the
+/// system realm — even when every operator was skipped (already present) or
+/// refused, and whatever happened to the signing key.
+fn report_system_realm_restore(report: Option<&hearth::backup::ImportReport>, dry_run: bool) {
+    let Some(report) = report else {
+        tracing::warn!(
+            "This restore does not contain the system realm, so it brought back no \
+             operator-console account. If the target has none, restore the system realm from a \
+             full `hearth backup create` archive (or a `POST /admin/backup` made by a \
+             system-realm caller). See docs/guides/disaster-recovery.md."
+        );
+        return;
+    };
+    let (verb, prefix) = if dry_run {
+        ("would be", "(dry run — nothing written) ")
+    } else {
+        ("", "")
+    };
+    let users = &report.users;
+    let restored = users.created + users.overwritten;
+    let key = system_key_outcome(&report.realms, dry_run);
+    if restored == 0 {
+        tracing::warn!(
+            "{prefix}System realm: this restore did NOT restore operator-console access — no \
+             operator account from the archive {verb}{}restored ({} already present in the target \
+             and kept with their current credentials, {} refused). {key}. See \
+             docs/guides/disaster-recovery.md.",
+            if dry_run { " " } else { "" },
+            users.skipped,
+            users.errored,
+        );
+        return;
+    }
+    let noun = if restored == 1 { "account" } else { "accounts" };
+    tracing::info!(
+        "{prefix}System realm: {restored} operator-console {noun} {verb}{}restored; they sign in \
+         at /ui/admin/login with their original passwords and second factors (sessions are not \
+         restored, so each signs in again). {key}.",
+        if dry_run { " " } else { "" },
+    );
+    if users.skipped > 0 || users.errored > 0 {
+        tracing::warn!(
+            "{prefix}System realm: {} operator account(s) in the archive already existed and were \
+             kept unchanged, and {} were refused and did NOT come back.",
+            users.skipped,
+            users.errored,
+        );
+    }
+    if report.assignments.errored > 0 {
+        tracing::warn!(
+            "{prefix}System realm: {} role assignment(s) were refused — an operator restored \
+             without its realm.admin grant cannot use the console.",
+            report.assignments.errored
+        );
+    }
+}
+
+/// Describes what the restore did with the system realm's signing key, from
+/// the realm-level counts [`hearth::backup::ImportReport::realms`] carries
+/// for the system realm.
+fn system_key_outcome(realms: &hearth::backup::EntityCounts, dry_run: bool) -> &'static str {
+    match (realms.created, realms.overwritten, realms.errored, dry_run) {
+        (0, 0, 0, false) => {
+            "The target's system signing key was kept (tokens it signed stay valid; tokens signed \
+             by the archived key do not verify)"
+        }
+        (0, 0, 0, true) => "The target's system signing key would be kept",
+        (_, _, e, _) if e > 0 => "The archived system signing key was NOT installed",
+        (c, _, _, false) if c > 0 => "The archived system signing key was installed",
+        (c, _, _, true) if c > 0 => "The archived system signing key would be installed",
+        (_, _, _, false) => "The archived system signing key replaced the live one",
+        (_, _, _, true) => "The archived system signing key would replace the live one",
+    }
 }
 
 /// Returns `true` when any entity bucket of `report` recorded a failed import.
@@ -4689,6 +5084,52 @@ fn run_backup_verify(input: &std::path::Path) -> Result<(), Box<dyn std::error::
 ///
 /// Prints the manifest as a human-readable table without decompressing any
 /// entity files.
+/// Runs `hearth backup sign`.
+fn run_backup_sign(
+    input: &std::path::Path,
+    key_file: &std::path::Path,
+    output: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let key = load_backup_signing_key(key_file)?;
+    let output = output.unwrap_or(input);
+    hearth::backup::sign_archive(input, output, &key)?;
+    tracing::info!(
+        "Signed archive written to: {} (verify_key {})",
+        output.display(),
+        key.verify_key_b64()
+    );
+    Ok(())
+}
+
+/// Runs `hearth backup keygen`.
+fn run_backup_keygen(output: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write as _;
+
+    let (key, pem) = hearth::backup::BackupSigningKey::generate()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(output)
+        .map_err(|e| format!("cannot create '{}': {e}", output.display()))?;
+    file.write_all(pem.as_bytes())?;
+    file.sync_all()?;
+    tracing::info!("Private signing key written to: {}", output.display());
+    tracing::info!("verify_key: {}", key.verify_key_b64());
+    tracing::info!(
+        "Set `security.backup.verify_key` to the verify_key above on every instance that \
+         restores, and sign archives with `hearth backup create --sign-key {}` or \
+         `hearth backup sign --key-file {}`.",
+        output.display(),
+        output.display()
+    );
+    Ok(())
+}
+
 fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     use hearth::backup::BackupArchive;
 
@@ -4712,6 +5153,14 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
     tracing::info!("  hearth version : {}", m.hearth_version);
     tracing::info!("  created at     : {created_at_display}");
     tracing::info!("  signing key DEK: {dek_status}");
+    tracing::info!(
+        "  signature      : {}",
+        if m.detached_signature_b64.is_some() {
+            "present (checked against the verify key on restore)"
+        } else {
+            "absent — unsigned; a production restore refuses it"
+        }
+    );
     tracing::info!("  checksummed files: {}", m.checksums.len());
     tracing::info!("  realms ({}):", m.realms.len());
     for r in &m.realms {
@@ -5463,6 +5912,30 @@ mod tests {
     use super::*;
     use hearth::config::{Config, EmailTransport};
 
+    // ── `serve --dev` on a binary built without `dev-endpoints` ───────────
+
+    /// `--dev` on a binary without the `dev-endpoints` feature has no
+    /// `/admin/bootstrap`: the operator must be told so, and how to fix it,
+    /// instead of discovering it as a bare `404`.
+    #[test]
+    fn dev_mode_without_dev_endpoints_feature_names_the_fix() {
+        let notice = dev_endpoints_missing_notice(true, false)
+            .expect("--dev without the feature must produce a notice");
+        assert!(notice.contains("/admin/bootstrap"), "{notice}");
+        assert!(notice.contains("--features dev-endpoints"), "{notice}");
+    }
+
+    #[test]
+    fn dev_mode_with_dev_endpoints_feature_is_silent() {
+        assert_eq!(dev_endpoints_missing_notice(true, true), None);
+    }
+
+    #[test]
+    fn production_mode_never_mentions_dev_endpoints() {
+        assert_eq!(dev_endpoints_missing_notice(false, false), None);
+        assert_eq!(dev_endpoints_missing_notice(false, true), None);
+    }
+
     // ── An empty backup must not report success (task 26.26) ──────────────
 
     /// A `--data-dir` that does not exist must fail, not be created.
@@ -5479,7 +5952,7 @@ mod tests {
         let missing = dir.path().join("typo");
         let out = dir.path().join("out.hearth-backup");
 
-        let err = run_backup_create(Some(&out), None, false, false, &missing, None)
+        let err = run_backup_create(Some(&out), None, false, false, None, &missing, None)
             .expect_err("a nonexistent data directory must be refused");
 
         assert!(
@@ -5517,7 +5990,7 @@ mod tests {
         // it set, `BackupArchive::create` opens `out`, the realm enumeration
         // finds nothing, and the error is raised with the file already there.
         std::env::set_var("HEARTH_MASTER_KEY", "d4".repeat(32));
-        let err = run_backup_create(Some(&out), None, false, false, &data_dir, None)
+        let err = run_backup_create(Some(&out), None, false, false, None, &data_dir, None)
             .expect_err("the export must fail");
         std::env::remove_var("HEARTH_MASTER_KEY");
 
@@ -5626,7 +6099,7 @@ mod tests {
         let copy = dir.path().join("copy");
         copy_dir_recursive(&data_dir, &copy).expect("copy data dir");
         let out = dir.path().join("full.hearth-backup");
-        run_backup_create(Some(&out), None, false, false, &copy, None).expect("full export");
+        run_backup_create(Some(&out), None, false, false, None, &copy, None).expect("full export");
 
         let reader = hearth::backup::BackupArchive::open(&out).expect("open archive");
         let expected_id = system_id.to_string();
@@ -5681,8 +6154,16 @@ mod tests {
         let empty_store = dir.path().join("empty-store");
         std::fs::create_dir_all(&empty_store).expect("empty store");
         let out_empty = dir.path().join("empty.hearth-backup");
-        let err = run_backup_create(Some(&out_empty), None, false, false, &empty_store, None)
-            .expect_err("a store with no tenant realm must still be refused");
+        let err = run_backup_create(
+            Some(&out_empty),
+            None,
+            false,
+            false,
+            None,
+            &empty_store,
+            None,
+        )
+        .expect_err("a store with no tenant realm must still be refused");
         assert!(
             err.to_string().contains("nothing to export"),
             "the system realm must not resurrect the empty-archive defect; got: {err}"
@@ -5735,7 +6216,7 @@ mod tests {
         let copy = dir.path().join("copy");
         copy_dir_recursive(&data_dir, &copy).expect("copy data dir");
         let good = dir.path().join("good.hearth-backup");
-        run_backup_create(Some(&good), None, false, false, &copy, None).expect("export");
+        run_backup_create(Some(&good), None, false, false, None, &copy, None).expect("export");
 
         // Control: the unmodified archive restores. Without this the assertion
         // below could pass because the archive was never restorable at all.
@@ -5744,9 +6225,15 @@ mod tests {
             &good,
             Some("tenant"),
             "skip",
-            true, // dry run — do not take the data-directory lock for real
-            false,
-            true,
+            RestoreFlags {
+                dry_run: true, // do not take the data-directory lock for real
+                skip_verify: false,
+                allow_missing_signing_key: true,
+                // Not under test here: this archive is unsigned.
+                allow_unsigned: true,
+                replace_system_signing_key: false,
+            },
+            None,
             &control_target,
             None,
         )
@@ -5763,9 +6250,14 @@ mod tests {
             &elided,
             Some("tenant"),
             "skip",
-            false,
-            false,
-            true,
+            RestoreFlags {
+                dry_run: false,
+                skip_verify: false,
+                allow_missing_signing_key: true,
+                allow_unsigned: true,
+                replace_system_signing_key: false,
+            },
+            None,
             &target,
             None,
         )
@@ -5779,6 +6271,88 @@ mod tests {
             "the refusal must land BEFORE the target data directory is created, \
              or a fatal restore leaves a partial realm behind"
         );
+
+        std::env::remove_var("HEARTH_MASTER_KEY");
+    }
+
+    /// `backup create --sign-key` must produce an archive that a production
+    /// restore accepts with the matching verify key, and refuses without it
+    /// (A-30).
+    #[test]
+    fn create_with_sign_key_writes_an_archive_restore_verifies() {
+        use hearth::identity::CreateRealmRequest;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        std::env::set_var("HEARTH_MASTER_KEY", "e5".repeat(32));
+        {
+            let storage = Arc::new(
+                EmbeddedStorageEngine::open(cli_storage_config(&data_dir)).expect("open storage"),
+            ) as Arc<dyn StorageEngine>;
+            let (identity, ..) = build_all_engines(Arc::clone(&storage), None).expect("engines");
+            identity
+                .create_realm(&CreateRealmRequest {
+                    name: "tenant".to_string(),
+                    config: None,
+                })
+                .expect("realm");
+        }
+
+        let (key, pem) = hearth::backup::BackupSigningKey::generate().expect("generate");
+        let key_file = dir.path().join("signing.pem");
+        std::fs::write(&key_file, pem.as_bytes()).expect("write key");
+
+        // Export from a copy: this process still holds the original's lock.
+        let copy = dir.path().join("copy");
+        copy_dir_recursive(&data_dir, &copy).expect("copy data dir");
+        let archive = dir.path().join("signed.hearth-backup");
+        run_backup_create(
+            Some(&archive),
+            None,
+            false,
+            false,
+            Some(&key_file),
+            &copy,
+            None,
+        )
+        .expect("signed export");
+
+        let flags = |allow_unsigned| RestoreFlags {
+            dry_run: true,
+            skip_verify: false,
+            allow_missing_signing_key: true,
+            allow_unsigned,
+            replace_system_signing_key: false,
+        };
+        // No verify key and no opt-in: refused before the target is created.
+        let refused_target = dir.path().join("refused");
+        let err = run_backup_restore(
+            &archive,
+            Some("tenant"),
+            "skip",
+            flags(false),
+            None,
+            &refused_target,
+            None,
+        )
+        .expect_err("no verify key must refuse");
+        assert!(
+            err.to_string().contains("security.backup.verify_key"),
+            "{err}"
+        );
+        assert!(!refused_target.exists(), "refusal must precede any write");
+
+        run_backup_restore(
+            &archive,
+            Some("tenant"),
+            "skip",
+            flags(false),
+            Some(&key.verify_key_b64()),
+            &dir.path().join("target"),
+            None,
+        )
+        .expect("the signed archive must verify and restore");
 
         std::env::remove_var("HEARTH_MASTER_KEY");
     }
@@ -5911,7 +6485,7 @@ mod tests {
         std::env::set_var("HEARTH_MASTER_KEY", "b2".repeat(32));
         let out = dir.path().join("empty.hearth-backup");
 
-        let err = run_backup_create(Some(&out), None, false, false, &data_dir, None)
+        let err = run_backup_create(Some(&out), None, false, false, None, &data_dir, None)
             .expect_err("an export with no realms must be refused");
         std::env::remove_var("HEARTH_MASTER_KEY");
 
@@ -6167,7 +6741,7 @@ mod tests {
         std::env::remove_var("HEARTH_KEK");
         let out0 = dir.path().join("out0.hearth-backup");
         assert!(
-            run_backup_create(Some(&out0), None, false, false, &copy_of("d0"), None).is_err(),
+            run_backup_create(Some(&out0), None, false, false, None, &copy_of("d0"), None).is_err(),
             "sanity: this store really is KEK-encrypted, so an export with no \
              KEK must fail"
         );
@@ -6175,7 +6749,7 @@ mod tests {
         // The environment variable the error message names.
         let out = dir.path().join("out.hearth-backup");
         std::env::set_var("HEARTH_KEK", &kek_hex);
-        run_backup_create(Some(&out), None, false, false, &copy_of("d1"), None)
+        run_backup_create(Some(&out), None, false, false, None, &copy_of("d1"), None)
             .expect("HEARTH_KEK must make the export work — the error says so");
         assert!(out.exists(), "the archive must be written");
         std::env::remove_var("HEARTH_KEK");
@@ -6193,11 +6767,176 @@ mod tests {
             None,
             false,
             false,
+            None,
             &copy_of("d2"),
             Some(cfg_path.as_path()),
         )
         .expect("--config must make the export work — the error says so too");
         assert!(out2.exists(), "the archive must be written");
+
+        std::env::remove_var("HEARTH_MASTER_KEY");
+    }
+
+    // ── Rebuilding a cluster from a backup (upgrading guide) ───────────────
+
+    /// Opens `data_dir` and runs what `serve` runs at start-up against the
+    /// store: engine construction, then `reconcile_realms` for `config`.
+    /// Returns the realm named `tenant`, its signing key, and whether
+    /// `survivor@example.test` is one of its users.
+    fn start_and_read_tenant(
+        data_dir: &std::path::Path,
+        config: &Config,
+    ) -> (hearth::core::RealmId, Vec<u8>, bool) {
+        let storage = Arc::new(
+            EmbeddedStorageEngine::open(cli_storage_config(data_dir)).expect("open storage"),
+        ) as Arc<dyn StorageEngine>;
+        let (identity, _audit, rbac) =
+            build_all_engines(Arc::clone(&storage), None).expect("engines");
+        hearth::identity::reconcile::reconcile_realms(identity.as_ref(), rbac.as_ref(), config)
+            .expect("reconcile");
+        let realm = identity
+            .get_realm_by_name("tenant")
+            .expect("lookup")
+            .expect("the declared realm exists after start-up");
+        let key = identity
+            .export_realm_signing_key_pkcs8(realm.id())
+            .expect("signing key");
+        let has_user = identity
+            .get_user_by_email(realm.id(), "survivor@example.test")
+            .expect("user lookup")
+            .is_some();
+        (realm.id().clone(), key, has_user)
+    }
+
+    /// The upgrading guide's rebuild of a purged cluster (D1).
+    ///
+    /// Realms come from `hearth.yaml`: a fresh server's start-up reconcile
+    /// creates every declared realm, with a NEW id and a new signing key, and a
+    /// restore then refuses the archived realm's name as a duplicate, skips it
+    /// and its signing key, and writes its users under the archive's old id —
+    /// so the realm is empty under its own name and its tokens stop
+    /// validating, with no error. The guide used to prescribe exactly that
+    /// order (start the new cluster, then restore through its leader).
+    ///
+    /// Restoring OFFLINE into an empty data directory BEFORE the first start
+    /// is the order that works: reconcile then finds each realm already there.
+    /// This test runs both orders over one archive, with the same master key
+    /// on both sides, and asserts the realm keeps its id, its users and its
+    /// signing key only in the second.
+    #[test]
+    fn a_rebuild_restores_offline_before_the_first_start() {
+        use hearth::identity::CreateUserRequest;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("HEARTH_MASTER_KEY", "a7".repeat(32));
+        let config = Config {
+            realms: Some(std::collections::HashMap::from([(
+                "tenant".to_string(),
+                hearth::config::RealmYamlConfig::default(),
+            )])),
+            ..Config::default()
+        };
+
+        // The old cluster's store: `tenant` declared in YAML, one user.
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).expect("source dir");
+        let (realm_id, key) = {
+            let storage = Arc::new(
+                EmbeddedStorageEngine::open(cli_storage_config(&source)).expect("open storage"),
+            ) as Arc<dyn StorageEngine>;
+            let (identity, _audit, rbac) =
+                build_all_engines(Arc::clone(&storage), None).expect("engines");
+            hearth::identity::reconcile::reconcile_realms(
+                identity.as_ref(),
+                rbac.as_ref(),
+                &config,
+            )
+            .expect("reconcile");
+            let realm = identity
+                .get_realm_by_name("tenant")
+                .expect("lookup")
+                .expect("tenant");
+            identity
+                .create_user(
+                    realm.id(),
+                    &CreateUserRequest {
+                        email: "survivor@example.test".to_string(),
+                        display_name: "Survivor".to_string(),
+                        ..Default::default()
+                    },
+                )
+                .expect("user");
+            let key = identity
+                .export_realm_signing_key_pkcs8(realm.id())
+                .expect("signing key");
+            (realm.id().clone(), key)
+        };
+        let copy = dir.path().join("copy");
+        copy_dir_recursive(&source, &copy).expect("copy data dir");
+        // The tenant archive the guide takes: one without the system realm, as
+        // a v1.6.11 `POST /admin/backup` writes it (the guide exports the
+        // system realm separately).
+        let archive = dir.path().join("pre-upgrade.hearth-backup");
+        run_backup_create(
+            Some(&archive),
+            Some("tenant"),
+            false,
+            false,
+            None,
+            &copy,
+            None,
+        )
+        .expect("export");
+        let flags = || RestoreFlags {
+            dry_run: false,
+            skip_verify: false,
+            allow_missing_signing_key: false,
+            // Not under test here: this archive is unsigned.
+            allow_unsigned: true,
+            replace_system_signing_key: false,
+        };
+
+        // Each command below stands for a separate process: the CLI's engines
+        // hold each other (RBAC's session-version bumper is the identity
+        // engine), so in one process a store stays locked after its command
+        // returns. A copy of the quiescent directory is what the next process
+        // would open.
+        let next_process = |from: &std::path::Path, name: &str| {
+            let to = dir.path().join(name);
+            copy_dir_recursive(from, &to).expect("copy data dir");
+            to
+        };
+
+        // The order the guide used to give: start first, then restore.
+        let started_first = dir.path().join("started-first");
+        std::fs::create_dir_all(&started_first).expect("dir");
+        let (fresh_id, fresh_key, _) = start_and_read_tenant(&started_first, &config);
+        let restored_after = next_process(&started_first, "restored-after-start");
+        let _ = run_backup_restore(&archive, None, "skip", flags(), None, &restored_after, None);
+        let (id, restored_key, has_user) =
+            start_and_read_tenant(&next_process(&restored_after, "restarted"), &config);
+        assert_eq!(id, fresh_id, "the realm start-up created stays in place");
+        assert_ne!(
+            id, realm_id,
+            "precondition of the guide fix: restoring after the first start cannot bring \
+             back the realm's id"
+        );
+        assert_eq!(restored_key, fresh_key, "nor its signing key");
+        assert_ne!(restored_key, key);
+        assert!(!has_user, "nor its users, under its name");
+
+        // The order the guide now gives: restore offline, then start.
+        let target = dir.path().join("restored");
+        run_backup_restore(&archive, None, "skip", flags(), None, &target, None)
+            .expect("offline restore into an empty data directory");
+        let (id, restored_key, has_user) =
+            start_and_read_tenant(&next_process(&target, "first-start"), &config);
+        assert_eq!(id, realm_id, "the realm keeps its id");
+        assert_eq!(
+            restored_key, key,
+            "and its signing key, so its tokens still validate"
+        );
+        assert!(has_user, "and its users");
 
         std::env::remove_var("HEARTH_MASTER_KEY");
     }
@@ -6288,21 +7027,21 @@ mod tests {
         // the server must start with no HMAC key rather than refusing to boot.
         // This is the fail-then-pass case for HEA-2105/H — before the fix the
         // `|| !dev_mode` clause forced the key on every non-dev deployment.
-        let decision = resolve_sms_otp_hmac_key(None, SmsTransport::Log);
+        let decision = resolve_sms_otp_hmac_key(None, SmsTransport::Log, false);
         assert_eq!(decision, Ok(None));
     }
 
     #[test]
     fn sms_key_optional_for_log_transport_when_empty() {
         // An empty env var is treated the same as absent under Log transport.
-        let decision = resolve_sms_otp_hmac_key(Some(""), SmsTransport::Log);
+        let decision = resolve_sms_otp_hmac_key(Some(""), SmsTransport::Log, false);
         assert_eq!(decision, Ok(None));
     }
 
     #[test]
     fn sms_key_required_for_real_transport_when_missing() {
         // SMS actually enabled (Twilio) but no key → hard startup error.
-        let err = resolve_sms_otp_hmac_key(None, SmsTransport::Twilio)
+        let err = resolve_sms_otp_hmac_key(None, SmsTransport::Twilio, false)
             .expect_err("real transport without a key must be rejected");
         assert!(
             err.contains("HEARTH_SMS_OTP_HMAC_KEY environment variable is required"),
@@ -6312,7 +7051,7 @@ mod tests {
 
     #[test]
     fn sms_key_required_for_real_transport_when_empty() {
-        let err = resolve_sms_otp_hmac_key(Some(""), SmsTransport::AwsSns)
+        let err = resolve_sms_otp_hmac_key(Some(""), SmsTransport::AwsSns, false)
             .expect_err("real transport with an empty key must be rejected");
         assert!(
             err.contains("HEARTH_SMS_OTP_HMAC_KEY environment variable is required"),
@@ -6322,7 +7061,7 @@ mod tests {
 
     #[test]
     fn sms_key_too_short_is_rejected_for_real_transport() {
-        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Twilio)
+        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Twilio, false)
             .expect_err("a sub-32-byte key must be rejected");
         assert!(
             err.contains("at least 32 bytes"),
@@ -6334,7 +7073,7 @@ mod tests {
     fn sms_key_too_short_is_rejected_even_under_log_transport() {
         // A supplied-but-malformed key is always an error, even for Log — the
         // operator clearly intended to set one, so surface the mistake.
-        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Log)
+        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Log, false)
             .expect_err("a sub-32-byte key must be rejected");
         assert!(
             err.contains("at least 32 bytes"),
@@ -6345,8 +7084,32 @@ mod tests {
     #[test]
     fn sms_key_accepted_when_valid() {
         let key = "0123456789abcdef0123456789abcdef"; // exactly 32 bytes
-        let decision = resolve_sms_otp_hmac_key(Some(key), SmsTransport::Twilio);
+        let decision = resolve_sms_otp_hmac_key(Some(key), SmsTransport::Twilio, false);
         assert_eq!(decision, Ok(Some(key.as_bytes().to_vec())));
+    }
+
+    // ── fix/ga-sms: no all-zero key, random per-process key in dev only ──
+
+    #[test]
+    fn dev_mode_without_a_key_gets_a_random_non_zero_key() {
+        let a = resolve_sms_otp_hmac_key(None, SmsTransport::Log, true)
+            .expect("dev mode must start without a key")
+            .expect("dev mode must get a generated key, not none");
+        let b = resolve_sms_otp_hmac_key(Some(""), SmsTransport::Log, true)
+            .expect("dev mode must start without a key")
+            .expect("dev mode must get a generated key, not none");
+        assert_eq!(a.len(), 32, "a 32-byte HMAC-SHA256 key");
+        assert!(a.iter().any(|&x| x != 0), "never the all-zero key");
+        assert_ne!(a, b, "generated per call from the OS RNG, not a constant");
+    }
+
+    #[test]
+    fn dev_mode_keeps_an_operator_supplied_key() {
+        let key = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            resolve_sms_otp_hmac_key(Some(key), SmsTransport::Log, true),
+            Ok(Some(key.as_bytes().to_vec()))
+        );
     }
 
     // ── loadtest_unthrottle_decision (HEA-1796 prod-safety gate) ──────────

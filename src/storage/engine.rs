@@ -35,9 +35,7 @@ use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use fs2::FileExt as _;
 
-use arc_swap::ArcSwap;
-
-use crate::core::RealmId;
+use crate::core::{EpochCell, RealmId};
 use crate::storage::encryption;
 use crate::storage::error::StorageError;
 use crate::storage::fs::{Fs, RealFs};
@@ -335,8 +333,8 @@ pub struct EmbeddedStorageEngine {
     active_memtable: Arc<Memtable>,
     /// On-disk SST files, newest first.
     ///
-    /// Wrapped in `Arc<ArcSwap<...>>` for the same reason as `active_memtable`.
-    sst_readers: Arc<ArcSwap<Vec<SstReader>>>,
+    /// Wrapped in `Arc<EpochCell<...>>` for the same reason as `active_memtable`.
+    sst_readers: Arc<EpochCell<Vec<SstReader>>>,
     /// In-memory hot tier for frequently accessed data.
     hot_tier: HotTier,
     /// Base data directory.
@@ -380,6 +378,11 @@ pub struct EmbeddedStorageEngine {
     /// closes that window (HEA-1767). This lock is used in both single-node and
     /// cluster mode — there is no Raft-mediated path for `put_if_absent`.
     put_if_absent_lock: Mutex<()>,
+    /// Serialises [`StorageEngine::increment_u64`]'s read-modify-write. Its
+    /// own lock, not [`Self::put_if_absent_lock`]: the increment holds it
+    /// across a WAL write and fsync, and sharing would queue every
+    /// conditional put behind every control-epoch bump.
+    counter_lock: Mutex<()>,
     /// Monotonically increasing SST file counter.
     ///
     /// Wrapped in `Arc` so the WAL's pre-rotate flush callback can share it.
@@ -653,7 +656,7 @@ impl EmbeddedStorageEngine {
         // pre-rotate flush callback.
         let active_memtable = Arc::new(memtable);
         record_sst_file_count(sst_readers.len());
-        let sst_readers = Arc::new(ArcSwap::from_pointee(sst_readers));
+        let sst_readers = Arc::new(EpochCell::from_pointee(sst_readers));
         let flush_lock = Arc::new(Mutex::new(()));
         let sst_counter = Arc::new(std::sync::atomic::AtomicU64::new(max_sst_num + 1));
 
@@ -751,6 +754,10 @@ impl EmbeddedStorageEngine {
                     cb_sst_readers.store(Arc::new(rebuilt));
                     Ok(())
                 })?;
+                // As in `trigger_flush`: release a replaced reader list the
+                // store above could not, rather than hold its mappings until the
+                // next flush.
+                cb_sst_readers.reclaim();
                 Ok(())
             });
         }
@@ -765,6 +772,7 @@ impl EmbeddedStorageEngine {
             backup_barrier: Arc::new(RwLock::new(())),
             compaction_lock: Mutex::new(()),
             put_if_absent_lock: Mutex::new(()),
+            counter_lock: Mutex::new(()),
             sst_counter,
             fs,
             key_registry,
@@ -908,6 +916,12 @@ impl EmbeddedStorageEngine {
 
             Ok(())
         })?;
+
+        // The reader list is written only by flushes and compactions. If a
+        // thread was pinned when the list was replaced above, the old list — a
+        // memory map per SST — would otherwise wait for the next flush to be
+        // released; the memtable hand-off since then has driven the epoch on.
+        self.sst_readers.reclaim();
 
         Ok(())
     }
@@ -1094,6 +1108,12 @@ impl EmbeddedStorageEngine {
     /// Leaked old files are otherwise harmless orphans, cleaned up by the next
     /// compaction.
     pub fn compact_ssts(&self, min_sst_count: usize) -> Result<usize, StorageError> {
+        // Release any reader list an earlier flush or compaction replaced while
+        // a reader was pinned, merge or no merge: every wake of the compaction
+        // task passes here, so an idle engine does not keep merged-away files
+        // mapped until its next write.
+        self.sst_readers.reclaim();
+
         // Serialize against other compactions for the whole operation, but hold
         // `flush_lock` only for two brief phases — the snapshot+number allocation
         // and the commit. The O(total-data) merge I/O between them runs off
@@ -1168,7 +1188,7 @@ impl EmbeddedStorageEngine {
         drop(sst_readers);
 
         // --- Commit phase: hold `flush_lock` only for these metadata ops ---
-        let Ok(_guard) = self.flush_lock.lock() else {
+        let Ok(commit_guard) = self.flush_lock.lock() else {
             return Err(StorageError::Io(std::io::Error::other(
                 "flush mutex poisoned",
             )));
@@ -1239,6 +1259,14 @@ impl EmbeddedStorageEngine {
             );
         }
         self.sst_readers.store(Arc::new(rebuilt));
+        drop(commit_guard);
+        #[cfg(test)]
+        run_after_compaction_publish_hook();
+        // As in `trigger_flush`: the list just replaced maps every input this
+        // commit unlinked, so a reader pinned across the store above would
+        // otherwise hold their disk space until the next write to the list.
+        // Released after `flush_lock`, so no writer waits on the unmaps.
+        self.sst_readers.reclaim();
 
         Ok(input_count)
     }
@@ -1284,6 +1312,9 @@ impl EmbeddedStorageEngine {
     /// across the merge I/O (HEA-1931). Like [`Self::compact_ssts`], async callers
     /// should wrap it in `spawn_blocking`.
     pub fn compact_partial(&self) -> Result<usize, StorageError> {
+        // As in `compact_ssts`: release what earlier writes left retired.
+        self.sst_readers.reclaim();
+
         let merge_min = self.compaction.merge_min.max(2);
 
         // Serialize against other compactions for the whole operation. `flush_lock`
@@ -1303,7 +1334,7 @@ impl EmbeddedStorageEngine {
         // `other_nums`, and `drop_tombstones` (the run still being the oldest)
         // stay valid through the merge; `compaction_lock` keeps any other
         // compaction out.
-        let sst_readers = self.sst_readers.load();
+        let sst_readers = self.sst_readers.load_full();
         let Some((start, end)) = select_partial_run(&sst_readers, merge_min) else {
             return Ok(0);
         };
@@ -1368,14 +1399,14 @@ impl EmbeddedStorageEngine {
             drop_tombstones,
         )?;
 
-        // Drop the load guard before the commit phase (reload re-reads from
+        // Drop the snapshot before the commit phase (reload re-reads from
         // disk). Everything needed for the splice is already captured.
         drop(sst_readers);
 
         // --- Commit phase: hold `flush_lock` only for these metadata ops, so a
         // writer contends with compaction for the rename+fsync+reload, never for
         // the merge I/O above (HEA-1931). ---
-        let Ok(_guard) = self.flush_lock.lock() else {
+        let Ok(commit_guard) = self.flush_lock.lock() else {
             return Err(StorageError::Io(std::io::Error::other(
                 "flush mutex poisoned",
             )));
@@ -1444,9 +1475,35 @@ impl EmbeddedStorageEngine {
             );
         }
         self.sst_readers.store(Arc::new(rebuilt));
+        drop(commit_guard);
+        #[cfg(test)]
+        run_after_compaction_publish_hook();
+        // Release the replaced list, which maps the unlinked run members, as
+        // `compact_ssts` does.
+        self.sst_readers.reclaim();
 
         Ok(input_count)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only hook a compaction runs on its own thread after publishing its
+    /// rebuilt reader list and releasing `flush_lock`, and before releasing
+    /// the list it replaced. A test sets it to let a reader it pinned across
+    /// the publish go at exactly that point.
+    static AFTER_COMPACTION_PUBLISH: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the [`AFTER_COMPACTION_PUBLISH`] hook, if this thread set one.
+#[cfg(test)]
+fn run_after_compaction_publish_hook() {
+    AFTER_COMPACTION_PUBLISH.with_borrow_mut(|hook| {
+        if let Some(hook) = hook {
+            hook();
+        }
+    });
 }
 
 /// Selects a contiguous run of same-size-tier SSTs to merge, or `None` if no tier
@@ -1550,8 +1607,11 @@ impl StorageEngine for EmbeddedStorageEngine {
             None => {}
         }
 
-        // 3. SST files newest-to-oldest (binary search)
-        let sst_readers = self.sst_readers.load();
+        // 3. SST files newest-to-oldest (binary search). An owned snapshot, not
+        // a pinned `load()`: the probes below read mmapped blocks and can fault
+        // to disk, and an epoch pin held across that would stall reclamation
+        // for every `EpochCell` in the process.
+        let sst_readers = self.sst_readers.load_full();
         let mut ssts_probed: u64 = 0;
         for reader in sst_readers.iter() {
             ssts_probed += 1;
@@ -1860,6 +1920,21 @@ impl StorageEngine for EmbeddedStorageEngine {
         Ok(true)
     }
 
+    /// Atomic single-node increment: the read and the write happen under
+    /// [`counter_lock`](Self::counter_lock), so concurrent callers never both
+    /// write the same successor (see the trait documentation).
+    fn increment_u64(&self, realm_id: &RealmId, key: &[u8]) -> Result<u64, StorageError> {
+        let Ok(_guard) = self.counter_lock.lock() else {
+            return Err(StorageError::Io(std::io::Error::other(
+                "increment_u64 mutex poisoned",
+            )));
+        };
+        let next =
+            super::decode_u64_counter(self.get(realm_id, key)?.as_deref())?.saturating_add(1);
+        self.put(realm_id, key, &next.to_le_bytes())?;
+        Ok(next)
+    }
+
     fn write_batch(
         &self,
         realm_id: &RealmId,
@@ -1951,13 +2026,23 @@ impl StorageEngine for EmbeddedStorageEngine {
             .with_label_values(&["scan"])
             .start_timer();
 
+        // The memtable FIRST, the SST list second. A flush registers its SST
+        // before it clears the map it parked, so a key leaving the memtable is
+        // in this snapshot or in any SST list loaded after it — never in
+        // neither. Loaded the other way round, a flush that completed while
+        // this scan read the SSTs left its keys in neither the stale SST list
+        // nor the emptied memtable, and the scan dropped them. Sessions are
+        // listed with a scan, so `revoke_all_user_sessions` skipped live ones
+        // (`a_scan_never_misses_a_key_a_concurrent_flush_moves`).
+        let memtable_entries = self.active_memtable.iter_realm(realm_id);
+
         // Merge results from memtable and all SST files.
         // Use a BTreeMap to deduplicate — memtable entries (newest) win.
         let mut merged: std::collections::BTreeMap<Vec<u8>, MemtableValue> =
             std::collections::BTreeMap::new();
 
         // SST files oldest-to-newest (reverse of storage order) so newer overwrites older
-        let sst_readers = self.sst_readers.load();
+        let sst_readers = self.sst_readers.load_full();
         for reader in sst_readers.iter().rev() {
             let entries = reader.range_scan(realm_id, start, end)?;
             for (key, value) in entries {
@@ -1965,8 +2050,9 @@ impl StorageEngine for EmbeddedStorageEngine {
             }
         }
 
-        // Memtable entries (newest) overwrite SST entries
-        let memtable_entries = self.active_memtable.iter_realm(realm_id);
+        // Memtable entries (newest) overwrite SST entries. A key re-written
+        // and flushed after the snapshot above keeps its snapshot value: the
+        // value it had when this scan read the memtable.
         for (key, value) in memtable_entries {
             if key.as_slice() >= start && key.as_slice() < end {
                 merged.insert(key, value);
@@ -2007,23 +2093,27 @@ impl StorageEngine for EmbeddedStorageEngine {
             .with_label_values(&["scan_keys"])
             .start_timer();
 
+        // The memtable before the SST list, for the reason given in `scan`:
+        // read after it, a concurrent flush can hide keys from this scan
+        // (`a_key_scan_never_misses_a_key_a_concurrent_flush_moves`).
+        let memtable_keys = self
+            .active_memtable
+            .iter_realm_range_keys(realm_id, start, end);
+
         // BTreeMap<key, is_alive>: true = Data, false = Tombstone.
         // Memtable entries (newest) overwrite SST entries as we insert in
         // oldest-to-newest order.
         let mut merged: std::collections::BTreeMap<Vec<u8>, bool> =
             std::collections::BTreeMap::new();
 
-        let sst_readers = self.sst_readers.load();
+        let sst_readers = self.sst_readers.load_full();
         for reader in sst_readers.iter().rev() {
             for (key, alive) in reader.range_scan_keys(realm_id, start, end)? {
                 merged.insert(key, alive);
             }
         }
 
-        for (key, alive) in self
-            .active_memtable
-            .iter_realm_range_keys(realm_id, start, end)
-        {
+        for (key, alive) in memtable_keys {
             merged.insert(key, alive);
         }
 
@@ -2053,7 +2143,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         }
 
         // Enumerate from every live SST file.
-        let sst_readers = self.sst_readers.load();
+        let sst_readers = self.sst_readers.load_full();
         for reader in sst_readers.iter() {
             for (key, _) in reader.iter_all()? {
                 realms.insert(key.realm_id().clone());
@@ -2360,6 +2450,95 @@ mod tests {
         );
     }
 
+    /// `increment_u64` hands every concurrent caller a distinct value and
+    /// never loses an increment (the control-epoch bump depends on both).
+    #[test]
+    fn increment_u64_is_atomic_under_concurrency() {
+        use std::sync::{Arc, Barrier};
+
+        let (_dir, engine) = setup_engine();
+        let engine = Arc::new(engine);
+        let realm = RealmId::generate();
+
+        const THREADS: usize = 12;
+        const PER_THREAD: usize = 25;
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let engine = Arc::clone(&engine);
+                let barrier = Arc::clone(&barrier);
+                let realm = realm.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (0..PER_THREAD)
+                        .map(|_| engine.increment_u64(&realm, b"ctr").expect("increment"))
+                        .collect::<Vec<u64>>()
+                })
+            })
+            .collect();
+        let mut seen: Vec<u64> = handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("join"))
+            .collect();
+        seen.sort_unstable();
+        let expected: Vec<u64> = (1..=(THREADS * PER_THREAD) as u64).collect();
+        assert_eq!(
+            seen, expected,
+            "every increment must return a distinct successor"
+        );
+        assert_eq!(
+            engine.get(&realm, b"ctr").expect("get"),
+            Some(((THREADS * PER_THREAD) as u64).to_le_bytes().to_vec()),
+        );
+    }
+
+    /// Counter increments do not share `put_if_absent`'s lock: every control
+    /// write bumps the counter with a WAL write and fsync under its lock, and
+    /// holding the conditional-put lock across that serialised every
+    /// `put_if_absent` caller (replay markers, nonces, OTP single-use) behind
+    /// control writes. Proven from the other side: an increment completes
+    /// while the conditional-put lock is held.
+    #[test]
+    fn increment_u64_does_not_wait_for_the_put_if_absent_lock() {
+        use std::sync::Arc;
+
+        let (_dir, engine) = setup_engine();
+        let engine = Arc::new(engine);
+        let realm = RealmId::generate();
+        let held = engine.put_if_absent_lock.lock().expect("lock");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let incrementer = {
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                let _ = tx.send(engine.increment_u64(&realm, b"ctr").expect("increment"));
+            })
+        };
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        incrementer.join().expect("join");
+        assert_eq!(
+            outcome.ok(),
+            Some(1),
+            "increment_u64 waited on the put_if_absent lock"
+        );
+    }
+
+    /// A counter that is not eight bytes is reported, never restarted at 1.
+    #[test]
+    fn increment_u64_refuses_a_corrupted_counter() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine.put(&realm, b"ctr", b"xyz").expect("put");
+        assert!(matches!(
+            engine.increment_u64(&realm, b"ctr"),
+            Err(StorageError::DeserializationFailed { .. })
+        ));
+        assert_eq!(
+            engine.get(&realm, b"ctr").expect("get"),
+            Some(b"xyz".to_vec())
+        );
+    }
+
     // HEA-1767: the trait-default `put_if_absent` is a non-atomic get-then-put
     // with a TOCTOU window. `EmbeddedStorageEngine` overrides it to hold a lock
     // across the check-and-write. Under N concurrent tasks racing on the same
@@ -2633,6 +2812,143 @@ mod tests {
             "{} acknowledged writes were lost during concurrent flushes (e.g. {:?})",
             lost.len(),
             &lost[..lost.len().min(5)]
+        );
+    }
+
+    /// Runs `scan` on three threads while the main thread writes a probe key
+    /// and flushes it, over and over, and counts the scans that came back
+    /// without a probe key acknowledged before they started.
+    ///
+    /// A flush parks the memtable's map, registers the SST it wrote, and only
+    /// then clears the parked slot, so a key moving out of the memtable is
+    /// always in the memtable or in the SST list. A reader sees it only if it
+    /// looks at the memtable *first*: one that snapshots the SST list first
+    /// and reads the memtable after a whole flush has gone by finds the key in
+    /// neither. Filler flushed to an SST in the scanned range makes every scan
+    /// spend long enough reading SSTs for a flush to land in between.
+    ///
+    /// Returns `(scans, misses)`.
+    fn scans_racing_flushes<S>(scan: S) -> (usize, usize)
+    where
+        S: Fn(&EmbeddedStorageEngine, &RealmId) -> Vec<Vec<u8>> + Copy + Send + 'static,
+    {
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+        const FLUSHES: u64 = 200;
+        const FILLER: u32 = 2_000;
+        const NONE_YET: u64 = u64::MAX;
+        fn probe(i: u64) -> Vec<u8> {
+            format!("k{i:05}").into_bytes()
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            wal_config: WalConfig {
+                max_size: 64 * 1024 * 1024,
+                sync_mode: SyncMode::None,
+            },
+            // Large enough that only the test's own `flush_memtable` calls flush.
+            memtable_config: MemtableConfig {
+                flush_threshold_bytes: 64 * 1024 * 1024,
+            },
+            tiered_config: TieredConfig::default(),
+            allow_missing_keks: false,
+            compaction: CompactionConfig::default(),
+            dev_mode: true,
+            block_cache_bytes: 4 * 1024 * 1024,
+        };
+        let engine = Arc::new(EmbeddedStorageEngine::open(config).expect("open"));
+        let realm = RealmId::generate();
+
+        for n in 0..FILLER {
+            engine
+                .put(&realm, format!("f{n:05}").as_bytes(), b"filler")
+                .expect("put filler");
+        }
+        engine.flush_memtable().expect("flush filler");
+
+        let newest = Arc::new(AtomicU64::new(NONE_YET));
+        let stop = Arc::new(AtomicBool::new(false));
+        let scans = Arc::new(AtomicUsize::new(0));
+        let misses = Arc::new(AtomicUsize::new(0));
+
+        let scanners: Vec<_> = (0..3)
+            .map(|_| {
+                let engine = Arc::clone(&engine);
+                let realm = realm.clone();
+                let newest = Arc::clone(&newest);
+                let stop = Arc::clone(&stop);
+                let scans = Arc::clone(&scans);
+                let misses = Arc::clone(&misses);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        // Every probe up to `i` was acknowledged before this
+                        // load, so the scan below must return all of them.
+                        let i = newest.load(Ordering::Acquire);
+                        if i == NONE_YET {
+                            std::hint::spin_loop();
+                            continue;
+                        }
+                        let found: HashSet<Vec<u8>> = scan(&engine, &realm).into_iter().collect();
+                        scans.fetch_add(1, Ordering::Relaxed);
+                        if (0..=i).any(|j| !found.contains(&probe(j))) {
+                            misses.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for i in 0..FLUSHES {
+            engine.put(&realm, &probe(i), b"probe").expect("put probe");
+            newest.store(i, Ordering::Release);
+            engine.flush_memtable().expect("flush");
+        }
+        stop.store(true, Ordering::Relaxed);
+        for s in scanners {
+            s.join().expect("scanner thread");
+        }
+
+        (
+            scans.load(Ordering::Relaxed),
+            misses.load(Ordering::Relaxed),
+        )
+    }
+
+    /// `revoke_all_user_sessions` finds the sessions it revokes with a scan
+    /// (`list_sessions_by_user`). A scan that drops the keys a concurrent
+    /// flush is moving skips live sessions, and their tokens keep validating
+    /// after a password change or a disable.
+    #[test]
+    fn a_scan_never_misses_a_key_a_concurrent_flush_moves() {
+        let (scans, misses) = scans_racing_flushes(|engine, realm| {
+            engine
+                .scan(realm, b"f", b"l")
+                .expect("scan")
+                .into_iter()
+                .map(|entry| entry.key)
+                .collect()
+        });
+        assert!(scans > 0, "no scan ran while the flushes did");
+        assert_eq!(
+            misses, 0,
+            "{misses} of {scans} scans missed a key a concurrent flush was moving to an SST"
+        );
+    }
+
+    /// The same guarantee for the key-only scan behind `count_prefix` and
+    /// `scan_prefix_paged`.
+    #[test]
+    fn a_key_scan_never_misses_a_key_a_concurrent_flush_moves() {
+        let (scans, misses) = scans_racing_flushes(|engine, realm| {
+            engine.scan_keys(realm, b"f", b"l").expect("scan_keys")
+        });
+        assert!(scans > 0, "no key scan ran while the flushes did");
+        assert_eq!(
+            misses, 0,
+            "{misses} of {scans} key scans missed a key a concurrent flush was moving to an SST"
         );
     }
 
@@ -4782,5 +5098,207 @@ mod tests {
             realms, expected,
             "list_realms must include realms whose data flushed to SST files"
         );
+    }
+
+    // ===== Releasing replaced SST reader lists =====
+
+    /// Which compaction entry point a reclamation test drives.
+    #[derive(Clone, Copy)]
+    enum Compaction {
+        /// `compact_ssts`, the periodic full merge.
+        Full,
+        /// `compact_partial`, the count-triggered size-tiered merge.
+        Partial,
+    }
+
+    impl Compaction {
+        /// Runs one compaction of this kind, returning how many SSTs it merged.
+        fn run(self, engine: &EmbeddedStorageEngine) -> usize {
+            match self {
+                Self::Full => engine.compact_ssts(2).expect("compact_ssts"),
+                Self::Partial => engine.compact_partial().expect("compact_partial"),
+            }
+        }
+    }
+
+    /// An engine holding `ssts` equally sized SSTs, one flush each, that only
+    /// compacts when a test asks it to. Both compaction kinds merge all of
+    /// them: the full merge needs two, and they form one size tier of at
+    /// least `merge_min` = 2.
+    fn engine_with_ssts(ssts: usize) -> (tempfile::TempDir, EmbeddedStorageEngine) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.memtable_config.flush_threshold_bytes = 1 << 20;
+        config.compaction = CompactionConfig {
+            enabled: false,
+            interval_secs: 0,
+            min_sst_count: 2,
+            max_sst_count: 0,
+            merge_min: 2,
+        };
+        let engine = EmbeddedStorageEngine::open(config).expect("open");
+        let realm = RealmId::generate();
+        for i in 0..ssts {
+            engine
+                .put(&realm, format!("key-{i}").as_bytes(), b"value")
+                .expect("put");
+            engine.flush_memtable().expect("flush");
+        }
+        assert_eq!(count_sst_files(dir.path()), ssts, "one SST per flush");
+        (dir, engine)
+    }
+
+    /// How many memory maps this process still holds of SST files under
+    /// `dir` that have been unlinked: the disk space a replaced reader list
+    /// keeps allocated for as long as it lives.
+    #[cfg(target_os = "linux")]
+    fn unlinked_sst_maps(dir: &std::path::Path) -> usize {
+        let dir = dir.canonicalize().expect("canonical data dir");
+        let dir = dir.to_string_lossy();
+        std::fs::read_to_string("/proc/self/maps")
+            .expect("read /proc/self/maps")
+            .lines()
+            .filter(|line| {
+                line.contains(dir.as_ref()) && line.contains(".sst") && line.ends_with("(deleted)")
+            })
+            .count()
+    }
+
+    /// A compaction replaces the reader list with one over its merged output,
+    /// and the list it replaces maps every file it just unlinked. A reader
+    /// pinned across that write stops the write releasing it, so the
+    /// compaction must release it again before returning, once the reader
+    /// has let go — as a flush does — rather than hold the unlinked files'
+    /// disk space until the next write to the list.
+    ///
+    /// Exact when nothing else in the process pins, which nextest's
+    /// process-per-test model provides. The reader thread outlives the
+    /// compaction because a thread's exit pins it once more, to hand its
+    /// deferred work to the collector, which could refuse the epoch advances
+    /// the release needs.
+    fn assert_compaction_releases_the_list_it_replaced(kind: Compaction) {
+        use std::sync::mpsc;
+
+        let (dir, engine) = engine_with_ssts(3);
+        let engine = Arc::new(engine);
+
+        let (pinned_tx, pinned_rx) = mpsc::channel();
+        let (unpin_tx, unpin_rx) = mpsc::channel::<()>();
+        let (unpinned_tx, unpinned_rx) = mpsc::channel();
+        let (exit_tx, exit_rx) = mpsc::channel::<()>();
+        let reader = std::thread::spawn({
+            let engine = Arc::clone(&engine);
+            move || {
+                let pinned = engine.sst_readers.load();
+                pinned_tx
+                    .send(pinned.len())
+                    .expect("compactor is listening");
+                unpin_rx.recv().expect("compactor releases the reader");
+                drop(pinned);
+                unpinned_tx.send(()).expect("compactor is listening");
+                exit_rx.recv().expect("compactor lets the reader exit");
+            }
+        });
+        assert_eq!(pinned_rx.recv().expect("reader pinned"), 3);
+
+        let data_dir = dir.path().to_path_buf();
+        AFTER_COMPACTION_PUBLISH.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                // The merged-away files are unlinked, and the replaced list,
+                // held back by the pinned reader, still maps them.
+                #[cfg(target_os = "linux")]
+                assert!(
+                    unlinked_sst_maps(&data_dir) > 0,
+                    "precondition: the replaced list maps the unlinked inputs"
+                );
+                #[cfg(not(target_os = "linux"))]
+                let _ = &data_dir;
+                unpin_tx.send(()).expect("reader is waiting");
+                unpinned_rx.recv().expect("reader unpinned");
+            }));
+        });
+        let merged = kind.run(&engine);
+        AFTER_COMPACTION_PUBLISH.with_borrow_mut(Option::take);
+
+        assert_eq!(merged, 3, "the compaction merged every SST");
+        assert_eq!(
+            engine.sst_readers.retired_len(),
+            0,
+            "the reader-list cell still holds the list the compaction replaced"
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            unlinked_sst_maps(dir.path()),
+            0,
+            "the compaction returned still mapping the SSTs it unlinked"
+        );
+
+        exit_tx.send(()).expect("reader is waiting to exit");
+        reader.join().expect("reader thread");
+    }
+
+    #[test]
+    fn compact_ssts_releases_the_reader_list_it_replaced_even_if_a_reader_held_it() {
+        assert_compaction_releases_the_list_it_replaced(Compaction::Full);
+    }
+
+    #[test]
+    fn compact_partial_releases_the_reader_list_it_replaced_even_if_a_reader_held_it() {
+        assert_compaction_releases_the_list_it_replaced(Compaction::Partial);
+    }
+
+    /// A reader still pinned when a write's own release ran leaves the list
+    /// that write replaced retired, and the list is written only by flushes
+    /// and compactions. Every compaction wake — the periodic sweep and the
+    /// count trigger, including one with nothing to merge — must release it,
+    /// so an idle engine does not hold merged-away files mapped until its
+    /// next write.
+    fn assert_a_compaction_wake_releases_a_list_left_retired(kind: Compaction) {
+        let (dir, engine) = engine_with_ssts(3);
+
+        // Pinned on this thread across the whole compaction, so neither its
+        // write nor anything it runs afterwards can release what it replaced.
+        let pinned = engine.sst_readers.load();
+        assert_eq!(
+            kind.run(&engine),
+            3,
+            "the first compaction merged every SST"
+        );
+        drop(pinned);
+        assert_eq!(
+            engine.sst_readers.retired_len(),
+            1,
+            "precondition: the pinned reader kept the replaced list retired"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            unlinked_sst_maps(dir.path()) > 0,
+            "precondition: the retired list maps the unlinked inputs"
+        );
+
+        assert_eq!(kind.run(&engine), 0, "one SST left: nothing to merge");
+        assert_eq!(
+            engine.sst_readers.retired_len(),
+            0,
+            "a compaction wake left a replaced reader list retired"
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            unlinked_sst_maps(dir.path()),
+            0,
+            "a compaction wake left unlinked SSTs mapped"
+        );
+        #[cfg(not(target_os = "linux"))]
+        let _ = &dir;
+    }
+
+    #[test]
+    fn a_compact_ssts_wake_releases_a_reader_list_left_retired() {
+        assert_a_compaction_wake_releases_a_list_left_retired(Compaction::Full);
+    }
+
+    #[test]
+    fn a_compact_partial_wake_releases_a_reader_list_left_retired() {
+        assert_a_compaction_wake_releases_a_list_left_retired(Compaction::Partial);
     }
 }

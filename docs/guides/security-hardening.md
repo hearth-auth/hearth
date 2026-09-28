@@ -140,8 +140,38 @@ data key of every WAL segment and SST for every realm.
 
 ### OAuth client secrets
 
-OAuth client secrets are stored as Argon2id hashes, not plaintext. Treat them like passwords:
-- Generate at least 32 bytes of cryptographically random material.
+OAuth client secrets are never stored in plaintext. How they are hashed depends on who chose them:
+
+- **Hearth-generated** secrets (`POST /register`, the console's new-application form, *Regenerate
+  secret*) are 32 bytes from the OS CSPRNG and are stored as an unsalted SHA-256 digest
+  (`$hearth-sha256$v=1$…`). Against a 256-bit random preimage a single SHA-256 is already
+  infeasible to invert, so a slow KDF adds nothing — and it would make every authenticated
+  introspection cost a full Argon2id run. Verification is one SHA-256 plus a constant-time compare.
+- **Caller-chosen** secrets (gRPC `RegisterClient`/`CreateApplication`, `hearth.yaml`
+  `applications[].client_secret`, migration import) may be low-entropy, so they are stored as
+  Argon2id hashes, like passwords. Secrets stored before the SHA-256 format existed are Argon2id
+  too and keep verifying. They are never re-hashed automatically — Hearth cannot tell from the hash
+  whether the secret was random. Regenerate the secret to move a client onto the fast format.
+  Authenticating such a client is slower than authenticating any other, which reveals that the
+  client exists to anyone timing the endpoint; prefer Hearth-generated secrets.
+
+**The remaining Argon2id cost is an amplification vector, bounded by the KDF gate.** Anyone who
+knows an Argon2id-hashed client's `client_id` can make the server run one Argon2id verification
+per request by presenting any secret at `/token`, `/as/par`, `/introspect`, `/revoke` or
+`/device_authorization` (their `/realms/{realm}/…` twins, and the gRPC OAuth service). Client ids are not secret: they
+travel in browser authorization requests, and a `hearth.yaml` application's id is a UUID v5 that
+anyone can compute from the realm and the application key. Every such verification therefore runs
+behind the same process-wide admission gate as password hashing
+(`security.password.kdf.max_in_flight`), on the blocking pool; when the gate is saturated the
+request is shed with `503` and `Retry-After` (gRPC: `UNAVAILABLE`), exactly like a login. The gate
+caps the CPU and memory this can consume, but under such a flood legitimate Argon2id clients and
+password logins share the shed. Rotate config-managed and legacy clients to Hearth-generated
+secrets (*Regenerate secret* on the client's page in the admin console), after which their
+verification is one SHA-256, never touches the gate, and cannot be used this way. An unknown or
+public `client_id` presenting a secret costs one SHA-256.
+
+Treat client secrets like passwords:
+- If you must supply your own, generate at least 32 bytes of cryptographically random material.
 - Rotate them immediately if compromised (Hearth supports multiple active secrets per client
   for zero-downtime rotation).
 
@@ -496,7 +526,7 @@ on a production bind).
 
 | Config key | Default | Effect |
 |---|---|---|
-| `token_per_minute` | `200` | Requests/minute per `(realm, client)` pair |
+| `token_per_minute` | `200` | Requests/minute per `(realm, client)` pair at `/token`, `/as/par`, `/introspect`, `/revoke` and `/device_authorization` (and their realm twins), counted before the client is authenticated; `/as/par` counts against a separate bucket of the same size |
 
 Applies to token issuance, introspection, and device-authorization requests. Same zero-warning
 behaviour as `admin_per_minute`.

@@ -105,7 +105,7 @@ For server-side (5xx) errors, `error_code` is `null` — internal detail is neve
 |------|---------|
 | `HEARTH_DUPLICATE_EMAIL` | A user with this email already exists in the realm. |
 | `HEARTH_DUPLICATE_REALM_NAME` | A realm with this name already exists. |
-| `HEARTH_YAML_MANAGED_RESOURCE` | The resource is declared in `hearth.yaml` and cannot be deleted at runtime; the next startup would re-create it. Remove the declaration and restart. Returned as `409` over REST and `FAILED_PRECONDITION` over gRPC. |
+| `HEARTH_YAML_MANAGED_RESOURCE` | The resource is declared in `hearth.yaml`: it cannot be deleted at runtime (the next startup would re-create it), and an application's credentials and security profile (`jwks`, `assertion_public_key`, `profile`) cannot be changed at runtime (the next reload would undo the change — removing runtime-added keys from a secretless application would make it public). Change or remove the declaration and restart. Returned as `409` over REST and `FAILED_PRECONDITION` over gRPC. |
 
 ### Organizations
 

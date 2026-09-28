@@ -10,7 +10,7 @@ Every other identity provider is an application sitting on top of a generic data
 
 **Sub-millisecond p99 (engine plane) · One binary · Zero external dependencies**
 
-Token validation, session lookup, and permission checks run in-process against lock-free in-memory structures (`ArcSwap<HashMap>`) — no network hop, no cache round-trip, no database query on the hot path. Deploy as a single binary with one config file and a data directory. No Postgres to provision, no Redis to invalidate, no policy service to operate.
+Token validation, session lookup, and permission checks run in-process against lock-free in-memory structures (epoch-reclaimed `HashMap` snapshots) — no network hop, no cache round-trip, no database query on the hot path. Deploy as a single binary with one config file and a data directory. No Postgres to provision, no Redis to invalidate, no policy service to operate.
 
 > **Stable 1.6.10:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
 
@@ -111,7 +111,7 @@ docker run --rm --network=host ghcr.io/hearth-auth/hearth:v1.6.10 serve --dev
 curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 ```
 
-> **Mac / Windows Docker Desktop:** `--network=host` does not map to the host loopback on Docker Desktop. Use the Docker Compose stack (`deploy/docker-compose.yml`) for a cross-platform setup, or run from source (`cargo run -- serve --dev`).
+> **Mac / Windows Docker Desktop:** `--network=host` does not map to the host loopback on Docker Desktop. Use the Docker Compose stack (`deploy/docker-compose.yml`) for a cross-platform setup, or run from source (`cargo run --features dev-endpoints -- serve --dev`).
 
 ### Helm OCI chart (signed)
 
@@ -139,7 +139,7 @@ For signature and SLSA provenance verification of binaries, see [docs/guides/ver
 ## Try it in 30 seconds
 
 ```bash
-cargo build --release
+cargo build --release --features dev-endpoints   # bootstrap is opt-in, never in a default build
 ./target/release/hearth serve --dev          # in-memory store, binds 127.0.0.1:8420
 curl -fsS http://127.0.0.1:8420/readyz       # → {"status":"ready","storage":"ok"}
 curl -X POST http://127.0.0.1:8420/admin/bootstrap | jq .
@@ -213,7 +213,7 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 
 **Multi-tenancy**
 - Realm-isolated keyspace (every key prefixed with `RealmId`)
-- Per-realm Ed25519 signing keys with JWKS rotation
+- Per-realm Ed25519 signing keys with JWKS rotation (plus an RSA key for RS256 ID tokens, created only for clients that request `id_token_signed_response_alg: RS256`)
 - Cascading deletion across users, sessions, credentials, OAuth clients, role assignments, device codes, signing keys
 
 **Protocols**
@@ -337,6 +337,12 @@ The Rust suite, the seven SDK suites and the SDK conformance check are all in th
 cargo build --release
 # Binary: target/release/hearth
 ```
+
+That is a production build. The dev-only surface — `POST /admin/bootstrap`, the `/dev/seed-*`
+routes and the hard-coded dev admin password — is behind the `dev-endpoints` cargo feature,
+which is **not** on by default. To use the bootstrap flow below, build with
+`cargo build --release --features dev-endpoints` (or just run `make dev`). `serve --dev` on a
+featureless binary still starts, and logs that bootstrap is unavailable.
 
 ### 2. Run in dev mode
 
@@ -515,7 +521,7 @@ Secrets are supplied through the environment rather than the YAML file so they n
 | `HEARTH_MASTER_KEY` | **Required in production** | 64 lowercase hex chars (32 bytes) | `openssl rand -hex 32` | Host key that encrypts every realm's Key Encryption Key (KEK) at rest. Optional only if a persisted `${data_dir}/hearth.host_key` file already exists; on a **fresh production start with no file, startup aborts** with `HEARTH_MASTER_KEY is not set and auto-generation is disabled in production mode` (auto-generation happens only under `--dev`). `hearth config validate` does not check for it. |
 | `HEARTH_PREVIOUS_MASTER_KEY` | Rotation only | 64 lowercase hex chars (32 bytes) | *(the prior key)* | The previous `HEARTH_MASTER_KEY` value, set **only during a master-key rotation** so the existing KEKs in `hearth.keys` can be re-encrypted under the new key. Remove it once the next clean start succeeds. |
 | `HEARTH_KEK` | Optional | 64 lowercase hex chars (32 bytes / AES-256) | `openssl rand -hex 32` | Storage key-encryption key; overrides `security.key_encryption_key`. Must not be the all-zero key. |
-| `HEARTH_SMS_OTP_HMAC_KEY` | Only with real SMS | ≥ 32 bytes | `openssl rand -base64 32` | Cryptographically binds SMS OTP codes to the server. Required **only when `sms.transport` is a real transport** (`twilio`, `awssns`). Under the `log` transport (dev or production) it is optional and a deterministic dev key is substituted. |
+| `HEARTH_SMS_OTP_HMAC_KEY` | Only with real SMS | ≥ 32 bytes | `openssl rand -base64 32` | Cryptographically binds SMS OTP codes to the server. Required **only when `sms.transport` is a real transport** (`twilio`, `awssns`). There is no fallback key: under `--dev` with no key a random per-process key is generated; outside `--dev` with no key, SMS OTP fails closed (no code is issued, and a user whose second factor is SMS cannot finish logging in). Outside `--dev`, `sms` MFA cannot be enabled at all while `sms.transport` is `log`. When set, it also seeds the email OTP key; otherwise email OTP codes are keyed from a random per-process secret. |
 | `HEARTH_TURNSTILE_SECRET_KEY` | With Turnstile | Cloudflare secret string | *(Cloudflare dashboard)* | Cloudflare Turnstile secret; overrides `abuse.captcha.turnstile.secret_key`. When Turnstile is enabled and this is unset, every challenge is rejected. |
 | `HEARTH_REALM_<REALM>_FINGERPRINT_HMAC_SECRET` | Per configured realm | ≥ 32 bytes | `openssl rand -base64 32` | Per-realm device-fingerprint HMAC secret. `<REALM>` is the SCREAMING_SNAKE_CASE realm name (e.g. `HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET`). See [security hardening](docs/guides/security-hardening.md). |
 | `HEARTH_DEV_DATA_DIR` | Dev only | filesystem path | — | Overrides the data directory used under `--dev` (env > config `storage.data_dir` > temp dir). Ignored outside dev mode. |
@@ -602,9 +608,9 @@ For the full token list and design rationale see [`docs/specs/THEME.md`](docs/sp
 Run directly with Cargo — no Docker required:
 
 ```bash
-make dev          # cargo run -- serve --dev
+make dev          # cargo run --features dev-endpoints -- serve --dev
 # or
-cargo run -- serve --dev
+cargo run --features dev-endpoints -- serve --dev
 ```
 
 `--dev` binds to `http://127.0.0.1:8420` and auto-enables the built-in **mailcatcher** email transport. `make dev` keeps its store in `./data/dev`, so data survives restarts; `make dev-reset` wipes it. Every outbound email (verification links, password resets, setup notifications) is captured in-process and visible in a browser UI at **http://127.0.0.1:8420/dev/mail** — no external mail server or Docker needed.
@@ -637,11 +643,15 @@ hearth migrate rotate-pepper --data-dir <path> [--summary-only]
 hearth config validate [<path>]            # defaults to ./hearth.yaml
 hearth config example [-o <path>]          # print an annotated hearth.yaml
 hearth config reload [--url <url>] [--pid-file <path>]   # hot reload: POST, or SIGHUP via PID file
-hearth backup create  [-o <archive>] [--realm <name|uuid>] [--include-audit] [--encrypt] [--data-dir <path>] [--config <hearth.yaml>]
+hearth backup create  [-o <archive>] [--realm <name|uuid>] [--include-audit] [--encrypt] [--sign-key <key.pem>]
+                      [--data-dir <path>] [--config <hearth.yaml>]
 hearth backup restore -i <archive> [--realm <slug>] [--mode skip|overwrite|merge] [--dry-run]
-                      [--allow-missing-signing-key] [--data-dir <path>]
+                      [--allow-missing-signing-key] [--verify-key <base64url>] [--allow-unsigned]
+                      [--data-dir <path>] [--config <hearth.yaml>]
 hearth backup verify  -i <archive>
 hearth backup inspect -i <archive>
+hearth backup sign    -i <archive> --key-file <key.pem> [-o <archive>]
+hearth backup keygen  -o <key.pem>
 hearth rbac orphans list  [--realm <name|uuid>] [--data-dir <path>]
 hearth rbac orphans purge [--realm <name|uuid>] [--data-dir <path>] [--dry-run]
 hearth completions <bash|elvish|fish|powershell|zsh>
@@ -667,7 +677,7 @@ Time to first token: under 30 minutes from a clean clone.
 
 ```bash
 make dev
-# or: cargo run -- serve --dev
+# or: cargo run --features dev-endpoints -- serve --dev
 ```
 
 Binds to `http://127.0.0.1:8420` with in-memory storage.

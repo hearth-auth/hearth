@@ -83,6 +83,47 @@ fn make_email_service(sender: Arc<CapturingEmailSender>) -> hearth::identity::Em
 }
 
 // ---------------------------------------------------------------------------
+// A code proves possession of the address it was sent to, and no other
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn email_otp_does_not_verify_for_a_different_address() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("email-otp-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm");
+    let sender = CapturingEmailSender::new();
+    let svc = make_email_service(sender.clone());
+    let now = now_unix_ts();
+
+    let nonce = harness
+        .identity()
+        .issue_email_otp(realm.id(), "mallory@example.com", HMAC_KEY, &svc, None, now)
+        .expect("issue_email_otp");
+    let code = sender.last_otp_code().expect("code");
+
+    let err = harness
+        .identity()
+        .verify_email_otp(
+            realm.id(),
+            &nonce,
+            "victim@example.com",
+            &code,
+            HMAC_KEY,
+            now,
+        )
+        .expect_err("a code mailed to mallory must not verify for victim");
+    assert!(
+        matches!(err, hearth::identity::IdentityError::InvalidEmailOtp),
+        "expected InvalidEmailOtp, got {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // AC-1: issue_email_otp → verify_email_otp round-trip succeeds
 // ---------------------------------------------------------------------------
 
@@ -119,7 +160,14 @@ async fn email_otp_issue_verify_round_trip() {
 
     harness
         .identity()
-        .verify_email_otp(realm.id(), &nonce, &code, HMAC_KEY, now)
+        .verify_email_otp(
+            realm.id(),
+            &nonce,
+            "alice@example.com",
+            &code,
+            HMAC_KEY,
+            now,
+        )
         .expect("verify_email_otp with correct code must succeed");
 }
 
@@ -152,7 +200,7 @@ async fn email_otp_wrong_code_returns_invalid() {
 
     let err = harness
         .identity()
-        .verify_email_otp(realm.id(), &nonce, wrong, HMAC_KEY, now)
+        .verify_email_otp(realm.id(), &nonce, "bob@example.com", wrong, HMAC_KEY, now)
         .expect_err("wrong code must fail");
 
     assert!(
@@ -200,7 +248,14 @@ async fn email_otp_expired_returns_invalid() {
 
     let err = harness
         .identity()
-        .verify_email_otp(realm.id(), &nonce, &code, HMAC_KEY, verify_ts)
+        .verify_email_otp(
+            realm.id(),
+            &nonce,
+            "carol@example.com",
+            &code,
+            HMAC_KEY,
+            verify_ts,
+        )
         .expect_err("expired OTP must fail");
 
     assert!(
@@ -238,13 +293,13 @@ async fn email_otp_replay_fails() {
     // First verify succeeds.
     harness
         .identity()
-        .verify_email_otp(realm.id(), &nonce, &code, HMAC_KEY, now)
+        .verify_email_otp(realm.id(), &nonce, "dave@example.com", &code, HMAC_KEY, now)
         .expect("first verify must succeed");
 
     // Second verify with same nonce+code must fail (record deleted on success).
     let err = harness
         .identity()
-        .verify_email_otp(realm.id(), &nonce, &code, HMAC_KEY, now)
+        .verify_email_otp(realm.id(), &nonce, "dave@example.com", &code, HMAC_KEY, now)
         .expect_err("replay must fail");
 
     assert!(
@@ -286,15 +341,20 @@ async fn email_otp_attempt_exhaustion_returns_invalid() {
 
     // Exhaust all 5 attempts with wrong codes.
     for _ in 0..5 {
-        let _ = harness
-            .identity()
-            .verify_email_otp(realm.id(), &nonce, &wrong, HMAC_KEY, now);
+        let _ = harness.identity().verify_email_otp(
+            realm.id(),
+            &nonce,
+            "eve@example.com",
+            &wrong,
+            HMAC_KEY,
+            now,
+        );
     }
 
     // A subsequent attempt (even with the correct code) must fail.
     let err = harness
         .identity()
-        .verify_email_otp(realm.id(), &nonce, &code, HMAC_KEY, now)
+        .verify_email_otp(realm.id(), &nonce, "eve@example.com", &code, HMAC_KEY, now)
         .expect_err("exhausted OTP must fail even with correct code");
 
     assert!(
@@ -343,7 +403,14 @@ async fn email_otp_realm_expiry_override() {
     // 61 seconds past issue time — expired under the realm override.
     let err = harness
         .identity()
-        .verify_email_otp(realm.id(), &nonce, &code, HMAC_KEY, issue_ts + 61)
+        .verify_email_otp(
+            realm.id(),
+            &nonce,
+            "frank@example.com",
+            &code,
+            HMAC_KEY,
+            issue_ts + 61,
+        )
         .expect_err("OTP must expire after realm-configured 60 s");
 
     assert!(
@@ -435,7 +502,7 @@ async fn user_email_otp_enabled_starts_false_and_set_on_enrollment() {
         .expect("CapturingEmailSender must have received the code");
     harness
         .identity()
-        .verify_email_otp(realm.id(), &nonce, &code, HMAC_KEY, now)
+        .verify_email_otp(realm.id(), &nonce, user.email(), &code, HMAC_KEY, now)
         .expect("verify_email_otp must succeed with the correct code");
 
     // Step 3: set the flag (the web layer's final enrollment step).

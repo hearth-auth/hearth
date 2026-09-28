@@ -156,6 +156,8 @@ if (!claims.hasPermission("docs.edit")) {
 
 The JWT carries only identity claims (`sub`, `tid`, etc.). Resource servers call `POST /realms/{realm}/introspect` with the bearer token to get the live RBAC claim set.
 
+The resource server must authenticate as a **confidential client** — `client_secret_basic`, `client_secret_post`, or `private_key_jwt`. Hearth refuses a public client (one registered without a secret) with `401 invalid_client`, because a `client_id` on its own is public information. Every SDK below therefore takes a client secret for introspection.
+
 **Introspection call:**
 
 <Tabs groupId="lang">
@@ -181,7 +183,11 @@ if (!result.permissions?.includes('docs.edit')) return res.status(403).end();
 ```go
 import hearth "github.com/hearth-auth/hearth/sdks/go/hearth"
 
-result, err := client.Introspect(ctx, accessToken)
+result, err := client.Introspect(ctx, hearth.IntrospectRequest{
+    Token:        accessToken,
+    ClientID:     "<resource-server-client-id>",
+    ClientSecret: os.Getenv("HEARTH_CLIENT_SECRET"),
+})
 if err != nil || !result.Active {
     http.Error(w, "Unauthorized", http.StatusUnauthorized)
     return
@@ -228,7 +234,9 @@ if (!in_array('docs.edit', $result->permissions ?? [], strict: true)) {
 <TabItem value="rust" label="Rust">
 
 ```rust
-let result = client.introspect(&access_token).await?;
+let result = client
+    .introspect(&access_token, "<resource-server-client-id>", &client_secret)
+    .await?;
 if !result.active {
     return StatusCode::UNAUTHORIZED.into_response();
 }

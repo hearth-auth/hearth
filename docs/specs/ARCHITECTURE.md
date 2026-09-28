@@ -110,6 +110,7 @@ Authorization decisions are NOT on the hot path. Permissions are resolved at tok
 Hot path code MUST obey all of the following:
 
 1. **Zero heap allocations.** MUST NOT call `Box::new`, `Vec::new`, `String::from`, `format!()`, `to_string()`, or any other allocating operation in the steady state. Pre-allocated buffers and arena allocators are the alternatives.
+   - The one sanctioned exception is the bookkeeping of the epoch collector that rule 3 requires. A read through `core::EpochCell` pins its thread in the cells' `crossbeam-epoch` collector, and every 128th pin on a thread runs a slice of that collector's pending work, which allocates at most once per 1,024 loads on the thread — and only while there is collector work pending, which `EpochCell` writes (and threads that used a cell exiting) produce; with neither, a warm load allocates nothing. The cells have a collector of their own, so no other code's deferred work (such as `crossbeam-skiplist`'s node frees) runs in, or allocates in, a hot-path read. `src/core/epoch_cell.rs` explains the mechanism and `tests/epoch_cell_hot_path.rs` gates both bounds, measuring the second with a writer running. Hot-path code MUST NOT add any other allocation, amortised or not.
 2. **No syscalls for reads.** Hot-tier reads MUST be satisfied from memory-mapped structures or in-process data. No `read()`, `pread()`, or file I/O.
 3. **No locks on the read path.** Readers MUST NOT acquire mutexes, `RwLock` write locks, or any blocking synchronization primitive. Epoch-based reclamation (e.g., `crossbeam-epoch`) or read-copy-update patterns are required.
 4. **No yielding.** Hot path async functions MUST NOT `.await` on I/O operations. They complete synchronously within the async context.
@@ -121,6 +122,8 @@ Hot path code MUST obey all of the following:
 - Write path code (WAL append, memtable insert) is NOT hot path and has different constraints (see [Section 6.1](#61-write-path-invariants)).
 - RBAC resolution (role/group/assignment traversal during `resolve_permissions`) is NOT hot path — it runs at token issuance. Its performance budget is enforced by benchmarks, not by allocation rules.
 - Cold path reads MUST NOT degrade hot path performance. Cold-tier promotion MUST NOT lock or invalidate hot-tier data structures.
+- Control-cache reloads are NOT hot path. The revoked-JTI blocklist, the DPoP blocklist and realm statuses are rebuilt from storage when the replicated control epoch moves (a control asserted on another node). The rebuild runs on a dedicated reloader thread (`src/identity/engine/control.rs`); the validation path only compares the epoch — at most one debounced storage read per `EPOCH_SYNC_INTERVAL_MICROS` — and, when it moved, signals that thread with an atomic store and an `unpark`. In cluster mode the replicated epoch row signals it from the Raft observer. Control writers and the reloader order their cache changes under a lock that covers in-memory work only and that validation MUST NOT take. The reloader holds a reload back (at most 100 ms) while the node's own control bumps are in flight, so a node — a cluster leader whose observer sees its own bump first — does not reload for a control it applied itself. The consequence is bounded staleness on the nodes that did not serve the control, never a blocked validation. The epoch is bumped with one Raft `IncrementU64` command whose successor the state machine computes at apply time. That command MUST count at most once per log entry. The state machine persists its applied index with every entry (§16.1), so a restart does not re-apply entries — but a node installing a snapshot re-applies every entry after the snapshot's declared index, and the snapshot's data may already hold their effects (it is scanned while the leader keeps applying). So the counter carries a sidecar row with the index of the last entry that moved it, written in the same atomic batch; an entry at or below it has already been counted and changes nothing; and any other command that writes a counter key (a `Put` from an older binary) moves the sidecar to its own index in the same batch, so the increments after it apply again and the counter converges. Every other Raft command converges when applied twice. A counter or sidecar row that does not decode is repaired, identically on every node, to the incrementing entry's log index (above every value ever handed out) rather than refused, and a bump that cannot be persisted MUST be alertable and MUST NOT be forgotten: it is logged at `ERROR`, counted in `hearth_control_epoch_bump_failures_total`, and recorded as owed; a dedicated bump thread — never the reloader, which must keep reloading while a retry blocks for up to `write_timeout` — retries the owed bump with bounded backoff until it succeeds (one extra bump only costs other nodes a reload), exporting the owed count as `hearth_control_epoch_bumps_owed` (summed over the process's engines). Cluster storage does not forward a follower's writes, so a bump lost to a leader change can never be made by the node that owes it: a node that becomes leader MUST bump the epoch once (every row committed under an earlier leader precedes that bump in its log, so every node, the new leader included, reloads), and a node whose owed bump is refused as `NotLeader` drops it. The control still binds on the serving node meanwhile. A bump is not folded into the control row's own Raft proposal: the rows are plain batches and the increment is its own command, and the retry closes the window without a new command. A snapshot install can still lower a node's persisted epoch; the reload that follows it re-bases the node's epoch bookkeeping on the value it reads, so later controls bind.
+- Raft observers (`ReplicatedWriteObserver`) run on the state machine's apply path on every node, the leader included. They MUST NOT write to storage: a write is a Raft proposal, and a proposal made from inside an apply waits for that apply.
 
 ### 3.4 Benchmark Enforcement
 
@@ -308,7 +311,7 @@ Hearth's internal hot path validates tokens via **session lookup**, not signatur
 
 **Signing:**
 
-- Token signing MUST use asymmetric algorithms only. **Ed25519 (EdDSA)** is the primary signing algorithm. RS256 and ES256 MAY be supported for ecosystem compatibility.
+- Token signing MUST use asymmetric algorithms only. **Ed25519 (EdDSA)** signs everything Hearth issues and validates. The one exception is RS256 for the **ID tokens** of a client that registered `id_token_signed_response_alg: RS256` (OIDC Core §15.1 interop; see [OIDC.md §1.2](OIDC.md#12-signing)). RS256 MUST NOT be accepted by any path that validates an access, refresh, logout or required-action token.
 - Symmetric signing algorithms (HS256, HS384, HS512) MUST NOT be supported. This eliminates the class of vulnerabilities where a verification key can forge tokens.
 - `alg: none` MUST be rejected unconditionally.
 - Hearth MUST manage its own signing key lifecycle: generation, rotation, and JWKS endpoint for external consumers. Operators MUST NOT need to manually generate or distribute keys in the default configuration.
@@ -368,18 +371,23 @@ Each layer validates what it is responsible for. **Each layer MUST validate its 
 ### 9.1 Shared State
 
 - Global mutable state is prohibited. All shared state MUST be passed explicitly via function parameters or held in typed state containers (e.g., `Arc<AppState>`).
-- Read-heavy shared data MUST use lock-free structures (`crossbeam-epoch`, `arc-swap`). `RwLock` is a fallback when lock-free is impractical.
+- Read-heavy shared data MUST use lock-free structures: `core::EpochCell` (built on `crossbeam-epoch`) on the hot path. `RwLock` (`core::SwapCell`) is a fallback when lock-free is impractical, and is not permitted on the hot path.
+- `arc-swap` MUST NOT be used: 1.9.2 corrupts the heap under the `load` + `rcu` pattern and no release fixes it (tasks 26.1 and 26.5, `reports/arc-swap-use-after-free-2026-09-21.md`). `deny.toml` bans it.
 - `Mutex` MUST NOT be held across `.await` points. Use `tokio::sync::Mutex` only when necessary, with a comment explaining why.
 
 ### 9.2 Unsafe Code
 
-`unsafe` MUST be minimized and isolated. Hearth leans on well-audited crates (`memmap2`, `crossbeam-epoch`, `arc-swap`) for operations that would otherwise require custom `unsafe` code.
+`unsafe` MUST be minimized and isolated. Hearth leans on well-audited crates (`memmap2`, `crossbeam-epoch`) for operations that would otherwise require custom `unsafe` code.
 
 - Every `unsafe` block MUST have a `// SAFETY:` comment explaining why the operation is sound.
 - `unsafe` MUST NOT appear in the protocol or identity layers. It is permitted only in:
   - Storage engine (memory-mapped I/O, pointer arithmetic for data structures) — only if crate abstractions prove insufficient via profiling
+  - `src/core/epoch_cell.rs` — the `Arc` raw-pointer round trip and pinned dereference behind `EpochCell`, the hot path's epoch-reclaimed atomic `Arc` (task 26.5). The grace period itself is `crossbeam-epoch`'s; the cell adds four small blocks, each with its `// SAFETY:` argument
   - Performance-critical data structures in the RBAC engine (if profiling shows crate abstractions are insufficient; this is unlikely given RBAC runs off the hot path)
 - All `unsafe` code MUST be covered by Miri tests where feasible, and by address sanitizer runs in CI.
+  - Hearth cannot be built for Miri (`ring`, `aws-lc-sys` and `zstd-sys` are C), so `unsafe-check/` compiles each source file that holds `unsafe` on its own, with its unit tests, against the dependency releases Hearth ships. `make miri` runs those tests under Miri (Tree Borrows, several scheduler seeds) and `make asan` under AddressSanitizer; CI runs both in the `unsafe-code` job, on the nightly `unsafe-check/rust-toolchain.toml` pins.
+  - The cells built on `EpochCell` (hot tier, block cache, memtable, identity caches) run their concurrency tests under glibc heap checking: `make heap-check`, a step of CI's `quality` job.
+  - `tests/unsafe_check_harness.rs` fails when a file in `src/` gains `unsafe` that `unsafe-check/` does not compile, unless the file is listed there with the reason Miri cannot run it. The one such file is `src/storage/fs.rs`, whose `memmap2::Mmap::map` call Miri cannot model; its soundness rests on the data directory's files not being truncated under a mapping.
 - New `unsafe` blocks require explicit reviewer approval.
 
 ---
@@ -552,7 +560,7 @@ These crates are pre-approved and need no additional justification:
 | gRPC | `tonic` | `tower`-compatible |
 | Logging | `tracing`, `tracing-subscriber` | Structured, async-aware |
 | CLI | `clap` | Derive-based |
-| Lock-free concurrency | `crossbeam-epoch`, `arc-swap` | |
+| Lock-free concurrency | `crossbeam-epoch` (via `core::EpochCell`) | `arc-swap` is banned — see §9.1 |
 | Memory-mapped I/O | `memmap2` | |
 | Raft consensus | `openraft` | Implemented — `src/cluster/`; gated on `cluster:` config; **EXPERIMENTAL in 1.x — not production-supported.** Known defects: C-5 (no follower cache invalidation), C-6 (immutable membership), H-3 (follower writes return HTTP 500). |
 | HTTP framework | `axum` | `tower`-compatible |
@@ -588,6 +596,8 @@ These crates are pre-approved and need no additional justification:
 The cluster layer MUST use `openraft` for Raft consensus. A custom Raft implementation MUST NOT be written — Raft is a well-specified but notoriously subtle protocol, and `openraft` is battle-tested with existing production users.
 
 Hearth provides the `RaftLogStorage` and `RaftStateMachine` trait implementations, giving full control over the storage and application layer while relying on `openraft` for leader election, log replication, and membership management.
+
+The state machine MUST persist its applied state. openraft 0.9 recovers a restarting node by re-applying the log from the state machine's reported applied index; a state machine that reports none is re-fed the log from index 0, which the log no longer holds once a snapshot let it be purged (with the default policy, after about 5,000 entries), and the node cannot restart. So every applied entry writes an applied-state row (`\0raft:sm:applied`, its `LogId`) in the SAME atomic storage batch as its effect — in the command's realm for a data entry, in the nil-UUID meta realm for blank and membership entries (with the stored membership, `\0raft:sm:membership`) — and a snapshot install writes the snapshot's applied state inside its restore window. On open, the greatest applied-state row across realms is the applied index: entries apply in order, each durable before the next, so every entry at or below it is durable and none above it. These rows are node-local and are excluded from snapshots. A data directory written by a release that did not persist them, over a purged log, is refused at startup with re-seed instructions.
 
 ### 16.2 Single-Node Mode
 
@@ -671,7 +681,7 @@ Key architectural decisions codified in this document, with rationale:
 | Storage | Custom embedded engine | Purpose-built for identity access patterns, no external dependencies |
 | Authorization model | Claims-based RBAC (roles, groups, permissions embedded in JWT) | Matches industry convention (Auth0/Clerk/Keycloak/Okta). Synchronous client checks with zero network cost. Resource-specific authz lives in the application layer; teams needing graph-shaped ACLs pair Hearth with a dedicated authz service (SpiceDB, OpenFGA). |
 | Token validation (hot path) | Session lookup, not signature re-verification | Sub-microsecond vs 5-50μs, instant revocation, smaller key exposure surface |
-| Signing algorithm | Ed25519 (asymmetric only) | No HS256 eliminates token forgery from compromised verification keys |
+| Signing algorithm | Ed25519 (asymmetric only); RS256 for ID tokens a client opts into | No HS256 eliminates token forgery from compromised verification keys; RS256 ID tokens are mandatory for OpenID certification and are never accepted as access tokens |
 | Password hashing | Argon2id, OWASP parameters | Security over latency — hashing is off the hot path |
 | Multi-tenancy | Logical isolation, type-enforced | Cross-realm users are inherent to identity systems; physical isolation makes this painful |
 | Cluster consensus | `openraft` | Proven library, not custom — Raft is subtle and `openraft` is battle-tested |
@@ -680,7 +690,7 @@ Key architectural decisions codified in this document, with rationale:
 | API contracts | Protobuf (`.proto` files) | Single source of truth for REST, gRPC, events, and SDK codegen |
 | Audit trail | WAL-derived, async materialization | Zero write-path overhead; WAL is the durable record, audit store is a materialized view |
 | Embedded mode | Not supported | FFI tax unjustified without proven demand; sync core makes future addition feasible |
-| Unsafe code | Lean on crates | `memmap2`, `crossbeam-epoch`, `arc-swap` over custom `unsafe`. Matches Hearth's "leverage ecosystem" philosophy |
+| Unsafe code | Lean on crates | `memmap2`, `crossbeam-epoch` over custom `unsafe`. Matches Hearth's "leverage ecosystem" philosophy |
 | TDD | Strict, test-first | Database + security = zero tolerance for "I think this works." Tests define correctness before implementation. |
 | Compatibility | **Strict SemVer, in force now** | 1.0 GA shipped 2026-06-21 (`git tag v1.0.0`; CHANGELOG `[1.0.0]`), so the rules in [`VERSIONING.md`](../../VERSIONING.md) — per-surface breaking-change definitions, the support window, the deprecation policy and the 2.0 process — are **normative today**, not aspirational. The earlier "pre-1.0-GA: breaking changes permitted" entry in this row outlived the release that ended it and is withdrawn. |
 | Encryption at rest mechanism | Envelope encryption (AES-256-GCM) | Key rotation is O(DEKs) not O(data). Industry standard (AWS KMS, GCP KMS). |

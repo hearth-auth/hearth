@@ -148,6 +148,12 @@ pub(crate) struct ChainHead {
     mac: String,
 }
 
+/// Events an audit import writes per atomic chunk. The realm's chain lock is
+/// held for one chunk's hash-chain work and WAL enqueue at a time — never
+/// across a chunk's fsync, nor across the whole import — so a live audit
+/// write waits at most for one chunk, however large the archive.
+pub(crate) const IMPORT_CHUNK: usize = 512;
+
 /// Embedded audit engine backed by the storage layer.
 ///
 /// Thread-safe via the underlying `StorageEngine`. Hash-chain correctness
@@ -169,6 +175,10 @@ pub struct EmbeddedAuditEngine {
     /// with an optional cached [`ChainHead`] to avoid re-reading the persisted
     /// head (and the `O(n)` scan) on every append after the first.
     chain_locks: Mutex<HashMap<RealmId, Arc<Mutex<Option<ChainHead>>>>>,
+    /// Per-realm serialization of audit imports (backup restores), so two
+    /// imports of one realm never interleave their chunks. Contended only by
+    /// another import: live appends never take it.
+    import_locks: Mutex<HashMap<RealmId, Arc<Mutex<()>>>>,
     /// Optional key-encryption key; when set, per-realm HMAC keys are
     /// AES-256-GCM-wrapped at rest.
     kek: Option<[u8; 32]>,
@@ -184,6 +194,7 @@ impl EmbeddedAuditEngine {
             storage,
             clock,
             chain_locks: Mutex::new(HashMap::new()),
+            import_locks: Mutex::new(HashMap::new()),
             kek: None,
             hmac_key_cache: Mutex::new(HashMap::new()),
         }
@@ -343,6 +354,18 @@ impl EmbeddedAuditEngine {
         }
     }
 
+    /// Returns the per-realm import lock, creating it on first access.
+    fn realm_import_lock(&self, realm_id: &RealmId) -> Arc<Mutex<()>> {
+        let mut map = self
+            .import_locks
+            .lock()
+            .expect("import_locks mutex poisoned");
+        Arc::clone(
+            map.entry(realm_id.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
     /// Computes the HMAC-SHA256 integrity hash for an event.
     ///
     /// `Hash = HMAC-SHA256(realm_hmac_key, prev_hash || event_data_json)`
@@ -492,6 +515,27 @@ impl EmbeddedAuditEngine {
             count,
             count,
         ))
+    }
+
+    /// The ids of every event `realm_id` holds, and the newest timestamp
+    /// among them — what [`AuditEngine::import_events`] dedupes against and
+    /// the floor for events it re-stamps.
+    fn held_event_ids(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<(std::collections::HashSet<AuditEventId>, Option<Timestamp>), AuditError> {
+        let prefix = keys::event_scan_prefix();
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &keys::prefix_end(&prefix))?;
+        let mut known = std::collections::HashSet::with_capacity(entries.len());
+        let mut newest: Option<Timestamp> = None;
+        for entry in &entries {
+            let event = decode_event(&entry.value)?;
+            newest = newest.max(Some(event.timestamp));
+            known.insert(event.id);
+        }
+        Ok((known, newest))
     }
 
     /// Plans a prune of a chronological prefix of events.
@@ -761,80 +805,159 @@ impl AuditEngine for EmbeddedAuditEngine {
         }))
     }
 
-    fn import_event(&self, source: &AuditEvent) -> Result<(), AuditError> {
-        // Mirrors `with_pending_append`'s chain read-modify-write but preserves
-        // the source event's identity, timestamp, and content — only the
-        // integrity hash and chain head are (re)computed under this realm's HMAC
-        // key. See the extensive comments in `with_pending_append` for why the
-        // chain lock covers the RMW + enqueue but not the fsync wait.
-        let realm_id = source.realm_id.clone();
-        let chain_lock = self.realm_chain_lock(&realm_id);
-        let chain_lock_for_rollback = Arc::clone(&chain_lock);
-
-        let durable_handle = {
-            let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
-            let hmac_key = self.get_realm_hmac_key(&realm_id)?;
-            let head = match cached.as_ref() {
-                Some(h) => h.clone(),
-                None => self.load_or_init_head(&realm_id, &hmac_key)?,
-            };
-            let prev_hash = head.last_hash.clone();
-            let seq = head.seq + 1;
-
-            let mut event = AuditEvent {
-                id: source.id.clone(),
-                realm_id: realm_id.clone(),
-                actor: source.actor.clone(),
-                action: source.action.clone(),
-                resource_type: source.resource_type.clone(),
-                resource_id: source.resource_id.clone(),
-                timestamp: source.timestamp,
-                metadata: source.metadata.clone(),
-                integrity_hash: String::new(),
-            };
-            event.integrity_hash = Self::compute_hmac_hash(&hmac_key, &prev_hash, &event);
-
-            let value = encode_event(&event)?;
-            let primary_key = keys::encode_event_key(event.timestamp, seq, &event.id);
-            let actor_key = keys::encode_actor_index(&event.actor, event.timestamp, &event.id);
-            let action_key =
-                keys::encode_action_index(event.action.as_str(), event.timestamp, &event.id);
-
-            let new_head = Self::signed_head(
-                &hmac_key,
-                head.anchor.clone(),
-                event.integrity_hash.clone(),
-                seq,
-                head.count + 1,
-            );
-            let head_value = Self::head_bytes(&new_head)?;
-            *cached = Some(new_head);
-
-            let audit_kvs = [
-                (primary_key.clone(), value),
-                (actor_key, primary_key.clone()),
-                (action_key, primary_key),
-                (keys::chain_head_key(), head_value),
-            ];
-
-            match self.storage.enqueue_batch(&realm_id, &audit_kvs) {
-                Ok(h) => h,
-                Err(e) => {
-                    *cached = None;
-                    return Err(AuditError::from(e));
-                }
-            }
-        };
-
-        let durable_result = self.storage.await_batch_durable(durable_handle);
-        if durable_result.is_err() {
-            let mut c = chain_lock_for_rollback
-                .lock()
-                .expect("realm chain lock poisoned");
-            *c = None;
+    #[allow(clippy::too_many_lines)] // one chunk loop: plan, enqueue, fsync, account
+    fn import_events(
+        &self,
+        realm_id: &RealmId,
+        events: &[AuditEvent],
+    ) -> Result<super::AuditImportOutcome, AuditError> {
+        // Mirrors `with_pending_append`'s chain read-modify-write, one CHUNK at
+        // a time. The realm's `std` chain lock is taken per chunk — for its
+        // hash-chain work and WAL enqueue only, never across its fsync nor
+        // across the whole import — because live audit writes take the same
+        // lock on Tokio workers: an import holding it for a multi-gigabyte
+        // archive pinned every worker that tried to audit this realm until
+        // the runtime froze, token validation for every realm included.
+        //
+        // Imports of one realm run one at a time (the import lock below is
+        // contended only by another import). Live appends between chunks mint
+        // fresh random event ids, so they can never duplicate an archived
+        // event: the dedupe set read before the first chunk stays exact.
+        let mut outcome = super::AuditImportOutcome::default();
+        if events.is_empty() {
+            return Ok(outcome);
         }
-        durable_result?;
-        Ok(())
+        let import_lock = self.realm_import_lock(realm_id);
+        let _import = import_lock.lock().expect("realm import lock poisoned");
+        let hmac_key = self.get_realm_hmac_key(realm_id)?;
+
+        // What the realm already holds — the ids (dedupe) and the newest
+        // timestamp (the floor for re-stamped events) — read BEFORE the chain
+        // lock: this scan decodes every event the realm has.
+        let (mut known, newest) = self.held_event_ids(realm_id)?;
+
+        // Original timestamps are kept only where they cannot reorder the
+        // chain: an empty chain, events in ascending time, none in the future
+        // (a later live append must sort after them), and no live append
+        // landing between two chunks. Once anything else is in the chain,
+        // events are stamped no earlier than the newest time it holds.
+        let now = self.clock.now();
+        let ascending = events.windows(2).all(|w| w[0].timestamp <= w[1].timestamp);
+        let in_past = events.iter().all(|e| e.timestamp <= now);
+        let mut restamp = !ascending || !in_past;
+        let mut stamp = newest.map_or(now, |n| n.max(now));
+
+        let chain_lock = self.realm_chain_lock(realm_id);
+        let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(IMPORT_CHUNK * 3 + 1);
+        // The sequence number our last chunk ended the chain on.
+        let mut our_seq: Option<u64> = None;
+        let mut anchored = false;
+        let mut next = 0usize;
+        while next < events.len() {
+            let end = (next + IMPORT_CHUNK).min(events.len());
+            let (head, written, handle) = {
+                let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
+                // Re-read the head every chunk: live appends may have moved it.
+                let mut head = match cached.as_ref() {
+                    Some(h) => h.clone(),
+                    None => self.load_or_init_head(realm_id, &hmac_key)?,
+                };
+                // The cached head counts appends still in flight, so the head —
+                // not the scan — says whether anything but this import is in
+                // the chain. Stamping under the lock orders these events after
+                // every append that took its time before them.
+                let interleaved = match our_seq {
+                    None => head.count > 0,
+                    Some(seq) => head.seq != seq,
+                };
+                if interleaved {
+                    restamp = true;
+                    stamp = stamp.max(self.clock.now());
+                }
+                let mut written = 0u64;
+                for source in &events[next..end] {
+                    if !known.insert(source.id.clone()) {
+                        outcome.duplicates += 1;
+                        continue;
+                    }
+                    let timestamp = if restamp { stamp } else { source.timestamp };
+                    let mut event = AuditEvent {
+                        id: source.id.clone(),
+                        realm_id: realm_id.clone(),
+                        actor: source.actor.clone(),
+                        action: source.action.clone(),
+                        resource_type: source.resource_type.clone(),
+                        resource_id: source.resource_id.clone(),
+                        timestamp,
+                        metadata: Some(restore_marked_metadata(
+                            source.metadata.as_ref(),
+                            source.timestamp,
+                        )),
+                        integrity_hash: String::new(),
+                    };
+                    event.integrity_hash =
+                        Self::compute_hmac_hash(&hmac_key, &head.last_hash, &event);
+                    let seq = head.seq + 1;
+                    let primary_key = keys::encode_event_key(event.timestamp, seq, &event.id);
+                    batch.push((primary_key.clone(), encode_event(&event)?));
+                    batch.push((
+                        keys::encode_actor_index(&event.actor, event.timestamp, &event.id),
+                        primary_key.clone(),
+                    ));
+                    batch.push((
+                        keys::encode_action_index(
+                            event.action.as_str(),
+                            event.timestamp,
+                            &event.id,
+                        ),
+                        primary_key,
+                    ));
+                    head = Self::signed_head(
+                        &hmac_key,
+                        head.anchor.clone(),
+                        event.integrity_hash,
+                        seq,
+                        head.count + 1,
+                    );
+                    written += 1;
+                }
+                next = end;
+                if written == 0 {
+                    continue;
+                }
+                // Enqueued under the lock, so the WAL holds the chunk in chain
+                // order; the head is advanced optimistically, exactly as an
+                // append does, so a live write chains on it while we fsync.
+                batch.push((keys::chain_head_key(), Self::head_bytes(&head)?));
+                let enqueued = self.storage.enqueue_batch(realm_id, &batch);
+                batch.clear();
+                let handle = match enqueued {
+                    Ok(h) => h,
+                    Err(e) => {
+                        *cached = None;
+                        return Err(AuditError::from(e));
+                    }
+                };
+                *cached = Some(head.clone());
+                (head, written, handle)
+            };
+            // The chain lock is released: live appends proceed during the fsync.
+            if let Err(e) = self.storage.await_batch_durable(handle) {
+                *chain_lock.lock().expect("realm chain lock poisoned") = None;
+                return Err(AuditError::from(e));
+            }
+            our_seq = Some(head.seq);
+            outcome.imported += written;
+            // The first durable chunk starts (or extends) a chain: record the
+            // anchor now, not after the last chunk, so a later chunk's failure
+            // cannot leave written history without it.
+            if !anchored {
+                Self::record_chain_anchor(self.storage.as_ref(), realm_id);
+                anchored = true;
+            }
+        }
+        outcome.restamped = restamp;
+        Ok(outcome)
     }
 
     fn query(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, AuditError> {
@@ -989,7 +1112,7 @@ impl AuditEngine for EmbeddedAuditEngine {
             };
 
             let expected_hash = Self::compute_hmac_hash(&hmac_key, &prev_hash, &event);
-            if event.integrity_hash != expected_hash {
+            if !integrity_tag_matches(&event.integrity_hash, &expected_hash) {
                 crate::metrics::metrics()
                     .audit_integrity_failures_total
                     .inc();
@@ -1005,7 +1128,7 @@ impl AuditEngine for EmbeddedAuditEngine {
         // the event count and final hash will no longer match the head.
         if full_range {
             if let Some(head) = head {
-                if count != head.count || prev_hash != head.last_hash {
+                if count != head.count || !integrity_tag_matches(&prev_hash, &head.last_hash) {
                     crate::metrics::metrics()
                         .audit_integrity_failures_total
                         .inc();
@@ -1266,6 +1389,37 @@ impl EmbeddedAuditEngine {
     }
 }
 
+/// Compares a stored HMAC chain tag with the recomputed one in constant time.
+///
+/// Length-blind via [`crate::core::ct_eq_secret_str`]; a plain `!=` returns at
+/// the first differing byte, which is a MAC-forgery oracle wherever the
+/// verdict is observable.
+fn integrity_tag_matches(stored: &str, expected: &str) -> bool {
+    crate::core::ct_eq_secret_str(stored, expected)
+}
+
+/// The metadata key marking an event a backup restore imported.
+const RESTORE_MARKER: &str = "backup_restore";
+
+/// `metadata` with the [`RESTORE_MARKER`] entry added, recording the event's
+/// original timestamp. An object gains the key; any other value is kept
+/// under `original_metadata`.
+fn restore_marked_metadata(
+    metadata: Option<&serde_json::Value>,
+    original_timestamp: Timestamp,
+) -> serde_json::Value {
+    let marker = serde_json::json!({ "original_timestamp": original_timestamp });
+    match metadata {
+        Some(serde_json::Value::Object(map)) => {
+            let mut map = map.clone();
+            map.insert(RESTORE_MARKER.to_string(), marker);
+            serde_json::Value::Object(map)
+        }
+        None | Some(serde_json::Value::Null) => serde_json::json!({ RESTORE_MARKER: marker }),
+        Some(other) => serde_json::json!({ RESTORE_MARKER: marker, "original_metadata": other }),
+    }
+}
+
 /// Verifies that `events` form an intact HMAC chain from `anchor` under `key`.
 ///
 /// The events must be in the order they were written — which is the order a
@@ -1277,7 +1431,10 @@ impl EmbeddedAuditEngine {
 pub fn first_broken_link(events: &[AuditEvent], key: &[u8], anchor: &str) -> Option<usize> {
     let mut prev = anchor.to_string();
     for (i, event) in events.iter().enumerate() {
-        if event.integrity_hash != EmbeddedAuditEngine::compute_hmac_hash(key, &prev, event) {
+        if !integrity_tag_matches(
+            &event.integrity_hash,
+            &EmbeddedAuditEngine::compute_hmac_hash(key, &prev, event),
+        ) {
             return Some(i);
         }
         prev.clone_from(&event.integrity_hash);
@@ -1319,6 +1476,76 @@ mod tests {
     use crate::core::{FakeClock, RealmId, Timestamp};
     use crate::storage::{EmbeddedStorageEngine, StorageConfig};
     use std::sync::Arc;
+
+    fn fixture_event(realm_id: RealmId) -> AuditEvent {
+        AuditEvent {
+            id: AuditEventId::generate(),
+            realm_id,
+            actor: "user_123".to_string(),
+            action: AuditAction::UserCreated,
+            resource_type: "user".to_string(),
+            resource_id: "user_456".to_string(),
+            timestamp: Timestamp::from_micros(1_700_000_000_000_000),
+            metadata: None,
+            integrity_hash: String::new(),
+        }
+    }
+
+    #[test]
+    fn integrity_tag_match_is_accepted() {
+        let tag = EmbeddedAuditEngine::compute_hmac_hash(
+            b"k",
+            "anchor",
+            &fixture_event(RealmId::generate()),
+        );
+        let stored = tag.clone();
+        assert!(integrity_tag_matches(&stored, &tag));
+    }
+
+    #[test]
+    fn integrity_tag_same_length_mismatch_is_rejected() {
+        let tag = "a".repeat(64);
+        let forged = format!("{}b", "a".repeat(63));
+        assert!(!integrity_tag_matches(&forged, &tag));
+    }
+
+    #[test]
+    fn integrity_tag_different_length_is_rejected() {
+        let tag = "a".repeat(64);
+        assert!(!integrity_tag_matches(&"a".repeat(63), &tag));
+        assert!(!integrity_tag_matches(&"a".repeat(65), &tag));
+        assert!(!integrity_tag_matches("", &tag));
+    }
+
+    /// `first_broken_link` must flag a stored tag that was swapped for another
+    /// value — the same length or not — at that event's own index.
+    #[test]
+    fn first_broken_link_flags_a_substituted_tag_of_any_length() {
+        let key = b"chain-key";
+        let realm = RealmId::generate();
+        let mut events = Vec::new();
+        let mut prev = "anchor".to_string();
+        for _ in 0..3 {
+            let mut e = fixture_event(realm.clone());
+            e.integrity_hash = EmbeddedAuditEngine::compute_hmac_hash(key, &prev, &e);
+            prev.clone_from(&e.integrity_hash);
+            events.push(e);
+        }
+        assert_eq!(first_broken_link(&events, key, "anchor"), None);
+
+        let real = events[1].integrity_hash.clone();
+        let flipped_last = if real.ends_with('0') { '1' } else { '0' };
+        let same_len = format!("{}{flipped_last}", &real[..real.len() - 1]);
+        for forged in [
+            same_len,
+            real[..real.len() - 1].to_string(),
+            format!("{real}0"),
+        ] {
+            let mut tampered = events.clone();
+            tampered[1].integrity_hash = forged;
+            assert_eq!(first_broken_link(&tampered, key, "anchor"), Some(1));
+        }
+    }
 
     fn setup() -> (EmbeddedAuditEngine, RealmId) {
         let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -2456,6 +2683,149 @@ mod tests {
             [0xAB; 32]
         );
     }
+
+    // === Restoring archived events (import_events) ==========================
+
+    /// `n` archived events of another store, timestamped `from`, `from + 1`, …
+    fn archived_events(realm_id: &RealmId, from: i64, n: i64) -> Vec<AuditEvent> {
+        (0..n)
+            .map(|i| AuditEvent {
+                id: AuditEventId::generate(),
+                realm_id: realm_id.clone(),
+                actor: "archived".to_string(),
+                action: AuditAction::UserCreated,
+                resource_type: "user".to_string(),
+                resource_id: format!("u{i}"),
+                timestamp: Timestamp::from_micros(from + i),
+                metadata: Some(serde_json::json!({ "n": i })),
+                integrity_hash: "source-chain-hash".to_string(),
+            })
+            .collect()
+    }
+
+    fn all_events(engine: &EmbeddedAuditEngine, realm_id: &RealmId) -> Vec<AuditEvent> {
+        engine
+            .query(&AuditQuery::for_realm(realm_id.clone()))
+            .expect("query")
+    }
+
+    /// Events older than a live realm's own used to be appended with their
+    /// original timestamps, so they sorted before the events they chained
+    /// after and the realm stopped verifying. They now land at the end of the
+    /// chain, stamped with the import time and marked with the original.
+    #[test]
+    fn importing_older_events_into_a_live_chain_keeps_it_verifiable() {
+        let (engine, realm_id, clock) = setup_with_clock();
+        clock.set(Timestamp::from_micros(5_000_000));
+        append_n(&engine, &realm_id, 3);
+        clock.set(Timestamp::from_micros(6_000_000));
+
+        let archived = archived_events(&realm_id, 1_000, 4);
+        let outcome = engine.import_events(&realm_id, &archived).expect("import");
+        assert_eq!(outcome.imported, 4);
+        assert!(outcome.restamped, "a live chain gets re-stamped events");
+        assert!(engine
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify"));
+
+        let events = all_events(&engine, &realm_id);
+        assert_eq!(events.len(), 7);
+        let imported: Vec<&AuditEvent> = events.iter().filter(|e| e.actor == "archived").collect();
+        assert_eq!(imported.len(), 4);
+        for (i, event) in imported.iter().enumerate() {
+            let meta = event.metadata.as_ref().expect("metadata");
+            assert_eq!(meta["n"], serde_json::json!(i), "original metadata kept");
+            assert_eq!(
+                meta[RESTORE_MARKER]["original_timestamp"],
+                serde_json::json!(archived[i].timestamp),
+                "the marker records the original time"
+            );
+            assert_eq!(event.timestamp, Timestamp::from_micros(6_000_000));
+            assert_eq!(event.id, archived[i].id, "the event id is kept");
+        }
+
+        // A live append afterwards still chains on.
+        append_n(&engine, &realm_id, 1);
+        assert!(engine
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify"));
+    }
+
+    /// Into a realm with no event, archived events keep their original times.
+    #[test]
+    fn importing_into_an_empty_chain_keeps_original_timestamps() {
+        let (engine, realm_id, clock) = setup_with_clock();
+        clock.set(Timestamp::from_micros(9_000_000));
+        let archived = archived_events(&realm_id, 1_000, 3);
+        let outcome = engine.import_events(&realm_id, &archived).expect("import");
+        assert!(!outcome.restamped);
+        let events = all_events(&engine, &realm_id);
+        let times: Vec<Timestamp> = events.iter().map(|e| e.timestamp).collect();
+        let want: Vec<Timestamp> = archived.iter().map(|e| e.timestamp).collect();
+        assert_eq!(times, want);
+        append_n(&engine, &realm_id, 2);
+        assert!(engine
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify"));
+    }
+
+    /// Importing the same archive twice adds nothing the second time.
+    #[test]
+    fn re_importing_the_same_events_adds_no_duplicate() {
+        let (engine, realm_id, clock) = setup_with_clock();
+        clock.set(Timestamp::from_micros(5_000_000));
+        append_n(&engine, &realm_id, 2);
+        let archived = archived_events(&realm_id, 1_000, 3);
+        engine
+            .import_events(&realm_id, &archived)
+            .expect("first import");
+        let again = engine
+            .import_events(&realm_id, &archived)
+            .expect("second import");
+        assert_eq!(again.imported, 0);
+        assert_eq!(again.duplicates, 3);
+        assert_eq!(all_events(&engine, &realm_id).len(), 5);
+        assert!(engine
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify"));
+    }
+
+    /// An imported event is part of the chain like any other: editing it in
+    /// storage afterwards is detected.
+    #[test]
+    fn a_tampered_imported_event_is_detected() {
+        let (engine, realm_id, clock) = setup_with_clock();
+        clock.set(Timestamp::from_micros(5_000_000));
+        append_n(&engine, &realm_id, 2);
+        engine
+            .import_events(&realm_id, &archived_events(&realm_id, 1_000, 3))
+            .expect("import");
+        assert!(engine
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify"));
+
+        let prefix = keys::event_scan_prefix();
+        let entries = engine
+            .storage
+            .scan(&realm_id, &prefix, &keys::prefix_end(&prefix))
+            .expect("scan");
+        let (key, mut event) = entries
+            .iter()
+            .map(|e| (e.key.clone(), decode_event(&e.value).expect("decode")))
+            .find(|(_, e)| e.actor == "archived")
+            .expect("an imported event");
+        event.actor = "forged".to_string();
+        engine
+            .storage
+            .put(&realm_id, &key, &encode_event(&event).expect("encode"))
+            .expect("tamper");
+        assert!(
+            !engine
+                .verify_integrity(&realm_id, None, None)
+                .expect("verify"),
+            "an edited imported event must fail verification"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2594,5 +2964,307 @@ mod property_tests {
                 );
             }
         }
+    }
+}
+
+/// A restore's audit import must never stall the realm's live audit writes
+/// for its whole duration: live writes run on Tokio workers and take the
+/// realm's `std` chain lock, so an import holding it across every chunk's
+/// fsync — up to a 4 GiB archive — pinned workers until the runtime froze.
+#[cfg(test)]
+mod import_concurrency_tests {
+    use super::*;
+    use crate::core::{FakeClock, RealmId, Timestamp};
+    use crate::storage::{
+        EmbeddedStorageEngine, ScanEntry, StorageConfig, StorageDurabilityHandle, StorageError,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Parks the first `await_batch_durable` after it is armed — the import's
+    /// first chunk waiting for its fsync — until released.
+    struct ParkingStorage {
+        inner: Arc<dyn StorageEngine>,
+        armed: AtomicBool,
+        parked: Mutex<Option<mpsc::Sender<()>>>,
+        release: Mutex<Option<mpsc::Receiver<()>>>,
+        /// When set, the number of `enqueue_batch` calls that still succeed;
+        /// the next one fails with an I/O error.
+        enqueues_before_failure: Mutex<Option<usize>>,
+    }
+
+    impl StorageEngine for ParkingStorage {
+        fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.get(realm_id, key)
+        }
+
+        fn put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.inner.put(realm_id, key, value)
+        }
+
+        fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+            self.inner.delete(realm_id, key)
+        }
+
+        fn scan(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+        ) -> Result<Vec<ScanEntry>, StorageError> {
+            self.inner.scan(realm_id, start, end)
+        }
+
+        fn put_batch(
+            &self,
+            realm_id: &RealmId,
+            entries: &[(Vec<u8>, Vec<u8>)],
+        ) -> Result<(), StorageError> {
+            self.inner.put_batch(realm_id, entries)
+        }
+
+        fn enqueue_batch(
+            &self,
+            realm_id: &RealmId,
+            entries: &[(Vec<u8>, Vec<u8>)],
+        ) -> Result<StorageDurabilityHandle, StorageError> {
+            {
+                let mut budget = self.enqueues_before_failure.lock().expect("budget");
+                match budget.as_mut() {
+                    Some(0) => {
+                        return Err(StorageError::Io(std::io::Error::other(
+                            "injected enqueue failure",
+                        )))
+                    }
+                    Some(n) => *n -= 1,
+                    None => {}
+                }
+            }
+            self.inner.enqueue_batch(realm_id, entries)
+        }
+
+        fn await_batch_durable(&self, handle: StorageDurabilityHandle) -> Result<(), StorageError> {
+            if self.armed.swap(false, Ordering::SeqCst) {
+                if let Some(parked) = self.parked.lock().expect("parked").take() {
+                    let _ = parked.send(());
+                }
+                if let Some(release) = self.release.lock().expect("release").take() {
+                    let _ = release.recv_timeout(Duration::from_secs(30));
+                }
+            }
+            self.inner.await_batch_durable(handle)
+        }
+
+        fn put_if_absent(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+            value: &[u8],
+        ) -> Result<bool, StorageError> {
+            self.inner.put_if_absent(realm_id, key, value)
+        }
+
+        fn increment_u64(&self, realm_id: &RealmId, key: &[u8]) -> Result<u64, StorageError> {
+            self.inner.increment_u64(realm_id, key)
+        }
+
+        fn write_batch(
+            &self,
+            realm_id: &RealmId,
+            puts: &[(Vec<u8>, Vec<u8>)],
+            deletes: &[Vec<u8>],
+        ) -> Result<(), StorageError> {
+            self.inner.write_batch(realm_id, puts, deletes)
+        }
+
+        fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+            self.inner.list_realms()
+        }
+
+        fn begin_snapshot_restore(&self, snapshot_id: &str) -> Result<(), StorageError> {
+            self.inner.begin_snapshot_restore(snapshot_id)
+        }
+
+        fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
+            self.inner.complete_snapshot_restore()
+        }
+    }
+
+    fn archived(realm_id: &RealmId, from: i64, n: usize) -> Vec<AuditEvent> {
+        (0..n)
+            .map(|i| AuditEvent {
+                id: AuditEventId::generate(),
+                realm_id: realm_id.clone(),
+                actor: "archived".to_string(),
+                action: AuditAction::UserCreated,
+                resource_type: "user".to_string(),
+                resource_id: format!("u{i}"),
+                timestamp: Timestamp::from_micros(from + i as i64),
+                metadata: None,
+                integrity_hash: "source-chain-hash".to_string(),
+            })
+            .collect()
+    }
+
+    fn live_event(realm_id: &RealmId) -> CreateAuditEvent {
+        CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: "live".to_string(),
+            action: AuditAction::UserCreated,
+            resource_type: "user".to_string(),
+            resource_id: "live".to_string(),
+            metadata: None,
+        }
+    }
+
+    /// Runs one import of `IMPORT_CHUNK * 2 + 7` archived events (three
+    /// chunks), parks it on its first chunk's fsync, and appends one live
+    /// event meanwhile: the live append must complete within a bound while
+    /// the import is parked, and the chain must verify afterwards.
+    fn live_write_during_import(prime_live_chain: bool) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let inner = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                .expect("storage"),
+        ) as Arc<dyn StorageEngine>;
+        let (parked_tx, parked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let storage = Arc::new(ParkingStorage {
+            inner,
+            armed: AtomicBool::new(false),
+            parked: Mutex::new(Some(parked_tx)),
+            release: Mutex::new(Some(release_rx)),
+            enqueues_before_failure: Mutex::new(None),
+        });
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(9_000_000)));
+        let engine = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        ));
+        let realm_id = RealmId::generate();
+        if prime_live_chain {
+            engine.append(&live_event(&realm_id)).expect("prime");
+        }
+        let events = archived(&realm_id, 1_000, IMPORT_CHUNK * 2 + 7);
+
+        storage.armed.store(true, Ordering::SeqCst);
+        let importer = {
+            let engine = Arc::clone(&engine);
+            let realm_id = realm_id.clone();
+            let events = events.clone();
+            std::thread::spawn(move || engine.import_events(&realm_id, &events))
+        };
+        parked_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the import reaches its first chunk's fsync");
+
+        let (done_tx, done_rx) = mpsc::channel();
+        {
+            let engine = Arc::clone(&engine);
+            let realm_id = realm_id.clone();
+            std::thread::spawn(move || {
+                let _ = done_tx.send(engine.append(&live_event(&realm_id)).map(|_| ()));
+            });
+        }
+        let live = done_rx.recv_timeout(Duration::from_secs(10));
+        let _ = release_tx.send(());
+        let live = live.expect("a live audit write completes while an import is in progress");
+        live.expect("the live append succeeds");
+
+        let outcome = importer
+            .join()
+            .expect("importer thread")
+            .expect("the import completes");
+        assert_eq!(outcome.imported, events.len() as u64);
+        assert_eq!(outcome.duplicates, 0);
+        assert!(
+            engine
+                .verify_integrity(&realm_id, None, None)
+                .expect("verify"),
+            "prime {prime_live_chain}: the chain verifies with a live write between chunks"
+        );
+        let stored = engine
+            .query(&AuditQuery::for_realm(realm_id.clone()))
+            .expect("query");
+        assert_eq!(
+            stored.len(),
+            events.len() + 1 + usize::from(prime_live_chain),
+            "every imported event and every live write is stored"
+        );
+
+        // A later live write still chains on, and re-importing the archive
+        // adds nothing.
+        engine.append(&live_event(&realm_id)).expect("after");
+        let again = engine.import_events(&realm_id, &events).expect("re-import");
+        assert_eq!((again.imported, again.duplicates), (0, events.len() as u64));
+        assert!(engine
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify"));
+    }
+
+    /// A chunk that fails after earlier chunks were written leaves those
+    /// chunks durable and chained — so the realm's chain anchor must record
+    /// that it has a chain, or a later wipe of the realm's audit log could not
+    /// be told from a realm that never had one.
+    #[test]
+    fn a_failed_later_chunk_still_records_the_chain_anchor() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let inner = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                .expect("storage"),
+        ) as Arc<dyn StorageEngine>;
+        let storage = Arc::new(ParkingStorage {
+            inner,
+            armed: AtomicBool::new(false),
+            parked: Mutex::new(None),
+            release: Mutex::new(None),
+            enqueues_before_failure: Mutex::new(Some(1)),
+        });
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(9_000_000)));
+        let engine = EmbeddedAuditEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+        let realm_id = RealmId::generate();
+        assert!(
+            !engine.chain_was_established(&realm_id).expect("anchor"),
+            "precondition: no chain yet"
+        );
+        let events = archived(&realm_id, 1_000, IMPORT_CHUNK + 3);
+        engine
+            .import_events(&realm_id, &events)
+            .expect_err("the second chunk fails");
+        *storage.enqueues_before_failure.lock().expect("budget") = None;
+        assert_eq!(
+            engine
+                .query(&AuditQuery::for_realm(realm_id.clone()))
+                .expect("query")
+                .len(),
+            IMPORT_CHUNK,
+            "precondition: the first chunk is durable"
+        );
+        assert!(
+            engine.chain_was_established(&realm_id).expect("anchor"),
+            "the anchor records the chain the first chunk started"
+        );
+        assert!(engine
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify"));
+    }
+
+    /// Into a realm with events: every imported event is re-stamped.
+    #[test]
+    fn a_live_audit_write_is_not_blocked_by_an_import_into_a_live_chain() {
+        live_write_during_import(true);
+    }
+
+    /// Into an empty realm: the first chunk keeps its original (past)
+    /// timestamps; once a live write lands between chunks, the rest are
+    /// re-stamped after it, so storage order stays chain order.
+    #[test]
+    fn a_live_audit_write_is_not_blocked_by_an_import_into_an_empty_chain() {
+        live_write_during_import(false);
     }
 }

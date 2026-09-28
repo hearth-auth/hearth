@@ -459,12 +459,28 @@ email:
 ### `sms`
 
 Outbound SMS delivery for one-time passwords (OTPs). Required when SMS MFA is enabled in any
-realm. Defaults to the `log` transport, which writes OTP bodies to the structured log — use
-only in development.
+realm. Defaults to the `log` transport, which delivers nothing: under `--dev` it writes the
+full message (OTP included) to the structured log so a developer can read the code; outside
+`--dev` it logs only that a message was dropped, with the body redacted.
+
+Outside `--dev`, `sms` cannot be listed in `auth.mfa_methods` or any
+`realms.<name>.auth.mfa_methods` while `transport` is `log` — the config is refused at
+startup, and the admin API / admin console realm config `PATCH` answers `400` — because no
+code could ever be delivered. The same rule rejects unknown method names on every surface.
 
 > **Environment variable:** `HEARTH_SMS_OTP_HMAC_KEY` must be set when `transport` is not
-> `log` or when running outside `--dev` mode. Generate with `openssl rand -hex 32`. Must be
-> at least 32 characters. Set in the process environment only — never in `hearth.yaml`.
+> `log`. Generate with `openssl rand -hex 32`. Must be at least 32 characters. Set in the
+> process environment only — never in `hearth.yaml`. Under `--dev` with no key, Hearth
+> generates a random per-process key. Outside `--dev` with no key, SMS OTP fails closed: no
+> code is issued, and a user whose second factor is SMS cannot complete login until SMS is
+> configured. There is no fallback or dev key in production.
+>
+> **Email OTP key.** Email OTP codes are HMAC'd under a key derived from
+> `HEARTH_SMS_OTP_HMAC_KEY` when it is set (domain-separated, never the SMS key itself), and
+> otherwise from the process's random cookie secret. Either way the key is secret — never a
+> constant — so no dedicated email OTP variable is needed. Without `HEARTH_SMS_OTP_HMAC_KEY`
+> an email OTP verifies only on the process that issued it, the same scope as the login
+> cookies it completes; set the variable if your deployment routes one sign-in across nodes.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -618,6 +634,13 @@ raising a cost would change login latency with no diagnostic, and silently lower
 defect the floor exists to prevent. `--dev` is exempt and runs deliberately cheap parameters.
 Start-up logs the effective parameters, at `WARN` when they are below the floor.
 
+**Ceiling.** The same keys are also refused **above** the ceilings every stored-hash verifier
+enforces: `password_memory_cost` at most `1048576` (1 GiB) and `password_time_cost` at most `64`.
+A hash minted above them — a client secret, a recovery code, or a password a later restore imports
+— could never be verified, so the configuration is refused at start-up, naming the ceiling. The
+ceiling applies in `--dev` too. Argon2 parallelism has no configuration key; it is compiled in,
+below the verifier's ceiling of `16`.
+
 ### `onboarding`
 
 First-run setup flow configuration.
@@ -711,6 +734,18 @@ Argon2id compute). The gate caps concurrent KDF work; requests wait briefly for 
 slot and then **shed with `503 Service Unavailable` + `Retry-After`** rather than
 queueing unboundedly.
 
+The shared pool also admits every **Argon2id client-secret verification** — a
+caller-chosen or legacy client secret presented at `/token`, `/introspect`,
+`/revoke`, `/device_authorization`, `/as/par`, their realm twins or the gRPC OAuth
+service (gRPC sheds with `UNAVAILABLE`). Such a request waits for its permit
+asynchronously — it holds no worker or blocking-pool thread while it waits, so a
+burst larger than the blocking pool is served or shed, never hung — for at most
+`max_queue_wait_ms`. The permit covers the Argon2id verification alone; the rest
+of the request (for `client_credentials`, token signing and issuance) runs after it
+is released. In a FAPI 2.0 Advanced realm a presented secret is refused before the
+gate. Hearth-generated client secrets are SHA-256 and never take a permit. See
+`docs/guides/security-hardening.md` § OAuth client secrets.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `max_in_flight` | integer | host **core count** | Maximum concurrent Argon2id operations. Omit (or `null`) to default to [`available_parallelism`] — the Little's-Law bound at which Argon2id throughput saturates, so higher values buy no throughput and only add queue latency. An explicit `0` is **rejected at startup**. Calibrate against your hardware using the C7/HEA-1875 saturation sweep. |
@@ -747,11 +782,16 @@ CPU/memory headroom exists, since the bound exists to protect them.
 
 #### `security.backup`
 
-Backup and restore hardening (A-30). When `verify_key` is set, the restore endpoint verifies that every uploaded archive's `manifest.json` carries a valid Ed25519 detached signature. Archives without a valid signature are rejected unconditionally (fail-closed). When absent, signature verification is skipped.
+Backup and restore hardening (A-30). Restore authenticates an archive by the Ed25519 detached signature on its `manifest.json`, and is **fail-closed**:
+
+- **`verify_key` set** — every restore (HTTP and CLI) requires a signature that verifies against it. An unsigned archive, a bad signature, or a manifest edited after signing is rejected; nothing overrides a configured key. Because the signature covers only the manifest and members are bound to it by their checksums, a signed restore always verifies every member: `hearth backup restore --skip-verify` is refused while a key is configured.
+- **`verify_key` unset** — outside dev mode `POST /admin/backup/restore` refuses every archive (`400`, with an error naming this key), and `hearth backup restore` refuses unless the operator passes `--allow-unsigned`. Servers started with `--dev` restore unsigned archives with a warning.
+
+Generate a key pair with `hearth backup keygen`; sign archives with `hearth backup create --sign-key` or `hearth backup sign`. The private key is not a config key — it stays on the host that takes backups. See the [Backup guide](../guides/backup.md#signed-archives).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `verify_key` | string | — | Base64url-encoded Ed25519 public key (32 bytes, URL-safe no-padding). When set, all restore uploads must carry a matching `detached_signature_b64` in their manifest or they are rejected. A value that does not decode to exactly 32 bytes is a startup error — a key that cannot verify is refused rather than silently ignored. |
+| `verify_key` | string | — | Base64url-encoded Ed25519 public key (32 bytes, URL-safe no-padding). When set, every restore must carry a matching `detached_signature_b64` in its manifest or it is rejected. **When unset, restore is refused outside dev mode** (the CLI accepts `--allow-unsigned`). `hearth backup restore` reads it from `--config`, or takes `--verify-key`. A value that does not decode to exactly 32 bytes is a startup error — a key that cannot verify is refused rather than silently ignored. |
 | `export_rate_limit` | integer | `10` | Maximum backup/export calls per admin user per hour. Set to `0` to disable per-export rate limiting. |
 
 ```yaml
@@ -798,7 +838,7 @@ Global per-IP and per-account rate-limit thresholds. These are the server-wide d
 | `login_per_account.max_failures` | integer | `5` | Maximum consecutive failures for a single account before it is locked out. |
 | `login_per_account.lockout_seconds` | integer | `300` | Duration (seconds) of the account lockout after `max_failures` is reached. |
 | `admin_per_minute` | integer | `100` | Maximum admin-API requests per minute per admin user, shared across the REST and gRPC surfaces. Requests beyond the cap receive `429 Too Many Requests`. Set to `0` to disable the limiter entirely. |
-| `token_per_minute` | integer | `200` | Maximum OAuth token, introspection, and device-authorization requests per minute per `(realm, client)` pair. Set to `0` to disable the limiter entirely. |
+| `token_per_minute` | integer | `200` | Maximum OAuth token, pushed-authorization (`/as/par`), introspection, revocation and device-authorization requests per minute per `(realm, client)` pair, counted before the client is authenticated — keyed on the claimed `client_id` (body, else Basic username), or on the client IP when there is none. `/as/par` (and its realm twin) has its **own** budget of this size, so a login's push and its code exchange each draw on a separate bucket; the other endpoints share one. Set to `0` to disable the limiter entirely. |
 
 ```yaml
 security:
@@ -1068,8 +1108,9 @@ Weights for the step-up MFA risk engine. These become the default
 | `email_reputation.extra_disposable_domains` | list of strings | `[]` | Extra disposable domains beyond the built-in list. |
 
 Only the disposable-domain signal refuses a registration. A role address
-(`admin@`, `support@`) or a domain with no MX is recorded and allowed — both are
-legitimate in plenty of tenants.
+(`admin@`, `support@`) is recorded and allowed — it is legitimate in plenty of
+tenants. Hearth performs no DNS or MX lookup of the email domain; an address
+whose domain does not receive mail is caught by email verification, not here.
 
 ```yaml
 security:
@@ -1492,14 +1533,16 @@ Declarative OAuth 2.0 client definitions. Keyed by a **slug** (used to derive a 
 | `post_logout_redirect_uris` | list | `[]` | Allowed OIDC RP-initiated logout targets. A `post_logout_redirect_uri` passed to the logout endpoint is only honored when it appears here; an empty list permits no post-logout redirect. |
 | `grant_types` | list | `["authorization_code"]` | Allowed grant types: `authorization_code`, `client_credentials`, `refresh_token`, `device_code`. |
 | `confidential` | bool | `false` | Whether this is a confidential client (has a client secret). |
-| `client_secret` | string | — | Client secret. Supports `${ENV_VAR}` substitution. **Required** when `confidential: true`. Hashed with Argon2id before storage. |
+| `client_secret` | string | — | Client secret. Supports `${ENV_VAR}` substitution. **Required** when `confidential: true`. Hashed with Argon2id before storage: a configured secret is caller-chosen, so its entropy is unknown (Hearth-generated secrets use a fast SHA-256 format instead; see `docs/guides/security-hardening.md`). |
 | `access_token_authorization` | *not a YAML key* | `embedded` | **Admin API / admin UI only — not settable in `hearth.yaml`.** Controls how resource servers resolve RBAC permissions for tokens issued to this client. One of: `embedded`, `introspection`, `decision`. Set it via `POST /admin/applications` / `PATCH /admin/applications/{id}` or the client edit form. Putting it under `applications.<slug>` in a config file is rejected at startup by `deny_unknown_fields`. See [Token Authorization Modes](../guides/rbac.md#token-authorization-modes). |
 | `require_consent` | bool | `true` | Whether users must approve the OAuth consent screen before tokens are issued. Set `false` only for first-party clients you control. |
-| `profile` | string | `"standard"` | Security profile for this client: `"fapi2"` or `"standard"`. Setting `"fapi2"` subjects this client to FAPI 2.0 constraints (DPoP sender-constrained tokens, PAR, PKCE S256) regardless of the realm-level `fapi_profile`. |
+| `profile` | string | `"standard"` | Security profile for this client: `"fapi2"` or `"standard"` (anything else fails `hearth config validate` and startup). Setting `"fapi2"` subjects this client to FAPI 2.0 constraints (DPoP sender-constrained tokens, PAR, PKCE S256, `private_key_jwt` client authentication) regardless of the realm-level `fapi_profile`. A `"fapi2"` application **requires** `jwks` and must not be `confidential` or carry a `client_secret`. |
+| `jwks` | mapping or string | — | The client's public JWK Set (RFC 7517), inline: a YAML mapping `{keys: [...]}` or the same object as a JSON string. Its keys verify the client's `private_key_jwt` assertions and signed request objects (JAR). **Required** with `profile: "fapi2"`. Public keys only. YAML is authoritative: removing the key removes the client's JWKS on the next reconcile — unless that would leave the client with no credential at all (no secret, no JWKS, not FAPI 2.0), which would make it a public client: that change is refused with a warning, reported in the reconcile report, and the application is left unchanged. The REST admin API refuses runtime changes to `jwks`, `assertion_public_key` and `profile` of a YAML-declared application (`409`). |
+| `id_token_signed_response_alg` | string | `"EdDSA"` | Algorithm this client's **ID tokens** are signed with: `"EdDSA"` or `"RS256"` (case-sensitive; anything else fails `hearth config validate` and startup). `RS256` is for relying parties that only verify the OpenID Connect default; it creates the realm's RSA-3072 ID-token key on first use and publishes it in the realm JWKS. Access and refresh tokens are always EdDSA. `RS256` is refused under FAPI 2.0 — with `profile: fapi2`, or in a realm with `fapi_profile` — since FAPI 2.0 permits only PS256, ES256 and EdDSA. Clients registered through Dynamic Client Registration default to `RS256` instead (`EdDSA` in a FAPI realm) — see [OIDC.md §1.2](OIDC.md#12-signing). |
 
 Reconciliation:
 - New slug → client **created** with deterministic UUID
-- Existing slug → `name`, `redirect_uris`, `post_logout_redirect_uris`, `grant_types` **updated** if changed
+- Existing slug → `name`, `redirect_uris`, `post_logout_redirect_uris`, `grant_types`, `id_token_signed_response_alg` **updated** if changed
 - Removed slug → client **archived**
 
 ```yaml
@@ -1513,6 +1556,8 @@ realms:
         grant_types:
           - authorization_code
           - refresh_token
+        # This RP's OIDC library only verifies RS256 ID tokens.
+        id_token_signed_response_alg: RS256
       api-service:
         name: "API Service"
         confidential: true

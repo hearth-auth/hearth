@@ -30,7 +30,9 @@
 #                             limiter to stay under). Set >0 only to pin a
 #                             specific offered load for a controlled ramp.
 #   LOADTEST_DATA_DIR [./data/loadtest-corpus]  throwaway corpus data dir
-#                             (wiped before each boot so bootstrap stays fresh)
+#                             (wiped before each boot so bootstrap stays fresh;
+#                             a second concurrent run on the same dir is
+#                             refused — give it its own LOADTEST_DATA_DIR)
 #   CORPUS_ACME       [500000] users seeded into the acme realm (large default)
 #   CORPUS_GLOBEX     [400000] users seeded into the globex realm
 #   CORPUS_INITECH    [200000] users seeded into the initech realm
@@ -46,6 +48,9 @@
 #   SEED              [1]      determinism seed
 #   SETTLE            [0]      seconds to wait after seeding before the run
 #   EXTRA_RUN_ARGS    []       extra flags appended to the `run` subcommand
+#   SERVER_LOG_OUT    [loadtest/reports/server.log]  where the server log is
+#                             copied on exit (the temp workdir is deleted), so a
+#                             failed request in the report can be explained
 #
 # Loopback / dev only — the server boots with `--dev` (bootstrap enabled,
 # relaxed security) and `security.load_test_unthrottled` which disables ALL
@@ -111,6 +116,7 @@ WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/hearth-loadtest.XXXXXX")"
 CORPUS_CONFIG="${LOADTEST_DIR}/loadtest-corpus.yaml"
 SEED_HANDLE="${LOADTEST_DIR}/reports/seed-handle.json"
 SERVER_LOG="${WORKDIR}/server.log"
+SERVER_LOG_OUT="${SERVER_LOG_OUT:-${LOADTEST_DIR}/reports/server.log}"
 SERVER_PID=""
 
 # ── Teardown ─────────────────────────────────────────────────────────────────
@@ -120,6 +126,13 @@ cleanup() {
     kill "${SERVER_PID}" 2>/dev/null || true
     wait "${SERVER_PID}" 2>/dev/null || true
   fi
+  # Keep the server log next to the report: a failed request (a 5xx) in the
+  # report can only be explained from it, and WORKDIR is deleted below.
+  if [[ -f "${SERVER_LOG}" ]]; then
+    mkdir -p "$(dirname "${SERVER_LOG_OUT}")"
+    cp "${SERVER_LOG}" "${SERVER_LOG_OUT}" 2>/dev/null \
+      && echo "==> Server log kept at ${SERVER_LOG_OUT}" >&2
+  fi
   rm -rf "${WORKDIR}"
   exit "${code}"
 }
@@ -127,7 +140,7 @@ trap cleanup EXIT INT TERM
 
 # ── 1. Build the release binaries ────────────────────────────────────────────
 echo "==> Building release hearth + loadtest binaries"
-cargo build --release --manifest-path "${REPO_ROOT}/Cargo.toml"
+cargo build --release --features dev-endpoints --manifest-path "${REPO_ROOT}/Cargo.toml"
 cargo build --release --manifest-path "${LOADTEST_DIR}/Cargo.toml"
 
 HEARTH_BIN="$(cargo metadata --format-version 1 --no-deps \
@@ -153,6 +166,18 @@ export LOADTEST_CORPUS_ACME="${CORPUS_ACME}"
 export LOADTEST_CORPUS_GLOBEX="${CORPUS_GLOBEX}"
 export LOADTEST_CORPUS_INITECH="${CORPUS_INITECH}"
 export LOADTEST_CORPUS_UMBRELLA="${CORPUS_UMBRELLA}"
+# One run per data dir. The wipe below would pull the directory out from under
+# a concurrent run's live server (its data-dir lock file goes with it), and the
+# two servers would then write SSTs into one directory, each unable to decrypt
+# the other's: every write that triggers a memtable flush answers 500. The lock
+# is held on an inherited fd, so the server keeps it even if this script dies.
+mkdir -p "$(dirname "${LOADTEST_DATA_DIR}")"
+exec 9>"${LOADTEST_DATA_DIR}.lock"
+if ! flock -n 9; then
+  echo "error: another load test is using ${LOADTEST_DATA_DIR} (lock held on" \
+    "${LOADTEST_DATA_DIR}.lock); wait for it or set LOADTEST_DATA_DIR" >&2
+  exit 1
+fi
 # Fresh data dir each run: the dev-realm bootstrap the token pool needs only
 # succeeds anonymously on a clean instance (a persisted dev realm 401s).
 rm -rf "${LOADTEST_DATA_DIR}"

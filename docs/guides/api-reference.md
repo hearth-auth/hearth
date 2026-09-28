@@ -278,6 +278,19 @@ open, token-gated, or disabled is controlled by `realms.<name>.auth.dcr.mode` in
 `hearth.yaml` (see [CONFIGURATION.md — `realms.<name>.auth.dcr`](../specs/CONFIGURATION.md#realmsnameathdcr))
 or at runtime via `PATCH /admin/realms/{realm_id}/config` with the `dcr_policy` field.
 
+### ID-token signing algorithm (`id_token_signed_response_alg`)
+
+Every registration surface above — and `PATCH /admin/applications/{id}` — accepts
+`id_token_signed_response_alg`: `"EdDSA"` or `"RS256"` (case-sensitive). Any other value
+(`none`, `HS256`, `ES256`, …) is refused: `400 invalid_client_metadata` on `POST /register`,
+`400` on the admin routes. When the field is omitted, **dynamic registration defaults to
+`RS256`** (OpenID Connect Registration §2) and the admin routes default to `EdDSA`; the
+registration response and the client record always report the resolved value. The setting
+affects ID tokens only — access and refresh tokens are EdDSA for every client. Under FAPI 2.0 —
+a client with the `fapi2` profile, or any client of a realm with a `fapi_profile` — RS256 is
+refused (FAPI 2.0 permits only PS256, ES256 and EdDSA), and dynamic registration in such a realm
+defaults to `EdDSA`. See [OIDC.md §1.2](../specs/OIDC.md#12-signing).
+
 ---
 
 ## POST /token — Confidential-client authentication
@@ -350,6 +363,29 @@ The `client_credentials` grant, RFC 8693 token exchange, `POST /revoke`, and
 and `client_secret`) before processing the request. A missing, wrong, or unrecognized
 secret on any of these paths returns `401 invalid_client` — the same RFC 6749-registered
 code returned by the `authorization_code` and `refresh_token` arms.
+
+`POST /introspect` (and `POST /realms/<realm-name>/introspect`) serves **confidential
+clients only** (RFC 7662 §2.1). Authenticate with `client_secret_basic`,
+`client_secret_post`, or `private_key_jwt` (`client_id` + `client_assertion_type` +
+`client_assertion`). A public client — one registered without a secret — receives
+`401 invalid_client` even though its `client_id` is valid, because client IDs are
+public. Register a confidential client for each resource server that introspects.
+`POST /revoke` continues to accept public clients by `client_id` (RFC 7009 §2.1). A
+confidential client authenticates with its secret, or — for a `private_key_jwt` client
+such as a FAPI 2.0 client — with `client_assertion_type` + `client_assertion`; such a
+client presenting only its `client_id` receives `401 invalid_client`. `/revoke` revokes
+only a token **issued to the calling client**: for a token-exchange token, the client that
+performed the exchange (its `act.sub`); otherwise the client in the token's `azp`, the client
+that owns its grant family (access and refresh tokens from the `authorization_code` and `device_code`
+grants), or — for a `client_credentials` or `jwt-bearer` token — the client itself. Any
+other token, including a Hearth first-party session token issued to no OAuth client
+(step-up-MFA and magic-link grants, console logins), is left untouched and the
+endpoint still answers `200` (RFC 7009 §2.2), so the response reveals nothing about the
+token. Revoking a token-exchange token blocklists that token alone; the subject's
+session stays live. Being named in a token's `aud` does not make a resource server its owner. To end
+a session that no client owns, use the admin session API (`DELETE /admin/sessions/{id}`).
+Discovery lists the accepted methods in `introspection_endpoint_auth_methods_supported`
+and `revocation_endpoint_auth_methods_supported`.
 
 ### Realm-scoped token endpoint
 

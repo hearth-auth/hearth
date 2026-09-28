@@ -12,9 +12,13 @@
 
 #[cfg(unix)]
 mod sigterm {
+    #[cfg(feature = "dev-endpoints")]
     use std::io::{BufRead, Read, Write};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::TcpListener;
+    #[cfg(feature = "dev-endpoints")]
+    use std::net::TcpStream;
     use std::process::{Child, Command};
+    #[cfg(feature = "dev-endpoints")]
     use std::sync::mpsc::Receiver;
     use std::time::Duration;
 
@@ -54,6 +58,7 @@ mod sigterm {
     /// real synchronisation point instead of a wall-clock guess. `RUST_LOG`
     /// wins over the config log level — `telemetry` builds its `EnvFilter` with
     /// `try_from_default_env` first.
+    #[cfg(feature = "dev-endpoints")]
     fn start_server_dev_traced(port: u16) -> Child {
         Command::new(hearth_bin())
             .args(["serve", "--dev", "--port", &port.to_string()])
@@ -69,6 +74,7 @@ mod sigterm {
     ///
     /// The thread must keep reading after the first match, otherwise the pipe
     /// fills and the server blocks on its own log writes.
+    #[cfg(feature = "dev-endpoints")]
     fn watch_for_request_start(child: &mut Child) -> Receiver<()> {
         let stdout = child.stdout.take().expect("server stdout must be piped");
         let (tx, rx) = std::sync::mpsc::channel();
@@ -189,6 +195,7 @@ mod sigterm {
     /// This form waits for the server to log `started processing request`
     /// before signalling. The connection is then provably serving a request,
     /// not idle, so the drain must wait for it however loaded the box is.
+    #[cfg(feature = "dev-endpoints")]
     #[test]
     fn sigterm_does_not_abort_inflight_http_request() {
         let port = find_available_port();

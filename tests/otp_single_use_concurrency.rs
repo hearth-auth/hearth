@@ -285,7 +285,7 @@ async fn sms_otp_is_redeemable_once_under_concurrency() {
 
     let engine = harness.identity_arc();
     let successes = count_concurrent_successes(&engine, move |e| {
-        e.verify_sms_otp(&realm, &nonce, &code, SMS_HMAC_KEY, now)
+        e.verify_sms_otp(&realm, &nonce, TEST_PHONE, &code, SMS_HMAC_KEY, now)
     })
     .await;
 
@@ -331,7 +331,14 @@ async fn email_otp_is_redeemable_once_under_concurrency() {
 
     let engine = harness.identity_arc();
     let successes = count_concurrent_successes(&engine, move |e| {
-        e.verify_email_otp(&realm, &nonce, &code, EMAIL_HMAC_KEY, now)
+        e.verify_email_otp(
+            &realm,
+            &nonce,
+            "race@example.com",
+            &code,
+            EMAIL_HMAC_KEY,
+            now,
+        )
     })
     .await;
 

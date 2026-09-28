@@ -595,12 +595,9 @@ async fn confirm_link_page_impl(
     let Some(cookie_val) = auth::cookie_value_from_headers(&headers, CONFIRM_LINK_COOKIE) else {
         return Redirect::to("/ui/login").into_response();
     };
-    let Some((ticket_cookie, mac)) = cookie_val.rsplit_once('.') else {
+    let Some(mac) = confirm_cookie_mac_for(cookie_val, &q.ticket) else {
         return Redirect::to("/ui/login").into_response();
     };
-    if ticket_cookie != q.ticket {
-        return Redirect::to("/ui/login").into_response();
-    }
     // We don't know user_id yet (peek without consuming the engine
     // ticket). Peek by scanning — we want the user_id for MAC
     // verification, so read-through the engine.
@@ -712,12 +709,9 @@ async fn confirm_link_submit_impl(
     let Some(cookie_val) = auth::cookie_value_from_headers(&headers, CONFIRM_LINK_COOKIE) else {
         return Redirect::to("/ui/login").into_response();
     };
-    let Some((ticket_cookie, mac)) = cookie_val.rsplit_once('.') else {
+    let Some(mac) = confirm_cookie_mac_for(cookie_val, &form.ticket) else {
         return Redirect::to("/ui/login").into_response();
     };
-    if ticket_cookie != form.ticket {
-        return Redirect::to("/ui/login").into_response();
-    }
     let realm_id = match realm_resolver::resolve(state.as_ref(), realm_name.as_deref()) {
         Resolved::Realm(r) => r.id().clone(),
         _ => return Redirect::to("/ui/login").into_response(),
@@ -1029,4 +1023,53 @@ pub(crate) fn audit_federation_unlinked(
 // `pub(super)` accessor exposed by `auth.rs`.
 fn cookie_secret_32(state: &WebState) -> &[u8; 32] {
     auth::cookie_secret_bytes_32(&state.cookie_secret)
+}
+
+/// Splits a `{ticket}.{mac}` confirm-link cookie and returns the MAC part when
+/// the cookie's ticket equals the `supplied` one, `None` otherwise.
+///
+/// The ticket comparison is constant-time and length-blind
+/// ([`crate::core::ct_eq_secret_str`]), so a probe cannot learn the cookie's
+/// ticket byte by byte from response timing.
+fn confirm_cookie_mac_for<'a>(cookie_val: &'a str, supplied: &str) -> Option<&'a str> {
+    let (ticket_cookie, mac) = cookie_val.rsplit_once('.')?;
+    crate::core::ct_eq_secret_str(ticket_cookie, supplied).then_some(mac)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TICKET: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn confirm_cookie_mac_is_returned_when_the_ticket_matches() {
+        let cookie = format!("{TICKET}.the-mac");
+        assert_eq!(confirm_cookie_mac_for(&cookie, TICKET), Some("the-mac"));
+    }
+
+    #[test]
+    fn confirm_cookie_same_length_ticket_mismatch_is_rejected() {
+        let cookie = format!("{TICKET}.the-mac");
+        let forged = format!("{}0", &TICKET[..TICKET.len() - 1]);
+        assert_eq!(forged.len(), TICKET.len());
+        assert_ne!(forged, TICKET);
+        assert_eq!(confirm_cookie_mac_for(&cookie, &forged), None);
+    }
+
+    #[test]
+    fn confirm_cookie_different_length_ticket_is_rejected() {
+        let cookie = format!("{TICKET}.the-mac");
+        assert_eq!(
+            confirm_cookie_mac_for(&cookie, &TICKET[..TICKET.len() - 1]),
+            None
+        );
+        assert_eq!(confirm_cookie_mac_for(&cookie, &format!("{TICKET}0")), None);
+        assert_eq!(confirm_cookie_mac_for(&cookie, ""), None);
+    }
+
+    #[test]
+    fn confirm_cookie_without_a_mac_separator_is_rejected() {
+        assert_eq!(confirm_cookie_mac_for(TICKET, TICKET), None);
+    }
 }

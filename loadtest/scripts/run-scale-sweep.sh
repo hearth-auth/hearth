@@ -107,7 +107,7 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
   [[ -z "${PROTOC}" ]] && { echo "error: protoc not found; set PROTOC= or SKIP_BUILD=1" >&2; exit 1; }
   echo "==> Building release binaries"
   RUSTC_WRAPPER="" SCCACHE_DIR=/tmp/sccache-dir TMPDIR=/tmp \
-    cargo build --release --manifest-path "${REPO_ROOT}/Cargo.toml"
+    cargo build --release --features dev-endpoints --manifest-path "${REPO_ROOT}/Cargo.toml"
   RUSTC_WRAPPER="" SCCACHE_DIR=/tmp/sccache-dir TMPDIR=/tmp \
     cargo build --release --manifest-path "${LOADTEST_DIR}/Cargo.toml"
   TD=$(cargo metadata --format-version 1 --no-deps --manifest-path "${REPO_ROOT}/Cargo.toml" \

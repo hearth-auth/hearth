@@ -84,10 +84,43 @@ async fn bootstrap_route_absent_in_prod_mode() {
     );
 }
 
+/// Without the `dev-endpoints` cargo feature the route is absent even from a
+/// **dev-mode** router: the feature, not the runtime flag, is what keeps
+/// `/admin/bootstrap` out of a default (`cargo build`) binary.
+#[cfg(not(feature = "dev-endpoints"))]
+#[tokio::test]
+async fn bootstrap_route_absent_in_dev_mode_without_the_feature() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness creation");
+    let app = dev_app(&harness).await;
+
+    // Loopback peer: the request would pass the per-request guard, so a 404
+    // here can only come from the route never having been compiled in.
+    let response = app
+        .oneshot(loopback_bootstrap_request())
+        .await
+        .expect("request");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "a binary built without `dev-endpoints` must not route /admin/bootstrap, even in dev mode"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body read");
+    assert!(
+        body.is_empty(),
+        "expected the router-level 404 (route not registered), got: {body:?}"
+    );
+}
+
 /// In dev mode the route must be registered and reachable.
 ///
 /// A 200 OK confirms the route exists in the routing table; a 404 would mean
 /// it was incorrectly excluded.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn bootstrap_route_present_in_dev_mode() {
     let harness = common::TestHarness::embedded()

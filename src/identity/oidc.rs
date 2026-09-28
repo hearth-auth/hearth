@@ -58,6 +58,76 @@ impl ClientProfile {
     }
 }
 
+/// The JWS algorithm Hearth signs a client's ID tokens with — the client's
+/// `id_token_signed_response_alg` (OpenID Connect Dynamic Client Registration
+/// 1.0 §2).
+///
+/// Only ID tokens are affected. Access, refresh, logout and JARM tokens are
+/// always Ed25519, whatever this says, and Hearth never accepts an RS256 token
+/// where it validates one of those.
+///
+/// # Defaults
+///
+/// The *registration surface* decides what an omitted value means, and the
+/// resolved value is always persisted explicitly:
+///
+/// - **Dynamic Client Registration** (`POST /register`,
+///   `POST /realms/{realm}/register`): omitted means [`Self::Rs256`], the
+///   default OIDC Registration §2 prescribes. A client registering the way the
+///   OpenID certification suite does gets what the specification says.
+/// - **Administrative surfaces** (admin REST, gRPC, console, `hearth.yaml`,
+///   backup/migration import): omitted means [`Self::EdDsa`], Hearth's native
+///   algorithm, so existing automation keeps the behaviour it was written for.
+///
+/// A client record stored before this setting existed carries no value and
+/// reads as [`Self::EdDsa`] (the `Default`), so no existing client changes
+/// algorithm on upgrade.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IdTokenSigningAlg {
+    /// Ed25519 (`EdDSA`) with the realm's signing key.
+    #[default]
+    #[serde(rename = "EdDSA")]
+    EdDsa,
+    /// RSASSA-PKCS1-v1_5 SHA-256 (`RS256`) with the realm's RSA ID-token key.
+    #[serde(rename = "RS256")]
+    Rs256,
+}
+
+impl IdTokenSigningAlg {
+    /// Every supported value, in the order discovery advertises them
+    /// (`id_token_signing_alg_values_supported`).
+    pub const SUPPORTED: [Self; 2] = [Self::Rs256, Self::EdDsa];
+
+    /// Returns the JWA name (`"EdDSA"` / `"RS256"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EdDsa => "EdDSA",
+            Self::Rs256 => "RS256",
+        }
+    }
+
+    /// Parses a client-supplied `id_token_signed_response_alg`.
+    ///
+    /// Matching is exact and case-sensitive, as JWA names are. Everything but
+    /// `RS256` and `EdDSA` is refused — notably `none`, every `HS*` (a shared
+    /// secret the client also holds could forge the client's own ID tokens),
+    /// and algorithms Hearth holds no key for.
+    ///
+    /// # Errors
+    /// Returns [`IdentityError::InvalidInput`](crate::identity::IdentityError::InvalidInput)
+    /// naming the supported values. The rejected value is not echoed back.
+    pub fn parse(value: &str) -> Result<Self, crate::identity::IdentityError> {
+        Self::SUPPORTED
+            .into_iter()
+            .find(|alg| alg.as_str() == value)
+            .ok_or_else(|| crate::identity::IdentityError::InvalidInput {
+                reason: "unsupported id_token_signed_response_alg; supported values are RS256 \
+                         and EdDSA"
+                    .to_string(),
+            })
+    }
+}
+
 /// The lifecycle status of an OAuth 2.0 application client.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -111,8 +181,22 @@ pub struct RegisterClientRequest {
     ///
     /// If provided, the secret is hashed with Argon2id and stored.
     /// The raw secret is returned once in the registration response
-    /// and never stored. If `None`, this is a public client.
+    /// and never stored. If `None` (and [`Self::generated_client_secret`] is
+    /// also `None`), this is a public client.
+    ///
+    /// This field is for a secret the **caller chose** — a gRPC
+    /// `RegisterClient`/`CreateApplication` body, a test fixture. Its entropy
+    /// is unknown, so it is always stored as an Argon2id hash. A secret Hearth
+    /// minted itself goes in [`Self::generated_client_secret`] instead. Setting
+    /// both is refused.
     pub client_secret: Option<String>,
+    /// A client secret Hearth minted itself ([`GeneratedClientSecret`]).
+    ///
+    /// Because it provably carries 256 bits from the OS CSPRNG, it is stored
+    /// as a fast SHA-256 digest rather than an Argon2id hash (task 26.43
+    /// follow-up), so authenticating the client costs one SHA-256 instead of
+    /// one Argon2id run. Mutually exclusive with [`Self::client_secret`].
+    pub generated_client_secret: Option<GeneratedClientSecret>,
     /// OAuth 2.0 grant types this client is allowed to use.
     ///
     /// Defaults to `["authorization_code"]` if not specified.
@@ -146,6 +230,13 @@ pub struct RegisterClientRequest {
     ///
     /// When set, JARM is mandatory for this client. Supported values: `"EdDSA"`.
     pub authorization_signed_response_alg: Option<String>,
+    /// ID-token signing algorithm (`id_token_signed_response_alg`, OIDC
+    /// Registration §2): `"RS256"` or `"EdDSA"`; anything else is refused.
+    ///
+    /// `None` means [`IdTokenSigningAlg::EdDsa`] — the administrative default.
+    /// The Dynamic Client Registration handlers resolve an omitted value to
+    /// `"RS256"` before calling the engine, as the specification requires.
+    pub id_token_signed_response_alg: Option<String>,
     /// Security profile for this client. Defaults to `Standard`.
     pub profile: ClientProfile,
     /// When `Some(true)`, users must have an enrolled MFA factor to complete
@@ -166,6 +257,7 @@ impl Default for RegisterClientRequest {
             redirect_uris: Vec::new(),
             cors_origins: Vec::new(),
             client_secret: None,
+            generated_client_secret: None,
             grant_types: Vec::new(),
             require_consent: true,
             client_logo_url: None,
@@ -182,9 +274,61 @@ impl Default for RegisterClientRequest {
             jwks: None,
             jwks_uri: None,
             authorization_signed_response_alg: None,
+            id_token_signed_response_alg: None,
             profile: ClientProfile::Standard,
             mfa_required: None,
         }
+    }
+}
+
+/// A client secret minted by Hearth itself: 32 bytes (256 bits) drawn from the
+/// operating-system CSPRNG, rendered as 43 characters of unpadded base64url.
+///
+/// The type is the proof of provenance. It has no public constructor other
+/// than [`Self::generate`], so a value of this type can only have come from the
+/// CSPRNG — never from a human, a request body, or a config file. That is what
+/// lets the engine store it as a fast, unsalted SHA-256 digest
+/// (`credentials::hash_generated_client_secret`) instead of an Argon2id hash:
+/// a slow KDF exists to protect LOW-entropy secrets from offline guessing, and
+/// against a 256-bit uniformly random preimage a single SHA-256 is already
+/// out of reach (2^256 work), with no salt needed because no two secrets
+/// collide. A caller-chosen secret has no such guarantee and stays on Argon2id
+/// ([`RegisterClientRequest::client_secret`]).
+///
+/// The plaintext is zeroed on drop and never appears in `Debug` output.
+#[derive(Clone)]
+pub struct GeneratedClientSecret(zeroize::Zeroizing<String>);
+
+impl GeneratedClientSecret {
+    /// Number of CSPRNG bytes behind every generated client secret (256 bits).
+    pub const ENTROPY_BYTES: usize = 32;
+
+    /// Mints a fresh secret from the OS CSPRNG.
+    ///
+    /// Panics only if the OS entropy source itself fails, which
+    /// [`rand_core::OsRng`] treats as unrecoverable — failing closed is the
+    /// right answer; a low-entropy client secret would be worse than aborting.
+    #[must_use]
+    pub fn generate() -> Self {
+        use base64::Engine as _;
+        use rand_core::RngCore as _;
+        let mut bytes = zeroize::Zeroizing::new([0u8; Self::ENTROPY_BYTES]);
+        rand_core::OsRng.fill_bytes(bytes.as_mut());
+        Self(zeroize::Zeroizing::new(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes.as_ref()),
+        ))
+    }
+
+    /// The plaintext secret, to hand to the client exactly once.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for GeneratedClientSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GeneratedClientSecret(<redacted>)")
     }
 }
 
@@ -306,6 +450,15 @@ pub struct OAuthClient {
     /// values: `"EdDSA"`. Omit to allow plain responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     authorization_signed_response_alg: Option<String>,
+    /// ID-token signing algorithm (`id_token_signed_response_alg`).
+    ///
+    /// Every client registered since this field existed stores an explicit
+    /// value. `None` only appears on a record written before it, and reads as
+    /// [`IdTokenSigningAlg::EdDsa`] — what that client was always issued — so
+    /// an upgrade changes no existing client's algorithm. See
+    /// [`IdTokenSigningAlg`] for how each registration surface defaults it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id_token_signed_response_alg: Option<IdTokenSigningAlg>,
     /// Security profile for this client. Defaults to `Standard` for
     /// backward-compatible deserialization of records written before the
     /// profile field was introduced.
@@ -353,6 +506,7 @@ impl OAuthClient {
             jwks: None,
             jwks_uri: None,
             authorization_signed_response_alg: None,
+            id_token_signed_response_alg: Some(IdTokenSigningAlg::EdDsa),
             profile: ClientProfile::Standard,
             mfa_required: None,
         }
@@ -390,6 +544,7 @@ impl OAuthClient {
             jwks: None,
             jwks_uri: None,
             authorization_signed_response_alg: None,
+            id_token_signed_response_alg: Some(IdTokenSigningAlg::EdDsa),
             profile: ClientProfile::Standard,
             mfa_required: None,
         }
@@ -425,7 +580,11 @@ impl OAuthClient {
         self.client_secret_hash.as_deref()
     }
 
-    /// Returns whether this client is confidential (has a secret).
+    /// Returns whether this client holds a secret.
+    ///
+    /// A secretless client is not necessarily public: one with an assertion
+    /// key or a JWKS authenticates with `private_key_jwt`. Use
+    /// [`Self::is_public`] to decide whether `client_id` alone suffices.
     pub fn is_confidential(&self) -> bool {
         self.client_secret_hash.is_some()
     }
@@ -557,6 +716,41 @@ impl OAuthClient {
         self.assertion_public_key.as_deref()
     }
 
+    /// Returns whether this client authenticates ONLY with a `private_key_jwt`
+    /// assertion (RFC 7523 §2.2): it holds no secret but has keys — an
+    /// assertion key, or a registered JWKS (`jwks` or `jwks_uri`) — or it is a
+    /// FAPI 2.0 client, which may authenticate no other way.
+    ///
+    /// Such a client is confidential even though [`Self::is_confidential`]
+    /// (which reads the secret hash) says otherwise, so a surface that accepts
+    /// a secretless client on its `client_id` alone MUST refuse it unless it
+    /// presented a verified assertion — otherwise anyone who knows its public
+    /// identifier can act as it. A FAPI 2.0 client that somehow holds no key
+    /// (registered before registration required one) therefore fails closed
+    /// everywhere instead of counting as public.
+    pub fn requires_client_assertion(&self) -> bool {
+        self.client_secret_hash.is_none()
+            && (self.assertion_public_key.is_some()
+                || self.jwks.is_some()
+                || self.jwks_uri.is_some()
+                || self.profile.is_fapi2())
+    }
+
+    /// Returns whether this client holds a key Hearth can verify a
+    /// `private_key_jwt` assertion with: an assertion key or an inline JWKS.
+    /// A `jwks_uri` does not count — Hearth never fetches it.
+    pub fn has_verifiable_assertion_keys(&self) -> bool {
+        self.assertion_public_key.is_some() || self.jwks.is_some()
+    }
+
+    /// Returns whether this is a PUBLIC client — one that holds no credential
+    /// at all (no secret, no assertion key, no JWKS) and is not FAPI 2.0, and
+    /// so is identified by its `client_id` alone. Every other client must
+    /// authenticate.
+    pub fn is_public(&self) -> bool {
+        self.client_secret_hash.is_none() && !self.requires_client_assertion()
+    }
+
     /// Sets the assertion public key.  `None` clears it, disabling the
     /// `jwt-bearer` grant for this client.
     pub(crate) fn set_assertion_public_key(&mut self, key: Option<String>) {
@@ -611,6 +805,19 @@ impl OAuthClient {
     /// Sets the JARM signing algorithm. `None` disables mandatory JARM.
     pub(crate) fn set_authorization_signed_response_alg(&mut self, alg: Option<String>) {
         self.authorization_signed_response_alg = alg;
+    }
+
+    /// Returns the algorithm this client's ID tokens are signed with.
+    ///
+    /// A record stored before the setting existed reads as
+    /// [`IdTokenSigningAlg::EdDsa`], the algorithm it was always issued.
+    pub fn id_token_signed_response_alg(&self) -> IdTokenSigningAlg {
+        self.id_token_signed_response_alg.unwrap_or_default()
+    }
+
+    /// Records the client's ID-token signing algorithm explicitly.
+    pub(crate) fn set_id_token_signed_response_alg(&mut self, alg: IdTokenSigningAlg) {
+        self.id_token_signed_response_alg = Some(alg);
     }
 
     /// Returns the client's security profile.
@@ -689,8 +896,15 @@ pub struct UpdateClientRequest {
     /// JARM signing algorithm update. `Some(Some("EdDSA"))` enables mandatory JARM,
     /// `Some(None)` clears it (disables mandatory JARM). `None` leaves unchanged.
     pub authorization_signed_response_alg: Option<Option<String>>,
+    /// ID-token signing algorithm update: `Some("RS256")` or `Some("EdDSA")`;
+    /// anything else is refused. `None` leaves the current value unchanged.
+    pub id_token_signed_response_alg: Option<String>,
     /// Updated security profile. `None` leaves unchanged.
     pub profile: Option<ClientProfile>,
+    /// Inline JWKS JSON (`{"keys":[...]}`): the public keys the client signs
+    /// request objects and `private_key_jwt` assertions with. `None` leaves
+    /// unchanged; `Some(None)` clears it; `Some(Some(json))` replaces it.
+    pub jwks: Option<Option<String>>,
     /// Per-client MFA requirement.
     ///
     /// `None` leaves unchanged; `Some(Some(true))` enables; `Some(Some(false))`
@@ -797,6 +1011,31 @@ impl ResponseMode {
     /// Whether this mode produces a signed JWT authorization response.
     pub fn is_jarm(&self) -> bool {
         matches!(self, Self::QueryJwt | Self::FragmentJwt | Self::Jwt)
+    }
+
+    /// The mode an authorization response — the code or an error — is
+    /// actually delivered in.
+    ///
+    /// The requested mode, `query` when none was requested. A client that
+    /// registered an `authorization_signed_response_alg` always gets JARM: a
+    /// plain requested mode is upgraded to `query.jwt` (JARM §4).
+    ///
+    /// Success and error responses both go through this one rule (OAuth
+    /// Multiple Response Types §2.1, JARM §2.3): a `fragment` request that
+    /// got its code in the fragment used to get its error in the query
+    /// string, and a `query.jwt` request an unsigned error.
+    pub fn effective(requested: Option<&ResponseMode>, client_requires_jarm: bool) -> Self {
+        let requested = requested.cloned().unwrap_or_default();
+        if client_requires_jarm && !requested.is_jarm() {
+            Self::QueryJwt
+        } else {
+            requested
+        }
+    }
+
+    /// Whether parameters travel in the fragment rather than the query.
+    pub fn uses_fragment(&self) -> bool {
+        matches!(self, Self::Fragment | Self::FragmentJwt)
     }
 }
 
@@ -910,6 +1149,17 @@ impl AuthorizationResponse {
             response_mode: ResponseMode::Query,
             redirect_uri,
         }
+    }
+
+    /// Sets the delivery mode of a plain (non-JARM) response: `query` or
+    /// `fragment`. A JARM mode is ignored here — it needs the signed JWT that
+    /// only [`Self::new_jarm`] carries.
+    #[must_use]
+    pub(crate) fn with_plain_response_mode(mut self, mode: ResponseMode) -> Self {
+        if !mode.is_jarm() {
+            self.response_mode = mode;
+        }
+        self
     }
 
     /// Creates a JARM authorization response with a signed JWT.
@@ -1198,6 +1448,16 @@ pub struct OidcDiscoveryDocument {
     /// URL of the token introspection endpoint (RFC 7662).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub introspection_endpoint: Option<String>,
+    /// Client authentication methods the revocation endpoint accepts
+    /// (RFC 8414 §2). Includes `none`: RFC 7009 §2.1 lets public clients
+    /// revoke.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revocation_endpoint_auth_methods_supported: Vec<String>,
+    /// Client authentication methods the introspection endpoint accepts
+    /// (RFC 8414 §2). Never includes `none`: introspection serves confidential
+    /// clients only (RFC 7662 §2.1, task 26.43).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub introspection_endpoint_auth_methods_supported: Vec<String>,
     /// Whether RFC 8707 resource indicators are supported.
     #[serde(default)]
     pub resource_indicators_supported: bool,
@@ -1296,6 +1556,11 @@ pub struct JarClaims {
     /// downgrading a signed response to plain `query` mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_mode: Option<String>,
+    /// OIDC `prompt` (RFC 9101 §4 — overrides the outer `prompt` query
+    /// param). `none` forbids any interactive step; `consent` forces the
+    /// consent prompt even when a recorded consent covers the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 // ===== Pushed Authorization Requests (RFC 9126) =====
@@ -1336,6 +1601,13 @@ pub struct PushedAuthorizationRequest {
     /// Passed as the outer fallback value; the JAR's `response_mode` claim
     /// takes precedence if the JAR is present (RFC 9101 §4).
     pub response_mode: Option<String>,
+    /// OIDC `prompt` (`none`, `consent`, or absent).
+    ///
+    /// Passed as the outer fallback value; the JAR's `prompt` claim takes
+    /// precedence if the JAR is present (RFC 9101 §4). A pushed request is
+    /// the only source of `prompt` for a `request_uri` authorization: the
+    /// authorize endpoint ignores a `prompt` beside `request_uri`.
+    pub prompt: Option<String>,
 }
 
 /// Response from a successful PAR push (RFC 9126 §2.2).
@@ -1380,6 +1652,12 @@ pub(crate) struct StoredPushedAuthorizationRequest {
     /// `response_mode` even after the JAR JWT has been consumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) response_mode: Option<String>,
+    /// OIDC `prompt` — the JAR's `prompt` claim, else the pushed value.
+    ///
+    /// The only source of `prompt` for a `request_uri` authorization
+    /// (RFC 9126 §4: parameters beside `request_uri` are ignored).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) prompt: Option<String>,
     /// When this entry was created.
     pub(crate) created_at: Timestamp,
     /// When this entry expires (created_at + 90 s).
@@ -1614,12 +1892,23 @@ pub(crate) struct StoredGrantFamily {
 // ===== Token Revocation (RFC 7009) =====
 
 /// Request to revoke an OAuth 2.0 token (RFC 7009).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TokenRevocationRequest {
     /// The token to revoke (access or refresh).
     pub token: String,
     /// Optional hint about the token type.
     pub token_type_hint: Option<String>,
+    /// The client that authenticated for this revocation call.
+    ///
+    /// RFC 7009 §2.1: the server "verifies whether the token was issued to the
+    /// client making the revocation request". When `Some`, the engine revokes
+    /// only a token issued to this client — its `azp`, its grant family's
+    /// client, or (for a `client_credentials` token) its `sub` — and treats any
+    /// other token, including one issued to no client at all, as a silent
+    /// no-op (RFC 7009 §2.2). Every wire surface (`/revoke`, its realm twin,
+    /// gRPC `Revoke`) MUST set it. `None` is reserved for trusted in-process
+    /// callers that have already authorized the revocation themselves.
+    pub revoking_client_id: Option<crate::core::ClientId>,
 }
 
 // ===== Token Introspection (RFC 7662) =====
@@ -1806,6 +2095,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn effective_response_mode_defaults_to_query_and_upgrades_for_jarm_clients() {
+        use ResponseMode::{Fragment, FragmentJwt, Jwt, Query, QueryJwt};
+        assert_eq!(ResponseMode::effective(None, false), Query);
+        assert_eq!(ResponseMode::effective(Some(&Fragment), false), Fragment);
+        assert_eq!(ResponseMode::effective(Some(&QueryJwt), false), QueryJwt);
+        // A client with a registered signing alg never gets a plain response.
+        assert_eq!(ResponseMode::effective(None, true), QueryJwt);
+        assert_eq!(ResponseMode::effective(Some(&Query), true), QueryJwt);
+        assert_eq!(ResponseMode::effective(Some(&Fragment), true), QueryJwt);
+        assert_eq!(
+            ResponseMode::effective(Some(&FragmentJwt), true),
+            FragmentJwt
+        );
+        assert_eq!(ResponseMode::effective(Some(&Jwt), true), Jwt);
+        assert!(Fragment.uses_fragment() && FragmentJwt.uses_fragment());
+        assert!(!Query.uses_fragment() && !QueryJwt.uses_fragment() && !Jwt.uses_fragment());
+    }
+
+    #[test]
     fn oidc_config_default_values() {
         let config = OidcConfig::default();
         assert_eq!(config.authorization_code_ttl_secs, 60);
@@ -1824,6 +2132,88 @@ mod tests {
         let json = serde_json::to_string(&client).expect("serialize");
         let deserialized: OAuthClient = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(client, deserialized);
+    }
+
+    // ===== id_token_signed_response_alg (task 26.55) =====
+
+    #[test]
+    fn id_token_signing_alg_accepts_exactly_rs256_and_eddsa() {
+        assert_eq!(
+            IdTokenSigningAlg::parse("RS256").expect("RS256"),
+            IdTokenSigningAlg::Rs256
+        );
+        assert_eq!(
+            IdTokenSigningAlg::parse("EdDSA").expect("EdDSA"),
+            IdTokenSigningAlg::EdDsa
+        );
+        // `none`, every symmetric algorithm, algorithms Hearth holds no key for,
+        // and case variants are all refused.
+        for refused in [
+            "none", "None", "HS256", "HS384", "HS512", "rs256", "eddsa", "ES256", "PS256", "RS512",
+            "", " RS256",
+        ] {
+            assert!(
+                matches!(
+                    IdTokenSigningAlg::parse(refused),
+                    Err(crate::identity::IdentityError::InvalidInput { .. })
+                ),
+                "{refused:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn id_token_signing_alg_serializes_as_its_jwa_name() {
+        assert_eq!(
+            serde_json::to_string(&IdTokenSigningAlg::Rs256).expect("ser"),
+            "\"RS256\""
+        );
+        assert_eq!(
+            serde_json::to_string(&IdTokenSigningAlg::EdDsa).expect("ser"),
+            "\"EdDSA\""
+        );
+        assert_eq!(IdTokenSigningAlg::Rs256.as_str(), "RS256");
+        assert_eq!(IdTokenSigningAlg::EdDsa.as_str(), "EdDSA");
+    }
+
+    /// A client stored before the setting existed has no
+    /// `id_token_signed_response_alg` in its record. It must keep getting the
+    /// EdDSA ID tokens it was always issued.
+    #[test]
+    fn legacy_client_record_without_the_field_reads_as_eddsa() {
+        let client = OAuthClient::new(
+            ClientId::generate(),
+            "Legacy App".to_string(),
+            vec!["https://app.example.com/cb".to_string()],
+            Timestamp::from_micros(1_000_000),
+        );
+        let mut json = serde_json::to_value(&client).expect("serialize");
+        json.as_object_mut()
+            .expect("object")
+            .remove("id_token_signed_response_alg");
+        let legacy: OAuthClient = serde_json::from_value(json).expect("deserialize legacy");
+        assert_eq!(
+            legacy.id_token_signed_response_alg(),
+            IdTokenSigningAlg::EdDsa
+        );
+    }
+
+    #[test]
+    fn client_alg_round_trips_through_storage_json() {
+        let mut client = OAuthClient::new(
+            ClientId::generate(),
+            "RS App".to_string(),
+            vec!["https://app.example.com/cb".to_string()],
+            Timestamp::from_micros(1_000_000),
+        );
+        client.set_id_token_signed_response_alg(IdTokenSigningAlg::Rs256);
+        let json = serde_json::to_value(&client).expect("serialize");
+        assert_eq!(json["id_token_signed_response_alg"], "RS256");
+        let back: OAuthClient = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(
+            back.id_token_signed_response_alg(),
+            IdTokenSigningAlg::Rs256
+        );
     }
 
     #[test]
@@ -1930,6 +2320,8 @@ mod tests {
             ),
             revocation_endpoint: Some("https://hearth.local/revoke".to_string()),
             introspection_endpoint: Some("https://hearth.local/introspect".to_string()),
+            revocation_endpoint_auth_methods_supported: vec![],
+            introspection_endpoint_auth_methods_supported: vec![],
             resource_indicators_supported: true,
             authorization_response_iss_parameter_supported: true,
             end_session_endpoint: Some("https://hearth.local/end_session".to_string()),

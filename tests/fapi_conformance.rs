@@ -141,6 +141,7 @@ fn par_with_pkce(client_id: &ClientId) -> PushedAuthorizationRequest {
         nonce: Some("fapi-nonce".to_string()),
         request: None,
         response_mode: None,
+        prompt: None,
     }
 }
 
@@ -158,6 +159,7 @@ fn par_without_pkce(client_id: &ClientId) -> PushedAuthorizationRequest {
         nonce: None,
         request: None,
         response_mode: None,
+        prompt: None,
     }
 }
 
@@ -214,6 +216,34 @@ fn sign_jar(pkcs8_bytes: &[u8], client_id: &str, issuer: &str) -> String {
     let sig_b64 = b64.encode(sig.as_ref());
 
     format!("{signing_input}.{sig_b64}")
+}
+
+/// Signs a `private_key_jwt` client assertion (RFC 7523 §2.2) with the
+/// client's registered JWKS key — how a client authenticates in a FAPI 2.0
+/// Advanced realm (OIDC.md §2.1.2 item 6).
+fn sign_client_assertion(pkcs8_bytes: &[u8], client_id: &str, issuer: &str) -> String {
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let header = serde_json::json!({"alg": "EdDSA", "kid": "fapi-key"});
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "sub": client_id,
+        "aud": issuer,
+        "exp": now + 60,
+        "iat": now,
+        "jti": uuid::Uuid::new_v4().to_string(),
+    });
+    let signing_input = format!(
+        "{}.{}",
+        b64.encode(serde_json::to_vec(&header).unwrap()),
+        b64.encode(serde_json::to_vec(&claims).unwrap())
+    );
+    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8_bytes).unwrap();
+    let sig = pair.sign(signing_input.as_bytes());
+    format!("{signing_input}.{}", b64.encode(sig.as_ref()))
 }
 
 /// Builds an `AuthorizationRequest` from a `PushedAuthorizationRequest`, setting
@@ -408,6 +438,7 @@ async fn fapi_a02_authorize_without_jarm_client_rejected() {
         nonce: Some("adv-nonce".to_string()),
         request: Some(jar),
         response_mode: None,
+        prompt: None,
     };
 
     // PAR itself is gate-free for JAR presence — the JARM check fires in authorize.
@@ -550,6 +581,7 @@ async fn fapi_a04_valid_advanced_request_accepted() {
         nonce: Some("adv-full-nonce".to_string()),
         request: Some(jar),
         response_mode: None,
+        prompt: None,
     };
 
     let _par_resp = env
@@ -644,6 +676,7 @@ async fn fapi_a06_par_pkce_only_in_jar_accepted() {
         nonce: Some("a06-nonce".to_string()),
         request: Some(jar),
         response_mode: None,
+        prompt: None,
     };
 
     // Before the fix this returned FapiViolation("FAPI 2.0 Baseline requires PKCE").
@@ -721,6 +754,7 @@ async fn fapi_a07_realm_advanced_enforces_dpop_for_standard_profile_client() {
         nonce: Some("a07-nonce".to_string()),
         request: Some(jar),
         response_mode: None,
+        prompt: None,
     };
     env.harness
         .identity()
@@ -907,6 +941,7 @@ async fn fapi_b06_realm_baseline_enforces_dpop_for_standard_profile_client() {
         nonce: Some("b06-nonce".to_string()),
         request: None,
         response_mode: None,
+        prompt: None,
     };
     env.harness
         .identity()
@@ -948,6 +983,9 @@ async fn fapi_b06_realm_baseline_enforces_dpop_for_standard_profile_client() {
 // These tests exercise the HTTP surface directly — the embedded tests above
 // call the domain layer APIs, but do not exercise whether the HTTP authorize
 // handler actually calls `consume_par` and sets `via_par = true`.
+
+/// The confidential client secret of the FAPI Baseline HTTP test client.
+const FAPI_HTTP_CLIENT_SECRET: &str = "test-secret";
 
 /// Start an in-process axum HTTP server backed by a FAPI Baseline realm.
 ///
@@ -995,7 +1033,7 @@ async fn start_fapi_http_server() -> (
             &RegisterClientRequest {
                 client_name: "FAPI HTTP Test Client".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
-                client_secret: Some("test-secret".to_string()),
+                client_secret: Some(FAPI_HTTP_CLIENT_SECRET.to_string()),
                 grant_types: vec!["authorization_code".to_string()],
                 require_consent: false,
                 ..Default::default()
@@ -1086,6 +1124,8 @@ async fn fapi_b07_http_par_authorize_flow_succeeds() {
     let par_resp: serde_json::Value = http
         .post(format!("{base}/as/par"))
         .header("X-Realm-ID", &realm_uuid)
+        // The client is confidential: RFC 9126 §2 requires it to authenticate.
+        .basic_auth(&client_uuid, Some(FAPI_HTTP_CLIENT_SECRET))
         .json(&serde_json::json!({
             "client_id": client_uuid,
             "redirect_uri": REDIRECT_URI,
@@ -1195,6 +1235,8 @@ async fn fapi_b09_http_replay_request_uri_rejected() {
     let par_resp: serde_json::Value = http
         .post(format!("{base}/as/par"))
         .header("X-Realm-ID", &realm_uuid)
+        // The client is confidential: RFC 9126 §2 requires it to authenticate.
+        .basic_auth(&client_uuid, Some(FAPI_HTTP_CLIENT_SECRET))
         .json(&serde_json::json!({
             "client_id": client_uuid,
             "redirect_uri": REDIRECT_URI,
@@ -1277,6 +1319,8 @@ async fn fapi_b10_http_client_id_mismatch_rejected() {
     let par_resp: serde_json::Value = http
         .post(format!("{base}/as/par"))
         .header("X-Realm-ID", &realm_uuid)
+        // The client is confidential: RFC 9126 §2 requires it to authenticate.
+        .basic_auth(&client_uuid, Some(FAPI_HTTP_CLIENT_SECRET))
         .json(&serde_json::json!({
             "client_id": client_uuid,
             "redirect_uri": REDIRECT_URI,
@@ -1378,6 +1422,7 @@ async fn fapi_b11_realm_baseline_enforces_dpop_on_refresh_for_standard_profile_c
         nonce: Some("b11-nonce".to_string()),
         request: None,
         response_mode: None,
+        prompt: None,
     };
     env.harness
         .identity()
@@ -1634,7 +1679,11 @@ async fn fapi_a08_http_par_jar_authorize_flow_succeeds() {
             "code_challenge": PKCE_CHALLENGE,
             "code_challenge_method": "S256",
             "nonce": "fapi-a08-nonce",
-            "request": jar
+            "request": jar,
+            // A FAPI 2.0 Advanced realm authenticates the pushing client with
+            // private_key_jwt only (OIDC.md §2.1.2 item 6, RFC 9126 §2).
+            "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            "client_assertion": sign_client_assertion(&srv.pkcs8_bytes, &srv.client_id_str, &issuer),
         }))
         .send()
         .await

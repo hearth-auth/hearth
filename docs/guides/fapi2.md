@@ -27,7 +27,7 @@ FAPI 2.0 layered requirements in Hearth:
 | `iss` in every redirect response (RFC 9207) | ✓ | ✓ |
 | JAR mandatory — signed request object (RFC 9101) | | ✓ |
 | JARM mandatory — JWT-wrapped response | | ✓ |
-| `private_key_jwt` only — no `client_secret` | | ✓ |
+| `private_key_jwt` only — no `client_secret`, no public (`none`) clients, at `/token`, `/as/par`, `/introspect` and `/revoke` | | ✓ |
 | DPoP sender-constrained tokens (RFC 9449) | ✓ | ✓ |
 
 **Keycloak equivalent:** Keycloak's FAPI 1.0 Advanced / FAPI CIBA profiles are analogous to
@@ -94,10 +94,18 @@ only specific clients in a realm require FAPI 2.0 constraints; use realm-level `
 | Field | Required | Forbidden |
 |-------|----------|-----------|
 | `profile` | `"fapi2"` | |
-| `jwks` | JWKS JSON string with the client's public key | |
-| `client_secret` | | Must be absent — FAPI 2.0 clients authenticate with `private_key_jwt` |
+| `jwks` | JWKS JSON string with the client's public key (inline — a `jwks_uri` alone is refused: Hearth does not fetch key sets) | |
+| `client_secret` | | Must be absent (including a Hearth-generated one) — FAPI 2.0 clients authenticate with `private_key_jwt` |
 | `redirect_uris` | At least one HTTPS URI | `http://` (non-TLS) |
 | `response_type` | `"code"` only | `"token"`, `"id_token"` |
+| `id_token_signed_response_alg` | `"EdDSA"` (the default when omitted) | `"RS256"` — FAPI 2.0 §5.4.1 permits only PS256, ES256 and EdDSA |
+
+The RS256 restriction also applies to every client of a realm with a `fapi_profile` (§2):
+registration and updates that select RS256 are refused, dynamic registration in such a realm
+defaults to `EdDSA`, and an RS256 client that predates the realm's `fapi_profile` has its
+ID-token grants (authorization code, device) refused until it is switched to `EdDSA`. The admin
+console does not offer RS256 wherever this applies, and flags such a client on its edit page, where
+its other settings stay editable.
 
 ### Generate a key pair
 
@@ -152,44 +160,56 @@ curl -s -X POST "$ISSUER/admin/applications" \
   }'
 ```
 
-**Successful response (201 Created):**
+`jwks` may be the JWK Set object itself or a JSON string holding it. The same body works at
+`POST /clients`, and `PATCH /admin/applications/{id}` accepts `jwks` (`null` clears it) and
+`profile` to move an existing client onto FAPI 2.0 — except on an application declared in
+`hearth.yaml`, whose `jwks` and `profile` are changed in the YAML (a runtime change answers `409`
+`HEARTH_YAML_MANAGED_RESOURCE`). The set must hold public signing keys only
+(see `docs/specs/OIDC.md` §2.2.5).
+
+**Successful response (201 Created)** — the registered client (the stored `profile` and `jwks`
+are not echoed; read them back with `GET /admin/applications/{id}` or the console):
 
 ```json
 {
   "client_id": "<uuid>",
   "client_name": "My FAPI 2.0 Client",
-  "profile": "fapi2",
   "redirect_uris": ["https://app.example.com/callback"],
-  "jwks": "...",
-  "authorization_signed_response_alg": "EdDSA"
+  "grant_types": ["authorization_code"],
+  "id_token_signed_response_alg": "EdDSA"
 }
 ```
 
-**Rejected — `client_secret` present:**
+**Rejected — `client_secret` present, or no inline `jwks` (a `jwks_uri` alone is not fetched):**
 ```json
-{ "error": "invalid_client_metadata", "error_description": "FAPI 2.0 clients must use private_key_jwt" }
-```
-
-**Rejected — `jwks` missing:**
-```json
-{ "error": "invalid_client_metadata", "error_description": "FAPI 2.0 clients must register a JWKS" }
+{ "error": "invalid_request", "error_description": "FAPI 2.0 clients authenticate with private_key_jwt and must register their public keys inline (jwks); a jwks_uri is not fetched" }
 ```
 
 ### Dynamic Client Registration (RFC 7591)
 
-Alternatively, use the realm-scoped dynamic registration endpoint:
+Alternatively, use dynamic registration (`POST /register` with `X-Realm-ID`, or
+`POST /realms/<realm-name>/register`), passing `jwks` as the RFC 7591 JWK Set object:
 
 ```bash
 curl -s -X POST "$ISSUER/realms/<realm-name>/register" \
   -H "Content-Type: application/json" \
   -d '{
     "client_name": "My FAPI 2.0 Client",
-    "profile": "fapi2",
     "redirect_uris": ["https://app.example.com/callback"],
-    "jwks": "...",
-    "authorization_signed_response_alg": "EdDSA"
+    "token_endpoint_auth_method": "private_key_jwt",
+    "jwks": {"keys": [{"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig", "kid": "my-fapi-key-1", "x": "<base64url-public-key>"}]}
   }'
 ```
+
+A client that registers `jwks` defaults to `token_endpoint_auth_method: private_key_jwt`; no
+secret is minted, and the response states the method and echoes `jwks`. `client_secret_basic` /
+`client_secret_post` mint a secret (returned once); `none` registers a public client. The default
+without keys is `client_secret_basic` on `POST /register` and `none` on the realm route. In a
+realm with `fapi_profile: advanced`, only `private_key_jwt` with an inline `jwks` is accepted;
+anything else — including omitting `jwks` — is `400 invalid_client_metadata`, since a client
+registered with a secret or as public could never authenticate there. Invalid keys (private
+material, an encryption key, a duplicated `kid`), `jwks` together with `jwks_uri`, and
+`private_key_jwt` with only a `jwks_uri` are `invalid_client_metadata` too.
 
 ---
 
@@ -220,6 +240,8 @@ curl -s -X POST "$ISSUER/realms/$REALM/as/par" \
   -H "Content-Type: application/json" \
   -d "{
     \"client_id\": \"$CLIENT_ID\",
+    \"client_assertion_type\": \"urn:ietf:params:oauth:client-assertion-type:jwt-bearer\",
+    \"client_assertion\": \"$CLIENT_ASSERTION_JWT\",
     \"redirect_uri\": \"https://app.example.com/callback\",
     \"scope\": \"openid\",
     \"response_type\": \"code\",
@@ -229,6 +251,13 @@ curl -s -X POST "$ISSUER/realms/$REALM/as/par" \
     \"code_challenge_method\": \"S256\"
   }"
 ```
+
+The pushing client authenticates exactly as it does at the token endpoint (RFC 9126 §2): a
+FAPI 2.0 client with a fresh `private_key_jwt` assertion (§7 — single-use `jti`, `aud` = the
+realm issuer), a secret-bearing confidential client with `client_secret_basic` or
+`client_secret_post`. Only a public client may push on its `client_id` alone. A missing, wrong
+or replayed credential is `401 invalid_client`; the request object's `iss` and `client_id` must
+name the authenticated client.
 
 **Response (201 Created):**
 ```json
@@ -327,6 +356,8 @@ curl -s -X POST "$ISSUER/realms/$REALM/as/par" \
   -H "Content-Type: application/json" \
   -d "{
     \"client_id\": \"$CLIENT_ID\",
+    \"client_assertion_type\": \"urn:ietf:params:oauth:client-assertion-type:jwt-bearer\",
+    \"client_assertion\": \"$CLIENT_ASSERTION_JWT\",
     \"request\": \"$JAR_JWT\"
   }"
 ```
@@ -470,7 +501,13 @@ curl -s -X POST "$ISSUER/realms/$REALM/token" \
 ```
 
 `client_assertion` is a short-lived JWT signed with the client private key (separate from the
-DPoP proof). See RFC 7523 for the assertion structure.
+DPoP proof). See RFC 7523 for the assertion structure. Sign it with a key from the client's
+registered JWKS — PS256, ES256 or EdDSA, with the key's `kid` in the JWS header — and set
+`iss` = `sub` = the client id, `aud` = the realm issuer, a fresh `jti` and `exp` at most five
+minutes ahead. A FAPI 2.0 client is never public: without an assertion every endpoint answers
+`401 invalid_client`, including the `refresh_token` grant, which takes the same
+`client_assertion` fields. A client registered with only a `jwks_uri` cannot authenticate
+(Hearth does not fetch key sets); register the keys inline as `jwks`.
 
 **Rejected — DPoP header missing (FAPI 2.0 client):**
 ```json
@@ -647,6 +684,7 @@ Hearth's internal test suite covers the conformance scenarios in `tests/fapi_con
 | `invalid_request_object: JAR signature verification failed` | 400 | JAR JWT signed with wrong key | Sign with the private key matching the registered JWKS |
 | `invalid_request: JAR client_id mismatch` | 400 | `client_id` in JAR ≠ `client_id` query param | Set both to the same prefixed client ID |
 | `invalid_request: request_uri expired or already consumed` | 400 | PAR `request_uri` older than 90 s or replayed | Push a fresh PAR request |
+| `invalid_client` at `/as/par` | 401 | The pushing client did not authenticate, or its assertion/secret failed | Authenticate as at the token endpoint — a fresh `private_key_jwt` assertion for a FAPI 2.0 client |
 
 ---
 

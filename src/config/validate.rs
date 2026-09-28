@@ -88,6 +88,50 @@ const DEMO_FORBIDDEN_IN_PROD: &str =
 /// config error for a documented value (audit 2026-08-28 §4.18#10).
 const VALID_MFA_METHODS: &[&str] = &["totp", "webauthn", "sms", "email_otp"];
 
+/// The one rule every surface that writes `mfa_methods` applies — the YAML
+/// validator (global `auth.mfa_methods` and `realms.<name>.auth.mfa_methods`),
+/// the JSON admin API and the admin console realm config PATCH.
+///
+/// Refuses:
+/// * any name outside [`VALID_MFA_METHODS`];
+/// * `sms` when the effective SMS transport cannot deliver a code — the
+///   `log` transport outside dev mode. In dev mode the log transport writes
+///   the full message body to the log, so the developer does receive the
+///   code; in production it writes a redacted line and delivers nothing, so
+///   an `sms` factor there could never be satisfied.
+///
+/// Runtime surfaces used to skip both checks, so an admin could enable SMS
+/// MFA on a server that can only log (and, before the redaction, leak) OTPs.
+///
+/// # Errors
+///
+/// Returns the operator-facing reason for the first violation. It names the
+/// offending method or transport, never a secret.
+pub fn check_mfa_methods(
+    methods: &[String],
+    sms_transport: SmsTransport,
+    dev_mode: bool,
+) -> Result<(), String> {
+    if let Some(unknown) = methods
+        .iter()
+        .find(|m| !VALID_MFA_METHODS.contains(&m.as_str()))
+    {
+        return Err(format!(
+            "unknown MFA method '{unknown}'; valid methods are: {}",
+            VALID_MFA_METHODS.join(", ")
+        ));
+    }
+    if !dev_mode && sms_transport == SmsTransport::Log && methods.iter().any(|m| m == "sms") {
+        return Err(
+            "'sms' is listed as an MFA method but sms.transport is 'log', which delivers no \
+             message outside dev mode; configure a real SMS transport (twilio or awssns) to \
+             deliver OTP codes"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Valid authentication method names.
 const VALID_AUTH_METHODS: &[&str] = &["password", "magic_link", "passkey"];
 
@@ -444,7 +488,20 @@ impl Config {
             }
         }
         validate_realm_web_configs_all(self.realms.as_ref(), &mut issues);
-        validate_realm_auth_configs_all(self.realms.as_ref(), &self.sms, &mut issues);
+        if let Some(methods) = &self.auth.mfa_methods {
+            if let Err(reason) = check_mfa_methods(methods, self.sms.transport, self.dev_mode) {
+                issues.push(ValidationIssue {
+                    field: "auth.mfa_methods".to_string(),
+                    reason,
+                });
+            }
+        }
+        validate_realm_auth_configs_all(
+            self.realms.as_ref(),
+            &self.sms,
+            self.dev_mode,
+            &mut issues,
+        );
         validate_realm_applications_all(self.realms.as_ref(), &mut issues);
         validate_realm_organizations_all(self.realms.as_ref(), &mut issues);
         validate_realm_saml_sps_all(self.realms.as_ref(), &mut issues);
@@ -494,6 +551,7 @@ impl Config {
         }
 
         validate_auth_password_costs(&self.auth, &mut issues);
+        validate_argon2_ceilings(&self.auth, self.realms.as_ref(), &mut issues);
         validate_webauthn_preference(
             "auth.webauthn_resident_key",
             self.auth.webauthn_resident_key.as_deref(),
@@ -877,6 +935,63 @@ fn validate_auth_password_costs(auth: &AuthConfig, issues: &mut Vec<ValidationIs
                 ),
             });
         }
+    }
+}
+
+/// Refuses Argon2id costs above the ceilings every stored-hash verifier
+/// enforces (task 26.36: [`ARGON2_MAX_MEMORY_KIB`] and
+/// [`ARGON2_MAX_TIME_COST`]).
+///
+/// Above them `hash_raw_secret` would mint client secrets and recovery codes
+/// that `verify_raw_secret` always refuses, and user password hashes a restore
+/// refuses to import — a configuration that looks like "more secure" and
+/// silently locks every newly issued credential out. Applies in every mode:
+/// unlike the OWASP floor it is not a production-only policy. Parallelism has
+/// no configuration key (it is compiled in, below [`ARGON2_MAX_PARALLELISM`]).
+///
+/// [`ARGON2_MAX_MEMORY_KIB`]: crate::identity::ARGON2_MAX_MEMORY_KIB
+/// [`ARGON2_MAX_TIME_COST`]: crate::identity::ARGON2_MAX_TIME_COST
+/// [`ARGON2_MAX_PARALLELISM`]: crate::identity::ARGON2_MAX_PARALLELISM
+fn validate_argon2_ceilings(
+    auth: &AuthConfig,
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let mut check = |field: String, memory: Option<u32>, time: Option<u32>| {
+        if let Some(m) = memory.filter(|m| *m > crate::identity::ARGON2_MAX_MEMORY_KIB) {
+            issues.push(ValidationIssue {
+                field: format!("{field}.password_memory_cost"),
+                reason: format!(
+                    "{m} KiB is above the Argon2 memory ceiling of {} KiB (1 GiB) that every \
+                     stored-hash verifier enforces: credentials hashed with it could never be \
+                     verified",
+                    crate::identity::ARGON2_MAX_MEMORY_KIB
+                ),
+            });
+        }
+        if let Some(t) = time.filter(|t| *t > crate::identity::ARGON2_MAX_TIME_COST) {
+            issues.push(ValidationIssue {
+                field: format!("{field}.password_time_cost"),
+                reason: format!(
+                    "{t} is above the Argon2 time-cost ceiling of {} passes that every \
+                     stored-hash verifier enforces: credentials hashed with it could never be \
+                     verified",
+                    crate::identity::ARGON2_MAX_TIME_COST
+                ),
+            });
+        }
+    };
+    check(
+        "auth".to_string(),
+        auth.password_memory_cost,
+        auth.password_time_cost,
+    );
+    for (name, realm) in realms.into_iter().flatten() {
+        check(
+            format!("realms.{name}"),
+            realm.password_memory_cost,
+            realm.password_time_cost,
+        );
     }
 }
 
@@ -1611,6 +1726,7 @@ fn validate_realm_web_configs_all(
 fn validate_realm_auth_configs_all(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
     sms: &SmsConfig,
+    dev_mode: bool,
     issues: &mut Vec<ValidationIssue>,
 ) {
     let Some(realms) = realms else { return };
@@ -1637,25 +1753,10 @@ fn validate_realm_auth_configs_all(
             issues,
         );
         if let Some(methods) = &auth.mfa_methods {
-            for m in methods {
-                if !VALID_MFA_METHODS.contains(&m.as_str()) {
-                    issues.push(ValidationIssue {
-                        field: format!("realms.{name}.auth.mfa_methods"),
-                        reason: format!(
-                            "unknown MFA method '{}'; valid methods are: {}",
-                            m,
-                            VALID_MFA_METHODS.join(", ")
-                        ),
-                    });
-                }
-            }
-            if methods.iter().any(|m| m == "sms") && sms.transport == SmsTransport::Log {
+            if let Err(reason) = check_mfa_methods(methods, sms.transport, dev_mode) {
                 issues.push(ValidationIssue {
                     field: format!("realms.{name}.auth.mfa_methods"),
-                    reason:
-                        "'sms' is listed as an MFA method but sms.transport is 'log'; \
-                             configure a real SMS transport (twilio or awssns) to deliver OTP codes"
-                            .to_string(),
+                    reason,
                 });
             }
         }
@@ -1774,6 +1875,94 @@ fn validate_realm_auth_configs_all(
     }
 }
 
+/// Validates an application's `id_token_signed_response_alg` (task 26.55).
+///
+/// The engine refuses anything but RS256/EdDSA, and RS256 wherever FAPI 2.0
+/// applies (FAPI 2.0 Security Profile §5.4.1 permits only PS256, ES256 and
+/// EdDSA), at reconcile time; `hearth config validate` must say so first, not
+/// after a boot that already failed. `realm_fapi` is whether the realm has a
+/// `fapi_profile`.
+fn validate_app_id_token_alg(
+    prefix: &str,
+    app: &super::types::ApplicationYamlConfig,
+    realm_fapi: bool,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(alg) = &app.id_token_signed_response_alg else {
+        return;
+    };
+    let reason = match crate::identity::IdTokenSigningAlg::parse(alg) {
+        Err(_) => {
+            "must be \"RS256\" or \"EdDSA\" (case-sensitive); \"none\" and symmetric HS* \
+             algorithms are never supported"
+        }
+        Ok(crate::identity::IdTokenSigningAlg::Rs256)
+            if realm_fapi || app.profile.as_deref() == Some("fapi2") =>
+        {
+            "RS256 is not permitted under FAPI 2.0 (a `profile: fapi2` application or a realm \
+             with `fapi_profile`); use \"EdDSA\""
+        }
+        Ok(_) => return,
+    };
+    issues.push(ValidationIssue {
+        field: format!("{prefix}.id_token_signed_response_alg"),
+        reason: reason.to_string(),
+    });
+}
+
+/// Validates an application's `profile` and `jwks`.
+///
+/// Only `standard` and `fapi2` exist (anything else used to be read as
+/// standard with a warning). A `fapi2` application authenticates with
+/// `private_key_jwt` only, so it must declare the public keys it signs
+/// assertions with (`jwks`) and must not hold a secret — without keys,
+/// reconcile made it a client that counted as PUBLIC. The engine refuses the
+/// same at reconcile; `hearth config validate` must say so first.
+fn validate_app_profile_keys(
+    prefix: &str,
+    app: &super::types::ApplicationYamlConfig,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if let Some(jwks) = app.jwks_json() {
+        if let Err(reason) = crate::identity::validate_client_jwks(&jwks) {
+            issues.push(ValidationIssue {
+                field: format!("{prefix}.jwks"),
+                reason,
+            });
+        }
+    }
+    let fapi2 = match app.profile.as_deref() {
+        None | Some("standard") => false,
+        Some("fapi2") => true,
+        Some(_) => {
+            issues.push(ValidationIssue {
+                field: format!("{prefix}.profile"),
+                reason: "must be \"standard\" or \"fapi2\"".to_string(),
+            });
+            false
+        }
+    };
+    if !fapi2 {
+        return;
+    }
+    if app.jwks_json().is_none() {
+        issues.push(ValidationIssue {
+            field: format!("{prefix}.jwks"),
+            reason: "a `profile: fapi2` application authenticates with private_key_jwt only and \
+                     must declare its public keys inline (`jwks: {keys: [...]}`)"
+                .to_string(),
+        });
+    }
+    if app.confidential == Some(true) || app.client_secret.is_some() {
+        issues.push(ValidationIssue {
+            field: format!("{prefix}.client_secret"),
+            reason: "a `profile: fapi2` application must not hold a client secret; it \
+                     authenticates with private_key_jwt"
+                .to_string(),
+        });
+    }
+}
+
 fn validate_realm_applications_all(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
     issues: &mut Vec<ValidationIssue>,
@@ -1810,6 +1999,8 @@ fn validate_realm_applications_all(
                     }
                 }
             }
+            validate_app_id_token_alg(&prefix, app, cfg.fapi_profile.is_some(), issues);
+            validate_app_profile_keys(&prefix, app, issues);
             // A confidential client whose `client_secret` is present but empty
             // authenticates with `Authorization: Basic base64("<client_id>:")`,
             // which any caller who knows the client id can send. The `is_none()`
@@ -1962,7 +2153,7 @@ mod tests {
         sms: &SmsConfig,
     ) -> Result<(), ConfigError> {
         let mut issues = Vec::new();
-        super::validate_realm_auth_configs_all(realms, sms, &mut issues);
+        super::validate_realm_auth_configs_all(realms, sms, false, &mut issues);
         first_error(issues)
     }
 
@@ -2348,12 +2539,94 @@ mod tests {
         assert!(reason.contains("carrier_pigeon"), "{reason}");
     }
 
+    // ===== fix/ga-sms: one shared MFA-methods rule for YAML and runtime =====
+
+    fn methods(ms: &[&str]) -> Vec<String> {
+        ms.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn shared_mfa_rule_refuses_sms_on_the_log_transport_outside_dev() {
+        let err = check_mfa_methods(&methods(&["totp", "sms"]), SmsTransport::Log, false)
+            .expect_err("log transport cannot deliver an OTP in production");
+        assert!(err.contains("log"), "reason must name the transport: {err}");
+    }
+
+    #[test]
+    fn shared_mfa_rule_allows_sms_on_the_log_transport_in_dev() {
+        // Dev mode logs the full SMS body, so the developer does get the code.
+        assert_eq!(
+            check_mfa_methods(&methods(&["sms"]), SmsTransport::Log, true),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn shared_mfa_rule_allows_sms_on_a_real_transport() {
+        for t in [SmsTransport::Twilio, SmsTransport::AwsSns] {
+            assert_eq!(check_mfa_methods(&methods(&["sms"]), t, false), Ok(()));
+        }
+    }
+
+    #[test]
+    fn shared_mfa_rule_refuses_unknown_methods_even_in_dev() {
+        let err = check_mfa_methods(&methods(&["carrier_pigeon"]), SmsTransport::Twilio, true)
+            .expect_err("unknown method");
+        assert!(err.contains("carrier_pigeon"), "{err}");
+    }
+
+    #[test]
+    fn shared_mfa_rule_accepts_non_sms_methods_on_the_log_transport() {
+        assert_eq!(
+            check_mfa_methods(
+                &methods(&["totp", "webauthn", "email_otp"]),
+                SmsTransport::Log,
+                false
+            ),
+            Ok(())
+        );
+    }
+
+    /// The global `auth.mfa_methods` default is inherited by every realm that
+    /// does not override it, but only the per-realm list was ever validated.
+    #[test]
+    fn global_auth_mfa_methods_with_sms_on_the_log_transport_is_refused() {
+        let yaml = "security:\n  key_encryption_key: \"".to_string()
+            + &"ab".repeat(32)
+            + "\"\nauth:\n  mfa_methods: [\"sms\"]\n\
+               storage:\n  data_dir: \"/tmp/ga-sms-global\"\n";
+        let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
+        let issues = config.validate_all();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field == "auth.mfa_methods" && i.reason.contains("log")),
+            "global sms MFA on the log transport must be refused: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn global_auth_mfa_methods_with_an_unknown_method_is_refused() {
+        let yaml = "security:\n  key_encryption_key: \"".to_string()
+            + &"ab".repeat(32)
+            + "\"\nauth:\n  mfa_methods: [\"carrier_pigeon\"]\n\
+               storage:\n  data_dir: \"/tmp/ga-sms-global2\"\n";
+        let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
+        let issues = config.validate_all();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field == "auth.mfa_methods" && i.reason.contains("carrier_pigeon")),
+            "an unknown global MFA method must be refused: {issues:?}"
+        );
+    }
+
     #[test]
     fn validate_all_sms_mfa_with_log_transport_accumulates_issue() {
         let mut realms = std::collections::HashMap::new();
         realms.insert("default".to_string(), realm_with_mfa(&["sms"]));
         let mut issues = Vec::new();
-        validate_realm_auth_configs_all(Some(&realms), &sms_log(), &mut issues);
+        validate_realm_auth_configs_all(Some(&realms), &sms_log(), false, &mut issues);
         assert!(
             issues
                 .iter()
@@ -2739,6 +3012,80 @@ auth:
         );
     }
 
+    /// Above the Argon2 ceilings a stored-hash verifier enforces (task 26.36:
+    /// 1 GiB memory, 64 passes), `hash_raw_secret` would mint client secrets
+    /// and recovery codes that `verify_raw_secret` always refuses — and user
+    /// passwords a restore refuses to import. Refused at start-up, naming the
+    /// ceiling, in every mode (dev included: it is not an OWASP-style floor).
+    #[test]
+    fn argon2_costs_above_the_verifier_ceilings_are_refused() {
+        let cases = [
+            (
+                "auth:\n  password_time_cost: 65\n",
+                "auth.password_time_cost",
+                "64",
+            ),
+            (
+                "auth:\n  password_memory_cost: 1048577\n",
+                "auth.password_memory_cost",
+                "1048576",
+            ),
+            (
+                "realms:\n  acme:\n    password_time_cost: 100\n",
+                "realms.acme.password_time_cost",
+                "64",
+            ),
+            (
+                "realms:\n  acme:\n    password_memory_cost: 2097152\n",
+                "realms.acme.password_memory_cost",
+                "1048576",
+            ),
+        ];
+        for dev in [false, true] {
+            for (block, field, ceiling) in cases {
+                let yaml = format!(
+                    "{}storage:\n  data_dir: \"/tmp/hea-argon2-ceiling\"\n{block}",
+                    if dev { "dev_mode: true\n" } else { "" }
+                );
+                let config = Config::from_yaml_str_unchecked(&yaml).expect("parse");
+                let issues = config.validate_all();
+                assert!(
+                    issues
+                        .iter()
+                        .any(|i| i.field == field && i.reason.contains(ceiling)),
+                    "dev={dev}: {field} above the ceiling must be refused naming {ceiling}; \
+                     got: {issues:?}"
+                );
+            }
+        }
+    }
+
+    /// The ceilings themselves are accepted.
+    #[test]
+    fn argon2_costs_at_the_verifier_ceilings_are_accepted() {
+        let yaml = "\
+storage:
+  data_dir: \"/tmp/hea-argon2-ceiling-ok\"
+auth:
+  password_memory_cost: 1048576
+  password_time_cost: 64
+realms:
+  acme:
+    password_memory_cost: 1048576
+    password_time_cost: 64
+";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        let issues: Vec<_> = config
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field.contains("password_"))
+            .collect();
+        assert!(
+            issues.is_empty(),
+            "the ceilings are inclusive; got {issues:?}"
+        );
+    }
+
     /// Argon2 requires `m_cost >= 8`; anything lower makes `Params::new` fail.
     #[test]
     fn auth_password_memory_cost_below_argon2_minimum_is_refused() {
@@ -3095,6 +3442,177 @@ auth:
             "SECURITY: 'password' (ROPC, RFC 6749 §4.3) must not appear in \
              VALID_GRANT_TYPES — remove it and use client_credentials or auth-code+PKCE instead"
         );
+    }
+
+    #[test]
+    fn config_validates_application_id_token_signed_response_alg() {
+        let yaml = |alg: &str| {
+            format!(
+                r#"
+oidc:
+  issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+realms:
+  myrealm:
+    applications:
+      my-app:
+        name: "My App"
+        redirect_uris: ["https://app.example.com/cb"]
+        id_token_signed_response_alg: "{alg}"
+"#
+            )
+        };
+        // Look only at this field's issues: the fixture is deliberately
+        // minimal and trips unrelated production-mode rules (email transport).
+        let alg_issues = |alg: &str| {
+            Config::from_yaml_str_unchecked(&yaml(alg))
+                .expect("fixture parses")
+                .validate_all()
+                .into_iter()
+                .filter(|issue| {
+                    issue.field == "realms.myrealm.applications.my-app.id_token_signed_response_alg"
+                })
+                .count()
+        };
+        for ok in ["RS256", "EdDSA"] {
+            assert_eq!(alg_issues(ok), 0, "{ok} must be accepted");
+        }
+        for bad in ["HS256", "none", "rs256", "ES256", ""] {
+            assert_eq!(
+                alg_issues(bad),
+                1,
+                "{bad:?} must be refused by `hearth config validate`, not first at reconcile"
+            );
+        }
+    }
+
+    /// FAPI 2.0 Security Profile §5.4.1 permits only PS256, ES256 and EdDSA, so
+    /// `hearth config validate` refuses RS256 for a `profile: fapi2`
+    /// application and for any application of a realm with a `fapi_profile` —
+    /// the engine refuses both at reconcile, and the operator should hear first.
+    #[test]
+    fn config_refuses_rs256_id_tokens_under_fapi() {
+        let yaml = |realm_fapi: &str, app_profile: &str, alg: &str| {
+            format!(
+                r#"
+oidc:
+  issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+realms:
+  myrealm:
+{realm_fapi}
+    applications:
+      my-app:
+        name: "My App"
+        redirect_uris: ["https://app.example.com/cb"]
+{app_profile}
+        id_token_signed_response_alg: "{alg}"
+"#
+            )
+        };
+        let alg_issues = |realm_fapi: &str, app_profile: &str, alg: &str| {
+            Config::from_yaml_str_unchecked(&yaml(realm_fapi, app_profile, alg))
+                .expect("fixture parses")
+                .validate_all()
+                .into_iter()
+                .filter(|issue| {
+                    issue.field == "realms.myrealm.applications.my-app.id_token_signed_response_alg"
+                })
+                .count()
+        };
+        let fapi_realm = "    fapi_profile: baseline";
+        let fapi_app = "        profile: fapi2";
+        assert_eq!(alg_issues(fapi_realm, "", "RS256"), 1, "FAPI realm + RS256");
+        assert_eq!(alg_issues("", fapi_app, "RS256"), 1, "FAPI 2.0 app + RS256");
+        assert_eq!(alg_issues(fapi_realm, "", "EdDSA"), 0, "FAPI realm + EdDSA");
+        assert_eq!(alg_issues("", fapi_app, "EdDSA"), 0, "FAPI 2.0 app + EdDSA");
+        assert_eq!(alg_issues("", "", "RS256"), 0, "no FAPI + RS256");
+    }
+
+    /// A `profile: fapi2` application authenticates with `private_key_jwt`
+    /// only, so it must declare the keys it signs assertions with (`jwks`) and
+    /// no secret; an unknown profile is refused rather than read as standard.
+    /// Before, reconcile set `profile = Fapi2` on a keyless client that then
+    /// counted as PUBLIC.
+    #[test]
+    fn config_requires_keys_and_no_secret_for_a_fapi2_application() {
+        let yaml = |app: &str| {
+            format!(
+                r#"
+oidc:
+  issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+realms:
+  myrealm:
+    applications:
+      my-app:
+        name: "My App"
+        redirect_uris: ["https://app.example.com/cb"]
+{app}
+"#
+            )
+        };
+        let issues = |app: &str| -> Vec<String> {
+            Config::from_yaml_str_unchecked(&yaml(app))
+                .expect("fixture parses")
+                .validate_all()
+                .into_iter()
+                .filter(|i| i.field.starts_with("realms.myrealm.applications.my-app"))
+                .map(|i| format!("{}: {}", i.field, i.reason))
+                .collect()
+        };
+        let jwks = r"        jwks:
+          keys:
+            - kty: OKP
+              crv: Ed25519
+              kid: k1
+              alg: EdDSA
+              use: sig
+              x: 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo";
+
+        let keyless = issues("        profile: fapi2");
+        assert!(
+            keyless
+                .iter()
+                .any(|i| i.contains(".jwks") && i.contains("private_key_jwt")),
+            "a keyless fapi2 application must be refused, naming jwks: {keyless:?}"
+        );
+        let with_secret = issues(&format!(
+            "        profile: fapi2\n        confidential: true\n        client_secret: \"s3cret-s3cret-s3cret\"\n{jwks}"
+        ));
+        assert!(
+            with_secret.iter().any(|i| i.contains("client_secret")),
+            "a fapi2 application with a secret must be refused: {with_secret:?}"
+        );
+        let unknown = issues("        profile: fapi3");
+        assert!(
+            unknown.iter().any(|i| i.contains(".profile")),
+            "an unknown profile must be refused: {unknown:?}"
+        );
+        let private = issues(&format!(
+            "        profile: fapi2\n{jwks}\n              d: nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A"
+        ));
+        assert!(
+            private
+                .iter()
+                .any(|i| i.contains(".jwks") && i.contains("private")),
+            "a JWKS carrying private key material must be refused: {private:?}"
+        );
+        let ok = issues(&format!("        profile: fapi2\n{jwks}"));
+        assert!(ok.is_empty(), "fapi2 with an inline JWKS is valid: {ok:?}");
+        assert!(issues("").is_empty(), "control: a standard application");
     }
 
     #[test]

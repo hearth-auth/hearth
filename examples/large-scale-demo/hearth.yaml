@@ -4,7 +4,7 @@
 # machine to prove the storage model's usability at scale. Used by
 # `make seed-large`, which runs:
 #
-#   HEARTH_DEV_DATA_DIR=./data/demo cargo run --release -- serve --dev \
+#   HEARTH_DEV_DATA_DIR=./data/demo cargo run --release --features dev-endpoints -- serve --dev \
 #       --config examples/large-scale-demo/hearth.yaml
 #
 # NOT for production. The mass seeder below is gated by `demo.enabled: true`;

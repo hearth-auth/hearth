@@ -152,8 +152,17 @@ impl ClusterEngine {
     /// startup.
     pub fn set_replicated_write_observer(&self, observer: Arc<dyn ReplicatedWriteObserver>) {
         if let Some(slot) = &self.observer_slot {
-            if slot.set(observer).is_err() {
+            if slot.set(Arc::clone(&observer)).is_err() {
                 warn!("replicated-write observer already set; ignoring second registration");
+                return;
+            }
+            // The leadership watch drops a transition it sees before an
+            // observer exists; a node that already leads when the observer
+            // arrives is told now. Both firing costs one extra epoch bump.
+            if let Some(raft) = &self.raft {
+                if raft.metrics().borrow().state == ServerState::Leader {
+                    observer.on_leadership_acquired();
+                }
             }
         }
     }
@@ -194,7 +203,7 @@ impl ClusterEngine {
         faults: Option<Arc<PeerFaults>>,
     ) -> Result<Self, ClusterBuildError> {
         let raft_db_path = storage_config.data_dir.join("raft.db");
-        let log_store = HearthLogStore::open(&raft_db_path)
+        let mut log_store = HearthLogStore::open(&raft_db_path)
             .map_err(|e| ClusterBuildError::LogStore(e.to_string()))?;
 
         let sm_engine: Arc<dyn StorageEngine> = Arc::clone(&inner) as Arc<dyn StorageEngine>;
@@ -204,8 +213,21 @@ impl ClusterEngine {
         // `set_replicated_write_observer` (audit 2026-08-28 §4.16#5).
         let observer_slot: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>> =
             Arc::new(OnceLock::new());
-        let state_machine =
-            HearthStateMachine::with_observer_slot(sm_engine, Arc::clone(&observer_slot));
+        // The state machine loads its persisted applied state (storage reads:
+        // on the blocking pool).
+        let slot = Arc::clone(&observer_slot);
+        let state_machine = tokio::task::spawn_blocking(move || {
+            HearthStateMachine::with_observer_slot(sm_engine, slot)
+        })
+        .await
+        .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?
+        .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?;
+        if state_machine.has_no_applied_state() {
+            let log_state = openraft::storage::RaftLogStorage::get_log_state(&mut log_store)
+                .await
+                .map_err(|e| ClusterBuildError::LogStore(e.to_string()))?;
+            refuse_restart_without_applied_state(log_state.last_purged_log_id)?;
+        }
 
         let cert_pem = tokio::fs::read(&config.tls_cert_path).await?;
         let key_pem = tokio::fs::read(&config.tls_key_path).await?;
@@ -250,6 +272,7 @@ impl ClusterEngine {
         tokio::spawn(async move {
             run_lag_monitor(raft_for_monitor, reads_flag, threshold).await;
         });
+        tokio::spawn(watch_leadership(raft.clone(), Arc::clone(&observer_slot)));
 
         // Build initial membership map for use by the bootstrap HTTP handler.
         let mut initial_members = BTreeMap::new();
@@ -439,10 +462,10 @@ impl ClusterEngine {
     /// `external_request` hands out an immutable `&RaftState`. A targeted
     /// `Trigger::transfer_leader` arrived in openraft 0.10.
     ///
-    /// So the caller names a preferred target and this method cannot honour
-    /// it. `POST /admin/cluster/transfer-leadership` reports which node
-    /// actually won in `new_leader_id`, and whether that was the requested one
-    /// in `exact_target`.
+    /// So this method takes no target. `POST /admin/cluster/transfer-leadership`
+    /// refuses a body naming `target_node_id` with 422 rather than stepping
+    /// down anyway and reporting success (task 26.60), and reports the node
+    /// that actually won in `new_leader_id`.
     ///
     /// ## How the step-down is performed, and why it used to do nothing
     ///
@@ -831,6 +854,44 @@ impl ClusterEngine {
             .map_err(ClusterError::Storage)
     }
 
+    /// Atomically increments the `u64` counter at `key` and returns the new
+    /// value.
+    ///
+    /// In cluster mode proposes `RaftCommand::IncrementU64`, whose successor
+    /// the state machine computes at apply time, so concurrent increments on
+    /// any node never collide or move the counter backwards.
+    pub async fn increment_u64(&self, realm_id: &RealmId, key: &[u8]) -> Result<u64, ClusterError> {
+        if self.raft.is_some() {
+            let resp = self
+                .propose_with_response(RaftCommand::IncrementU64 {
+                    leader_timestamp: Self::leader_timestamp_now(),
+                    realm: realm_id.clone(),
+                    key: key.to_vec(),
+                })
+                .await?;
+            if !resp.success {
+                // Defensive: the state machine repairs a counter that does not
+                // decode and succeeds (every node the same way), so no current
+                // state machine answers `false` here.
+                return Err(ClusterError::Storage(
+                    crate::storage::StorageError::DeserializationFailed {
+                        reason: "the replicated counter is corrupted; the increment was refused"
+                            .to_string(),
+                    },
+                ));
+            }
+            return crate::storage::decode_u64_counter(Some(&resp.payload))
+                .map_err(ClusterError::Storage);
+        }
+        let inner = Arc::clone(&self.inner);
+        let realm_id = realm_id.clone();
+        let key = key.to_vec();
+        spawn_blocking(move || inner.increment_u64(&realm_id, &key))
+            .await
+            .map_err(|e| ClusterError::Raft(e.to_string()))?
+            .map_err(ClusterError::Storage)
+    }
+
     /// Enumerates all realm IDs present in the underlying storage engine.
     ///
     /// Delegates directly to [`EmbeddedStorageEngine::list_realms`] without
@@ -902,6 +963,37 @@ impl IncomingRpcDispatch for ClusterEngine {
 }
 
 // ── Background lag monitor ────────────────────────────────────────────────────
+
+/// A node whose log was purged but whose data directory holds no persisted
+/// applied state was written by an earlier release, which did not persist it:
+/// openraft would replay from index 0, which the log no longer holds, and fail
+/// deep inside `Raft::new`. Refuse with instructions instead. (A current
+/// binary persists the applied state with every entry, so it cannot reach
+/// this state: a log is purged only after a snapshot of applied entries.)
+fn refuse_restart_without_applied_state(
+    last_purged: Option<openraft::LogId<u64>>,
+) -> Result<(), ClusterBuildError> {
+    match last_purged {
+        None => Ok(()),
+        Some(purged) => Err(ClusterBuildError::RaftInit(format!(
+            "this node's Raft log is purged through index {} but its data directory holds no \
+             persisted applied state (it was written by an earlier Hearth release, which kept \
+             its applied state and membership in memory only, or an interrupted snapshot \
+             install cleared it): it cannot be restarted in place. Re-seed it if the rest of \
+             the cluster still has a leader: stop it, move its data directory (including \
+             raft.db) aside, and start it empty so the leader sends it a snapshot. If no node \
+             can start (every node's log was purged, as in the full-cluster restart this \
+             release requires), there is no leader to send one, and the older build cannot \
+             restart this node either: rebuild the cluster from the backup taken before the \
+             upgrade. Restore it offline with `hearth backup restore` into one empty data \
+             directory and copy that directory to every node before the new cluster first \
+             starts; restoring into a cluster that has already started leaves every realm \
+             empty under a new id (see the upgrading guide, \"Upgrading a cluster whose Raft \
+             logs were purged\")",
+            purged.index
+        ))),
+    }
+}
 
 async fn run_lag_monitor(
     raft: openraft::Raft<HearthRaftConfig>,
@@ -984,6 +1076,9 @@ fn check_clock_skew(payload: &[u8]) -> Option<u64> {
                 }
                 | RaftCommand::PutIfAbsent {
                     leader_timestamp, ..
+                }
+                | RaftCommand::IncrementU64 {
+                    leader_timestamp, ..
                 } => *leader_timestamp,
             },
             _ => continue,
@@ -1035,12 +1130,62 @@ impl ClusterStorageAdapter {
     }
 }
 
-fn cluster_to_storage_err(e: ClusterError) -> crate::storage::StorageError {
+/// Tells the replicated-write observer each time this node wins leadership —
+/// once per term it leads, however quickly the metrics change around it.
+///
+/// A control's durable row and its control-epoch bump are two Raft proposals.
+/// When leadership moves between them the bump is lost, and cluster storage
+/// has no follower-to-leader forwarding, so the old leader can never make it
+/// up; the observer bumps the epoch on the new leader instead (see the
+/// identity engine's control plane). Exits when the Raft instance shuts down.
+async fn watch_leadership(
+    raft: openraft::Raft<HearthRaftConfig>,
+    observer: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>>,
+) {
+    let mut metrics = raft.metrics();
+    let mut led_term: Option<u64> = None;
+    loop {
+        let won = {
+            let m = metrics.borrow_and_update();
+            let won = m.state == ServerState::Leader && led_term != Some(m.current_term);
+            if won {
+                led_term = Some(m.current_term);
+            }
+            won
+        };
+        if won {
+            if let Some(observer) = observer.get() {
+                observer.on_leadership_acquired();
+            }
+        }
+        if metrics.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// How a [`ClusterError::NotLeader`] reads once carried as a
+/// [`crate::storage::StorageError::Io`] (see [`cluster_to_storage_err`]).
+const NOT_LEADER_PREFIX: &str = "raft: not the leader";
+
+/// Whether a storage error is cluster storage refusing a write because this
+/// node is not the Raft leader.
+///
+/// Cluster storage does not forward a follower's write to the leader, so such
+/// a write can never succeed on this node until it leads again — a caller
+/// retrying one is waiting on an election, not on a transient fault.
+pub fn is_not_leader(err: &crate::storage::StorageError) -> bool {
+    matches!(err, crate::storage::StorageError::Io(e) if e.to_string().starts_with(NOT_LEADER_PREFIX))
+}
+
+/// Maps a [`ClusterError`] onto the [`crate::storage::StorageError`] the
+/// [`StorageEngine`] facade returns.
+pub(crate) fn cluster_to_storage_err(e: ClusterError) -> crate::storage::StorageError {
     use crate::storage::StorageError;
     match e {
         ClusterError::Storage(se) => se,
         ClusterError::NotLeader { leader_addr } => StorageError::Io(std::io::Error::other(
-            format!("raft: not the leader; redirect to {leader_addr}"),
+            format!("{NOT_LEADER_PREFIX}; redirect to {leader_addr}"),
         )),
         ClusterError::ReplicationLagExceeded { leader_addr } => {
             StorageError::Io(std::io::Error::other(format!(
@@ -1204,6 +1349,21 @@ impl StorageEngine for ClusterStorageAdapter {
         .map_err(cluster_to_storage_err)
     }
 
+    fn increment_u64(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+    ) -> Result<u64, crate::storage::StorageError> {
+        let engine = Arc::clone(&self.engine);
+        let realm_id = realm_id.clone();
+        let key = key.to_vec();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async move { engine.increment_u64(&realm_id, &key).await })
+        })
+        .map_err(cluster_to_storage_err)
+    }
+
     fn list_realms(&self) -> Result<Vec<RealmId>, crate::storage::StorageError> {
         self.engine.list_realms()
     }
@@ -1238,6 +1398,45 @@ mod tests {
 
     fn make_realm() -> RealmId {
         RealmId::new(Uuid::new_v4())
+    }
+
+    /// A data directory written by an earlier release (no persisted applied
+    /// state) over a purged log is refused; over an unpurged log (openraft
+    /// replays it all) it starts.
+    ///
+    /// The instructions must work when NO node can start — the full-cluster
+    /// restart this release requires, on a cluster whose logs were purged.
+    /// "Start it empty and the leader sends it a snapshot" assumes a leader,
+    /// so on its own it sent operators round in a circle: the refusal must
+    /// also name the rebuild-from-backup procedure.
+    #[test]
+    fn a_purged_log_without_persisted_applied_state_is_refused_with_instructions() {
+        assert!(refuse_restart_without_applied_state(None).is_ok());
+        let err = refuse_restart_without_applied_state(Some(LogId::new(
+            CommittedLeaderId::new(1, 1),
+            5_000,
+        )))
+        .expect_err("refused");
+        let msg = err.to_string();
+        assert!(msg.contains("5000") && msg.contains("Re-seed"), "{msg}");
+        assert!(
+            msg.contains("no node") && msg.contains("backup") && msg.contains("upgrading guide"),
+            "the refusal must give the procedure for when no node can start: {msg}"
+        );
+        // Realms come from hearth.yaml, so a cluster that has started has
+        // already created every declared realm under a new id, and a restore
+        // into it leaves the realms empty under their names. The rebuild must
+        // restore OFFLINE, before the new cluster first starts.
+        assert!(
+            msg.contains("hearth backup restore") && msg.contains("before"),
+            "the refusal must name the offline restore, before the first start: {msg}"
+        );
+        assert!(
+            !msg.contains("start a fresh cluster with empty data directories and restore"),
+            "restoring into a started cluster loses every realm's id and keys: {msg}"
+        );
+        // Stopping a purged node is one-way on either build.
+        assert!(msg.contains("older build"), "{msg}");
     }
 
     fn open_engine(dir: &std::path::Path) -> Arc<EmbeddedStorageEngine> {

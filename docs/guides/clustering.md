@@ -304,6 +304,34 @@ curl -s http://10.0.0.1:8420/admin/cluster/status \
 
 `role` is one of `"leader"`, `"follower"`, `"candidate"`, `"learner"`, or `"unknown"`. `is_healthy` reflects whether the peer appears in the leader's replication map.
 
+**Alert on `hearth_control_epoch_bumps_owed` staying above 0.** A control — a token or session
+revocation, a DPoP key block, a realm status change, a user deletion — is applied on the node that
+served it and announced to the others by bumping the replicated control epoch. When a bump cannot
+be persisted (for example a leader change between the control's write and its bump, or while Raft
+has no leader) the control still binds on the serving node and the admin call still succeeds; the
+failed bump is logged at `ERROR`, counted in `hearth_control_epoch_bump_failures_total`, and
+recorded as **owed**. What happens next depends on why it failed:
+
+- **The node is still the leader** (a write timeout, a storage fault): a background thread on that
+  node retries the owed bump with backoff (100 ms doubling to 5 s) until it succeeds, and every
+  other node then reloads.
+- **Leadership moved** (the node is now a follower, or no leader was known): followers cannot write
+  — Hearth does not forward a follower's writes to the leader — so the bump could never succeed
+  there. Instead, **every node that becomes the Raft leader bumps the control epoch once**. The
+  control's row was committed before that bump in the new leader's log, so every node, the new
+  leader included, reloads and enforces it. The old leader drops what it owed (logged once at
+  `INFO`), and the gauge returns to 0.
+
+`hearth_control_epoch_bumps_owed` is the number of controls still waiting, summed over the
+process. **Alert when it stays above 0 for more than a minute**: the node that owes the bump still
+believes it is the leader but cannot commit (it lost its quorum, or storage is failing), and until
+it succeeds or steps down the other nodes enforce stale controls. Check `/admin/cluster/status` on
+that node; if another node has been elected, step the stuck node down or restart it. Any election
+— including the one that follows restarting the stuck leader — makes every node reload, and so does
+the next control asserted anywhere. The owed count lives in memory: a node that stops while owing
+loses the count, and the election that follows covers it. A control-epoch row that does not decode
+is repaired by the state machine on the next bump (every node the same way).
+
 ---
 
 ### Graceful Shutdown
@@ -324,9 +352,14 @@ systemctl stop hearth
 
 > **This is a step-down, not a targeted transfer.** openraft 0.9.25 — the
 > version Hearth pins — has no API for handing leadership to a *chosen* peer;
-> `Trigger::transfer_leader` arrived in 0.10. `target_node_id` is therefore a
-> preference the server cannot honour, and `exact_target` will normally be
-> `false`. Read `new_leader_id` to find out who actually took over.
+> `Trigger::transfer_leader` arrived in 0.10. A request body that names a
+> `target_node_id` is therefore **refused with `422`** and nothing changes —
+> the server will not step down and then report success for a handover it did
+> not perform. Send no body (or `{}`) and read `new_leader_id` to find out
+> which voter won the election. Any other field in the body is refused with
+> `400`, so a misspelled target (`targetNodeId`, `target`) is never silently
+> dropped. `exact_target` is **deprecated** and always `false`; it stays in
+> the response for 1.x clients and will be removed in 2.0.
 
 > **It is not instantaneous, and it is not free.** The endpoint works by
 > letting the followers' leader leases expire, so the cluster has **no leader**

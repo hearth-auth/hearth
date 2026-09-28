@@ -33,7 +33,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "▸ building hearth (release)"
-(cd "$REPO_ROOT" && cargo build --release --bin hearth --quiet)
+(cd "$REPO_ROOT" && cargo build --release --features dev-endpoints --bin hearth --quiet)
 
 echo "▸ starting hearth --dev on port $PORT (data: $DATA_DIR)"
 HEARTH_BIN="$REPO_ROOT/target/release/hearth"

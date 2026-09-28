@@ -260,6 +260,10 @@ verification failures when some tokens still carry the old key ID. TTL respects
 
 ## Token Introspection (RFC 7662)
 
+Introspection requires a **confidential** client: construct `HearthClient` with both
+`clientId` and `clientSecret` (otherwise `introspect()` throws `ConfigurationError`).
+Hearth answers a public client — `client_id` with no secret — with `401 invalid_client`.
+
 ```kotlin
 val result = client.introspect(token)
 if (result.active) {

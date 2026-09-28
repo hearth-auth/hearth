@@ -7,8 +7,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use arc_swap::ArcSwap;
-
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ring::rand::SecureRandom;
@@ -17,8 +15,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::audit::{Actor, AuditAction, AuditContext, AuditEngine, CreateAuditEvent};
 use crate::core::{
-    AgentCredentialId, AgentId, ClientId, Clock, ImportOutcome, InvitationId, OrganizationId,
-    RealmId, SessionId, Timestamp, UserId, WebhookId,
+    AgentCredentialId, AgentId, ClientId, Clock, EpochCell, ImportOutcome, InvitationId,
+    OrganizationId, RealmId, SessionId, Timestamp, UserId, WebhookId,
 };
 use crate::identity::claims_config::{
     resolve_claims_for_target, ClaimEvaluationContext, ClaimTarget,
@@ -329,7 +327,11 @@ use crate::storage::StorageEngine;
 
 mod advisory_lock;
 pub(super) mod approval;
+pub(crate) mod client_jwks;
+mod control;
+mod id_token_keys;
 pub(super) mod oauth;
+mod retired_keys;
 mod sharded_cache;
 // Phase D engine modules
 pub(super) mod aat;
@@ -337,7 +339,8 @@ pub(super) mod cross_realm;
 pub(super) mod spiffe;
 pub(super) mod txn;
 
-use sharded_cache::ShardedArcSwapMap;
+use retired_keys::KeyFamily;
+use sharded_cache::ShardedEpochMap;
 
 /// Context supplied to [`IdentityEngine::issue_tokens_with_context`] to
 /// influence which claims are embedded in the issued token pair.
@@ -576,11 +579,11 @@ pub struct EmbeddedIdentityEngine {
     /// Each realm gets its own key pair so tokens from one realm cannot
     /// validate in another.
     ///
-    /// Hot-path readers call `load()` — one atomic fence, no locking.
+    /// Hot-path readers call `load()` — one epoch-pinned load, no lock.
     /// Writers `rcu()` only the affected shard; realm key ops are rare.
     /// Wrapped in `Arc` so background delete tasks can hold a reference.
     /// Sharded (HEA-1772) so an insert clones ~`1/N` of the map, not all of it.
-    realm_signing_keys: Arc<ShardedArcSwapMap<RealmId, Arc<SigningKey>>>,
+    realm_signing_keys: Arc<ShardedEpochMap<RealmId, Arc<SigningKey>>>,
     /// Per-realm retiring signing keys within their rotation grace period.
     ///
     /// After [`rotate_realm_signing_key`](Self::rotate_realm_signing_key) the
@@ -596,7 +599,17 @@ pub struct EmbeddedIdentityEngine {
     /// their deadline and filtered by the current clock at read time, so an
     /// expired retiring key is never accepted even before the cache entry is
     /// invalidated. Invalidated on rotation and realm delete.
-    realm_retiring_keys: Arc<ShardedArcSwapMap<RealmId, Arc<Vec<RetiringSigningKey>>>>,
+    realm_retiring_keys: Arc<ShardedEpochMap<RealmId, Arc<Vec<RetiringSigningKey>>>>,
+    /// Per-realm RSA keys that sign RS256 ID tokens (task 26.55), lazily
+    /// loaded. A realm is absent until a client in it selects RS256.
+    ///
+    /// Guarded by the same `realm_key_epoch` as `realm_signing_keys`, so a
+    /// rotation on any node evicts both key families together.
+    realm_id_token_rsa_keys: Arc<ShardedEpochMap<RealmId, Arc<tokens::RsaIdTokenSigningKey>>>,
+    /// Per-realm retiring RSA ID-token keys still inside their rotation grace
+    /// period — the RS256 twin of `realm_retiring_keys`.
+    realm_id_token_rsa_retiring_keys:
+        Arc<ShardedEpochMap<RealmId, Arc<Vec<id_token_keys::RetiringRsaIdTokenKey>>>>,
     /// Per-realm rotation epoch guarding the `realm_signing_keys` cache-miss
     /// fill against a racing rotation (HEA-2096).
     ///
@@ -610,34 +623,37 @@ pub struct EmbeddedIdentityEngine {
     /// time the load completes, discards its own insert so the next reader
     /// reloads the freshly-rotated key. No lock and no cost on the cache-hit
     /// hot path — only cache misses read the epoch.
-    realm_key_epoch: Arc<ShardedArcSwapMap<RealmId, u64>>,
-    /// Highest cluster control epoch this process has observed.
+    realm_key_epoch: Arc<ShardedEpochMap<RealmId, u64>>,
+    /// Keeps the control caches (`realm_status_cache`, `revoked_jti_cache`,
+    /// `blocked_dpop_jkt_cache`) coherent with storage.
     ///
-    /// Three caches decide a control question authoritatively on the
-    /// validation path — `realm_status_cache`, `revoked_jti_cache` and
-    /// `blocked_dpop_jkt_cache` — and each is written only by the node that
-    /// served the mutating request. A kill-switch thrown on one node therefore
-    /// did not bind on any other until that node restarted, while its own
-    /// storage already held the row that said so (audit 2026-08-28 §4.1
-    /// objection, §4.16#5, §4.19#12; enumerated in
-    /// `reports/follower-bypass-enumeration-2026-09-21.md`).
-    ///
-    /// The epoch row replicates with the rows it describes, so observing it
-    /// needs no new transport. See [`Self::sync_control_epoch`].
-    control_epoch: AtomicU64,
+    /// Each of those caches decides a control authoritatively on the
+    /// validation path and is written directly only by the node that served
+    /// the mutating request. A kill-switch thrown on one node therefore did
+    /// not bind on any other until that node restarted, while its own storage
+    /// already held the row that said so (audit 2026-08-28 §4.1 objection,
+    /// §4.16#5, §4.19#12; `reports/follower-bypass-enumeration-2026-09-21.md`).
+    /// Every control write now bumps a replicated control epoch, and a node
+    /// whose caches trail it reloads them on a background thread. Validation
+    /// only compares epochs and signals that thread; it never takes a lock or
+    /// waits for a reload. See [`control`] for the ordering argument.
+    control: Arc<control::ControlPlane>,
+    /// The background reloader and bump threads, joined when the engine drops so no thread
+    /// outlives the storage handle it reads.
+    control_worker: Vec<std::thread::JoinHandle<()>>,
     /// Micros timestamp before which the hot path skips epoch reconciliation.
     ///
     /// Reconciling both epochs costs two storage reads, and the validation hot
     /// path may perform none. This bounds how often it pays for them. See
     /// [`Self::sync_epochs_debounced`] and [`EPOCH_SYNC_INTERVAL_MICROS`].
     epoch_sync_after: AtomicI64,
-    /// Wait-free realm status cache for the `validate_token` hot path.
+    /// Lock-free realm status cache for the `validate_token` hot path.
     ///
     /// Populated at startup and updated on every realm CRUD operation.
     /// `validate_token` reads with `load()` — no lock, no storage call.
     /// Writers (`create_realm`, `update_realm`, `delete_realm`) use `rcu()`.
     /// Wrapped in `Arc` so background delete tasks can hold a reference.
-    realm_status_cache: Arc<ArcSwap<HashMap<RealmId, RealmStatus>>>,
+    realm_status_cache: Arc<EpochCell<HashMap<RealmId, RealmStatus>>>,
     /// Per-realm RSA signing keys used for SAML metadata + response signing.
     ///
     /// Lazily loaded. Regeneration happens only on first SAML operation in
@@ -805,9 +821,12 @@ pub struct EmbeddedIdentityEngine {
     /// In-process session cache for the `validate_token` hot path (S12-F1).
     ///
     /// Key: `(RealmId, SessionId)`. Value: `Arc<Session>`.
-    /// Hot-path readers call `load()` — one atomic fence, no lock, no I/O.
+    /// Hot-path readers call `load()` — one epoch-pinned load, no lock, no I/O.
     /// Writers use `rcu()` on `persist_session`. Bounded to [`SESSION_CACHE_MAX`].
-    session_cache: ArcSwap<HashMap<(RealmId, SessionId), Arc<Session>>>,
+    session_cache: Arc<control::SessionCache>,
+    /// Generation guarding [`Self::session_cache`] cache-miss fills against a
+    /// racing revocation, eviction or flush; see [`Self::get_session_arc`].
+    session_cache_gen: Arc<AtomicU64>,
     /// In-process token claims cache for the `validate_token` hot path (S12-F2).
     ///
     /// Key: SHA-256(`token_bytes`) as `[u8; 32]`. Value: `Arc<TokenClaims>`.
@@ -815,7 +834,7 @@ pub struct EmbeddedIdentityEngine {
     /// access token. Hot-path readers call `load()`. Bounded to
     /// `config.token.claims_cache_max`; a full cache evicts expired then
     /// soonest-to-expire entries rather than refusing inserts (HEA-1990).
-    token_claims_cache: ArcSwap<HashMap<[u8; 32], Arc<TokenClaims>>>,
+    token_claims_cache: Arc<control::ClaimsCache>,
     /// Monotonic generation counter guarding [`Self::token_claims_cache`]
     /// against a flush-vs-in-flight-verify TOCTOU (HEA-2097).
     ///
@@ -830,7 +849,7 @@ pub struct EmbeddedIdentityEngine {
     /// to revoke it. No hot-path cost: only cache misses read the counter, and
     /// the cache-hit read path is untouched. This is the claims-cache twin of
     /// the `realm_key_epoch` guard on the signing-key cache.
-    token_claims_cache_gen: AtomicU64,
+    token_claims_cache_gen: Arc<AtomicU64>,
     /// Per-realm DPoP nonce HMAC secrets (AGENT_AUTH.md §13.2).
     ///
     /// Lazily populated: first call for a realm loads or generates the secret
@@ -846,8 +865,8 @@ pub struct EmbeddedIdentityEngine {
     /// Populated at startup by scanning `agt:dpop:block:jkt:*` across all realms.
     /// Updated by `block_dpop_jkt` / `unblock_dpop_jkt`; each write `rcu()`s a
     /// single shard. Modelled as a set via `V = ()`.
-    /// Hot-path readers call `contains_key()` — one atomic fence, no lock, no syscall.
-    blocked_dpop_jkt_cache: ShardedArcSwapMap<String, ()>,
+    /// Hot-path readers call `contains_key()` — one epoch-pinned load, no lock, no syscall.
+    blocked_dpop_jkt_cache: Arc<ShardedEpochMap<String, ()>>,
     /// Hot-path JTI revocation projection (§10.5).
     ///
     /// Key: `"{realm_uuid}:{jti}"`. Value: expiry (Unix seconds); `i64::MAX`
@@ -856,12 +875,12 @@ pub struct EmbeddedIdentityEngine {
     /// Populated at startup by scanning `oauth:revjti:*` across all realms.
     /// Updated whenever a sessionless token is revoked; each write `rcu()`s a
     /// single shard (HEA-1772) rather than cloning the whole projection.
-    /// Hot-path readers call `contains_key()` — one atomic fence, no lock, no syscall.
+    /// Hot-path readers call `contains_key()` — one epoch-pinned load, no lock, no syscall.
     ///
     /// Expired entries remain until the next per-shard eviction sweep; an
     /// expired token is rejected by the `exp` claim check before we reach this
     /// cache, so stale entries are harmless.
-    revoked_jti_cache: ShardedArcSwapMap<String, i64>,
+    revoked_jti_cache: Arc<ShardedEpochMap<String, i64>>,
     // INVARIANT: guard released before method returns; no .await in scope.
     agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor,
     /// Per-code-hash advisory lock for single-use enforcement of authorization codes.
@@ -915,9 +934,17 @@ impl std::fmt::Debug for EmbeddedIdentityEngine {
 /// machine (audit 2026-08-28 §4.16#5).
 ///
 /// On a follower, a sessionless-token revocation arrives only as a raw
-/// `oauth:revjti:` storage write. These callbacks keep the hot-path
-/// revoked-JTI projection coherent with such writes; the node's own API
-/// handlers update the projection synchronously and never pass through here.
+/// `oauth:revjti:` storage write, and a control asserted on another node only
+/// as a new control-epoch row. These callbacks project the first into the
+/// revoked-JTI cache and hand the second to the control-cache reloader.
+///
+/// They run on the state machine's apply path on EVERY node — the leader's own
+/// writes come back through here too — so they MUST NOT write to storage: a
+/// write is a Raft proposal, and a proposal made from inside an apply waits for
+/// that same apply (on the leader, a self-deadlock until `write_timeout`; a
+/// revocation took 10 s and then failed after its row had committed). Nothing
+/// here writes, proposes, or waits on I/O; the only lock taken is the control
+/// journal's, which is held for in-memory work alone.
 impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
     fn on_replicated_put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) {
         // The RBAC decision cache is invalidated by a per-realm generation
@@ -933,17 +960,28 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
         // the identity engine is this node's single observer and the audit
         // engine decides whether it cares about the key.
         self.audit.on_replicated_row(realm_id, key);
+        // The replicated control epoch: another node (or, on the leader, this
+        // one) asserted a control. The reloader decides whether this node's
+        // caches already reflect it.
+        if keys::is_system_realm(realm_id) && key == keys::encode_control_epoch().as_slice() {
+            match crate::storage::decode_u64_counter(Some(value)) {
+                Ok(epoch) => self.control.signal(epoch),
+                Err(err) => tracing::warn!(error = %err, "replicated control epoch is corrupted"),
+            }
+            return;
+        }
         let prefix = keys::revoked_jti_scan_prefix();
         if let Some(jti_bytes) = key.strip_prefix(prefix.as_slice()) {
             let jti = String::from_utf8_lossy(jti_bytes);
-            // Same two storage-value formats `populate_revoked_jti_cache`
-            // accepts: 8-byte LE i64 expiry, or legacy `b"1"` (no expiry).
-            let exp: i64 = if value.len() == 8 {
-                i64::from_le_bytes(value.try_into().unwrap_or([0xff_u8; 8]))
-            } else {
-                i64::MAX
-            };
-            self.insert_revoked_jti_cache(realm_id, &jti, exp);
+            // Cache projection only: no epoch bump (see the impl docs). The
+            // node that served the revocation bumped the epoch itself.
+            self.control.apply(
+                Some(control::ControlOp::RevokeJti {
+                    key: control::revoked_jti_cache_key(realm_id, &jti),
+                    exp: control::decode_revoked_jti_expiry(value),
+                }),
+                None,
+            );
         }
     }
 
@@ -955,19 +993,47 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
         let prefix = keys::revoked_jti_scan_prefix();
         if let Some(jti_bytes) = key.strip_prefix(prefix.as_slice()) {
             let jti = String::from_utf8_lossy(jti_bytes);
-            let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
-            self.revoked_jti_cache.remove(cache_key.as_str());
+            // Through the control plane like every other cache change, so a
+            // reload that scanned before this delete cannot resurrect it.
+            self.control.apply(
+                Some(control::ControlOp::ForgetJti {
+                    key: control::revoked_jti_cache_key(realm_id, &jti),
+                }),
+                None,
+            );
         }
+    }
+
+    fn on_leadership_acquired(&self) {
+        // Only a flag and an unpark: the control plane's bump thread makes the
+        // bump (a storage write must not run on the Raft watch task).
+        self.control.on_leadership_acquired();
     }
 
     fn on_replicated_reset(&self) {
         self.rbac.on_replicated_snapshot();
         self.audit.on_replicated_snapshot();
-        if let Err(e) = self.populate_revoked_jti_cache() {
+        // The whole key-space was replaced: rebuild every control cache. This
+        // runs on the blocking pool (see the state machine), so reloading
+        // inline is fine; on failure the background reloader keeps retrying.
+        // The snapshot may carry a lower control epoch than this node had
+        // recorded, so the reload re-bases the epoch bookkeeping on it.
+        if let Err(e) = self.control.reload_after_reset() {
             tracing::error!(
                 error = %e,
-                "failed to rebuild the revoked-JTI projection after snapshot install"
+                "failed to rebuild the control caches after snapshot install; retrying"
             );
+        }
+    }
+}
+
+impl Drop for EmbeddedIdentityEngine {
+    fn drop(&mut self) {
+        // Stop and join the reloader so it never outlives this engine's
+        // storage handle (a restart in the same process reopens the store).
+        self.control.shutdown();
+        for worker in std::mem::take(&mut self.control_worker) {
+            let _ = worker.join();
         }
     }
 }
@@ -1254,7 +1320,10 @@ impl EmbeddedIdentityEngine {
             Arc::clone(&storage),
             Arc::clone(&clock),
         ));
-        let engine = Self {
+        let caches = control::ControlCaches::new();
+        let control =
+            control::ControlPlane::new(Arc::clone(&storage), Arc::clone(&clock), caches.clone());
+        let mut engine = Self {
             storage,
             clock,
             config,
@@ -1263,12 +1332,15 @@ impl EmbeddedIdentityEngine {
             dummy_hash,
             dummy_hashes: Mutex::new(std::collections::HashMap::new()),
             signing_key,
-            realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
-            realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
-            realm_key_epoch: Arc::new(ShardedArcSwapMap::new()),
-            control_epoch: AtomicU64::new(0),
+            realm_signing_keys: Arc::new(ShardedEpochMap::new()),
+            realm_retiring_keys: Arc::new(ShardedEpochMap::new()),
+            realm_id_token_rsa_keys: Arc::new(ShardedEpochMap::new()),
+            realm_id_token_rsa_retiring_keys: Arc::new(ShardedEpochMap::new()),
+            realm_key_epoch: Arc::new(ShardedEpochMap::new()),
+            control: Arc::clone(&control),
+            control_worker: Vec::new(),
             epoch_sync_after: AtomicI64::new(0),
-            realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            realm_status_cache: Arc::clone(&caches.realm_status),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
@@ -1316,12 +1388,13 @@ impl EmbeddedIdentityEngine {
             ),
             device_fp,
             sv_store,
-            session_cache: ArcSwap::from_pointee(HashMap::new()),
-            token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
-            token_claims_cache_gen: AtomicU64::new(0),
+            session_cache: Arc::clone(&caches.sessions),
+            session_cache_gen: Arc::clone(&caches.session_gen),
+            token_claims_cache: Arc::clone(&caches.claims),
+            token_claims_cache_gen: Arc::clone(&caches.claims_gen),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
-            blocked_dpop_jkt_cache: ShardedArcSwapMap::new(),
-            revoked_jti_cache: ShardedArcSwapMap::new(),
+            blocked_dpop_jkt_cache: Arc::clone(&caches.blocked_jkt),
+            revoked_jti_cache: Arc::clone(&caches.revoked_jti),
             // INVARIANT: guard released before method returns; no .await in scope.
             agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
                 crate::abuse::agent_monitor::AgentRateConfig::default(),
@@ -1330,9 +1403,8 @@ impl EmbeddedIdentityEngine {
         engine.purge_legacy_oidc_rsa_keys();
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
-        engine.populate_realm_status_cache()?;
-        engine.populate_revoked_jti_cache()?;
-        engine.populate_blocked_dpop_jkt_cache()?;
+        engine.control.reload()?;
+        engine.control_worker = engine.control.start();
         Ok(engine)
     }
 
@@ -1603,178 +1675,30 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Scans storage for all non-system realms and populates the wait-free
-    /// `realm_status_cache` used by the `validate_token` hot path.
-    ///
-    /// Called once at startup after seeding. Realms created or updated after
-    /// this point are tracked via the individual CRUD cache updates.
-    fn populate_realm_status_cache(&self) -> Result<(), IdentityError> {
-        let sys_realm = keys::system_realm_id();
-        let realm_prefix = keys::realm_id_scan_prefix();
-        let realm_end = keys::prefix_end(&realm_prefix);
-        let entries = self
-            .storage
-            .scan(&sys_realm, &realm_prefix, &realm_end)
-            .map_err(Self::storage_err)?;
-
-        let mut map = HashMap::new();
-        for entry in &entries {
-            // Fail-closed: a corrupted realm record must hard-error rather than
-            // silently skipping, which would leave the realm absent from the
-            // cache and allow validate_token to pass the status check fail-open.
-            let realm = serde_json::from_slice::<Realm>(&entry.value).map_err(|e| {
-                tracing::error!(
-                    key = ?entry.key,
-                    err = %e,
-                    "realm deserialization failed during status cache population \
-                     — refusing to start with an incomplete cache"
-                );
-                IdentityError::Internal {
-                    reason: format!("realm status cache population failed: {e}"),
-                }
-            })?;
-            if !keys::is_system_realm(realm.id()) {
-                map.insert(realm.id().clone(), realm.status());
-            }
-        }
-        self.realm_status_cache.store(Arc::new(map));
-        Ok(())
-    }
-
-    /// Scans all realm namespaces for `oauth:revjti:*` keys and loads
-    /// non-expired entries into `revoked_jti_cache`.
-    ///
-    /// Called once at startup.  Handles two storage-value formats:
-    /// - 8-byte little-endian `i64` expiry (current format)
-    /// - Any other length (legacy `b"1"` format): mapped to `i64::MAX`
-    ///   so the entry is never self-evicted (the `exp` claim check catches it).
-    fn populate_revoked_jti_cache(&self) -> Result<(), IdentityError> {
-        let sys_realm = keys::system_realm_id();
-        let realm_prefix = keys::realm_id_scan_prefix();
-        let realm_end = keys::prefix_end(&realm_prefix);
-        let realm_entries = self
-            .storage
-            .scan(&sys_realm, &realm_prefix, &realm_end)
-            .map_err(Self::storage_err)?;
-
-        let now_secs = self.clock.now().as_micros() / 1_000_000;
-        let jti_prefix = keys::revoked_jti_scan_prefix();
-        let jti_end = keys::prefix_end(&jti_prefix);
-
-        let mut map: HashMap<String, i64> = HashMap::new();
-
-        for realm_entry in &realm_entries {
-            let Ok(realm) =
-                serde_json::from_slice::<crate::identity::types::Realm>(&realm_entry.value)
-            else {
-                continue;
-            };
-            if keys::is_system_realm(realm.id()) {
-                continue;
-            }
-            let jti_entries = self
-                .storage
-                .scan(realm.id(), &jti_prefix, &jti_end)
-                .map_err(Self::storage_err)?;
-
-            for entry in jti_entries {
-                let exp: i64 = if entry.value.len() == 8 {
-                    // Current format: LE i64 expiry.
-                    i64::from_le_bytes(entry.value[..8].try_into().unwrap_or([0xff_u8; 8]))
-                } else {
-                    // Legacy b"1" format: no expiry stored; never self-evict.
-                    i64::MAX
-                };
-                // Skip entries that are already expired.
-                if exp != i64::MAX && now_secs >= exp {
-                    continue;
-                }
-                let jti_key = String::from_utf8_lossy(&entry.key);
-                // Strip the `oauth:revjti:` prefix to get the raw JTI string.
-                let jti = jti_key.strip_prefix("oauth:revjti:").unwrap_or(&jti_key);
-                let cache_key = format!("{}:{}", realm.id().as_uuid(), jti);
-                map.insert(cache_key, exp);
-            }
-        }
-
-        self.revoked_jti_cache.replace_all(map);
-        Ok(())
-    }
-
-    /// Scans all realm namespaces for `agt:dpop:block:jkt:*` keys and loads
-    /// their thumbprints into `blocked_dpop_jkt_cache`.
-    ///
-    /// Called once at startup. The blocklist has no expiry — entries are
-    /// admin-managed via `block_dpop_jkt` / `unblock_dpop_jkt`.
-    fn populate_blocked_dpop_jkt_cache(&self) -> Result<(), IdentityError> {
-        let sys_realm = keys::system_realm_id();
-        let realm_prefix = keys::realm_id_scan_prefix();
-        let realm_end = keys::prefix_end(&realm_prefix);
-        let realm_entries = self
-            .storage
-            .scan(&sys_realm, &realm_prefix, &realm_end)
-            .map_err(Self::storage_err)?;
-
-        let jkt_prefix = keys::blocked_dpop_jkt_scan_prefix();
-        let jkt_end = keys::prefix_end(&jkt_prefix);
-
-        let mut set = std::collections::HashSet::new();
-
-        for realm_entry in &realm_entries {
-            let Ok(realm) =
-                serde_json::from_slice::<crate::identity::types::Realm>(&realm_entry.value)
-            else {
-                continue;
-            };
-            if keys::is_system_realm(realm.id()) {
-                continue;
-            }
-            let entries = self
-                .storage
-                .scan(realm.id(), &jkt_prefix, &jkt_end)
-                .map_err(Self::storage_err)?;
-
-            for entry in entries {
-                let raw = String::from_utf8_lossy(&entry.key);
-                let jkt = raw
-                    .strip_prefix("agt:dpop:block:jkt:")
-                    .unwrap_or(&raw)
-                    .to_string();
-                set.insert(jkt);
-            }
-        }
-
-        self.blocked_dpop_jkt_cache
-            .replace_all(set.into_iter().map(|jkt| (jkt, ())));
-        Ok(())
-    }
-
-    /// Adds `(realm, jti, exp)` entry to `revoked_jti_cache` via RCU.
-    ///
-    /// Also evicts any entries whose expiry has already passed to bound
-    /// cache memory.  Called from every revocation write site.
-    /// Inserts a revoked identifier into the local blocklist cache AND bumps
-    /// the cluster control epoch, so every other node reloads its own.
+    /// Revokes `(realm, jti)` in this node's blocklist and bumps the cluster
+    /// control epoch, so every other node reloads its own. The caller has
+    /// already written the durable `oauth:revjti:` row.
     ///
     /// `is_token_jti_revoked` reads only this cache — no storage fallback — so
     /// without the bump a token revoked here stayed valid on every other node
     /// until it restarted (task 24.6, audit §4.16#5).
+    ///
+    /// For LOCAL revocations only. A replicated row is projected by the Raft
+    /// observer with [`control::ControlPlane::apply`] and no bump: the bump is
+    /// a storage write, which on a cluster leader is a Raft proposal made from
+    /// inside the state machine's own apply, and waits for itself.
     fn insert_revoked_jti_cache(&self, realm_id: &RealmId, jti: &str, exp_secs: i64) {
-        let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
-        let now_secs = self.clock.now().as_micros() / 1_000_000;
-        // Evict expired entries in the target shard while we hold the clone.
-        self.revoked_jti_cache
-            .insert_retaining(cache_key, exp_secs, |_, &exp| {
-                exp == i64::MAX || now_secs < exp
-            });
-        self.bump_control_epoch();
+        self.publish_control(Some(control::ControlOp::RevokeJti {
+            key: control::revoked_jti_cache_key(realm_id, jti),
+            exp: exp_secs,
+        }));
     }
 
     /// Adds a DPoP JWK thumbprint to the server-side blocklist (§10.4).
     ///
     /// Writes the thumbprint to persistent storage and updates the hot-path
-    /// in-memory projection via `rcu()`. After this call, every access token
-    /// whose `cnf.jkt` matches `jkt` will be rejected at `validate_token` time.
+    /// in-memory projection. After this call, every access token whose
+    /// `cnf.jkt` matches `jkt` will be rejected at `validate_token` time.
     pub(super) fn block_dpop_jkt_inner(
         &self,
         realm_id: &RealmId,
@@ -1784,9 +1708,8 @@ impl EmbeddedIdentityEngine {
         self.storage
             .put(realm_id, &key, b"")
             .map_err(Self::storage_err)?;
-        self.blocked_dpop_jkt_cache.insert(jkt.to_string(), ());
         // Every other node's blocklist is a separate cache (task 24.6).
-        self.bump_control_epoch();
+        self.publish_control(Some(control::ControlOp::BlockJkt(jkt.to_string())));
         Ok(())
     }
 
@@ -1804,8 +1727,7 @@ impl EmbeddedIdentityEngine {
         self.storage
             .delete(realm_id, &key)
             .map_err(Self::storage_err)?;
-        self.blocked_dpop_jkt_cache.remove(jkt);
-        self.bump_control_epoch();
+        self.publish_control(Some(control::ControlOp::UnblockJkt(jkt.to_string())));
         Ok(())
     }
 
@@ -1826,7 +1748,10 @@ impl EmbeddedIdentityEngine {
             Arc::clone(&storage),
             Arc::clone(&clock),
         ));
-        let engine = Self {
+        let caches = control::ControlCaches::new();
+        let control =
+            control::ControlPlane::new(Arc::clone(&storage), Arc::clone(&clock), caches.clone());
+        let mut engine = Self {
             storage,
             clock,
             config,
@@ -1835,12 +1760,15 @@ impl EmbeddedIdentityEngine {
             dummy_hash,
             dummy_hashes: Mutex::new(std::collections::HashMap::new()),
             signing_key,
-            realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
-            realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
-            realm_key_epoch: Arc::new(ShardedArcSwapMap::new()),
-            control_epoch: AtomicU64::new(0),
+            realm_signing_keys: Arc::new(ShardedEpochMap::new()),
+            realm_retiring_keys: Arc::new(ShardedEpochMap::new()),
+            realm_id_token_rsa_keys: Arc::new(ShardedEpochMap::new()),
+            realm_id_token_rsa_retiring_keys: Arc::new(ShardedEpochMap::new()),
+            realm_key_epoch: Arc::new(ShardedEpochMap::new()),
+            control: Arc::clone(&control),
+            control_worker: Vec::new(),
             epoch_sync_after: AtomicI64::new(0),
-            realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            realm_status_cache: Arc::clone(&caches.realm_status),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
@@ -1888,12 +1816,13 @@ impl EmbeddedIdentityEngine {
             ),
             device_fp,
             sv_store,
-            session_cache: ArcSwap::from_pointee(HashMap::new()),
-            token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
-            token_claims_cache_gen: AtomicU64::new(0),
+            session_cache: Arc::clone(&caches.sessions),
+            session_cache_gen: Arc::clone(&caches.session_gen),
+            token_claims_cache: Arc::clone(&caches.claims),
+            token_claims_cache_gen: Arc::clone(&caches.claims_gen),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
-            blocked_dpop_jkt_cache: ShardedArcSwapMap::new(),
-            revoked_jti_cache: ShardedArcSwapMap::new(),
+            blocked_dpop_jkt_cache: Arc::clone(&caches.blocked_jkt),
+            revoked_jti_cache: Arc::clone(&caches.revoked_jti),
             // INVARIANT: guard released before method returns; no .await in scope.
             agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
                 crate::abuse::agent_monitor::AgentRateConfig::default(),
@@ -1909,15 +1838,11 @@ impl EmbeddedIdentityEngine {
         if let Err(e) = engine.restore_attempt_trackers_from_wal() {
             tracing::warn!(error = %e, "with_signing_key: restore_attempt_trackers_from_wal failed");
         }
-        if let Err(e) = engine.populate_realm_status_cache() {
-            tracing::warn!(error = %e, "with_signing_key: populate_realm_status_cache failed");
+        if let Err(e) = engine.control.reload() {
+            tracing::warn!(error = %e, "with_signing_key: loading the control caches failed");
+            engine.control.request_full_reload();
         }
-        if let Err(e) = engine.populate_revoked_jti_cache() {
-            tracing::warn!(error = %e, "with_signing_key: populate_revoked_jti_cache failed");
-        }
-        if let Err(e) = engine.populate_blocked_dpop_jkt_cache() {
-            tracing::warn!(error = %e, "with_signing_key: populate_blocked_dpop_jkt_cache failed");
-        }
+        engine.control_worker = engine.control.start();
         engine
     }
 
@@ -2036,7 +1961,8 @@ impl EmbeddedIdentityEngine {
     /// Covers every family of stored key material:
     ///
     /// - System-realm scans — `sys:global:key`, `realm:key:*`,
-    ///   `realm:retiring:*` and `realm:saml_key:*`.
+    ///   `realm:retiring:*`, `realm:saml_key:*`, and the RS256 ID-token keys
+    ///   `realm:idtoken_rsa:*` / `realm:idtoken_rsa_retiring:*`.
     /// - A realm walk — `agt:dpop:nonce-secret`, `mfa:dek:key` and the audit
     ///   chain's HMAC key, which are written into each tenant realm's own
     ///   namespace and therefore cannot be reached by a system-realm scan
@@ -2080,6 +2006,8 @@ impl EmbeddedIdentityEngine {
             keys::realm_signing_key_scan_prefix(),
             keys::realm_retiring_key_all_scan_prefix(),
             keys::realm_saml_key_scan_prefix(),
+            keys::realm_id_token_rsa_key_scan_prefix(),
+            keys::realm_id_token_rsa_retiring_all_scan_prefix(),
         ] {
             let end = keys::prefix_end(&prefix);
             let entries = storage
@@ -3585,9 +3513,11 @@ impl EmbeddedIdentityEngine {
             // confidential client could be redeemed unauthenticated or by a
             // different client. Require that the caller authenticated as the
             // exact confidential client the family was issued to. Public
-            // clients (no secret) are exempt — they have no secret channel
-            // and are already constrained by rotation + DPoP binding.
-            if client.client_secret_hash().is_some() {
+            // clients are exempt — they have no credential to present and
+            // are already constrained by rotation + DPoP binding. A secretless
+            // client with an assertion key or a JWKS is not public: it binds
+            // like a secret holder (it authenticates with `private_key_jwt`).
+            if !client.is_public() {
                 let authenticated = bind_ctx.and_then(|c| c.authenticated_client_id.as_ref());
                 if authenticated != Some(client_id) {
                     return Err(IdentityError::InvalidClient);
@@ -3596,8 +3526,7 @@ impl EmbeddedIdentityEngine {
         }
 
         // Verify the incoming refresh token matches the current hash
-        let incoming_hash = Self::sha256_hex(refresh_token.as_bytes());
-        if incoming_hash != family.current_refresh_hash {
+        if !Self::refresh_token_matches_hash(refresh_token, &family.current_refresh_hash) {
             // THEFT DETECTED — a previously-rotated token is being reused.
             family.revoked = true;
             let updated =
@@ -3969,6 +3898,22 @@ impl EmbeddedIdentityEngine {
         URL_SAFE_NO_PAD.encode(digest.as_ref())
     }
 
+    /// Returns `true` when `verifier` is the S256 pre-image of the stored
+    /// `challenge` (RFC 7636 §4.6).
+    ///
+    /// The comparison is constant-time and length-blind
+    /// ([`crate::core::ct_eq_secret_str`]): a plain `!=` would return at the
+    /// first differing byte of the challenge.
+    fn pkce_s256_verifier_matches(verifier: &str, challenge: &str) -> bool {
+        crate::core::ct_eq_secret_str(&Self::pkce_s256_challenge(verifier), challenge)
+    }
+
+    /// Returns `true` when `refresh_token` hashes to the family's stored
+    /// `current_refresh_hash`, compared in constant time.
+    fn refresh_token_matches_hash(refresh_token: &str, stored_hash: &str) -> bool {
+        crate::core::ct_eq_secret_str(&Self::sha256_hex(refresh_token.as_bytes()), stored_hash)
+    }
+
     /// Persists a session to storage and keeps the in-process cache consistent.
     fn persist_session(&self, realm_id: &RealmId, session: &Session) -> Result<(), IdentityError> {
         self.persist_session_with(realm_id, session, Vec::new())
@@ -4005,7 +3950,7 @@ impl EmbeddedIdentityEngine {
         if session.is_valid(self.clock.now()) {
             self.session_cache_insert(realm_id, session);
         } else {
-            self.session_cache_evict(realm_id, session.id());
+            self.session_cache_invalidate(realm_id, session.id());
         }
         Ok(())
     }
@@ -4026,6 +3971,46 @@ impl EmbeddedIdentityEngine {
             m.insert(key.clone(), Arc::clone(&val));
             m
         });
+    }
+
+    /// Cache-miss fill of a session read from storage, discarded if any
+    /// session write, eviction or flush happened since `gen_before_read` —
+    /// the generation snapshotted before the read. To bound a cached trust
+    /// decision, never write the entry if the generation moved (the HEA-2097
+    /// claims-cache rule, applied to sessions).
+    ///
+    /// Two checks, because an eviction that finds the key absent does not
+    /// touch the map, so the `rcu` compare-and-swap alone cannot see it: the
+    /// generation is re-read inside the `rcu`, and again after it behind a
+    /// `SeqCst` fence. Every invalidation bumps the generation, fences, then
+    /// looks at the map ([`Self::session_cache_invalidate`]). So either the
+    /// re-read here sees the bump and this fill removes its own entry, or the
+    /// invalidation sees the entry and removes it.
+    fn session_cache_fill(&self, realm_id: &RealmId, session: &Arc<Session>, gen_before_read: u64) {
+        if self.session_cache.load().len() >= SESSION_CACHE_MAX {
+            return;
+        }
+        let key = (realm_id.clone(), session.id().clone());
+        self.session_cache.rcu(|map| {
+            let mut m = HashMap::clone(map);
+            if self.session_cache_gen.load(Ordering::SeqCst) == gen_before_read {
+                m.insert(key.clone(), Arc::clone(session));
+            }
+            m
+        });
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.session_cache_gen.load(Ordering::SeqCst) != gen_before_read {
+            self.session_cache_evict(realm_id, session.id());
+        }
+    }
+
+    /// Evicts a session because a write changed it (revocation, expiry,
+    /// policy eviction), and fences off any cache-miss fill that read it
+    /// before the write (see [`Self::session_cache_fill`]).
+    fn session_cache_invalidate(&self, realm_id: &RealmId, session_id: &SessionId) {
+        self.session_cache_gen.fetch_add(1, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        self.session_cache_evict(realm_id, session_id);
     }
 
     /// Hot-path session lookup that returns the cached `Arc<Session>` without
@@ -4080,11 +4065,20 @@ impl EmbeddedIdentityEngine {
         }
 
         // Cache miss: load from storage and warm the cache on a valid result.
+        //
+        // Snapshot the cache generation BEFORE the read. A revocation that
+        // lands between the read and the insert writes its row and evicts a
+        // key that is not cached yet; inserting the live session read here
+        // afterwards would resurrect it for every later validation. The fill
+        // is dropped whenever the generation moved (see
+        // `session_cache_fill`).
+        let gen_before_read = self.session_cache_gen.load(Ordering::SeqCst);
         let session = self.load_session_raw(realm_id, session_id)?;
         match session {
             Some(s) if s.is_valid(now) && !s.is_policy_expired(now) => {
-                self.session_cache_insert(realm_id, &s);
-                Ok(Some(Arc::new(s)))
+                let arc = Arc::new(s);
+                self.session_cache_fill(realm_id, &arc, gen_before_read);
+                Ok(Some(arc))
             }
             Some(s) if s.is_valid(now) => {
                 // Policy-expired (A-18): reject fail-closed. Eviction is
@@ -4120,8 +4114,18 @@ impl EmbeddedIdentityEngine {
     /// of the process. Token-claims caches are handled separately by
     /// `flush_token_claims_cache`.
     fn purge_realm_caches(&self, realm_id: &RealmId) {
+        // Fence off any in-flight cache-miss fill of this realm's sessions
+        // (see `session_cache_fill`) before looking at the map.
+        self.session_cache_gen.fetch_add(1, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
         // Session cache: keyed by (realm, session). Rebuild without this realm.
-        let has_sessions = self.session_cache.load().keys().any(|(r, _)| r == realm_id);
+        // An owned snapshot for the scan: it walks every cached session, and an
+        // epoch pin held that long would stall reclamation process-wide.
+        let has_sessions = self
+            .session_cache
+            .load_full()
+            .keys()
+            .any(|(r, _)| r == realm_id);
         if has_sessions {
             self.session_cache.rcu(|map| {
                 let mut m = HashMap::clone(map);
@@ -4167,7 +4171,7 @@ impl EmbeddedIdentityEngine {
         let mut evicted = session.clone();
         evicted.revoke();
         self.persist_session(realm_id, &evicted)?;
-        self.session_cache_evict(realm_id, evicted.id());
+        self.session_cache_invalidate(realm_id, evicted.id());
         if let Ok(Some(realm)) = self.get_realm(realm_id) {
             if realm.config().session_version.enabled {
                 let retention = realm.config().session_version.delta_retention_seconds;
@@ -4246,7 +4250,7 @@ impl EmbeddedIdentityEngine {
     /// This runs only on a cache **miss**, which already performed the Ed25519
     /// verify + `serde_json` parse — it is off the zero-allocation hot path, so
     /// the O(n) rebuild and eviction scan here are acceptable. The hot-path
-    /// read (`validate_token`) is unchanged: one wait-free `ArcSwap::load` plus
+    /// read (`validate_token`) is unchanged: one lock-free `EpochCell::load` plus
     /// an `Arc` refcount bump.
     ///
     /// Eviction policy when the cache is full:
@@ -4341,6 +4345,191 @@ impl EmbeddedIdentityEngine {
     fn get_signing_key_or_default(&self, realm_id: &RealmId) -> Arc<SigningKey> {
         self.get_or_load_realm_signing_key(realm_id)
             .unwrap_or_else(|_| Arc::clone(&self.signing_key))
+    }
+
+    /// The batch entry that bumps `realm_id`'s persisted key epoch, and the
+    /// epoch it writes. A change to a realm's stored key material puts this
+    /// entry in the same atomic batch as the key rows, then calls
+    /// [`Self::evict_realm_key_caches_locked`]. Caller MUST hold
+    /// `realm_ops_lock`, which serialises the read-then-write bump so it
+    /// cannot lose an update.
+    ///
+    /// The epoch is *persisted*, so it replicates with the key material and
+    /// every other node can tell that its own cached key is stale. Read the
+    /// stored value rather than the local one: on a node that has never
+    /// rotated this realm the local counter is 0 and would hand back an epoch
+    /// another node has already used (§4.15#6).
+    fn realm_key_epoch_bump_locked(&self, realm_id: &RealmId) -> (u64, (Vec<u8>, Vec<u8>)) {
+        let next_epoch = self
+            .read_persisted_key_epoch(realm_id)
+            .max(self.realm_key_epoch.get(realm_id).unwrap_or(0))
+            .wrapping_add(1);
+        (
+            next_epoch,
+            (
+                keys::encode_realm_key_epoch(realm_id),
+                next_epoch.to_le_bytes().to_vec(),
+            ),
+        )
+    }
+
+    /// Makes a written change to a realm's key material visible on this node:
+    /// records the new `epoch` (already persisted by the change's batch, see
+    /// [`Self::realm_key_epoch_bump_locked`]) and evicts every key cache plus
+    /// the memoized token claims. Caller MUST hold `realm_ops_lock`.
+    ///
+    /// The epoch is bumped *before* the caches are cleared so a concurrent
+    /// cache-miss fill that snapshotted the old epoch and read the outgoing
+    /// key sees the change and discards its stale insert instead of
+    /// resurrecting it past the `remove()` below (HEA-2096).
+    fn evict_realm_key_caches_locked(&self, realm_id: &RealmId, epoch: u64) {
+        self.realm_key_epoch.insert(realm_id.clone(), epoch);
+
+        // Invalidate the active key cache so realm_jwks / token issuance pick up the new key.
+        self.realm_signing_keys.remove(realm_id);
+        // Invalidate the retiring-key cache so a just-retired key is picked up
+        // on the next validation (HEA-2090).
+        self.realm_retiring_keys.remove(realm_id);
+        // And the RS256 ID-token caches, for the same two reasons.
+        self.realm_id_token_rsa_keys.remove(realm_id);
+        self.realm_id_token_rsa_retiring_keys.remove(realm_id);
+        // Drop memoized claims: a token already validated under the outgoing key
+        // must be re-verified against the new key set, so an emergency rotation
+        // (grace 0) actually cuts it off instead of letting a warm cache entry
+        // carry it to its own `exp` (HEA-2093).
+        self.flush_token_claims_cache();
+    }
+
+    /// Whether the reserved system realm holds at least one user record.
+    ///
+    /// A system realm with no user is the state engine construction seeds
+    /// (`seed_system_realm_if_absent`): a record and a freshly generated key
+    /// that has signed nothing, because only a system-realm user can be issued
+    /// a system-realm token. A restore treats such a realm as absent.
+    fn system_realm_has_users(&self) -> Result<bool, IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        let prefix = keys::user_id_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(&sys_realm, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        Ok(!entries.is_empty())
+    }
+
+    /// Writes one imported user (and its credential) into `realm_id` with
+    /// `create_user`'s validation rules. Shared by `import_user` (tenant
+    /// realms) and `import_admin_user` (the system realm); the system-realm
+    /// guard lives in the callers.
+    fn import_user_record(
+        &self,
+        realm_id: &RealmId,
+        request: &ImportUserRequest,
+    ) -> Result<User, IdentityError> {
+        // 1. Validate and normalize input (same invariants as create_user)
+        let email = validation::validate_email(&request.email)?;
+        let first_name = validation::validate_name_part(&request.first_name, "First name")?;
+        let last_name = validation::validate_name_part(&request.last_name, "Last name")?;
+        let display_name = if request.display_name.trim().is_empty() {
+            let synthesized = format!("{} {}", first_name, last_name).trim().to_string();
+            if synthesized.is_empty() {
+                return Err(IdentityError::InvalidInput {
+                    reason: "Display name or first/last name is required".to_string(),
+                });
+            }
+            validation::validate_display_name(&synthesized)?
+        } else {
+            validation::validate_display_name(&request.display_name)?
+        };
+
+        // 2. Check email uniqueness
+        let email_key = keys::encode_user_email(&email);
+        if self
+            .storage
+            .get(realm_id, &email_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::DuplicateEmail);
+        }
+
+        // 3. Resolve user id — allow caller to preserve a foreign UUID,
+        //    but refuse to clobber an existing record at that id.
+        let user_id = request.id.clone().unwrap_or_else(UserId::generate);
+        let id_key = keys::encode_user_id(&user_id);
+        if self
+            .storage
+            .get(realm_id, &id_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::InvalidInput {
+                reason: "a user with this id already exists".to_string(),
+            });
+        }
+
+        let now = self.clock.now();
+        // Imports preserve the source state; required_actions are not inferred from realm defaults.
+        let mut user = User::new(
+            user_id.clone(),
+            email.clone(),
+            display_name,
+            first_name,
+            last_name,
+            request.status,
+            Vec::new(),
+            now,
+            now,
+        );
+
+        if !request.attributes.is_empty() {
+            Self::validate_user_attributes(&request.attributes)?;
+            user.set_attributes(request.attributes.clone());
+        }
+
+        let user_bytes = Self::serialize_user(&user)?;
+        let user_id_bytes = keys::encode_user_id_value(&user_id);
+
+        // 4. If a credential was supplied, derive the algorithm from the
+        //    PHC prefix and prepare the credential write as part of the
+        //    same atomic batch. Preserving the foreign hash verbatim lets
+        //    the user authenticate with their existing password; the next
+        //    successful verify will auto-upgrade to Argon2id.
+        let mut entries = Vec::with_capacity(3);
+        entries.push((email_key, user_id_bytes));
+        entries.push((id_key, user_bytes));
+
+        if let Some(raw) = &request.credential {
+            let algorithm = classify_phc_algorithm(&raw.phc_string).ok_or_else(|| {
+                IdentityError::InvalidInput {
+                    reason: "unrecognized password hash format".to_string(),
+                }
+            })?;
+            let created_at = raw.created_at_micros.unwrap_or_else(|| now.as_micros());
+            let stored = StoredCredential {
+                algorithm,
+                hash: raw.phc_string.clone(),
+                created_at,
+                pepper_version: None,
+            };
+            let cred_bytes = Self::serialize_credential(&stored)?;
+            let cred_key = keys::encode_credential_key(&user_id);
+            entries.push((cred_key, cred_bytes));
+        }
+
+        self.storage
+            .put_batch(realm_id, &entries)
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::UserCreated,
+            "user",
+            &user_id.as_uuid().to_string(),
+        )?;
+
+        Ok(user)
     }
 
     /// Verifies a JWT signature against the realm-specific signing key, falling
@@ -4461,17 +4650,59 @@ impl EmbeddedIdentityEngine {
         out
     }
 
+    /// Decides what installing `archived` as the system realm's signing key
+    /// does, reading only: [`ImportOutcome::Skipped`] when it is already the
+    /// active key, or when the system realm holds operator accounts and
+    /// `overwrite` is `false` (a live system realm keeps the key its live
+    /// tokens are signed with); [`ImportOutcome::Created`] for a system realm
+    /// with no user (its seeded key has signed nothing);
+    /// [`ImportOutcome::Overwritten`] for a live key `overwrite` replaces. A
+    /// key the system realm rotated away from is refused whenever it would be
+    /// installed.
+    fn plan_system_key_import(
+        &self,
+        current: &SigningKey,
+        archived: &SigningKey,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        if current.key_id() == archived.key_id() {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let pristine = !self.system_realm_has_users()?;
+        if !pristine && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        // Never reinstall a key this system realm rotated away from — for
+        // instance one retired after a compromise. An archive older than the
+        // rotation still carries it, and installing it would re-arm every
+        // token its holder can mint.
+        self.refuse_rotated_away_active_key(
+            &keys::system_realm_id(),
+            KeyFamily::Ed25519,
+            archived.key_id(),
+        )?;
+        Ok(if pristine {
+            ImportOutcome::Created
+        } else {
+            ImportOutcome::Overwritten
+        })
+    }
+
     /// Deletes retiring signing-key blobs for a realm from system-realm storage.
     ///
     /// `cutoff_secs` selects what goes:
     /// - `Some(now)` — only keys whose grace deadline has already elapsed
-    ///   (`deadline <= now`), the routine purge performed on each rotation.
+    ///   (`deadline <= now`).
     /// - `None` — every retiring key, used when the realm itself is deleted.
+    ///
+    /// A rotation does not come through here: it removes its retiring rows in
+    /// the same atomic batch that installs the new key and records the retired
+    /// kids ([`Self::retiring_rows_to_purge`]).
     ///
     /// Takes `storage` by argument rather than `&self` so the `delete_realm`
     /// background cascade — which owns only a cloned storage handle — can reuse
-    /// it. Best-effort: a failure here must never abort a rotation or delete, so
-    /// errors are logged and the count of removed blobs is returned.
+    /// it. Best-effort: a failure here must never abort a delete, so errors are
+    /// logged and the count of removed blobs is returned.
     fn purge_realm_retiring_keys(
         storage: &Arc<dyn StorageEngine>,
         realm_id: &RealmId,
@@ -4585,40 +4816,81 @@ impl EmbeddedIdentityEngine {
     ///
     /// Returns `0` for a realm that has never been rotated, matching the
     /// in-memory default so the two are directly comparable.
-    /// Bumps the cluster control epoch so every other node reloads the three
-    /// authoritative control caches on its next validation.
+    /// Bumps the cluster control epoch so every other node reloads its
+    /// control caches (and drops its session and token-claims caches).
     ///
-    /// Called by realm suspend/archive, token revocation, and DPoP key
-    /// blocking — the three mutations whose enforcement lives in a cache that
-    /// answers "allow" on a miss.
+    /// Used directly by session revocation, whose enforcement on other nodes
+    /// lives in a session cache that answers from memory; the three control
+    /// caches go through [`Self::publish_control`] with their change.
     ///
-    /// Best-effort by design. A failure to bump must not fail the control
-    /// itself: the durable row that carries the decision is already written,
-    /// and refusing the revocation because its epoch bump failed would trade a
-    /// propagation delay for an outright denial of the control. The next
-    /// successful bump, or a restart, still converges every node.
+    /// A failure to bump must not fail the control itself: the durable row
+    /// that carries the decision is already written, and refusing the
+    /// revocation because its epoch bump failed would trade a propagation
+    /// delay for an outright denial of the control. The failed bump is owed
+    /// instead, and the control-cache reloader retries it until it succeeds.
     fn bump_control_epoch(&self) {
+        self.publish_control(None);
+    }
+
+    /// Publishes a control whose durable row the caller has already written:
+    /// bumps the persisted control epoch, then applies `op` to this node's
+    /// control caches and records the epoch its own bump produced.
+    ///
+    /// The bump comes first so that a node which sees the new epoch and
+    /// reloads finds the row. The cache change goes through
+    /// [`control::ControlPlane::apply`], which orders it against a concurrent
+    /// reload so the reload cannot overwrite it. No lock is held across the
+    /// storage write.
+    ///
+    /// The bump is marked in flight until it is recorded, so the reloader does
+    /// not reload for it when the Raft observer (or a validation) sees the new
+    /// epoch first.
+    fn publish_control(&self, op: Option<control::ControlOp>) {
+        let _in_flight = self.control.begin_local_bump();
+        let epoch = self.persist_control_epoch_bump();
+        self.control.apply(op, epoch);
+        if epoch.is_none() {
+            // Other nodes learn of the control only through the epoch: the
+            // reloader retries the bump until it succeeds.
+            self.control.owe_bump();
+        }
+    }
+
+    /// Increments the persisted control epoch and returns the new value, or
+    /// `None` when the bump could not be persisted (best-effort, as below).
+    ///
+    /// One atomic [`StorageEngine::increment_u64`] — a Raft command whose
+    /// successor is computed at apply time in cluster mode. It used to be a
+    /// read followed by a write of the successor, so two concurrent bumps
+    /// could both write the same value, or a slow one could overwrite a faster
+    /// one's higher value and move the epoch backwards; a node that had already
+    /// reloaded at the higher value then ignored the later control entirely.
+    fn persist_control_epoch_bump(&self) -> Option<u64> {
         let sys_realm = keys::system_realm_id();
         let key = keys::encode_control_epoch();
-        let next = match self.storage.get(&sys_realm, &key) {
-            Ok(Some(bytes)) => <[u8; 8]>::try_from(bytes.as_slice())
-                .map(u64::from_le_bytes)
-                .unwrap_or(0)
-                .saturating_add(1),
-            Ok(None) => 1,
+        match self.storage.increment_u64(&sys_realm, &key) {
+            // The caller records the value locally once it has applied the
+            // change to its own caches; otherwise this node would reload for
+            // no reason.
+            Ok(next) => Some(next),
+            // Alertable, not silent (M5): the control is applied on this node
+            // regardless, and the caller records the bump as owed; the
+            // control-cache reloader retries it until it succeeds, which makes
+            // every other node reload. In a cluster a corrupted epoch row is
+            // repaired by the state machine on the next increment.
             Err(err) => {
-                tracing::warn!(error = %err, "could not read the control epoch to bump it");
-                return;
+                crate::metrics::metrics()
+                    .control_epoch_bump_failures_total
+                    .inc();
+                tracing::error!(
+                    error = %err,
+                    "could not persist the control epoch bump: other nodes will not reload \
+                     for this control until the retried bump succeeds \
+                     (hearth_control_epoch_bumps_owed)"
+                );
+                None
             }
-        };
-        if let Err(err) = self.storage.put(&sys_realm, &key, &next.to_le_bytes()) {
-            tracing::warn!(error = %err, "could not persist the control epoch bump");
-            return;
         }
-        // This node already applied the change to its own caches, so record
-        // the epoch locally too; otherwise it would reload on its next read
-        // for no reason.
-        self.control_epoch.store(next, Ordering::Release);
     }
 
     /// Reconciles both cluster epochs, at most once per
@@ -4663,58 +4935,37 @@ impl EmbeddedIdentityEngine {
         self.sync_realm_key_epoch(realm_id);
     }
 
-    /// Reloads the three authoritative control caches when another node has
-    /// asserted a control.
+    /// Signals the control-cache reloader when the persisted control epoch is
+    /// ahead of the one this node's caches reflect — that is, when another
+    /// node has asserted a control.
     ///
-    /// Runs alongside [`Self::sync_realm_key_epoch`] on the validation path.
-    /// The common case is one small storage read that finds the epoch
-    /// unchanged and returns.
+    /// Runs alongside [`Self::sync_realm_key_epoch`] on the validation path,
+    /// so it does nothing that path forbids beyond the one debounced storage
+    /// read: no lock, no reload. [`control::ControlPlane::signal`] is an
+    /// atomic compare and, when the epoch moved, a `fetch_max` and an
+    /// `unpark`; the reload itself runs on the reloader thread, so the
+    /// validation that noticed does not wait for it. In cluster mode the
+    /// replicated epoch row signals the reloader directly (see the
+    /// `ReplicatedWriteObserver` impl), so this is the fallback, not the
+    /// usual trigger.
     ///
     /// The reload is a full repopulate rather than an incremental one. Realm
     /// statuses and blocked thumbprints are bounded by realm and blocklist
     /// size; revoked identifiers are not, so a revocation elsewhere costs this
-    /// node one blocklist scan. That is the right trade: revocations are rare
-    /// relative to validations, and the alternative — a storage read per
-    /// validation — is forbidden on this path.
+    /// node one blocklist scan — coalesced, at most one per
+    /// `control::RELOAD_MIN_SPACING`.
     fn sync_control_epoch(&self) {
         let sys_realm = keys::system_realm_id();
         let key = keys::encode_control_epoch();
-        let persisted = match self.storage.get(&sys_realm, &key) {
-            Ok(Some(bytes)) => <[u8; 8]>::try_from(bytes.as_slice())
-                .map(u64::from_le_bytes)
-                .unwrap_or(0),
-            Ok(None) => 0,
-            Err(err) => {
-                // Fail soft, exactly as the key epoch does: a transient
-                // storage error must not take down token validation.
-                tracing::warn!(error = %err, "could not read the control epoch");
-                return;
-            }
-        };
-        if persisted <= self.control_epoch.load(Ordering::Acquire) {
-            return;
+        match self.storage.get(&sys_realm, &key) {
+            Ok(raw) => match crate::storage::decode_u64_counter(raw.as_deref()) {
+                Ok(persisted) => self.control.signal(persisted),
+                Err(err) => tracing::warn!(error = %err, "the control epoch row is corrupted"),
+            },
+            // Fail soft, exactly as the key epoch does: a transient storage
+            // error must not take down token validation.
+            Err(err) => tracing::warn!(error = %err, "could not read the control epoch"),
         }
-        // Store first so a concurrent validation does not repeat the reload.
-        self.control_epoch.store(persisted, Ordering::Release);
-        if let Err(err) = self.populate_realm_status_cache() {
-            tracing::warn!(error = %err, "control epoch moved but the realm status cache did not reload");
-        }
-        if let Err(err) = self.populate_revoked_jti_cache() {
-            tracing::warn!(error = %err, "control epoch moved but the revoked-JTI cache did not reload");
-        }
-        if let Err(err) = self.populate_blocked_dpop_jkt_cache() {
-            tracing::warn!(error = %err, "control epoch moved but the DPoP blocklist did not reload");
-        }
-        // `lookup_session` returns a cached live session WITHOUT consulting
-        // storage, so a session revoked on another node stays live here until
-        // the entry is dropped. Revocation is the only thing that enforces a
-        // disable, because access tokens embed their claims at issue time.
-        self.session_cache.store(Arc::new(HashMap::new()));
-        self.flush_token_claims_cache();
-        tracing::info!(
-            epoch = persisted,
-            "a control was asserted on another node; local control caches reloaded"
-        );
     }
 
     fn read_persisted_key_epoch(&self, realm_id: &RealmId) -> u64 {
@@ -4766,6 +5017,9 @@ impl EmbeddedIdentityEngine {
         self.realm_key_epoch.insert(realm_id.clone(), persisted);
         self.realm_signing_keys.remove(realm_id);
         self.realm_retiring_keys.remove(realm_id);
+        // The RS256 ID-token keys rotate under the same epoch (task 26.55).
+        self.realm_id_token_rsa_keys.remove(realm_id);
+        self.realm_id_token_rsa_retiring_keys.remove(realm_id);
         self.flush_token_claims_cache();
         tracing::info!(
             realm = %realm_id.as_uuid(),
@@ -4778,7 +5032,7 @@ impl EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
     ) -> Result<Arc<SigningKey>, IdentityError> {
-        // Wait-free read: one atomic load, no locking.
+        // Lock-free read: one epoch-pinned load, no locking.
         if let Some(key) = self.realm_signing_keys.get(realm_id) {
             return Ok(key);
         }
@@ -4914,7 +5168,7 @@ impl EmbeddedIdentityEngine {
                     }
                     // Drop the cached (still-valid) copy so subsequent
                     // get_session calls observe the revocation.
-                    self.session_cache_evict(realm_id, &session_id);
+                    self.session_cache_invalidate(realm_id, &session_id);
                 }
             }
         }
@@ -5009,7 +5263,14 @@ impl EmbeddedIdentityEngine {
                 "jwt".to_string(),
             ],
             subject_types_supported: vec!["public".to_string()],
-            id_token_signing_alg_values_supported: vec!["EdDSA".to_string()],
+            // OIDC Discovery 1.0 §3: RS256 MUST be listed. It signs ID tokens
+            // only, for clients that registered it (task 26.55); every other
+            // token is EdDSA.
+            id_token_signing_alg_values_supported:
+                crate::identity::oidc::IdTokenSigningAlg::SUPPORTED
+                    .iter()
+                    .map(|alg| alg.as_str().to_string())
+                    .collect(),
             scopes_supported: vec![
                 "openid".to_string(),
                 "profile".to_string(),
@@ -5045,6 +5306,18 @@ impl EmbeddedIdentityEngine {
             device_authorization_endpoint: Some(format!("{issuer}/device_authorization")),
             revocation_endpoint: Some(format!("{issuer}/revoke")),
             introspection_endpoint: Some(format!("{issuer}/introspect")),
+            revocation_endpoint_auth_methods_supported: vec![
+                "none".to_string(),
+                "client_secret_basic".to_string(),
+                "client_secret_post".to_string(),
+                "private_key_jwt".to_string(),
+            ],
+            // Task 26.43: confidential clients only — never `none`.
+            introspection_endpoint_auth_methods_supported: vec![
+                "client_secret_basic".to_string(),
+                "client_secret_post".to_string(),
+                "private_key_jwt".to_string(),
+            ],
             resource_indicators_supported: true,
             authorization_response_iss_parameter_supported: true,
             end_session_endpoint: Some(format!("{issuer}/end_session")),
@@ -5066,7 +5339,7 @@ impl EmbeddedIdentityEngine {
     /// Verifies a client_credentials (sessionless) token by checking the JTI
     /// revocation projection. Returns `Ok(())` if the token is not revoked.
     ///
-    /// Hot-path safe: reads `revoked_jti_cache` via a single atomic `load()` —
+    /// Hot-path safe: reads `revoked_jti_cache` via a single epoch-pinned `load()` —
     /// no lock, no syscall (§10.5).
     fn verify_client_credentials_token(
         &self,
@@ -5085,7 +5358,7 @@ impl EmbeddedIdentityEngine {
     /// revoked delegation grant is honored immediately rather than at natural
     /// expiry (G1).
     ///
-    /// Hot-path safe: a single atomic `load()` — no lock, no syscall (§10.5).
+    /// Hot-path safe: a single epoch-pinned `load()` — no lock, no syscall (§10.5).
     fn is_token_jti_revoked(&self, realm_id: &RealmId, claims: &TokenClaims) -> bool {
         let Some(ref jti) = claims.jti else {
             return false;
@@ -5533,6 +5806,23 @@ impl EmbeddedIdentityEngine {
             cascade_work_done = true;
         }
 
+        // 5b. The RS256 ID-token key and its retiring predecessors (task
+        //     26.55) — private keys under the system realm, like the above.
+        let rsa_key_storage_key = keys::encode_realm_id_token_rsa_key(realm_id);
+        if storage
+            .get(&sys_realm, &rsa_key_storage_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            cascade_work_done = true;
+            storage
+                .delete(&sys_realm, &rsa_key_storage_key)
+                .map_err(Self::storage_err)?;
+        }
+        if Self::purge_realm_id_token_rsa_retiring_keys(storage, realm_id, None) > 0 {
+            cascade_work_done = true;
+        }
+
         // 6. A-5: write a post-delete realm name cooldown tombstone so the
         //    freed name cannot be immediately re-claimed. Best-effort: a write
         //    failure here is not fatal for the delete. Only written when the
@@ -5939,7 +6229,7 @@ impl EmbeddedIdentityEngine {
                         .map_err(Self::storage_err)?;
                     // Evict from in-process cache so subsequent get_session
                     // calls see the deletion rather than a stale cache hit.
-                    self.session_cache_evict(realm_id, &session_id);
+                    self.session_cache_invalidate(realm_id, &session_id);
                 }
             }
 
@@ -5948,6 +6238,12 @@ impl EmbeddedIdentityEngine {
             self.storage
                 .delete(realm_id, &entry.key)
                 .map_err(Self::storage_err)?;
+        }
+        if !session_entries.is_empty() {
+            // Every other node holds its own session cache, and a cache hit
+            // returns a live session without consulting storage: publish a
+            // control, as `revoke_session` does, so they drop theirs.
+            self.bump_control_epoch();
         }
 
         // 6. Delete all organization memberships for this user
@@ -6128,6 +6424,175 @@ impl EmbeddedIdentityEngine {
         }
         Ok(())
     }
+
+    /// Validates an import request and builds the client it would create —
+    /// every rule [`IdentityEngine::import_client`] applies, with no storage
+    /// read or write, no existence check and no RSA key provisioned.
+    ///
+    /// The single source of those rules: `import_client` builds the client it
+    /// writes with it, and [`IdentityEngine::validate_import_client`] (a
+    /// backup restore's overwrite and dry-run modes) runs it alone, so the
+    /// check that decides whether a live client may be replaced cannot drift
+    /// from the one the replacement must pass.
+    #[allow(clippy::too_many_lines)] // one validated setter per client field
+    fn build_imported_client(
+        &self,
+        request: &ImportClientRequest,
+    ) -> Result<OAuthClient, IdentityError> {
+        let client_name = validation::validate_client_name(&request.client_name)?;
+
+        let has_client_credentials = request
+            .grant_types
+            .contains(&"client_credentials".to_string());
+        let has_device_code = request
+            .grant_types
+            .contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string());
+        let has_jwt_bearer = request
+            .grant_types
+            .contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer".to_string());
+        if request.redirect_uris.is_empty()
+            && !has_client_credentials
+            && !has_device_code
+            && !has_jwt_bearer
+        {
+            return Err(IdentityError::InvalidInput {
+                reason: "at least one redirect URI is required".to_string(),
+            });
+        }
+        for uri in &request.redirect_uris {
+            if uri.trim().is_empty() {
+                return Err(IdentityError::InvalidInput {
+                    reason: "redirect URIs must not be empty".to_string(),
+                });
+            }
+            validation::validate_redirect_uri(uri)?;
+        }
+
+        let client_id = request.id.clone().unwrap_or_else(ClientId::generate);
+
+        let now = self.clock.now();
+        let grant_types = if request.grant_types.is_empty() {
+            vec!["authorization_code".to_string()]
+        } else {
+            request.grant_types.clone()
+        };
+
+        // The stored hash: computed from a plaintext secret (external provider,
+        // YAML), or taken verbatim from a Hearth backup — never re-hashed,
+        // since there is no plaintext, and only in a format Hearth can verify.
+        let secret_hash = match (&request.client_secret, &request.client_secret_hash) {
+            (Some(_), Some(_)) => {
+                return Err(IdentityError::InvalidInput {
+                    reason: "client_secret and client_secret_hash are mutually exclusive"
+                        .to_string(),
+                });
+            }
+            (Some(secret), None) => Some(credentials::hash_raw_secret(
+                secret.as_bytes(),
+                &self.config.credential,
+            )?),
+            (None, Some(hash)) => {
+                credentials::validate_stored_client_secret_hash(hash)?;
+                Some(hash.clone())
+            }
+            (None, None) => None,
+        };
+        let mut client = if let Some(secret_hash) = secret_hash {
+            OAuthClient::new_confidential(
+                client_id,
+                client_name,
+                request.redirect_uris.clone(),
+                now,
+                secret_hash,
+                grant_types,
+            )
+        } else {
+            let mut c =
+                OAuthClient::new(client_id, client_name, request.redirect_uris.clone(), now);
+            c.set_grant_types(grant_types);
+            c
+        };
+        client.set_slug(
+            request
+                .slug
+                .clone()
+                .unwrap_or_else(|| client.client_name().to_lowercase().replace(' ', "-")),
+        );
+        client.set_trust_level(request.trust_level);
+        client.set_require_consent(
+            request
+                .require_consent
+                .unwrap_or(request.trust_level == crate::identity::ClientTrustLevel::ThirdParty),
+        );
+        client.set_declared_scopes(request.declared_scopes.clone());
+        client.set_consent_spans_orgs(request.consent_spans_orgs);
+        client.set_client_logo_url(request.client_logo_url.clone());
+        client.set_status(request.status);
+        if let Some(uri) = &request.backchannel_logout_uri {
+            validation::validate_logout_uri("backchannel_logout_uri", uri, false)?;
+        }
+        client.set_backchannel_logout_uri(request.backchannel_logout_uri.clone());
+        if let Some(uri) = &request.frontchannel_logout_uri {
+            validation::validate_logout_uri("frontchannel_logout_uri", uri, true)?;
+        }
+        client.set_frontchannel_logout_uri(request.frontchannel_logout_uri.clone());
+        client.set_post_logout_redirect_uris(request.post_logout_redirect_uris.clone());
+        client.set_cors_origins(request.cors_origins.clone());
+        client.set_access_token_authorization(request.access_token_authorization);
+        client.set_mfa_required(request.mfa_required);
+        // Credentials and the security profile, validated as a registration
+        // validates them and set in this same write, so the client is never
+        // stored weaker than requested — not even between two writes.
+        if let Some(key) = request.assertion_public_key.as_deref() {
+            Self::check_assertion_public_key(key)?;
+        }
+        client.set_assertion_public_key(request.assertion_public_key.clone());
+        if let Some(jwks) = request.jwks.as_deref() {
+            Self::check_client_jwks(jwks)?;
+        }
+        client.set_jwks(request.jwks.clone());
+        if request
+            .jwks_uri
+            .as_deref()
+            .is_some_and(|u| u.trim().is_empty())
+        {
+            return Err(IdentityError::InvalidInput {
+                reason: "jwks_uri must not be empty".to_string(),
+            });
+        }
+        client.set_jwks_uri(request.jwks_uri.clone());
+        if let Some(alg) = request.authorization_signed_response_alg.as_deref() {
+            if alg != "EdDSA" {
+                return Err(IdentityError::InvalidInput {
+                    reason: format!(
+                        "unsupported authorization_signed_response_alg '{alg}'; supported: EdDSA"
+                    ),
+                });
+            }
+        }
+        client.set_authorization_signed_response_alg(
+            request.authorization_signed_response_alg.clone(),
+        );
+        client.set_profile(request.profile);
+        Self::check_fapi2_client_keys(&client)?;
+        // ID-token signing algorithm (task 26.55), parsed as a registration
+        // parses it (`import_client` then provisions the RSA key), but not
+        // refused under a REALM's
+        // FAPI 2.0 profile: an import records the algorithm the source held
+        // rather than choosing one. A realm that turned `fapi_profile` on after
+        // an RS256 client registered still holds that client, so its backup
+        // carries it, and a restore must not drop it. FAPI still governs what
+        // is issued: `id_token_signer` refuses the client's ID-token grants
+        // while FAPI applies to it. A backup restore installs the archived RSA
+        // key first, so an RS256 client finds that key rather than minting a
+        // new one. A client whose OWN profile is FAPI 2.0 can never hold RS256
+        // (registration and update refuse it, §5.4.1), so that is refused.
+        client.set_id_token_signed_response_alg(Self::parse_client_id_token_alg(
+            request.id_token_signed_response_alg.as_deref(),
+            request.profile.is_fapi2(),
+        )?);
+        Ok(client)
+    }
 }
 
 impl IdentityEngine for EmbeddedIdentityEngine {
@@ -6262,22 +6727,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             )
             .map_err(Self::storage_err)?;
 
-        // Cache signing key (wait-free reads on hot path).
+        // Cache signing key (lock-free reads on hot path).
         self.realm_signing_keys
             .insert(realm_id.clone(), Arc::new(realm_signing_key));
 
-        // Cache realm status for wait-free validate_token reads.
+        // Cache realm status for lock-free validate_token reads.
         {
             let id = realm_id.clone();
-            self.realm_status_cache.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.insert(id.clone(), RealmStatus::Active);
-                new_map
-            });
             // A status change decided here binds on every node only via the
             // control epoch: `realm_status_cache` answers "active" on a miss
             // and is written by the serving node alone (task 24.6).
-            self.bump_control_epoch();
+            self.publish_control(Some(control::ControlOp::SetRealmStatus(
+                id,
+                RealmStatus::Active,
+            )));
         }
 
         self.record_audit(
@@ -6428,22 +6891,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             let _ = self.storage.delete(&sys_realm, &old_name_key);
         }
 
-        // Propagate status change to the wait-free cache so validate_token
+        // Propagate status change to the lock-free cache so validate_token
         // immediately reflects the new lifecycle state. Ordered before
         // record_audit so the cache is consistent before any further writes,
         // matching the ordering used in create_realm.
         if request.status.is_some() {
             let id = realm_id.clone();
             let status = realm.status();
-            self.realm_status_cache.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.insert(id.clone(), status);
-                new_map
-            });
             // A status change decided here binds on every node only via the
             // control epoch: `realm_status_cache` answers "active" on a miss
             // and is written by the serving node alone (task 24.6).
-            self.bump_control_epoch();
+            self.publish_control(Some(control::ControlOp::SetRealmStatus(id, status)));
         }
 
         self.record_audit(
@@ -6533,15 +6991,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .map_err(Self::storage_err)?;
                 // Reflect the status change in the in-memory cache immediately.
                 let id = realm_id.clone();
-                self.realm_status_cache.rcu(|current| {
-                    let mut new_map = (**current).clone();
-                    new_map.insert(id.clone(), RealmStatus::DeletingInProgress);
-                    new_map
-                });
                 // A status change decided here binds on every node only via the
                 // control epoch: `realm_status_cache` answers "active" on a miss
                 // and is written by the serving node alone (task 24.6).
-                self.bump_control_epoch();
+                self.publish_control(Some(control::ControlOp::SetRealmStatus(
+                    id,
+                    RealmStatus::DeletingInProgress,
+                )));
             }
         }
 
@@ -6583,7 +7039,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 let realm_id_bg = realm_id.clone();
                 let signing_keys = self.realm_signing_keys.clone();
                 let retiring_keys = self.realm_retiring_keys.clone();
-                let status_cache = self.realm_status_cache.clone();
+                let rsa_id_token_keys = self.realm_id_token_rsa_keys.clone();
+                let rsa_id_token_retiring_keys = self.realm_id_token_rsa_retiring_keys.clone();
+                let control = Arc::clone(&self.control);
                 let existing_realm_bg = existing_realm.clone();
 
                 handle.spawn(async move {
@@ -6633,11 +7091,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     // Remove from in-memory caches.
                     signing_keys.remove(&realm_id_bg);
                     retiring_keys.remove(&realm_id_bg);
-                    status_cache.rcu(|current| {
-                        let mut new_map = (**current).clone();
-                        new_map.remove(&realm_id_bg);
-                        new_map
-                    });
+                    rsa_id_token_keys.remove(&realm_id_bg);
+                    rsa_id_token_retiring_keys.remove(&realm_id_bg);
+                    // Through the control plane, so a concurrent reload
+                    // cannot overwrite the removal.
+                    control.apply(
+                        Some(control::ControlOp::ForgetRealmStatus(realm_id_bg.clone())),
+                        None,
+                    );
 
                     tracing::info!(
                         realm_id = %realm_id_bg.as_uuid(),
@@ -6668,15 +7129,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             let id = realm_id.clone();
             self.realm_signing_keys.remove(&id);
             self.realm_retiring_keys.remove(&id);
-            self.realm_status_cache.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.remove(&id);
-                new_map
-            });
+            self.realm_id_token_rsa_keys.remove(&id);
+            self.realm_id_token_rsa_retiring_keys.remove(&id);
             // A status change decided here binds on every node only via the
             // control epoch: `realm_status_cache` answers "active" on a miss
             // and is written by the serving node alone (task 24.6).
-            self.bump_control_epoch();
+            self.publish_control(Some(control::ControlOp::ForgetRealmStatus(id)));
         }
         // Drop realm-scoped session and MFA caches the key-space sweep does
         // not reach; otherwise a deleted realm's session stays readable from
@@ -6728,6 +7186,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
             jwks.keys.extend(entry.key.to_jwks().keys);
         }
+
+        // RS256 ID-token keys (task 26.55): the active one and any still in
+        // their grace window. Present only once a client in the realm selected
+        // RS256; never provisioned from here, so this read path never writes.
+        jwks.keys.extend(self.realm_id_token_rsa_jwks(realm_id));
 
         Ok(jwks)
     }
@@ -6936,7 +7399,32 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // dropped; put() takes &[u8] so Deref chain handles the coercion (HEA-750).
         let old_pkcs8 = Zeroizing::new(old_key.pkcs8_bytes().to_vec());
 
-        // Generate and store the new active signing key.
+        // The realm's RS256 ID-token key rotates alongside (task 26.55) — but
+        // only in a realm that has one. Its replacement is generated here,
+        // before any write, so a key-generation failure leaves the realm
+        // exactly as it was. An RSA key that cannot be loaded must not block
+        // what may be an emergency rotation: it is replaced without a grace
+        // window, since nothing could verify with it anyway.
+        let (old_rsa, rsa_present) = match self.load_realm_id_token_rsa_key(realm_id) {
+            Ok(Some(key)) => (Some(key), true),
+            Ok(None) => (None, false),
+            Err(e) => {
+                tracing::error!(
+                    realm = %realm_id.as_uuid(),
+                    error = %e,
+                    "RS256 ID-token key could not be loaded; rotation replaces it with no \
+                     grace window"
+                );
+                (None, true)
+            }
+        };
+        let new_rsa = if rsa_present {
+            Some(tokens::RsaIdTokenSigningKey::generate()?)
+        } else {
+            None
+        };
+
+        // Generate the new active signing key.
         let new_key = SigningKey::generate()?;
         let new_pkcs8 = Zeroizing::new(new_key.pkcs8_bytes().to_vec());
         let kek = self
@@ -6944,11 +7432,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .key_encryption_key
             .as_ref()
             .map(|k| k.as_bytes());
-        let key_storage_key = keys::encode_realm_signing_key(realm_id);
         let new_stored = crate::identity::key_encryption::wrap_key(&new_pkcs8, kek)?;
-        self.storage
-            .put(&sys_realm, &key_storage_key, &new_stored)
-            .map_err(Self::storage_err)?;
+
+        // Every write of the rotation lands in ONE atomic batch: the new key,
+        // the old key's retiring row, the purge of closed (or, revoking, all)
+        // retiring rows, the record of every kid the rotation retires, the RSA
+        // half, and the key-epoch bump. A crash can leave the realm before the
+        // rotation or after it, never with a new key whose predecessor is not
+        // recorded retired — the record a restore consults to refuse archived
+        // key material the realm rotated away from.
+        let mut puts: Vec<(Vec<u8>, Vec<u8>)> =
+            vec![(keys::encode_realm_signing_key(realm_id), new_stored)];
+        let mut deletes: Vec<Vec<u8>> = Vec::new();
 
         // Reap retiring keys whose grace window has already closed. They can
         // never verify anything again, but they are wrapped (plaintext without
@@ -6965,7 +7460,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
         let revoking = grace_period_secs == 0;
         let cutoff = if revoking { None } else { Some(now_secs) };
-        let purged = Self::purge_realm_retiring_keys(&self.storage, realm_id, cutoff);
+        let purge = self.retiring_rows_to_purge(realm_id, KeyFamily::Ed25519, cutoff)?;
+        let purged = purge.rows.len();
+        deletes.extend(purge.rows);
+        let mut retired = purge.kids;
+        retired.push(old_key_id.clone());
+        puts.extend(Self::retired_record_puts(
+            realm_id,
+            KeyFamily::Ed25519,
+            &retired,
+            now_secs,
+        ));
 
         // Store the old key as a retiring key with its expiry deadline. A
         // revoking rotation stores nothing: a deadline of `now` can never
@@ -6973,53 +7478,43 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // in storage until some later rotation reaped it.
         let deadline_secs = now_secs.saturating_add(grace_period_secs);
         if !revoking {
-            let retiring_key_storage =
-                keys::encode_realm_retiring_key(realm_id, deadline_secs, &old_key_id);
             let old_stored = crate::identity::key_encryption::wrap_key(&old_pkcs8, kek)?;
-            self.storage
-                .put(&sys_realm, &retiring_key_storage, &old_stored)
-                .map_err(Self::storage_err)?;
+            puts.push((
+                keys::encode_realm_retiring_key(realm_id, deadline_secs, &old_key_id),
+                old_stored,
+            ));
         }
 
-        // Bump the rotation epoch *before* clearing the cache so a concurrent
-        // cache-miss fill that snapshotted the old epoch and read the outgoing
-        // key sees the change and discards its stale insert instead of
-        // resurrecting it past the `remove()` below (HEA-2096). Serialised by
-        // `realm_ops_lock`, so the read-then-write bump cannot lose an update.
-        //
-        // The epoch is also *persisted*, so it replicates with the key
-        // material and every other node can tell that its own cached key is
-        // stale. Read the stored value rather than the local one: on a node
-        // that has never rotated this realm the local counter is 0 and would
-        // hand back an epoch another node has already used (§4.15#6).
-        let next_epoch = self
-            .read_persisted_key_epoch(realm_id)
-            .max(self.realm_key_epoch.get(realm_id).unwrap_or(0))
-            .wrapping_add(1);
+        // RS256 ID-token key: same grace, same purge rules, same batch, so
+        // the single epoch bump evicts both families on every node.
+        let rsa_rotation = self.plan_realm_id_token_rsa_rotation(
+            realm_id,
+            old_rsa.as_deref(),
+            new_rsa.as_ref(),
+            now_secs,
+            deadline_secs,
+            revoking,
+            &mut puts,
+            &mut deletes,
+        )?;
+
+        let (epoch, epoch_entry) = self.realm_key_epoch_bump_locked(realm_id);
+        puts.push(epoch_entry);
         self.storage
-            .put(
-                &sys_realm,
-                &keys::encode_realm_key_epoch(realm_id),
-                &next_epoch.to_le_bytes(),
-            )
+            .write_batch(&sys_realm, &puts, &deletes)
             .map_err(Self::storage_err)?;
-        self.realm_key_epoch.insert(realm_id.clone(), next_epoch);
+        self.evict_realm_key_caches_locked(realm_id, epoch);
 
-        // Invalidate the active key cache so realm_jwks / token issuance pick up the new key.
-        self.realm_signing_keys.remove(realm_id);
-        // Invalidate the retiring-key cache so the just-retired key is picked up
-        // on the next validation (HEA-2090).
-        self.realm_retiring_keys.remove(realm_id);
-        // Drop memoized claims: a token already validated under the outgoing key
-        // must be re-verified against the new key set, so an emergency rotation
-        // (grace 0) actually cuts it off instead of letting a warm cache entry
-        // carry it to its own `exp` (HEA-2093).
-        self.flush_token_claims_cache();
-
+        let (rsa_old_kid, rsa_new_kid) = match &rsa_rotation {
+            Some((old, new)) => (old.clone().unwrap_or_default(), new.clone()),
+            None => (String::new(), String::new()),
+        };
         tracing::info!(
             realm = %realm_id.as_uuid(),
             old_kid = %old_key_id,
             new_kid = %new_key.key_id(),
+            rs256_old_kid = %rsa_old_kid,
+            rs256_new_kid = %rsa_new_kid,
             grace_period_secs,
             deadline_secs,
             purged_retiring_keys = purged,
@@ -7845,7 +8340,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     if session.is_valid(self.clock.now()) {
                         self.session_cache_insert(realm_id, &session);
                     } else {
-                        self.session_cache_evict(realm_id, session.id());
+                        self.session_cache_invalidate(realm_id, session.id());
                     }
                 }
                 dur.map_err(Self::storage_err)?;
@@ -8606,7 +9101,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // accept tokens. Checked after signature verification so forged tokens
         // never reach this path.
         //
-        // Wait-free read from the ArcSwap cache — no lock, no storage call.
+        // Lock-free read from the epoch-reclaimed cache — no lock, no storage call.
         // Absence from cache means realm is unknown (new or system realm);
         // fail-open matches the original get_realm(None) behavior.
         {
@@ -8642,7 +9137,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         // §10.4 — DPoP JKT blocklist: reject tokens whose `cnf.jkt` thumbprint
-        // is server-blocked. Hot-path safe: single atomic `load()`, no syscall.
+        // is server-blocked. Hot-path safe: single epoch-pinned `load()`, no syscall.
         if let Some(ref cnf) = claims.cnf {
             if self.blocked_dpop_jkt_cache.contains_key(cnf.jkt.as_str()) {
                 return Err(IdentityError::DPopJktBlocked);
@@ -8808,8 +9303,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     }
 
     fn jwks(&self) -> JwksDocument {
-        // Ed25519 only. Hearth signs every token it issues with EdDSA, and
-        // `id_token_signing_alg_values_supported` advertises exactly that.
+        // Ed25519 only: the global key plus the system realm's keys. RS256
+        // ID-token keys (task 26.55) live in the *realm* JWKS of a realm whose
+        // clients selected RS256; the system realm has no OAuth clients, so it
+        // never has one and this document never carries an RSA key.
         //
         // This document used to carry two more entries. An RSA-2048 `RS256`
         // key Hearth never signs with, and an EC P-256 `ES256` key whose
@@ -11061,6 +11558,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.authenticate_client_inner(realm_id, client_id, client_secret)
     }
 
+    fn authenticate_confidential_client(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        client_secret: Option<&str>,
+    ) -> Result<(), IdentityError> {
+        self.authenticate_confidential_client_inner(realm_id, client_id, client_secret)
+    }
+
     fn update_client(
         &self,
         realm_id: &RealmId,
@@ -11069,6 +11575,33 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<OAuthClient, IdentityError> {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
+        // The YAML-managed gate for credentials and the security profile,
+        // enforced here so REST, gRPC and the console share it. Reconcile
+        // treats `hearth.yaml` as authoritative for these fields: a key added
+        // at runtime would be removed at the next restart or SIGHUP, and on a
+        // secretless client that makes it public.
+        let touches_credentials = request.jwks.is_some()
+            || request.assertion_public_key.is_some()
+            || request.profile.is_some();
+        if touches_credentials {
+            if let Some(client) = self.get_client(realm_id, client_id)? {
+                if client.is_yaml_managed() {
+                    return Err(IdentityError::YamlManagedResource {
+                        kind: "application",
+                    });
+                }
+            }
+        }
+        self.update_client_inner(realm_id, client_id, request)
+    }
+
+    fn update_client_from_config(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        request: &crate::identity::oidc::UpdateClientRequest,
+    ) -> Result<OAuthClient, IdentityError> {
         self.require_active_realm(realm_id)?;
         self.update_client_inner(realm_id, client_id, request)
     }
@@ -11317,6 +11850,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             Some(bytes) => SigningKey::from_pkcs8(bytes)?,
             None => SigningKey::generate()?,
         };
+        // Never restore a realm with a key it rotated away from. The record
+        // outlives the realm, so a deleted realm restored from an archive
+        // older than a revoking rotation does not get the revoked key back.
+        self.refuse_rotated_away_active_key(
+            &realm_id,
+            KeyFamily::Ed25519,
+            realm_signing_key.key_id(),
+        )?;
 
         let realm = Realm::new(
             realm_id.clone(),
@@ -11367,15 +11908,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             let id = realm_id.clone();
             self.realm_signing_keys
                 .insert(id.clone(), Arc::new(realm_signing_key));
-            self.realm_status_cache.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.insert(id.clone(), RealmStatus::Active);
-                new_map
-            });
             // A status change decided here binds on every node only via the
             // control epoch: `realm_status_cache` answers "active" on a miss
             // and is written by the serving node alone (task 24.6).
-            self.bump_control_epoch();
+            self.publish_control(Some(control::ControlOp::SetRealmStatus(
+                id,
+                RealmStatus::Active,
+            )));
         }
 
         self.record_audit(
@@ -11394,115 +11933,98 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &ImportUserRequest,
     ) -> Result<User, IdentityError> {
+        // The system realm is reached only through `import_admin_user`, the
+        // restore twin of `create_admin_user`.
         if keys::is_system_realm(realm_id) {
             return Err(IdentityError::SystemRealmProtected {
                 operation: "import_user",
             });
         }
-        // 1. Validate and normalize input (same invariants as create_user)
-        let email = validation::validate_email(&request.email)?;
-        let first_name = validation::validate_name_part(&request.first_name, "First name")?;
-        let last_name = validation::validate_name_part(&request.last_name, "Last name")?;
-        let display_name = if request.display_name.trim().is_empty() {
-            let synthesized = format!("{} {}", first_name, last_name).trim().to_string();
-            if synthesized.is_empty() {
-                return Err(IdentityError::InvalidInput {
-                    reason: "Display name or first/last name is required".to_string(),
-                });
-            }
-            validation::validate_display_name(&synthesized)?
-        } else {
-            validation::validate_display_name(&request.display_name)?
-        };
+        self.import_user_record(realm_id, request)
+    }
 
-        // 2. Check email uniqueness
-        let email_key = keys::encode_user_email(&email);
-        if self
-            .storage
-            .get(realm_id, &email_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            return Err(IdentityError::DuplicateEmail);
+    fn import_admin_user(&self, request: &ImportUserRequest) -> Result<User, IdentityError> {
+        // Bypasses the `import_user` system-realm guard deliberately, exactly
+        // as `create_admin_user` bypasses `create_user`'s. Every validation
+        // rule is shared: both go through `import_user_record`.
+        self.import_user_record(&keys::system_realm_id(), request)
+    }
+
+    fn import_system_realm_signing_key(
+        &self,
+        pkcs8: &[u8],
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        // Refuse material that does not load before touching anything.
+        let archived = SigningKey::from_pkcs8(pkcs8)?;
+        let sys_realm = keys::system_realm_id();
+        let _ops_guard = self.realm_ops_lock.lock().expect("realm ops lock");
+
+        let current = self.get_or_load_realm_signing_key(&sys_realm)?;
+        let outcome = self.plan_system_key_import(&current, &archived, overwrite)?;
+        if outcome == ImportOutcome::Skipped {
+            return Ok(outcome);
         }
+        let pristine = outcome == ImportOutcome::Created;
 
-        // 3. Resolve user id — allow caller to preserve a foreign UUID,
-        //    but refuse to clobber an existing record at that id.
-        let user_id = request.id.clone().unwrap_or_else(UserId::generate);
-        let id_key = keys::encode_user_id(&user_id);
-        if self
-            .storage
-            .get(realm_id, &id_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            return Err(IdentityError::InvalidInput {
-                reason: "a user with this id already exists".to_string(),
-            });
-        }
-
-        let now = self.clock.now();
-        // Imports preserve the source state; required_actions are not inferred from realm defaults.
-        let mut user = User::new(
-            user_id.clone(),
-            email.clone(),
-            display_name,
-            first_name,
-            last_name,
-            request.status,
-            Vec::new(),
-            now,
-            now,
-        );
-
-        if !request.attributes.is_empty() {
-            Self::validate_user_attributes(&request.attributes)?;
-            user.set_attributes(request.attributes.clone());
-        }
-
-        let user_bytes = Self::serialize_user(&user)?;
-        let user_id_bytes = keys::encode_user_id_value(&user_id);
-
-        // 4. If a credential was supplied, derive the algorithm from the
-        //    PHC prefix and prepare the credential write as part of the
-        //    same atomic batch. Preserving the foreign hash verbatim lets
-        //    the user authenticate with their existing password; the next
-        //    successful verify will auto-upgrade to Argon2id.
-        let mut entries = Vec::with_capacity(3);
-        entries.push((email_key, user_id_bytes));
-        entries.push((id_key, user_bytes));
-
-        if let Some(raw) = &request.credential {
-            let algorithm = classify_phc_algorithm(&raw.phc_string).ok_or_else(|| {
-                IdentityError::InvalidInput {
-                    reason: "unrecognized password hash format".to_string(),
-                }
-            })?;
-            let created_at = raw.created_at_micros.unwrap_or_else(|| now.as_micros());
-            let stored = StoredCredential {
-                algorithm,
-                hash: raw.phc_string.clone(),
-                created_at,
-                pepper_version: None,
-            };
-            let cred_bytes = Self::serialize_credential(&stored)?;
-            let cred_key = keys::encode_credential_key(&user_id);
-            entries.push((cred_key, cred_bytes));
-        }
-
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        let plaintext = Zeroizing::new(archived.pkcs8_bytes().to_vec());
+        let stored = crate::identity::key_encryption::wrap_key(&plaintext, kek)?;
+        // The key this install displaces is retired exactly as a rotation
+        // retires one — recorded in the same batch — so a later restore of an
+        // archive that still carries it never reinstalls it.
+        let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
+        let mut puts = vec![(keys::encode_realm_signing_key(&sys_realm), stored)];
+        puts.extend(Self::retired_record_puts(
+            &sys_realm,
+            KeyFamily::Ed25519,
+            &[current.key_id().to_string()],
+            now_secs,
+        ));
+        let (epoch, epoch_entry) = self.realm_key_epoch_bump_locked(&sys_realm);
+        puts.push(epoch_entry);
         self.storage
-            .put_batch(realm_id, &entries)
+            .put_batch(&sys_realm, &puts)
             .map_err(Self::storage_err)?;
+        self.evict_realm_key_caches_locked(&sys_realm, epoch);
+        tracing::warn!(
+            new_kid = %archived.key_id(),
+            replaced_kid = %current.key_id(),
+            pristine,
+            "system realm signing key restored from a backup archive"
+        );
+        Ok(outcome)
+    }
 
-        self.record_audit(
-            realm_id,
-            None,
-            AuditAction::UserCreated,
-            "user",
-            &user_id.as_uuid().to_string(),
-        )?;
+    fn preview_system_realm_signing_key(
+        &self,
+        pkcs8: &[u8],
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        let archived = SigningKey::from_pkcs8(pkcs8)?;
+        let current = self.get_or_load_realm_signing_key(&keys::system_realm_id())?;
+        self.plan_system_key_import(&current, &archived, overwrite)
+    }
 
-        Ok(user)
+    fn check_archived_realm_keys(
+        &self,
+        realm_id: &RealmId,
+        signing_key_pkcs8: Option<&[u8]>,
+        id_token_rsa_pkcs8: Option<&[u8]>,
+    ) -> Result<(), IdentityError> {
+        if let Some(pkcs8) = signing_key_pkcs8 {
+            let key = SigningKey::from_pkcs8(pkcs8)?;
+            self.refuse_rotated_away_active_key(realm_id, KeyFamily::Ed25519, key.key_id())?;
+        }
+        if let Some(pkcs8) = id_token_rsa_pkcs8 {
+            let key = tokens::RsaIdTokenSigningKey::from_pkcs8(pkcs8)?;
+            self.refuse_rotated_away_active_key(realm_id, KeyFamily::IdTokenRs256, key.key_id())?;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -11625,6 +12147,30 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         })
     }
 
+    fn validate_import_client(
+        &self,
+        realm_id: &RealmId,
+        request: &ImportClientRequest,
+    ) -> Result<(), IdentityError> {
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_client",
+            });
+        }
+        let client = self.build_imported_client(request)?;
+        // An RS256 client needs the realm's RSA ID-token key, which
+        // `import_client` loads (or provisions). A stored key that does not
+        // unwrap or decode would fail there — after an overwrite restore has
+        // already deleted the live client — so it is loaded here, before
+        // anything is written or deleted. Read-only: a realm with no key yet
+        // is not provisioned by a validation (a dry run writes nothing).
+        if client.id_token_signed_response_alg() == crate::identity::oidc::IdTokenSigningAlg::Rs256
+        {
+            self.load_realm_id_token_rsa_key(realm_id)?;
+        }
+        Ok(())
+    }
+
     fn import_client(
         &self,
         realm_id: &RealmId,
@@ -11635,85 +12181,30 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 operation: "import_client",
             });
         }
-        let client_name = validation::validate_client_name(&request.client_name)?;
-
-        let has_client_credentials = request
-            .grant_types
-            .contains(&"client_credentials".to_string());
-        let has_device_code = request
-            .grant_types
-            .contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string());
-        let has_jwt_bearer = request
-            .grant_types
-            .contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer".to_string());
-        if request.redirect_uris.is_empty()
-            && !has_client_credentials
-            && !has_device_code
-            && !has_jwt_bearer
-        {
-            return Err(IdentityError::InvalidInput {
-                reason: "at least one redirect URI is required".to_string(),
-            });
-        }
-        for uri in &request.redirect_uris {
-            if uri.trim().is_empty() {
+        // The existence check comes before the build so an existing client
+        // (every `hearth.yaml` client on every restart) costs no Argon2id run
+        // for a plaintext secret it is not going to store.
+        if let Some(id) = &request.id {
+            if self
+                .storage
+                .get(realm_id, &keys::encode_oauth_client(id))
+                .map_err(Self::storage_err)?
+                .is_some()
+            {
                 return Err(IdentityError::InvalidInput {
-                    reason: "redirect URIs must not be empty".to_string(),
+                    reason: "a client with this id already exists".to_string(),
                 });
             }
-            validation::validate_redirect_uri(uri)?;
         }
-
-        let client_id = request.id.clone().unwrap_or_else(ClientId::generate);
-        let key = keys::encode_oauth_client(&client_id);
-        if self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .is_some()
+        let client = self.build_imported_client(request)?;
+        // The one effect the build leaves out: an RS256 client needs the
+        // realm's RSA ID-token key, provisioned as a registration does. A
+        // backup restore installs the archived key first, so it is found.
+        if client.id_token_signed_response_alg() == crate::identity::oidc::IdTokenSigningAlg::Rs256
         {
-            return Err(IdentityError::InvalidInput {
-                reason: "a client with this id already exists".to_string(),
-            });
+            self.ensure_realm_id_token_rsa_key(realm_id)?;
         }
-
-        let now = self.clock.now();
-        let grant_types = if request.grant_types.is_empty() {
-            vec!["authorization_code".to_string()]
-        } else {
-            request.grant_types.clone()
-        };
-
-        let mut client = if let Some(ref secret) = request.client_secret {
-            let secret_hash =
-                credentials::hash_raw_secret(secret.as_bytes(), &self.config.credential)?;
-            OAuthClient::new_confidential(
-                client_id,
-                client_name,
-                request.redirect_uris.clone(),
-                now,
-                secret_hash,
-                grant_types,
-            )
-        } else {
-            let mut c =
-                OAuthClient::new(client_id, client_name, request.redirect_uris.clone(), now);
-            c.set_grant_types(grant_types);
-            c
-        };
-        client.set_slug(
-            request
-                .slug
-                .clone()
-                .unwrap_or_else(|| client.client_name().to_lowercase().replace(' ', "-")),
-        );
-        client.set_trust_level(request.trust_level);
-        client.set_require_consent(
-            request.trust_level == crate::identity::ClientTrustLevel::ThirdParty,
-        );
-        client.set_declared_scopes(request.declared_scopes.clone());
-        client.set_consent_spans_orgs(request.consent_spans_orgs);
-
+        let key = keys::encode_oauth_client(client.client_id());
         let client_bytes =
             serde_json::to_vec(&client).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
@@ -12167,6 +12658,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         org: &Organization,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_organization",
+            });
+        }
         // Mirror `create_organization`'s persisted layout (primary record +
         // raw-UUID slug index) but preserve the org's own ID and every field.
         let id_key = keys::encode_org_id(org.id());
@@ -12227,6 +12726,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         membership: &OrganizationMembership,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_organization_membership",
+            });
+        }
         let fwd_key = keys::encode_membership_by_org(membership.org_id(), membership.user_id());
         let exists = self
             .storage
@@ -12279,6 +12786,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         consent: &ConsentExport,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // A consent names a client, and the system realm refuses clients
+        // (`register_client`, `import_client`): the live API never creates
+        // one there, so a restore must not either.
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_consent",
+            });
+        }
         if !keys::is_oauth_consent_key(&consent.storage_key) {
             return Err(IdentityError::Serialization {
                 reason: "consent record carries a storage key outside the consent key space"
@@ -12332,6 +12847,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         export: &AgentExport,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_agent",
+            });
+        }
         let agent = &export.agent;
         let id_key = keys::encode_agent_id(agent.id());
         let exists = self
@@ -12399,6 +12922,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         idp: &crate::identity::federation::IdpConfig,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_identity_provider",
+            });
+        }
         let key = keys::encode_idp_key(&idp.id);
         let exists = self
             .storage
@@ -12457,6 +12988,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         link: &FederationLinkExport,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_federation_link",
+            });
+        }
         let reverse_key = keys::encode_federation_ext_key(&link.idp_id, &link.external_sub);
         let forward_key = keys::encode_federation_ext_fwd_key(&link.user_id, &link.idp_id);
         let exists = self
@@ -12559,6 +13098,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         sp: &crate::identity::federation::saml::SamlServiceProvider,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_saml_service_provider",
+            });
+        }
         let key = keys::encode_saml_sp_key(&sp.sp_key);
         let exists = self
             .storage
@@ -12610,6 +13157,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         plaintext_json: &[u8],
     ) -> Result<(), IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_realm_saml_key",
+            });
+        }
         let stored: SamlStoredKey =
             serde_json::from_slice(plaintext_json).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
@@ -12688,6 +13243,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         mapping: &ScimMappingExport,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // SCIM provisions users and organizations, and the system realm
+        // refuses both (`create_user`, `create_organization`): the live API
+        // never creates a mapping there, so a restore must not either.
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_scim_mapping",
+            });
+        }
         let (reverse_key, forward_key) = match mapping.kind {
             ScimMappingKind::User => (
                 keys::encode_scim_ext_user_key(&mapping.external_id),
@@ -12747,6 +13310,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         invitation: &OrganizationInvitation,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError> {
+        // The live API never creates this in the system realm, so a restore
+        // must not either (the `create_*` twin refuses it, or it has none that
+        // can reach the system realm).
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "import_invitation",
+            });
+        }
         let id_key = keys::encode_invitation_id(invitation.id());
         let exists = self
             .storage
@@ -12840,6 +13411,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Refuse material that does not load, rather than storing a blob that
         // `load_realm_retiring_keys` will silently drop at validation time.
         let _usable = SigningKey::from_pkcs8(&key.pkcs8)?;
+        // A key this realm recorded retired and that no longer has a retiring
+        // row was purged — by a revoking rotation, the remedy for a leaked
+        // key. An archive made inside its grace window still carries it;
+        // reinstating it would let it verify tokens again.
+        self.refuse_purged_retiring_key(realm_id, KeyFamily::Ed25519, &key.key_id)?;
         let sys_realm = keys::system_realm_id();
         let storage_key = keys::encode_realm_retiring_key(realm_id, key.deadline_secs, &key.key_id);
         let exists = self
@@ -15754,6 +16330,38 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(key.pkcs8_bytes().to_vec())
     }
 
+    fn export_realm_id_token_rsa_key(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityError> {
+        self.export_realm_id_token_rsa_key_inner(realm_id)
+    }
+
+    fn import_realm_id_token_rsa_key(
+        &self,
+        realm_id: &RealmId,
+        pkcs8: &[u8],
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        self.import_realm_id_token_rsa_key_inner(realm_id, pkcs8, overwrite)
+    }
+
+    fn export_retiring_id_token_rsa_keys(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<RetiringSigningKeyExport>, IdentityError> {
+        self.export_retiring_id_token_rsa_keys_inner(realm_id)
+    }
+
+    fn import_retiring_id_token_rsa_key(
+        &self,
+        realm_id: &RealmId,
+        key: &RetiringSigningKeyExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        self.import_retiring_id_token_rsa_key_inner(realm_id, key, overwrite)
+    }
+
     fn backup_barrier(&self) -> Option<std::sync::Arc<std::sync::RwLock<()>>> {
         self.storage.backup_barrier()
     }
@@ -15963,6 +16571,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         nonce: &str,
+        phone: &str,
         candidate_code: &str,
         otp_hmac_key_bytes: &[u8],
         now_unix_ts: u64,
@@ -16016,8 +16625,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &otp_key, &updated_bytes)
             .map_err(Self::storage_err)?;
 
-        // 5. Constant-time HMAC verification.
-        let result = stored.verify(candidate_code, otp_hmac_key_bytes);
+        // 5. Constant-time HMAC verification, bound to the expected phone.
+        let result = stored.verify(candidate_code, phone, otp_hmac_key_bytes);
 
         match result {
             Ok(()) => {
@@ -16067,8 +16676,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let rng = ring::rand::SystemRandom::new();
         let nonce = otp_mod::generate_otp_nonce(&rng)?;
         let expiry_unix_ts = now_unix_ts.saturating_add(expiry_secs);
-        let (digits, stored) =
-            StoredOtp::create(&rng, otp_hmac_key_bytes, expiry_unix_ts, max_attempts)?;
+        let (digits, stored) = StoredOtp::create(
+            &rng,
+            otp_hmac_key_bytes,
+            email,
+            expiry_unix_ts,
+            max_attempts,
+        )?;
 
         let otp_key = keys::encode_email_pending_otp(&nonce);
         let otp_bytes = serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
@@ -16091,6 +16705,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         nonce: &str,
+        email: &str,
         candidate_code: &str,
         otp_hmac_key_bytes: &[u8],
         now_unix_ts: u64,
@@ -16139,7 +16754,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &otp_key, &updated_bytes)
             .map_err(Self::storage_err)?;
 
-        let result = stored.verify(candidate_code, otp_hmac_key_bytes);
+        let result = stored.verify(candidate_code, email, otp_hmac_key_bytes);
 
         match result {
             Ok(()) => {
@@ -16742,6 +17357,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             fid: subject_claims.fid.clone(),
             scope: Some(effective_scope.clone()),
             nonce: None,
+            // No `azp`: the RFC 7662 audience gate reads `azp` to narrow who
+            // may introspect, and a resource server receiving this delegated
+            // token must keep introspecting it exactly as it would the
+            // subject token. The client it was issued to is recorded instead
+            // by `act.sub` (the exchanging client — enforced above), which is
+            // what RFC 7009 §2.1 revocation ownership reads for it.
             azp: None,
             cnf: request
                 .dpop_jkt
@@ -17191,8 +17812,13 @@ impl EmbeddedIdentityEngine {
         let rng = ring::rand::SystemRandom::new();
         let nonce = otp_mod::generate_otp_nonce(&rng)?;
         let expiry_unix_ts = now_unix_ts.saturating_add(expiry_secs);
-        let (digits, stored) =
-            StoredOtp::create(&rng, otp_hmac_key_bytes, expiry_unix_ts, max_attempts)?;
+        let (digits, stored) = StoredOtp::create(
+            &rng,
+            otp_hmac_key_bytes,
+            phone,
+            expiry_unix_ts,
+            max_attempts,
+        )?;
 
         let otp_key = keys::encode_sms_pending_otp(&nonce);
         let otp_bytes = serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
@@ -17301,6 +17927,31 @@ mod tests {
 
     /// Hot-path epoch reconciliation: debounced storage reads, bounded staleness.
     mod epoch_sync_debounce;
+
+    /// Under FAPI 2.0 an assertion's `aud` is the issuer as a single string.
+    mod client_assertion_audience;
+    /// `private_key_jwt` assertion-JTI replay markers carry an expiry and are swept.
+    mod client_assertion_jti;
+    /// A presented assertion field is a `private_key_jwt` attempt, never ignored.
+    mod client_assertion_presence;
+    /// `client_credentials` authenticates before revealing existence or grants.
+    mod client_credentials_oracle;
+    /// The persisted control epoch is bumped atomically and never moves back.
+    mod control_epoch;
+    /// Control-cache reloads: lock-free validation, retries, ordering, coverage.
+    mod control_reload;
+    /// A FAPI 2.0 client is never public and always holds verifiable keys.
+    mod fapi2_client_keys;
+    /// An RS256 client's realm key is checked before an overwrite deletes it.
+    mod import_client_rs256_key;
+    /// Concurrent revocations survive a racing control-cache reload.
+    mod revocation_reload_races;
+    /// A signing-key rotation lands in one atomic storage batch.
+    mod rotation_atomicity;
+    /// PKCE challenge and refresh-token hash compare in constant time.
+    mod secret_compare;
+    /// A session-cache fill never resurrects a session revoked while it ran.
+    mod session_fill_race;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.
@@ -18700,12 +19351,19 @@ mod tests {
 
     // ----- 22.25: client-authentication timing parity (§4.25#3) -----
     //
-    // Measured by COUNTING Argon2 verifications, never by wall clock. The
-    // property is structural: how much hashing happens must depend only on
-    // whether the caller presented a secret, never on whether the client
-    // exists or what type it is.
+    // Measured by COUNTING verifications, never by wall clock. The property is
+    // structural: how much hashing happens must depend only on whether the
+    // caller presented a secret, never on whether the client exists or what
+    // type it is.
+    //
+    // 26.43 follow-up: a Hearth-GENERATED secret is stored as a SHA-256 digest,
+    // so the common arm is one fast verification and zero Argon2id runs, and
+    // the unknown / public arms must match THAT — an Argon2id dummy there
+    // would both reveal existence and keep the amplification on random ids.
 
-    /// Registers a confidential client (one with a stored secret hash).
+    /// Registers a confidential client whose secret the CALLER chose (the gRPC
+    /// shape). Unknown entropy, so it is stored as Argon2id — the same cost
+    /// class as a legacy pre-fast-hash secret.
     fn register_confidential_client(
         engine: &EmbeddedIdentityEngine,
         realm: &RealmId,
@@ -18727,37 +19385,82 @@ mod tests {
             .expect("register confidential client")
     }
 
-    /// Runs `f` and returns how many hash verifications it performed.
-    fn hashes_during(f: impl FnOnce()) -> u64 {
-        let before = credentials::hash_verification_count();
+    /// Registers a confidential client with a Hearth-generated secret — what
+    /// `POST /register`, the console, and secret rotation produce.
+    fn register_generated_client(
+        engine: &EmbeddedIdentityEngine,
+        realm: &RealmId,
+    ) -> (OAuthClient, crate::identity::GeneratedClientSecret) {
+        let secret = crate::identity::GeneratedClientSecret::generate();
+        let client = engine
+            .register_client(
+                realm,
+                &RegisterClientRequest {
+                    client_name: "Generated-Secret App".to_string(),
+                    redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                    generated_client_secret: Some(secret.clone()),
+                    grant_types: vec!["authorization_code".to_string()],
+                    ..Default::default()
+                },
+            )
+            .expect("register generated-secret client");
+        (client, secret)
+    }
+
+    /// Runs `f`, returning `(argon2_verifications, fast_verifications)`.
+    fn secret_work(f: impl FnOnce()) -> (u64, u64) {
+        let slow = credentials::hash_verification_count();
+        let fast = credentials::fast_secret_verification_count();
         f();
-        credentials::hash_verification_count() - before
+        (
+            credentials::hash_verification_count() - slow,
+            credentials::fast_secret_verification_count() - fast,
+        )
+    }
+
+    /// Reads a client's stored secret hash back out of storage.
+    fn stored_secret_hash(
+        engine: &EmbeddedIdentityEngine,
+        realm: &RealmId,
+        id: &ClientId,
+    ) -> String {
+        engine
+            .get_client(realm, id)
+            .expect("get client")
+            .expect("client exists")
+            .client_secret_hash()
+            .expect("confidential client has a hash")
+            .to_string()
     }
 
     /// The defect: an unknown `client_id` returned before any hashing while a
-    /// registered confidential client paid for one Argon2id verification, so
-    /// response time over an unauthenticated endpoint said whether the client
-    /// existed.
+    /// registered confidential client paid for a verification, so response
+    /// time over an unauthenticated endpoint said whether the client existed.
     #[test]
     fn unknown_and_registered_clients_hash_the_same_number_of_times() {
         let (_dir, engine, _clock) = setup_engine();
         let realm = create_test_realm(&engine);
-        let known = register_confidential_client(&engine, &realm, "the-real-secret");
+        let (known, _secret) = register_generated_client(&engine, &realm);
         let unknown = ClientId::generate();
 
-        let known_hashes = hashes_during(|| {
+        let known_work = secret_work(|| {
             let r = engine.authenticate_client(&realm, known.client_id(), Some("wrong-secret"));
             assert!(r.is_err(), "wrong secret must fail");
         });
-        let unknown_hashes = hashes_during(|| {
+        let unknown_work = secret_work(|| {
             let r = engine.authenticate_client(&realm, &unknown, Some("wrong-secret"));
             assert!(r.is_err(), "unknown client must fail");
         });
 
-        assert_eq!(known_hashes, 1, "a presented secret costs one verification");
         assert_eq!(
-            unknown_hashes, known_hashes,
-            "an unregistered client_id must cost the same hashing work as a              registered one, or response time enumerates clients"
+            known_work,
+            (0, 1),
+            "a presented secret costs one fast verification and no Argon2id"
+        );
+        assert_eq!(
+            unknown_work, known_work,
+            "an unregistered client_id must cost the same hashing work as a \
+             registered one, or response time enumerates clients"
         );
     }
 
@@ -18768,50 +19471,94 @@ mod tests {
         let (_dir, engine, _clock) = setup_engine();
         let realm = create_test_realm(&engine);
         let public = register_test_client(&engine, &realm); // client_secret: None
-        let confidential = register_confidential_client(&engine, &realm, "s3cret");
+        let (confidential, _secret) = register_generated_client(&engine, &realm);
 
-        let public_hashes = hashes_during(|| {
+        let public_work = secret_work(|| {
             drop(engine.authenticate_client(&realm, public.client_id(), Some("x")));
         });
-        let conf_hashes = hashes_during(|| {
+        let conf_work = secret_work(|| {
             drop(engine.authenticate_client(&realm, confidential.client_id(), Some("x")));
         });
 
         assert_eq!(
-            public_hashes, conf_hashes,
+            public_work, conf_work,
             "client type must not be readable from hashing work"
         );
-        assert_eq!(public_hashes, 1);
+        assert_eq!(public_work, (0, 1));
+    }
+
+    /// The introspection endpoint's confidential-only twin keeps the same
+    /// rule on every arm, and never spends Argon2id on a fast client.
+    #[test]
+    fn confidential_only_auth_does_equal_fast_work_on_every_arm() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let public = register_test_client(&engine, &realm);
+        let (conf, secret) = register_generated_client(&engine, &realm);
+        let unknown = ClientId::generate();
+
+        for (label, id, presented, ok) in [
+            ("right secret", conf.client_id(), secret.expose(), true),
+            ("wrong secret", conf.client_id(), "wrong", false),
+            ("public", public.client_id(), "x", false),
+            ("unknown", &unknown, "x", false),
+        ] {
+            let work = secret_work(|| {
+                let r = engine.authenticate_confidential_client(&realm, id, Some(presented));
+                assert_eq!(r.is_ok(), ok, "{label}: decision");
+            });
+            assert_eq!(work, (0, 1), "{label}: one fast verification, no Argon2id");
+        }
     }
 
     /// The other half of the rule: presenting no secret costs no hashing on
-    /// any arm, so the public-client token path stays off Argon2id.
+    /// any arm, so the public-client token path stays off every hash.
     #[test]
     fn omitting_the_secret_costs_no_hashing_on_any_arm() {
         let (_dir, engine, _clock) = setup_engine();
         let realm = create_test_realm(&engine);
         let public = register_test_client(&engine, &realm);
         let confidential = register_confidential_client(&engine, &realm, "s3cret");
+        let (generated, _secret) = register_generated_client(&engine, &realm);
         let unknown = ClientId::generate();
 
         for (label, id) in [
             ("public", public.client_id()),
-            ("confidential", confidential.client_id()),
+            ("confidential (argon2)", confidential.client_id()),
+            ("confidential (fast)", generated.client_id()),
             ("unknown", &unknown),
         ] {
-            let n = hashes_during(|| drop(engine.authenticate_client(&realm, id, None)));
-            assert_eq!(n, 0, "{label}: no secret presented must cost no hashing");
+            let n = secret_work(|| drop(engine.authenticate_client(&realm, id, None)));
+            assert_eq!(
+                n,
+                (0, 0),
+                "{label}: no secret presented must cost no hashing"
+            );
         }
     }
 
-    /// The dummy hash used on the no-stored-hash arms costs what the realm's
-    /// real client secrets cost — otherwise the parity is only in the count.
+    /// A caller-chosen (or pre-existing Argon2id) secret keeps verifying, on
+    /// the Argon2id path. That arm is slower than the fast arms — a known,
+    /// documented residual: we cannot prove such a secret is high-entropy, so
+    /// it cannot move to the fast hash, and cannot be silently re-hashed.
     #[test]
-    fn client_auth_dummy_hash_uses_the_realms_argon2_parameters() {
+    fn caller_chosen_and_legacy_argon2_secrets_still_authenticate() {
         let (_dir, engine, _clock) = setup_engine();
-        let tuned = realm_with_argon2(&engine, 2048, 3);
-        let (m, t, _p) = argon2_params_of(&engine.dummy_hash_for_realm(&tuned));
-        assert_eq!((m, t), (2048, 3));
+        let realm = create_test_realm(&engine);
+        let client = register_confidential_client(&engine, &realm, "correct-horse");
+        assert!(
+            stored_secret_hash(&engine, &realm, client.client_id()).starts_with("$argon2id$"),
+            "a caller-chosen secret must stay on Argon2id"
+        );
+
+        let work = secret_work(|| {
+            assert!(engine
+                .authenticate_client(&realm, client.client_id(), Some("correct-horse"))
+                .is_ok());
+        });
+        assert_eq!(work, (1, 0));
+        // Not re-hashed on success: provenance is unprovable from the hash.
+        assert!(stored_secret_hash(&engine, &realm, client.client_id()).starts_with("$argon2id$"));
     }
 
     /// Correct credentials still authenticate, and wrong ones still do not —
@@ -18821,12 +19568,20 @@ mod tests {
         let (_dir, engine, _clock) = setup_engine();
         let realm = create_test_realm(&engine);
         let client = register_confidential_client(&engine, &realm, "correct-horse");
+        let (fast, fast_secret) = register_generated_client(&engine, &realm);
         let public = register_test_client(&engine, &realm);
         let unknown = ClientId::generate();
 
         assert!(engine
             .authenticate_client(&realm, client.client_id(), Some("correct-horse"))
             .is_ok());
+        assert!(engine
+            .authenticate_client(&realm, fast.client_id(), Some(fast_secret.expose()))
+            .is_ok());
+        assert!(matches!(
+            engine.authenticate_client(&realm, fast.client_id(), Some("correct-horse")),
+            Err(IdentityError::InvalidClientSecret)
+        ));
         assert!(matches!(
             engine.authenticate_client(&realm, client.client_id(), Some("wrong")),
             Err(IdentityError::InvalidClientSecret)
@@ -18851,6 +19606,84 @@ mod tests {
         assert!(engine
             .authenticate_client(&realm, public.client_id(), Some("stray"))
             .is_ok());
+    }
+
+    // ----- 26.43 follow-up: fast hashing for Hearth-generated secrets -----
+
+    #[test]
+    fn a_generated_secret_is_stored_in_the_fast_format() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let (client, secret) = register_generated_client(&engine, &realm);
+        let stored = stored_secret_hash(&engine, &realm, client.client_id());
+        assert!(
+            stored.starts_with(credentials::FAST_CLIENT_SECRET_PREFIX),
+            "got {stored:?}"
+        );
+        assert!(!stored.contains(secret.expose()));
+    }
+
+    #[test]
+    fn a_caller_chosen_secret_is_stored_as_argon2id() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let client = register_confidential_client(&engine, &realm, "password1");
+        assert!(stored_secret_hash(&engine, &realm, client.client_id()).starts_with("$argon2id$"));
+    }
+
+    #[test]
+    fn registering_with_both_secret_kinds_is_refused() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let r = engine.register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "Ambiguous".to_string(),
+                redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                client_secret: Some("chosen".to_string()),
+                generated_client_secret: Some(crate::identity::GeneratedClientSecret::generate()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(r, Err(IdentityError::InvalidInput { .. })),
+            "got {r:?}"
+        );
+    }
+
+    /// Rotation moves a client onto the fast format — including one whose
+    /// previous secret was a legacy Argon2id hash — and the new secret carries
+    /// 256 bits.
+    #[test]
+    fn regenerating_a_secret_produces_the_fast_format() {
+        use base64::Engine as _;
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let client = register_confidential_client(&engine, &realm, "legacy-secret");
+
+        let fresh = engine
+            .regenerate_client_secret(&realm, client.client_id())
+            .expect("regenerate");
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&fresh)
+            .expect("base64url");
+        assert_eq!(raw.len(), 32, "a rotated secret must carry 256 bits");
+        assert!(stored_secret_hash(&engine, &realm, client.client_id())
+            .starts_with(credentials::FAST_CLIENT_SECRET_PREFIX));
+
+        let work = secret_work(|| {
+            assert!(engine
+                .authenticate_client(&realm, client.client_id(), Some(&fresh))
+                .is_ok());
+            assert!(engine
+                .authenticate_client(&realm, client.client_id(), Some("legacy-secret"))
+                .is_err());
+        });
+        assert_eq!(
+            work,
+            (0, 2),
+            "rotated clients authenticate on the fast path"
+        );
     }
 
     // ----- 22.24: magic-link redemption honours registration_policy -----
@@ -24121,6 +24954,7 @@ mod tests {
                 &TokenRevocationRequest {
                     token: forged_token,
                     token_type_hint: Some("access_token".to_string()),
+                    revoking_client_id: None,
                 },
             )
             .expect("forged revoke should silently succeed per RFC 7009");
@@ -25148,6 +25982,7 @@ mod tests {
             nonce: None,
             request: None,
             response_mode: None,
+            prompt: None,
         }
     }
 

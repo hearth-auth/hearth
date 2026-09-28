@@ -5,7 +5,15 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
+## The dev-only cargo feature: `POST /admin/bootstrap`, the `/dev/seed-*`
+## routes and the hard-coded dev admin password. It is NOT a default feature
+## (a plain `cargo build --release` / `cargo install` is a production build),
+## so every target that compiles the test suite or boots `serve --dev` for a
+## bootstrap-driven workflow opts in here. Package-qualified so it also works
+## with `--workspace`.
+DEV_FEATURES ?= --features hearth/dev-endpoints
+
+.PHONY: setup build test test-detached test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -55,8 +63,10 @@ tailwind-install:
 
 # ── Rust ──────────────────────────────────────────────
 
+## Local dev build (debug profile, dev endpoints compiled in). A production
+## binary is `cargo build --release` with no features — see the Dockerfile.
 build: css
-	PROTOC=$(PROTOC) cargo build $(CARGO_FLAGS)
+	PROTOC=$(PROTOC) cargo build $(DEV_FEATURES) $(CARGO_FLAGS)
 
 ## Run every Rust test across both workspace crates (main + simulation)
 ## via nextest. Doctests are intentionally excluded — Hearth favors
@@ -64,10 +74,35 @@ build: css
 ## same coverage, faster compile, shared helpers, single runner.
 ## Runnable documentation examples live under `examples/`.
 test:
-	PROTOC=$(PROTOC) cargo nextest run --workspace $(CARGO_FLAGS)
+	PROTOC=$(PROTOC) cargo nextest run --workspace $(DEV_FEATURES) $(CARGO_FLAGS)
 
+## The full suite, detached from the caller (scripts/run-detached.sh): one
+## `--workspace` pass that Claude Code's background-task monitor cannot kill.
+## Blocks until the suite ends and exits with its code; if the waiting process
+## is killed, the suite keeps running — `scripts/run-detached.sh wait <id>`.
+test-detached:
+	scripts/run-detached.sh run test -- $(MAKE) test CARGO_FLAGS="--no-fail-fast $(CARGO_FLAGS)"
+
+## Run the tests that only exist in a build WITHOUT `dev-endpoints` — the
+## production feature set a plain `cargo build` / `cargo install` ships.
+## `make test` compiles with the feature, so a `#[cfg(not(feature =
+## "dev-endpoints"))]` test (e.g. "`serve --dev` says bootstrap is unavailable",
+## "a dev-mode router has no /admin/bootstrap") is never even compiled there.
+## CI runs this in the `no-dev-endpoints` job. The test binaries are
+## discovered, not listed: every tests/*.rs holding such a test, plus the
+## manifest guard. The cli tests spawn `target/debug/hearth`, which this same
+## featureless invocation builds.
+NO_DEV_TEST_FILES := $(sort tests/default_feature_set.rs $(shell grep -l 'cfg(not(feature = "dev-endpoints"))' tests/*.rs))
+test-no-dev-endpoints:
+	PROTOC=$(PROTOC) cargo nextest run --package hearth --no-fail-fast --no-tests=fail \
+		$(foreach f,$(NO_DEV_TEST_FILES),--test $(basename $(notdir $(f)))) $(CARGO_FLAGS)
+
+## Lint both feature sets: the production one (no `dev-endpoints`, what a plain
+## `cargo build` ships) and the dev one the test suite compiles under. Each
+## hides code from the other, so a single pass leaves one surface unlinted.
 clippy:
 	PROTOC=$(PROTOC) cargo clippy --all-targets $(CARGO_FLAGS) -- -D warnings
+	PROTOC=$(PROTOC) cargo clippy --all-targets $(DEV_FEATURES) $(CARGO_FLAGS) -- -D warnings
 
 ## `make loadtest` — that's the whole contract. Nothing else is required: no
 ## running server, no bootstrap, no seed, no ARGS, no env vars, no free port.
@@ -133,6 +168,7 @@ coverage:
 	mkdir -p coverage
 	PROTOC=$(PROTOC) cargo llvm-cov nextest \
 		--workspace \
+		$(DEV_FEATURES) \
 		--ignore-filename-regex 'src/protocol/generated/' \
 		--html \
 		--output-dir coverage/html \
@@ -176,6 +212,86 @@ check:
 ## See docs/specs/TESTING.md § "Test Quality Anti-Patterns" and HEA-571.
 test-quality:
 	@bash scripts/check-test-quality.sh
+
+# ── Unsafe code (ARCHITECTURE.md §9.2) ────────────────
+
+## §9.2: all `unsafe` MUST be covered by Miri tests where feasible, and by
+## address-sanitizer runs in CI. Hearth cannot be built for Miri (ring,
+## aws-lc-sys and zstd-sys are C), so unsafe-check/ compiles each source file
+## that holds `unsafe` on its own, with its unit tests, on the nightly its
+## rust-toolchain.toml pins (rustup installs it on first use).
+## tests/unsafe_check_harness.rs keeps that list and its lockfile honest.
+## CI: `make miri asan` in the `unsafe-code` job, `make heap-check` in `quality`.
+
+## Scheduler seeds Miri explores per test; AddressSanitizer and heap-check passes.
+MIRI_SEEDS ?= 0..4
+ASAN_RUNS ?= 20
+HEAP_CHECK_RUNS ?= 3
+
+HOST_TRIPLE = $(shell rustc -vV | sed -n 's/^host: //p')
+HOST_TRIPLE_ENV = $(shell echo '$(HOST_TRIPLE)' | tr 'a-z-' 'A-Z_')
+
+## What `make heap-check` runs: EpochCell's own tests and those of every cell
+## built on it — the hot tier, block cache, memtable (reads racing a flush),
+## the engine's flush-vs-read races, the identity caches and their shard map —
+## plus the process-isolated contract test. The one test left out times puts,
+## which heap checking slows by design.
+HEAP_CHECK_FILTER = binary(epoch_cell_hot_path) \
+	| test(/^core::epoch_cell::/) \
+	| test(/^identity::engine::sharded_cache::/) \
+	| test(/^identity::engine::tests::(claims_cache|session_cache|realm_status_cache|token_claims_cache|signing_key_cache)/) \
+	| test(/^storage::(tiered|block_cache)::/) \
+	| (test(/^storage::memtable::/) & !test(=storage::memtable::tests::put_cost_does_not_scale_with_occupancy)) \
+	| test(/^storage::engine::tests::(concurrent_writes_during_flush_are_not_lost|a_scan_never_misses|a_key_scan_never_misses)/)
+
+## Miri, Tree Borrows: a data race, a use-after-free or an aliasing violation
+## in the unsafe modules' tests is an error. Leaks are not: EpochCell's epoch
+## collector is a static, and never frees its own bags at exit.
+miri: ## Run the unsafe modules' unit tests under Miri
+	cd unsafe-check && MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks -Zmiri-many-seeds=$(MIRI_SEEDS)" \
+	  cargo miri nextest run --locked --no-fail-fast
+
+## The same tests natively under AddressSanitizer (LeakSanitizer included), at
+## full stress size, with real threads and real preemption, ASAN_RUNS times.
+asan: ## Run the unsafe modules' unit tests under AddressSanitizer
+	cd unsafe-check && RUSTFLAGS="-Zsanitizer=address" \
+	  cargo nextest run --locked --no-fail-fast --target $(HOST_TRIPLE) --stress-count $(ASAN_RUNS)
+
+## Hearth's own tests of the cells built on EpochCell, under glibc heap checking
+## (scripts/heap-check-runner.sh), HEAP_CHECK_RUNS times. `--retries 0`: a
+## retry would turn a heap error that fires one run in three into a pass.
+##
+## `--workspace`, as `make test` has it, so that after `make check` this builds
+## nothing. The simulation crate turns on hearth's `test-hooks` feature, and a
+## hearth-only selection resolves hearth without it: different units, and cargo
+## compiles hearth and its lib tests a second time (checked with
+## `cargo +nightly test --no-run -Z unstable-options --unit-graph`).
+## `package(hearth)` keeps the simulation crate's tests out.
+heap-check: ## Run EpochCell's consumers' concurrency tests under glibc heap checking
+	CARGO_TARGET_$(HOST_TRIPLE_ENV)_RUNNER="$(CURDIR)/scripts/heap-check-runner.sh" \
+	  PROTOC=$(PROTOC) cargo nextest run --workspace --lib --test epoch_cell_hot_path \
+	  --retries 0 --no-fail-fast --stress-count $(HEAP_CHECK_RUNS) $(CARGO_FLAGS) \
+	  -E 'package(hearth) & ($(HEAP_CHECK_FILTER))'
+
+## All three. Each runs to completion and reports; the exit code is the worst.
+unsafe-check: ## Run Miri, AddressSanitizer and heap checking over the unsafe code
+	@failed=""; \
+	for gate in miri asan heap-check; do \
+	  echo ""; \
+	  echo "===> make $$gate"; \
+	  if $(MAKE) --no-print-directory $$gate; then \
+	    echo "===> $$gate: PASS"; \
+	  else \
+	    echo "===> $$gate: FAIL"; \
+	    failed="$$failed $$gate"; \
+	  fi; \
+	done; \
+	echo ""; \
+	if [ -n "$$failed" ]; then \
+	  echo "make unsafe-check: FAILED gates:$$failed"; \
+	  exit 1; \
+	fi; \
+	echo "make unsafe-check: all gates passed"
 
 ## §3.41 adversarial test-quality gate: every A-N row in the abuse-prevention
 ## plan (docs/plans/HEA-1114-abuse-prevention.md) must have at least one
@@ -473,6 +589,13 @@ ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
 	@echo "==> auth-discard-check (HEA-1657)" && $(MAKE) auth-discard-check
 	@echo "==> rbac-storage-check (HEA-1781)" && $(MAKE) rbac-storage-check
 	@echo "==> check (clippy + fmt + nextest)" && $(MAKE) check
+	@echo "==> test-no-dev-endpoints"     && $(MAKE) test-no-dev-endpoints
+	@echo "==> miri + asan (unsafe-check/, §9.2)" && $(MAKE) miri asan
+	@if [ "$$(uname -s)" = Linux ]; then \
+	  echo "==> heap-check (§9.2)" && $(MAKE) heap-check; \
+	else \
+	  echo "==> heap-check: SKIPPED on $$(uname -s) — glibc heap checking needs Linux; CI's quality job runs it"; \
+	fi
 	@echo "==> css-check"                && $(MAKE) css-check
 	@echo "==> proto-check"              && $(MAKE) proto-check
 	@echo "==> notice-check"             && $(MAKE) notice-check
@@ -506,7 +629,7 @@ sdk-smoke-local: ## Build hearth, boot --dev, run TS + Go SDK examples, tear dow
 ## Emails are captured in-process — mailcatcher inbox at http://127.0.0.1:8420/dev/mail
 ## No Docker required.
 dev:
-	HEARTH_DEV_DATA_DIR=./data/dev cargo run -- serve --dev
+	HEARTH_DEV_DATA_DIR=./data/dev cargo run $(DEV_FEATURES) -- serve --dev
 
 ## Wipe the persistent dev data directory (irreversible).
 dev-reset:
@@ -520,7 +643,7 @@ dev-reset:
 ## are instant thanks to a per-realm sentinel. Browse at http://127.0.0.1:8420
 ## and log in as user0000001@acme.demo / DemoPassw0rd!
 seed-large:
-	HEARTH_DEV_DATA_DIR=./data/demo cargo run --release -- serve --dev \
+	HEARTH_DEV_DATA_DIR=./data/demo cargo run --release $(DEV_FEATURES) -- serve --dev \
 		--config examples/large-scale-demo/hearth.yaml
 
 ## Wipe the large demo data directory (forces a fresh re-seed).

@@ -133,8 +133,10 @@ class AdminClient:
 
     def create_client(self, req: CreateClientRequest) -> OAuthClient:
         """Create a new OAuth client."""
+        # by_alias: the wire key is `client_name`; the server 422s on `name`.
         resp = self._http.post(
-            f"{self._base}/admin/applications", json=req.model_dump(exclude_none=True)
+            f"{self._base}/admin/applications",
+            json=req.model_dump(exclude_none=True, by_alias=True),
         )
         if resp.status_code not in (200, 201):
             raise HearthError(resp.status_code, resp.text)
@@ -162,9 +164,10 @@ class AdminClient:
 
     def update_client(self, client_id: str, req: UpdateClientRequest) -> OAuthClient:
         """Update an existing OAuth client."""
+        # by_alias: the route reads `client_name` and silently ignores `name`.
         resp = self._http.patch(
             f"{self._base}/admin/applications/{client_id}",
-            json=req.model_dump(exclude_none=True),
+            json=req.model_dump(exclude_none=True, by_alias=True),
         )
         if resp.status_code != 200:
             raise HearthError(resp.status_code, resp.text)

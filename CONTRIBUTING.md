@@ -7,7 +7,7 @@ Hearth runs fully in-process — no external services required.
 **Cargo-only path (recommended for day-to-day development):**
 
 ```sh
-make dev   # cargo run -- serve --dev
+make dev   # cargo run --features dev-endpoints -- serve --dev
 ```
 
 `--dev` mode:
@@ -128,6 +128,17 @@ Before opening a PR, make sure all Rust checks pass locally:
 make check   # clippy + fmt + nextest
 ```
 
+If the change touches `unsafe` code, `EpochCell` (`src/core/epoch_cell.rs`)
+or a cell built on it, also run:
+
+```sh
+make unsafe-check   # Miri + AddressSanitizer (unsafe-check/) + glibc heap checking
+```
+
+`make miri` and `make asan` run on the nightly `unsafe-check/rust-toolchain.toml`
+pins (rustup installs it on first use); `make heap-check` needs glibc 2.34 or
+later. CI runs all three (`docs/specs/ARCHITECTURE.md` §9.2).
+
 See [`CLAUDE.md`](CLAUDE.md) and [`docs/specs/`](docs/specs/) for the
 architecture, testing, and implementation-order rules every change
 must follow.
@@ -220,7 +231,7 @@ PROTOC=protoc cargo bench --bench storage_gate
 Criterion reports **mean**, **median** (≈ p50), and standard deviation.
 The gate binaries independently compute p50 and p99 from raw samples
 taken after warm-up iterations, matching the hot-tier steady state (data
-already in the `ArcSwap`-backed lock-free tier). See each bench file's
+already in the lock-free, epoch-reclaimed hot tier). See each bench file's
 module doc for sample count and warm-up details.
 
 If a gate fails on your machine but passes elsewhere, check for

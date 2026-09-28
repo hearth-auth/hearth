@@ -229,6 +229,8 @@ or explicit threshold assertions in the bench binary. Any threshold breach fails
 | Watch mode | `bacon` | TDD red-green-refactor loop, faster than cargo-watch |
 | Property testing | `proptest` | Mature shrinking, regression persistence |
 | Fuzz testing | `cargo-fuzz` (libFuzzer) | Coverage-guided, OSS-Fuzz integration |
+| Undefined behaviour in `unsafe` | Miri (`make miri`) | Runs each `unsafe` file's unit tests from `unsafe-check/` (Hearth's C dependencies are beyond Miri): Tree Borrows, data-race detection, several scheduler seeds, on the nightly `unsafe-check/rust-toolchain.toml` pins |
+| Memory errors | AddressSanitizer (`make asan`), glibc heap checking (`make heap-check`) | ASan over the same `unsafe-check/` tests at full stress size; heap checking (`libc_malloc_debug.so` + `MALLOC_CHECK_=3` + `MALLOC_PERTURB_=165`, via `scripts/heap-check-runner.sh`) over Hearth's tests of the cells built on `EpochCell` |
 | Benchmarks | `criterion` | Statistical benchmarking, regression detection |
 | HTTP testing | `reqwest` (test dependency) | For black box server-mode tests |
 | Test fixtures | Custom `TestHarness` | Spins up embedded or server instance, handles cleanup |
@@ -431,6 +433,8 @@ watch = ["src"]
 ### Tier Details
 
 **Fast** (every commit): Runs `cargo nextest run` with the default profile. This covers all `#[cfg(test)]` unit tests and all non-ignored integration tests. Developers should be able to run this locally in under 5 minutes.
+
+`unsafe` code (ARCHITECTURE.md §9.2) is checked in this tier too. CI's `unsafe-code` job runs `make miri` and `make asan` over `unsafe-check/`, and `quality` runs `make heap-check`. `make unsafe-check` runs all three locally. Each was seen red against a seeded bug — `EpochCell` with its grace period removed — before it was trusted: Miri reports data races between a read and the deallocation, ASan heap-use-after-free, and under heap checking the hot-tier, block-cache, shard-map and flush-race tests crash with SIGSEGV in every pass. `tests/unsafe_check_harness.rs` fails if a file in `src/` gains `unsafe` that `unsafe-check/` does not compile.
 
 **Standard** (merge to main): Adds benchmark gates. For RBAC, CI runs `make bench-gate`
 (`cargo bench --bench rbac_check`) and fails if either P0 latency threshold is

@@ -110,6 +110,25 @@ pub enum BackupError {
         slug: String,
     },
 
+    /// The archive has clients registered for RS256 ID tokens but carries no
+    /// restorable RS256 ID-token signing key for their realm (task 26.55).
+    ///
+    /// Restoring anyway would provision a NEW RSA key, and every ID token
+    /// issued before the backup — including any `id_token_hint` a relying
+    /// party still holds for logout — would stop verifying. Fails closed for
+    /// the same reason as [`Self::SigningKeyMissing`], with the same override.
+    #[error(
+        "backup archive has clients that receive RS256 ID tokens in realm '{slug}' but no \
+         restorable RS256 ID-token signing key — restoring would generate a NEW key and \
+         invalidate every ID token issued before the backup. Re-export the realm with \
+         encryption enabled so the key round-trips, or pass `--allow-missing-signing-key` \
+         to `hearth backup restore` to proceed anyway with a freshly generated key."
+    )]
+    IdTokenSigningKeyMissing {
+        /// Archive slug of the realm whose RS256 ID-token key could not be restored.
+        slug: String,
+    },
+
     /// The archive carries a realm the caller is not authorized to restore.
     ///
     /// A restore takes the realm it may write from the caller's identity. An
@@ -145,4 +164,45 @@ pub enum BackupError {
         /// Name of the realm that is already present on the target.
         slug: String,
     },
+
+    /// No backup verify key is configured, and the caller did not explicitly
+    /// accept an unauthenticated restore.
+    ///
+    /// Encryption and checksums do not prove who produced an archive: the
+    /// checksums sit in the manifest an attacker would rewrite, and the
+    /// passphrase is shared by every operator who can restore. Only the
+    /// detached manifest signature does, and without a key nothing checks it,
+    /// so restore refuses rather than trusting whatever archive it is handed.
+    #[error(
+        "refusing to restore: no backup verify key is configured, so the archive's origin \
+         cannot be authenticated. Set `security.backup.verify_key` to the base64url Ed25519 \
+         public key your archives are signed with (`hearth backup keygen` creates a pair; \
+         `hearth backup create --sign-key` or `hearth backup sign` signs an archive), or pass \
+         `--verify-key` to `hearth backup restore`. To restore an archive whose origin you have \
+         verified out of band, pass `--allow-unsigned` to `hearth backup restore`; the HTTP \
+         restore endpoint has no such override outside dev mode."
+    )]
+    VerifyKeyNotConfigured,
+
+    /// A verify key is configured but the archive's manifest carries no
+    /// detached signature.
+    #[error(
+        "refusing to restore: the archive is unsigned but a backup verify key is configured. \
+         If you trust its origin, sign it with the matching private key (`hearth backup sign \
+         --input <archive> --key-file <key.pem>`) and restore again."
+    )]
+    SignatureMissing,
+
+    /// The archive's detached manifest signature does not verify against the
+    /// configured key: the manifest was edited after signing, or it was signed
+    /// by a different key.
+    #[error(
+        "refusing to restore: the archive's manifest signature is invalid ({0}) — it was \
+         modified after signing or signed with a key other than the configured verify key"
+    )]
+    SignatureInvalid(String),
+
+    /// A backup signing key could not be parsed.
+    #[error("invalid backup signing key: {0}")]
+    SigningKeyInvalid(String),
 }

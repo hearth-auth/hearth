@@ -221,14 +221,30 @@ class HearthClient:
             raise HearthError(resp.status_code, resp.text)
         return TokenResponse(**resp.json())
 
-    def register_client(self, req: RegisterClientRequest) -> OAuthClient:
-        """Register a new OAuth client (requires admin/realm token)."""
+    def register_client(
+        self, req: RegisterClientRequest, access_token: Optional[str] = None
+    ) -> OAuthClient:
+        """Register a new OAuth client via the admin ``POST /clients`` endpoint.
+
+        This is an admin operation: the bearer token (``access_token``, or the
+        one this client was constructed with) must carry
+        ``hearth.clients.admin`` (or ``hearth.admin``) in this client's realm.
+
+        Raises:
+            HearthError: 401 without any token (no request is sent), or the
+                server's status on any non-2xx response.
+        """
+        token = access_token or self._token
+        if not token:
+            raise HearthError(401, "no access token provided")
         resp = self._http.post(
-            f"{self._base}/clients", json=req.model_dump(exclude_none=True)
+            f"{self._base}/clients",
+            json=req.model_dump(exclude_none=True, by_alias=True),
+            headers={"Authorization": f"Bearer {token}"},
         )
-        if resp.status_code != 200:
+        if resp.status_code not in (200, 201):
             raise HearthError(resp.status_code, resp.text)
-        return OAuthClient(**resp.json())
+        return OAuthClient.model_validate(resp.json())
 
     # ------------------------------------------------------------------
     # Protected endpoints
@@ -365,11 +381,24 @@ class HearthClient:
         setting on the issuing client.  Callers in introspection mode MUST compare this
         against their configured expected mode and reject on mismatch.
 
+        Introspection serves CONFIDENTIAL clients only: Hearth answers a public
+        client (``client_id`` alone) with ``401 invalid_client``, so
+        ``client_secret`` is required and a missing one is refused before any
+        request is sent.
+
+        :raises ConfigurationError: when ``client_id`` or ``client_secret`` is missing.
         :raises HearthError: on non-200 HTTP responses.
         """
-        body: Dict[str, Any] = {"token": access_token, "client_id": client_id}
-        if client_secret is not None:
-            body["client_secret"] = client_secret
+        if not client_id or not client_secret:
+            raise ConfigurationError(
+                "introspection requires a confidential client's client_id and client_secret",
+                field="client_secret",
+            )
+        body: Dict[str, Any] = {
+            "token": access_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
         if token_type_hint is not None:
             body["token_type_hint"] = token_type_hint
         resp = self._http.post(

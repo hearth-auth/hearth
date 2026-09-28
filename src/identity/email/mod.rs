@@ -121,6 +121,22 @@ pub(crate) fn reject_crlf(field: &str, value: &str) -> Result<(), EmailError> {
     Ok(())
 }
 
+/// Masks an email address for logs and display: the first character of the
+/// local part, then `***`, then the domain — `alice@example.com` becomes
+/// `a***@example.com`. Anything that is not `local@domain` becomes `***`.
+///
+/// Logs MUST NOT carry PII (CLAUDE.md), so every transport logs the recipient
+/// through this.
+pub(crate) fn mask_email_address(email: &str) -> String {
+    match email.split_once('@') {
+        Some((local, domain)) => {
+            let first = local.chars().next().unwrap_or('*');
+            format!("{first}***@{domain}")
+        }
+        None => "***".to_string(),
+    }
+}
+
 /// Convenience alias for a shared dynamic [`EmailSender`].
 pub type SharedEmailSender = Arc<dyn EmailSender>;
 
@@ -156,6 +172,18 @@ impl fmt::Debug for ApiKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mask_email_address_keeps_only_the_first_character_and_the_domain() {
+        assert_eq!(mask_email_address("alice@example.com"), "a***@example.com");
+        assert_eq!(
+            mask_email_address("bob.smith+otp@corp.example.org"),
+            "b***@corp.example.org"
+        );
+        assert_eq!(mask_email_address("not-an-address"), "***");
+        assert_eq!(mask_email_address("@example.com"), "****@example.com");
+        assert_eq!(mask_email_address(""), "***");
+    }
 
     #[test]
     fn logging_sender_accepts_plain_values() {

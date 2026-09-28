@@ -461,9 +461,15 @@ type RegisterClientRequest struct {
 	AccessTokenAuthorization AccessTokenAuthorization `protobuf:"varint,5,opt,name=access_token_authorization,json=accessTokenAuthorization,proto3,enum=hearth.identity.v1.AccessTokenAuthorization" json:"access_token_authorization,omitempty"`
 	// Trust level for this client.  Unspecified defaults to ThirdParty on the
 	// DCR path.  The authenticated admin create path respects this field.
-	TrustLevel    *ClientTrustLevel `protobuf:"varint,6,opt,name=trust_level,json=trustLevel,proto3,enum=hearth.identity.v1.ClientTrustLevel,oneof" json:"trust_level,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	TrustLevel *ClientTrustLevel `protobuf:"varint,6,opt,name=trust_level,json=trustLevel,proto3,enum=hearth.identity.v1.ClientTrustLevel,oneof" json:"trust_level,omitempty"`
+	// JWS algorithm for this client's ID tokens (OIDC Dynamic Client
+	// Registration 1.0 s2): "RS256" or "EdDSA"; anything else is rejected.
+	// Omitted means RS256 on the dynamic registration path (the OIDC default)
+	// and EdDSA on the authenticated admin path. Only ID tokens are affected;
+	// access and refresh tokens are always EdDSA.
+	IdTokenSignedResponseAlg *string `protobuf:"bytes,7,opt,name=id_token_signed_response_alg,proto3,oneof" json:"id_token_signed_response_alg,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *RegisterClientRequest) Reset() {
@@ -538,6 +544,13 @@ func (x *RegisterClientRequest) GetTrustLevel() ClientTrustLevel {
 	return ClientTrustLevel_CLIENT_TRUST_LEVEL_UNSPECIFIED
 }
 
+func (x *RegisterClientRequest) GetIdTokenSignedResponseAlg() string {
+	if x != nil && x.IdTokenSignedResponseAlg != nil {
+		return *x.IdTokenSignedResponseAlg
+	}
+	return ""
+}
+
 // Request to update an existing OAuth 2.0 client.
 type UpdateClientRequest struct {
 	state                    protoimpl.MessageState    `protogen:"open.v1"`
@@ -546,9 +559,11 @@ type UpdateClientRequest struct {
 	GrantTypes               []string                  `protobuf:"bytes,3,rep,name=grant_types,json=grantTypes,proto3" json:"grant_types,omitempty"`
 	AccessTokenAuthorization *AccessTokenAuthorization `protobuf:"varint,4,opt,name=access_token_authorization,json=accessTokenAuthorization,proto3,enum=hearth.identity.v1.AccessTokenAuthorization,oneof" json:"access_token_authorization,omitempty"`
 	// Trust level override.  Omit to leave unchanged.
-	TrustLevel    *ClientTrustLevel `protobuf:"varint,5,opt,name=trust_level,json=trustLevel,proto3,enum=hearth.identity.v1.ClientTrustLevel,oneof" json:"trust_level,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	TrustLevel *ClientTrustLevel `protobuf:"varint,5,opt,name=trust_level,json=trustLevel,proto3,enum=hearth.identity.v1.ClientTrustLevel,oneof" json:"trust_level,omitempty"`
+	// ID-token signing algorithm: "RS256" or "EdDSA". Omit to leave unchanged.
+	IdTokenSignedResponseAlg *string `protobuf:"bytes,6,opt,name=id_token_signed_response_alg,proto3,oneof" json:"id_token_signed_response_alg,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *UpdateClientRequest) Reset() {
@@ -616,6 +631,13 @@ func (x *UpdateClientRequest) GetTrustLevel() ClientTrustLevel {
 	return ClientTrustLevel_CLIENT_TRUST_LEVEL_UNSPECIFIED
 }
 
+func (x *UpdateClientRequest) GetIdTokenSignedResponseAlg() string {
+	if x != nil && x.IdTokenSignedResponseAlg != nil {
+		return *x.IdTokenSignedResponseAlg
+	}
+	return ""
+}
+
 // A registered OAuth 2.0 client.
 type OAuthClient struct {
 	state                    protoimpl.MessageState   `protogen:"open.v1"`
@@ -626,6 +648,8 @@ type OAuthClient struct {
 	IsConfidential           bool                     `protobuf:"varint,5,opt,name=is_confidential,json=isConfidential,proto3" json:"is_confidential,omitempty"`
 	GrantTypes               []string                 `protobuf:"bytes,6,rep,name=grant_types,json=grantTypes,proto3" json:"grant_types,omitempty"`
 	AccessTokenAuthorization AccessTokenAuthorization `protobuf:"varint,7,opt,name=access_token_authorization,json=accessTokenAuthorization,proto3,enum=hearth.identity.v1.AccessTokenAuthorization" json:"access_token_authorization,omitempty"`
+	// The algorithm this client's ID tokens are signed with: "RS256" or "EdDSA".
+	IdTokenSignedResponseAlg string `protobuf:"bytes,8,opt,name=id_token_signed_response_alg,proto3" json:"id_token_signed_response_alg,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -707,6 +731,13 @@ func (x *OAuthClient) GetAccessTokenAuthorization() AccessTokenAuthorization {
 		return x.AccessTokenAuthorization
 	}
 	return AccessTokenAuthorization_EMBEDDED
+}
+
+func (x *OAuthClient) GetIdTokenSignedResponseAlg() string {
+	if x != nil {
+		return x.IdTokenSignedResponseAlg
+	}
+	return ""
 }
 
 // A cursor-based page of OAuth clients.
@@ -900,9 +931,17 @@ type DeviceAuthorizationRequest struct {
 	// Client secret for a confidential client (RFC 8628 s3.1). HTTP Basic Auth
 	// is preferred and takes precedence; this is the client_secret_post
 	// fallback. Public clients omit it.
-	ClientSecret  *string `protobuf:"bytes,3,opt,name=client_secret,json=clientSecret,proto3,oneof" json:"client_secret,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ClientSecret *string `protobuf:"bytes,3,opt,name=client_secret,json=clientSecret,proto3,oneof" json:"client_secret,omitempty"`
+	// private_key_jwt client authentication (RFC 7523 s2.2, RFC 8628 s3.1):
+	// must be "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" when
+	// present. A request carrying either assertion field is authenticated by
+	// the assertion alone; combining it with a secret is refused.
+	ClientAssertionType *string `protobuf:"bytes,4,opt,name=client_assertion_type,proto3,oneof" json:"client_assertion_type,omitempty"`
+	// The signed client assertion JWT (RFC 7523 s2.2), `aud` = the realm
+	// issuer.
+	ClientAssertion *string `protobuf:"bytes,5,opt,name=client_assertion,proto3,oneof" json:"client_assertion,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *DeviceAuthorizationRequest) Reset() {
@@ -952,6 +991,20 @@ func (x *DeviceAuthorizationRequest) GetScope() string {
 func (x *DeviceAuthorizationRequest) GetClientSecret() string {
 	if x != nil && x.ClientSecret != nil {
 		return *x.ClientSecret
+	}
+	return ""
+}
+
+func (x *DeviceAuthorizationRequest) GetClientAssertionType() string {
+	if x != nil && x.ClientAssertionType != nil {
+		return *x.ClientAssertionType
+	}
+	return ""
+}
+
+func (x *DeviceAuthorizationRequest) GetClientAssertion() string {
+	if x != nil && x.ClientAssertion != nil {
+		return *x.ClientAssertion
 	}
 	return ""
 }
@@ -2149,7 +2202,7 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"token_type\x18\x03 \x01(\tR\ttokenType\x12\x1d\n" +
 	"\n" +
 	"expires_in\x18\x04 \x01(\x03R\texpiresIn\x12#\n" +
-	"\rrefresh_token\x18\x05 \x01(\tR\frefreshToken\"\x82\x03\n" +
+	"\rrefresh_token\x18\x05 \x01(\tR\frefreshToken\"\xec\x03\n" +
 	"\x15RegisterClientRequest\x12\x1f\n" +
 	"\vclient_name\x18\x01 \x01(\tR\n" +
 	"clientName\x12#\n" +
@@ -2159,9 +2212,11 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"grantTypes\x12j\n" +
 	"\x1aaccess_token_authorization\x18\x05 \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationR\x18accessTokenAuthorization\x12J\n" +
 	"\vtrust_level\x18\x06 \x01(\x0e2$.hearth.identity.v1.ClientTrustLevelH\x01R\n" +
-	"trustLevel\x88\x01\x01B\x10\n" +
+	"trustLevel\x88\x01\x01\x12G\n" +
+	"\x1cid_token_signed_response_alg\x18\a \x01(\tH\x02R\x1cid_token_signed_response_alg\x88\x01\x01B\x10\n" +
 	"\x0e_client_secretB\x0e\n" +
-	"\f_trust_level\"\xfd\x02\n" +
+	"\f_trust_levelB\x1f\n" +
+	"\x1d_id_token_signed_response_alg\"\xe7\x03\n" +
 	"\x13UpdateClientRequest\x12$\n" +
 	"\vclient_name\x18\x01 \x01(\tH\x00R\n" +
 	"clientName\x88\x01\x01\x12#\n" +
@@ -2170,10 +2225,12 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"grantTypes\x12o\n" +
 	"\x1aaccess_token_authorization\x18\x04 \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationH\x01R\x18accessTokenAuthorization\x88\x01\x01\x12J\n" +
 	"\vtrust_level\x18\x05 \x01(\x0e2$.hearth.identity.v1.ClientTrustLevelH\x02R\n" +
-	"trustLevel\x88\x01\x01B\x0e\n" +
+	"trustLevel\x88\x01\x01\x12G\n" +
+	"\x1cid_token_signed_response_alg\x18\x06 \x01(\tH\x03R\x1cid_token_signed_response_alg\x88\x01\x01B\x0e\n" +
 	"\f_client_nameB\x1d\n" +
 	"\x1b_access_token_authorizationB\x0e\n" +
-	"\f_trust_level\"\xc5\x02\n" +
+	"\f_trust_levelB\x1f\n" +
+	"\x1d_id_token_signed_response_alg\"\x89\x03\n" +
 	"\vOAuthClient\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x1f\n" +
 	"\vclient_name\x18\x02 \x01(\tR\n" +
@@ -2184,7 +2241,8 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\x0fis_confidential\x18\x05 \x01(\bR\x0eisConfidential\x12\x1f\n" +
 	"\vgrant_types\x18\x06 \x03(\tR\n" +
 	"grantTypes\x12j\n" +
-	"\x1aaccess_token_authorization\x18\a \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationR\x18accessTokenAuthorization\"~\n" +
+	"\x1aaccess_token_authorization\x18\a \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationR\x18accessTokenAuthorization\x12B\n" +
+	"\x1cid_token_signed_response_alg\x18\b \x01(\tR\x1cid_token_signed_response_alg\"~\n" +
 	"\x0fOAuthClientPage\x125\n" +
 	"\x05items\x18\x01 \x03(\v2\x1f.hearth.identity.v1.OAuthClientR\x05items\x12$\n" +
 	"\vnext_cursor\x18\x02 \x01(\tH\x00R\n" +
@@ -2202,13 +2260,17 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\n" +
 	"expires_in\x18\x03 \x01(\x03R\texpiresIn\x12\x19\n" +
 	"\x05scope\x18\x04 \x01(\tH\x00R\x05scope\x88\x01\x01B\b\n" +
-	"\x06_scope\"\x9a\x01\n" +
+	"\x06_scope\"\xb5\x02\n" +
 	"\x1aDeviceAuthorizationRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x19\n" +
 	"\x05scope\x18\x02 \x01(\tH\x00R\x05scope\x88\x01\x01\x12(\n" +
-	"\rclient_secret\x18\x03 \x01(\tH\x01R\fclientSecret\x88\x01\x01B\b\n" +
+	"\rclient_secret\x18\x03 \x01(\tH\x01R\fclientSecret\x88\x01\x01\x129\n" +
+	"\x15client_assertion_type\x18\x04 \x01(\tH\x02R\x15client_assertion_type\x88\x01\x01\x12/\n" +
+	"\x10client_assertion\x18\x05 \x01(\tH\x03R\x10client_assertion\x88\x01\x01B\b\n" +
 	"\x06_scopeB\x10\n" +
-	"\x0e_client_secret\"\xc1\x01\n" +
+	"\x0e_client_secretB\x18\n" +
+	"\x16_client_assertion_typeB\x13\n" +
+	"\x11_client_assertion\"\xc1\x01\n" +
 	"\x1bDeviceAuthorizationResponse\x12\x1f\n" +
 	"\vdevice_code\x18\x01 \x01(\tR\n" +
 	"deviceCode\x12\x1b\n" +

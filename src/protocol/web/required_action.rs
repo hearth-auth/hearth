@@ -38,12 +38,11 @@ use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{ClientId, RealmId, Timestamp, UserId};
 use crate::identity::error::IdentityError;
 use crate::identity::ra_token::{self, OidcParams};
-use crate::identity::CodeChallengeMethod;
 use crate::identity::RequiredAction;
 use crate::identity::{CleartextPassword, SessionContext, UpdateUserRequest};
 use crate::protocol::web::auth::{issue_auth_cookies, IssuedCookies};
-use crate::protocol::web::oauth_consent::{build_authorization_redirect, AuthorizeQuery};
 
+use super::authorize_gate::{refuse_if_silent, run_authorize_gates, AuthorizeParams, Gate};
 use super::handlers::append_cookie;
 use super::handlers_common;
 use super::templates::render;
@@ -125,36 +124,52 @@ fn action_label(action: &str) -> &'static str {
 // Public entry point: called from oauth_consent::authorize_get_impl  (AC-1)
 // ---------------------------------------------------------------------------
 
-/// Checks whether the authenticated user has pending required actions.
+/// The required-action gate of the authorization flow (see
+/// `authorize_gate`): checks whether the authenticated user has pending
+/// required actions before a code is issued.
 ///
-/// Returns `Some(redirect_response)` when actions are present — the caller
-/// MUST return this response immediately.  Returns `None` to indicate the
-/// normal flow should continue (AC-5: no-op path).
+/// Returns `Some(response)` when the flow must stop here — a redirect into
+/// the first action, or an error — and the caller MUST return it. Returns
+/// `None` when nothing is pending (AC-5: no-op path).
 ///
-/// The OIDC params are embedded in the signed RA session JWT so the flow can
+/// A lookup *error* is `Some(error)`, never `None`: reading a storage fault
+/// as "no required actions" issued the code past a pending forced password
+/// change or enrolment. A user that does not exist has no stored actions
+/// (`None`); the code exchange refuses a missing user (`UserNotFound`).
+///
+/// A `prompt=none` request with pending actions is answered
+/// `interaction_required` (OIDC Core §3.1.2.1) instead of being redirected
+/// into an action page.
+///
+/// The parameters are embedded in the signed RA session JWT so the flow can
 /// be resumed by [`resume_oidc_flow`] once all actions are complete.
-pub fn required_action_check(
+pub(super) fn required_action_intercept(
     state: &Arc<WebState>,
     realm: &RealmId,
     user_id: &UserId,
-    q: &AuthorizeQuery,
-    headers: &HeaderMap,
+    params: &AuthorizeParams,
+    secure: bool,
     now: Timestamp,
-    via_par: bool,
 ) -> Option<Response> {
-    let user = state.identity.get_user(realm, user_id).ok().flatten()?;
-
-    let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
-
-    // Dynamic injection: SMS MFA enrollment if realm requires it.
-    inject_enroll_phone_otp_if_needed(state, realm, user_id, &user, &mut actions);
-    // Dynamic injection: Email OTP enrollment if realm requires it.
-    inject_enroll_email_otp_if_needed(state, realm, user_id, &user, &mut actions);
-    // Dynamic injection: TOTP/MFA enrollment if client or role requires it.
-    inject_enroll_mfa_if_needed(state, realm, user_id, Some(&q.client_id), &mut actions);
-
+    let client_id = params.client_id.as_uuid().to_string();
+    let mut actions = match pending_required_actions(state, realm, user_id, Some(&client_id)) {
+        Ok(Some(actions)) => actions,
+        Ok(None) => return None,
+        Err(resp) => return Some(resp),
+    };
     if actions.is_empty() {
         return None;
+    }
+    // `prompt=none`: the actions need the user, and no UI may be shown.
+    if let Some(refusal) = refuse_if_silent(
+        state,
+        realm,
+        user_id,
+        params,
+        "interaction_required",
+        "user interaction required",
+    ) {
+        return Some(refusal);
     }
 
     // Sort by canonical priority so execution order is deterministic regardless
@@ -162,44 +177,100 @@ pub fn required_action_check(
     actions.sort_by_key(|a| a.priority());
     let first = actions[0];
 
-    let oidc_params = OidcParams {
-        client_id: q.client_id.clone(),
-        redirect_uri: q.redirect_uri.clone(),
-        scope: q.scope.clone(),
-        code_challenge: q.code_challenge.clone(),
-        code_challenge_method: q.code_challenge_method.clone(),
-        nonce: if q.nonce.is_empty() {
-            None
-        } else {
-            Some(q.nonce.clone())
-        },
-        state: if q.state.is_empty() {
-            None
-        } else {
-            Some(q.state.clone())
-        },
-        response_type: q.response_type.clone(),
-        response_mode: q.response_mode.clone().filter(|m| !m.is_empty()),
-        via_par,
-    };
-
-    let token = match state
-        .identity
-        .generate_ra_token(realm, user_id, actions, oidc_params, now)
-    {
+    let token = match state.identity.generate_ra_token(
+        realm,
+        user_id,
+        actions,
+        params.to_oidc_params(),
+        now,
+    ) {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!(error = %e, "required_action_check: generate_ra_token failed");
+            tracing::warn!(error = %e, "required_action_intercept: generate_ra_token failed");
             return Some(handlers_common::server_error());
         }
     };
 
-    let secure = state.is_secure_request(headers);
     let cookie = ra_token::ra_session_cookie(&token, secure);
     let path = format!("/required-action/{}", first.as_path_segment());
     let mut response = Redirect::to(&path).into_response();
     append_cookie(&mut response, &cookie);
     Some(response)
+}
+
+/// The user's pending required actions: the stored list plus the
+/// dynamically injected enrolment requirements.
+///
+/// * `Ok(None)` — the user does not exist, so nothing is stored for them.
+///   Every caller's next step (session creation, code exchange) refuses a
+///   missing user, so this is not the place to decide it.
+/// * `Err(response)` — a lookup failed. The actions (or the realm's
+///   enrolment requirements) are unknown, so the caller must refuse: reading
+///   the fault as "nothing pending" skipped the actions.
+fn pending_required_actions(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    client_id: Option<&str>,
+) -> Result<Option<Vec<RequiredAction>>, Response> {
+    let user = match state.identity.get_user(realm, user_id) {
+        Ok(Some(u)) => u,
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                realm_id = %realm.as_uuid(),
+                "required actions: user lookup failed; refusing"
+            );
+            return Err(handlers_common::server_error());
+        }
+    };
+    // The realm's enrolment requirements (SMS / email OTP / passkey) are read
+    // from the realm record; an error there is equally unknown.
+    let realm_config = match state.identity.get_realm(realm) {
+        Ok(r) => r.map(|r| r.config().clone()),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                realm_id = %realm.as_uuid(),
+                "required actions: realm lookup failed; refusing"
+            );
+            return Err(handlers_common::server_error());
+        }
+    };
+
+    let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
+    // Dynamic injection: SMS MFA enrollment if realm requires it.
+    inject_enroll_phone_otp_if_needed(
+        state,
+        realm,
+        user_id,
+        &user,
+        realm_config.as_ref(),
+        &mut actions,
+    );
+    // Dynamic injection: Email OTP enrollment if realm requires it.
+    inject_enroll_email_otp_if_needed(
+        state,
+        realm,
+        user_id,
+        &user,
+        realm_config.as_ref(),
+        &mut actions,
+    );
+    // Dynamic injection: TOTP/MFA enrollment if the client (OIDC only) or a
+    // role requires it.
+    // An unknown requirement refuses, like the lookups above.
+    inject_enroll_mfa_if_needed(
+        state,
+        realm,
+        user_id,
+        realm_config.as_ref(),
+        client_id,
+        &mut actions,
+    )
+    .map_err(|()| handlers_common::server_error())?;
+    Ok(Some(actions))
 }
 
 /// Checks whether the authenticating user has pending required actions for
@@ -208,8 +279,11 @@ pub fn required_action_check(
 /// Returns `Some(redirect_response)` when actions are pending — the caller
 /// MUST return this response immediately instead of creating a session.
 /// Returns `None` when no actions are pending and the login can proceed.
+/// A user or realm lookup error returns `Some(error)`: it is never read as
+/// "nothing pending". A user that does not exist returns `None`;
+/// `create_session` refuses it (`UserNotFound`).
 ///
-/// Unlike [`required_action_check`], this generates an RA token without
+/// Unlike the OIDC intercept, this generates an RA token without
 /// OIDC params; flow resumption creates a session cookie and redirects to
 /// `return_to` once all actions are complete.
 pub fn required_action_check_browser(
@@ -220,17 +294,14 @@ pub fn required_action_check_browser(
     headers: &HeaderMap,
     now: Timestamp,
 ) -> Option<Response> {
-    let user = state.identity.get_user(realm, user_id).ok().flatten()?;
-
-    let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
-
-    // Dynamic injection: SMS MFA enrollment if realm requires it.
-    inject_enroll_phone_otp_if_needed(state, realm, user_id, &user, &mut actions);
-    // Dynamic injection: Email OTP enrollment if realm requires it.
-    inject_enroll_email_otp_if_needed(state, realm, user_id, &user, &mut actions);
-    // Dynamic injection: TOTP/MFA enrollment if role requires it (no client on
-    // the direct browser login path; client-level enforcement is OIDC-only).
-    inject_enroll_mfa_if_needed(state, realm, user_id, None, &mut actions);
+    // No client on the direct browser login path; client-level MFA
+    // enforcement is OIDC-only. A lookup error refuses (see
+    // `pending_required_actions`).
+    let mut actions = match pending_required_actions(state, realm, user_id, None) {
+        Ok(Some(actions)) => actions,
+        Ok(None) => return None,
+        Err(resp) => return Some(resp),
+    };
 
     if actions.is_empty() {
         return None;
@@ -440,11 +511,15 @@ pub async fn action_complete(
 // Flow helpers (also used in tests)
 // ---------------------------------------------------------------------------
 
-/// Clears the RA cookie and issues the authorization code.
+/// Clears the RA cookie and resumes the authorization after the last
+/// required action.
 ///
-/// Called when all required actions have been completed.  Reconstructs the
-/// original OIDC authorize request from `RaClaims` and calls
-/// `identity.issue_authorization_code`.
+/// Reconstructs the original request from the signed `RaClaims` and
+/// re-enters the shared gate sequence (`authorize_gate`) at the gate after
+/// this one: the SMS MFA challenge, then consent / `prompt`, then issuance.
+/// This used to issue the code directly — skipping the SMS factor (fixed
+/// earlier) and the consent prompt, so any request that detoured through a
+/// required action got a code for a client the user never approved.
 pub fn resume_oidc_flow(
     state: &Arc<WebState>,
     realm: &RealmId,
@@ -457,58 +532,26 @@ pub fn resume_oidc_flow(
     let Ok(user_uuid) = uuid::Uuid::parse_str(user_sub) else {
         return handlers_common::server_error();
     };
-    let Ok(client_uuid) = uuid::Uuid::parse_str(&oidc_params.client_id) else {
+    let user_id = UserId::new(user_uuid);
+    // Server-signed state built from validated parameters: a value that does
+    // not parse is an internal fault, refused rather than defaulted.
+    let Some(params) = AuthorizeParams::from_oidc_params(&oidc_params) else {
+        tracing::warn!("resume_oidc_flow: RA session carries unparseable OIDC params");
         return handlers_common::server_error();
     };
 
-    let user_id = UserId::new(user_uuid);
-    let client_id = ClientId::new(client_uuid);
-
-    let code_challenge_method = match oidc_params.code_challenge_method.as_str() {
-        "S256" => Some(CodeChallengeMethod::S256),
-        _ => None,
-    };
-    let state_param = oidc_params.state.as_deref().unwrap_or("");
-    let code_challenge = if oidc_params.code_challenge.is_empty() {
-        None
-    } else {
-        Some(oidc_params.code_challenge.clone())
-    };
-
-    let response_mode = oidc_params
-        .response_mode
-        .as_deref()
-        .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok());
-
-    match state.identity.issue_authorization_code(
+    let mut response = run_authorize_gates(
+        state,
         realm,
         &user_id,
-        &client_id,
-        &oidc_params.redirect_uri,
-        &oidc_params.scope,
-        state_param,
-        code_challenge,
-        code_challenge_method,
-        oidc_params.nonce.clone(),
+        &params,
+        Gate::SmsMfa,
         Vec::new(),
-        response_mode,
-        None,                // jar_request — RA resume restores pre-validated params
-        oidc_params.via_par, // propagated from the original authorize request
-    ) {
-        Ok(resp) => {
-            // 22.3: always deliver to the engine-validated URI. `jar_request`
-            // is `None` here so the two agree today, but reading it off the
-            // response keeps that true if RA resume ever carries a JAR.
-            let location = build_authorization_redirect(resp.redirect_uri(), &resp);
-            let mut response = Redirect::to(&location).into_response();
-            append_cookie(&mut response, &clear_cookie);
-            response
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "resume_oidc_flow: issue_authorization_code failed");
-            handlers_common::server_error()
-        }
-    }
+        secure,
+        Timestamp::from_micros(now_micros()),
+    );
+    append_cookie(&mut response, &clear_cookie);
+    response
 }
 
 /// Generates a fresh RA session JWT for the remaining actions and redirects
@@ -582,6 +625,7 @@ fn inject_enroll_phone_otp_if_needed(
     realm: &RealmId,
     user_id: &UserId,
     user: &crate::identity::User,
+    realm_config: Option<&crate::identity::RealmConfig>,
     actions: &mut Vec<RequiredAction>,
 ) {
     if user.phone_verified() {
@@ -590,14 +634,9 @@ fn inject_enroll_phone_otp_if_needed(
     if actions.contains(&RequiredAction::EnrollPhoneOtp) {
         return;
     }
-    let sms_required = state
-        .identity
-        .get_realm(realm)
-        .ok()
-        .flatten()
-        .and_then(|r| r.config().mfa_methods.clone())
-        .map(|methods| methods.iter().any(|m| m == "sms"))
-        .unwrap_or(false);
+    let sms_required = realm_config
+        .and_then(|c| c.mfa_methods.as_ref())
+        .is_some_and(|methods| methods.iter().any(|m| m == "sms"));
 
     if !sms_required {
         return;
@@ -635,6 +674,7 @@ fn inject_enroll_email_otp_if_needed(
     realm: &RealmId,
     user_id: &UserId,
     user: &crate::identity::User,
+    realm_config: Option<&crate::identity::RealmConfig>,
     actions: &mut Vec<RequiredAction>,
 ) {
     if user.email_otp_enabled() {
@@ -643,14 +683,9 @@ fn inject_enroll_email_otp_if_needed(
     if actions.contains(&RequiredAction::EnrollEmailOtp) {
         return;
     }
-    let email_otp_required = state
-        .identity
-        .get_realm(realm)
-        .ok()
-        .flatten()
-        .and_then(|r| r.config().mfa_methods.clone())
-        .map(|methods| methods.iter().any(|m| m == "email_otp"))
-        .unwrap_or(false);
+    let email_otp_required = realm_config
+        .and_then(|c| c.mfa_methods.as_ref())
+        .is_some_and(|methods| methods.iter().any(|m| m == "email_otp"));
 
     if !email_otp_required {
         return;
@@ -695,23 +730,42 @@ const fn enroll_mfa_needed(realm_requires_passkey: bool, has_passkeys: bool) -> 
 /// passkey, or if `EnrollMfa` is already in the pending actions list.
 /// Does NOT persist the injected action — it is re-evaluated on every
 /// authorize request because the condition is external (client config / roles).
+///
+/// `Err(())` when a lookup the decision depends on fails (the factor list,
+/// the client record, the user's role assignments or a role): the
+/// requirement is then unknown and the caller refuses. Each of these used to
+/// read an error as "no requirement", so a transient client-store or RBAC
+/// fault issued the code without the enrolment the client or the user's
+/// role mandates. A client or role that does not exist imposes nothing.
 fn inject_enroll_mfa_if_needed(
     state: &Arc<WebState>,
     realm: &RealmId,
     user_id: &UserId,
+    realm_config: Option<&crate::identity::RealmConfig>,
     client_id_str: Option<&str>,
     actions: &mut Vec<RequiredAction>,
-) {
+) -> Result<(), ()> {
     if actions.contains(&RequiredAction::EnrollMfa) {
-        return;
+        return Ok(());
     }
+    let refuse = |what: &str, e: &dyn std::fmt::Display| {
+        tracing::warn!(
+            error = %e,
+            realm_id = %realm.as_uuid(),
+            lookup = what,
+            "required actions: MFA-requirement lookup failed; refusing"
+        );
+    };
 
     // User with TOTP or passkeys already satisfies any MFA requirement.
-    let has_totp = state.identity.mfa_enabled(realm, user_id).unwrap_or(false);
+    let has_totp = state
+        .identity
+        .mfa_enabled(realm, user_id)
+        .map_err(|e| refuse("totp", &e))?;
     let has_passkeys = !state
         .identity
         .list_webauthn_credentials(realm, user_id)
-        .unwrap_or_default()
+        .map_err(|e| refuse("passkeys", &e))?
         .is_empty();
 
     // §4.18#9: `realms.<name>.auth.webauthn_required` was dead code — the
@@ -719,61 +773,59 @@ fn inject_enroll_mfa_if_needed(
     // `to_realm_config`, and nothing read it. It is a *passkey* requirement,
     // so TOTP does not satisfy it and it must be evaluated before the
     // "any factor will do" short-circuit below.
-    let realm_requires_passkey = state
-        .identity
-        .get_realm(realm)
-        .ok()
-        .flatten()
-        .and_then(|r| r.config().webauthn_required)
+    let realm_requires_passkey = realm_config
+        .and_then(|c| c.webauthn_required)
         .unwrap_or(false);
     if enroll_mfa_needed(realm_requires_passkey, has_passkeys) {
         actions.push(RequiredAction::EnrollMfa);
-        return;
+        return Ok(());
     }
 
     if has_totp || has_passkeys {
-        return;
+        return Ok(());
     }
 
     // Per-client requirement.
-    let client_requires_mfa = client_id_str
+    let client_requires_mfa = match client_id_str
         .and_then(|cid| uuid::Uuid::parse_str(cid).ok())
         .map(ClientId::new)
-        .and_then(|cid| state.identity.get_client(realm, &cid).ok().flatten())
-        .and_then(|c| c.mfa_required())
-        .unwrap_or(false);
+    {
+        Some(cid) => state
+            .identity
+            .get_client(realm, &cid)
+            .map_err(|e| refuse("client", &e))?
+            .and_then(|c| c.mfa_required())
+            .unwrap_or(false),
+        None => false,
+    };
 
     // Per-role requirement: any role the user holds that appears in
     // `realm.config.mfa_required_roles` triggers enforcement.
-    let role_requires_mfa = (|| -> Option<bool> {
-        let required_roles = state
-            .identity
-            .get_realm(realm)
-            .ok()
-            .flatten()?
-            .config()
-            .mfa_required_roles
-            .clone()?;
-        if required_roles.is_empty() {
-            return Some(false);
-        }
-        let assignments = state.rbac.list_user_assignments(realm, user_id).ok()?;
-        let hit = assignments.iter().any(|a| {
-            state
+    let required_roles = realm_config
+        .and_then(|c| c.mfa_required_roles.as_deref())
+        .unwrap_or_default();
+    let mut role_requires_mfa = false;
+    if !client_requires_mfa && !required_roles.is_empty() {
+        let assignments = state
+            .rbac
+            .list_user_assignments(realm, user_id)
+            .map_err(|e| refuse("role assignments", &e))?;
+        for assignment in &assignments {
+            let role = state
                 .rbac
-                .get_role(realm, &a.role_id)
-                .ok()
-                .flatten()
-                .map(|r| required_roles.iter().any(|req| req == &r.name))
-                .unwrap_or(false)
-        });
-        Some(hit)
-    })()
-    .unwrap_or(false);
+                .get_role(realm, &assignment.role_id)
+                .map_err(|e| refuse("role", &e))?;
+            if role.is_some_and(|r| required_roles.iter().any(|req| req == &r.name)) {
+                role_requires_mfa = true;
+                break;
+            }
+        }
+    }
 
     if client_requires_mfa || role_requires_mfa {
         actions.push(RequiredAction::EnrollMfa);
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1587,7 +1639,12 @@ pub async fn enroll_phone_otp_send(
         );
     };
 
-    let hmac_key = sms_otp_hmac_key_bytes(&state);
+    let Some(hmac_key) = sms_otp_hmac_key_bytes(&state) else {
+        return render_enroll_phone_page(
+            &state,
+            Some("SMS delivery is not configured. Contact your administrator."),
+        );
+    };
     let now_ts = now_unix_ts();
 
     let nonce = match state.identity.issue_sms_otp(
@@ -1676,12 +1733,19 @@ pub async fn enroll_phone_otp_verify_submit(
         );
     }
 
-    let hmac_key = sms_otp_hmac_key_bytes(&state);
+    let Some(hmac_key) = sms_otp_hmac_key_bytes(&state) else {
+        return render_enroll_phone_page(
+            &state,
+            Some("SMS delivery is not configured. Contact your administrator."),
+        );
+    };
     let now_ts = now_unix_ts();
 
     match state
         .identity
-        .verify_sms_otp(&realm, &form.nonce, &form.code, &hmac_key, now_ts)
+        // Bound to the submitted number: a code sent to one phone must not
+        // mark a different one verified.
+        .verify_sms_otp(&realm, &form.nonce, &phone, &form.code, &hmac_key, now_ts)
     {
         Ok(()) => {}
         Err(_) => {
@@ -1843,17 +1907,26 @@ fn is_e164(s: &str) -> bool {
     digits.len() >= 7 && digits.len() <= 15 && digits.chars().all(|c| c.is_ascii_digit())
 }
 
-/// Returns the HMAC key bytes to use for OTP operations.
+/// Returns the HMAC key bytes to use for SMS OTP operations, or `None` when
+/// no key is loaded.
 ///
-/// When no key is configured (the `log` transport, in dev or production),
-/// returns a zero-filled 32-byte key. This path is unreachable whenever a real
-/// SMS transport is configured because startup rejects a missing
-/// `HEARTH_SMS_OTP_HMAC_KEY` when `sms.transport` is not `log`.
-pub(super) fn sms_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
-    state
-        .sms_otp_hmac_key
-        .clone()
-        .unwrap_or_else(|| vec![0u8; 32])
+/// There is deliberately no fallback. This used to substitute an all-zero
+/// 32-byte key whenever `HEARTH_SMS_OTP_HMAC_KEY` was unset (the `log`
+/// transport), which made every stored OTP digest brute-forceable by anyone
+/// who could read storage. Every caller now treats `None` as "SMS OTP is
+/// unavailable" and fails closed: no code is issued and nothing verifies.
+///
+/// Startup always loads a key for a real SMS transport, and generates a random
+/// per-process key in dev mode, so `None` means a production `log` transport.
+pub(super) fn sms_otp_hmac_key_bytes(state: &Arc<WebState>) -> Option<Vec<u8>> {
+    let key = state.sms_otp_hmac_key.clone();
+    if key.is_none() {
+        tracing::warn!(
+            "SMS OTP refused: no HEARTH_SMS_OTP_HMAC_KEY is loaded, so no code can be \
+             issued or verified (configure a real sms.transport and the key)"
+        );
+    }
+    key
 }
 
 /// Returns the current Unix timestamp in whole seconds.
@@ -2090,10 +2163,14 @@ pub async fn enroll_email_otp_verify_submit(
     let hmac_key = email_otp_hmac_key_bytes(&state);
     let now_ts = now_unix_ts();
 
-    match state
-        .identity
-        .verify_email_otp(&realm, &form.nonce, &form.code, &hmac_key, now_ts)
-    {
+    match state.identity.verify_email_otp(
+        &realm,
+        &form.nonce,
+        &email,
+        &form.code,
+        &hmac_key,
+        now_ts,
+    ) {
         Ok(()) => {}
         Err(_) => {
             return render_enroll_email_otp_verify(
@@ -2171,7 +2248,7 @@ fn render_enroll_email_otp_page(
     error: Option<&str>,
 ) -> Response {
     let tmpl = EnrollEmailOtpPageTemplate {
-        masked_email: mask_email(email),
+        masked_email: crate::identity::email::mask_email_address(email),
         error: error.map(str::to_string),
         chrome: false,
         active: "",
@@ -2195,7 +2272,7 @@ fn render_enroll_email_otp_verify(
     error: Option<&str>,
 ) -> Response {
     let tmpl = EnrollEmailOtpVerifyTemplate {
-        masked_email: mask_email(email),
+        masked_email: crate::identity::email::mask_email_address(email),
         nonce: nonce.map(str::to_string),
         error: error.map(str::to_string),
         chrome: false,
@@ -2213,26 +2290,38 @@ fn render_enroll_email_otp_verify(
     render(&tmpl)
 }
 
-/// Masks an email address for display: shows the first character, then
-/// `***`, then the domain. E.g. `alice@example.com` → `a***@example.com`.
-fn mask_email(email: &str) -> String {
-    if let Some((local, domain)) = email.split_once('@') {
-        let first = local.chars().next().unwrap_or('*');
-        format!("{first}***@{domain}")
-    } else {
-        "***".to_string()
-    }
-}
-
 /// Returns the HMAC key bytes to use for email OTP operations.
 ///
-/// Reuses the SMS OTP HMAC key if configured; falls back to a deterministic
-/// dev key when neither is set (dev mode only — not for production).
+/// Always a secret key — see [`derive_email_otp_hmac_key`]. This used to fall
+/// back to the public constant `hearth-dev-email-otp-key-not-for-production`
+/// whenever no SMS OTP key was loaded, which is every production deployment
+/// on the `log` SMS transport: each stored email OTP digest was then keyed
+/// with a value anyone could read in the source, and so brute-forceable
+/// offline in about 10^6 HMACs.
 pub(super) fn email_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
-    state
-        .sms_otp_hmac_key
-        .clone()
-        .unwrap_or_else(|| b"hearth-dev-email-otp-key-not-for-production".to_vec())
+    derive_email_otp_hmac_key(
+        state.sms_otp_hmac_key.as_deref(),
+        super::auth::cookie_secret_bytes(&state.cookie_secret),
+    )
+}
+
+/// Domain-separation label for [`derive_email_otp_hmac_key`].
+const EMAIL_OTP_KEY_LABEL: &[u8] = b"hearth/email-otp-hmac-key/v1";
+
+/// Derives the email OTP HMAC key: `HMAC-SHA256(base, label)`.
+///
+/// `base` is the operator's `HEARTH_SMS_OTP_HMAC_KEY` when one is loaded (it is
+/// stable across restarts and shared by every node), otherwise the process's
+/// random cookie secret. The cookie secret already bounds the email OTP login
+/// flow — the MFA pending cookie is MAC'd with it — so a code issued under it
+/// lives exactly as long, and on exactly the node, as the login it belongs to.
+/// The label keeps the derived key distinct from the key it came from.
+fn derive_email_otp_hmac_key(sms_key: Option<&[u8]>, cookie_secret: &[u8]) -> Vec<u8> {
+    let base = sms_key.unwrap_or(cookie_secret);
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, base);
+    ring::hmac::sign(&key, EMAIL_OTP_KEY_LABEL)
+        .as_ref()
+        .to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -2635,5 +2724,47 @@ mod mask_phone_tests {
             assert!(!is_e164(input), "is_e164 accepted {input:?}");
         }
         assert!(is_e164("+15555550100"));
+    }
+}
+
+#[cfg(test)]
+mod email_otp_key_tests {
+    use super::derive_email_otp_hmac_key;
+
+    /// The constant this used to fall back to whenever no SMS OTP key was
+    /// loaded — i.e. every production deployment on the `log` SMS transport.
+    /// It is in the public source, so every digest keyed with it could be
+    /// brute-forced offline (10^6 HMACs) by anyone who could read storage.
+    const OLD_PUBLIC_KEY: &[u8] = b"hearth-dev-email-otp-key-not-for-production";
+
+    #[test]
+    fn no_sms_key_derives_from_the_process_secret_not_a_public_constant() {
+        let a = derive_email_otp_hmac_key(None, &[1u8; 32]);
+        let b = derive_email_otp_hmac_key(None, &[2u8; 32]);
+        assert_ne!(a.as_slice(), OLD_PUBLIC_KEY);
+        assert_eq!(a.len(), 32, "a full HMAC-SHA256 key");
+        assert_ne!(a, b, "the key must depend on the secret, not be a constant");
+        assert_eq!(
+            a,
+            derive_email_otp_hmac_key(None, &[1u8; 32]),
+            "deterministic for one secret, so issue and verify agree"
+        );
+    }
+
+    #[test]
+    fn an_sms_key_is_preferred_but_never_reused_verbatim() {
+        let sms = b"0123456789abcdef0123456789abcdef";
+        let k = derive_email_otp_hmac_key(Some(sms), &[1u8; 32]);
+        assert_ne!(
+            k.as_slice(),
+            sms.as_slice(),
+            "domain-separated from the SMS key"
+        );
+        assert_eq!(
+            k,
+            derive_email_otp_hmac_key(Some(sms), &[9u8; 32]),
+            "the operator's cluster-shared key wins over the per-process secret"
+        );
+        assert_ne!(k.as_slice(), OLD_PUBLIC_KEY);
     }
 }

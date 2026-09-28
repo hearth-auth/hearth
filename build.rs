@@ -51,9 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("cargo:rerun-if-env-changed=HEARTH_RELEASE_VERSION");
     // Rebuild when the checked-out tag or HEAD changes so `git describe` stays current.
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs/tags");
-    println!("cargo:rerun-if-changed=.git/packed-refs");
+    emit_git_rerun_markers();
 
     compile_tailwind_if_available();
 
@@ -173,6 +171,45 @@ fn git_describe_version() -> Option<String> {
         Some(s[1..].to_string())
     } else {
         None
+    }
+}
+
+/// Emits `rerun-if-changed` markers for the git files `git describe` reads:
+/// `HEAD`, `refs/tags` and `packed-refs`.
+///
+/// The paths come from `git rev-parse --git-path`, not a hard-coded `.git/…`.
+/// In a linked worktree `.git` is a file, so `.git/HEAD` does not exist, and
+/// cargo treats a missing `rerun-if-changed` path as always changed: every
+/// cargo command re-ran this script and recompiled `hearth` (about 27 s per
+/// no-op `cargo check`). A path that does not exist (for example
+/// `packed-refs` before the first `git gc`) is skipped for the same reason.
+/// With no git at all (a source tarball, the container build) nothing is
+/// emitted, which is correct: there is no HEAD to follow.
+fn emit_git_rerun_markers() {
+    let Ok(output) = Command::new("git")
+        .args([
+            "rev-parse",
+            "--git-path",
+            "HEAD",
+            "--git-path",
+            "refs/tags",
+            "--git-path",
+            "packed-refs",
+        ])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let Ok(paths) = String::from_utf8(output.stdout) else {
+        return;
+    };
+    for path in paths.lines().map(str::trim).filter(|p| !p.is_empty()) {
+        if std::path::Path::new(path).exists() {
+            println!("cargo:rerun-if-changed={path}");
+        }
     }
 }
 

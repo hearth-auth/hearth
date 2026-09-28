@@ -269,7 +269,9 @@ type IntrospectRequest struct {
 	TokenTypeHint string `json:"token_type_hint,omitempty"`
 	// ClientID is the authenticating resource-server client. Required.
 	ClientID string `json:"client_id"`
-	// ClientSecret is the client secret for confidential clients.
+	// ClientSecret is the resource-server client's secret. Required: Hearth's
+	// introspection endpoint serves confidential clients only and answers a
+	// public client with 401 invalid_client.
 	ClientSecret string `json:"client_secret,omitempty"`
 }
 

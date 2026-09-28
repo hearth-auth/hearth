@@ -10,7 +10,6 @@ use crate::protocol::admin_auth::{
     ExportRateLimitOutcome, RateLimitOutcome, TokenRateLimitOutcome, TokenRateLimiter,
 };
 use crate::rbac::RbacError;
-use base64::Engine as _;
 
 use super::state::AppState;
 
@@ -247,16 +246,33 @@ pub(crate) fn extract_cluster_admin_auth(
             Json(serde_json::json!({"error": "cluster admin requires system realm"})),
         ));
     }
-    if !auth.permissions.iter().any(|p| p == "hearth.admin") {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": "forbidden",
-                "error_description": "hearth.admin permission required for cluster operations"
-            })),
-        ));
-    }
+    require_superuser(&auth, "cluster operations")?;
     Ok(auth)
+}
+
+/// Checks that the caller holds `hearth.admin` itself — not merely one of the
+/// `hearth.*.admin` sub-admin permissions [`extract_admin_auth`] also admits.
+///
+/// For operations whose reach exceeds any sub-admin domain: the cluster plane
+/// ([`extract_cluster_admin_auth`]), every backup restore (it writes users,
+/// clients, role assignments, agents and keys at once), and a backup export by
+/// a system-realm caller, which reaches every realm — the system realm's
+/// operator accounts and signing key included. `purpose` names the operation
+/// in the `403` body.
+pub(crate) fn require_superuser(
+    auth: &AdminAuth,
+    purpose: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if auth.permissions.iter().any(|p| p == "hearth.admin") {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "forbidden",
+            "error_description": format!("hearth.admin permission required for {purpose}")
+        })),
+    ))
 }
 
 // ── Rate-limiter attribution (HEA-2010) ──────────────────────────────────────
@@ -344,9 +360,12 @@ pub fn has_export_capability(permissions: &[String]) -> bool {
 /// Checks that the authenticated admin token carries the `hearth.export`
 /// permission required for backup/export endpoints (A-30).
 ///
-/// Returns `403 Forbidden` when the permission is absent. The check is separate
-/// from the normal `hearth.admin` gate so operators can grant export access to
-/// dedicated service accounts without granting full admin privileges.
+/// Returns `403 Forbidden` when the permission is absent. `hearth.export` is
+/// held *in addition to* an admin permission: a tenant realm may grant it with
+/// a sub-admin permission to a backup service account that EXPORTS that realm.
+/// A backup restore — which writes across every sub-admin domain — and an
+/// export by a **system-realm** caller, which reaches every realm, also
+/// require `hearth.admin` ([`require_superuser`]).
 pub(crate) fn check_export_capability(
     auth: &AdminAuth,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
@@ -470,63 +489,6 @@ pub(crate) fn emit_export_watermark(
     );
 }
 
-/// Verifies a detached Ed25519 signature on a backup manifest (A-30).
-///
-/// `public_key_bytes` must be the 32-byte raw Ed25519 public key.
-/// `manifest` must carry a `detached_signature_b64` field; the signature
-/// is verified against `manifest.canonical_bytes()`.
-///
-/// Returns `Err` with a 400 body when:
-/// - the signature field is absent
-/// - the signature is not valid base64url
-/// - the Ed25519 verification fails
-pub(crate) fn verify_manifest_signature(
-    manifest: &crate::backup::BackupManifest,
-    public_key_bytes: &[u8; 32],
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    use ring::signature::{UnparsedPublicKey, ED25519};
-
-    let sig_b64 = manifest.detached_signature_b64.as_deref().ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "missing_manifest_signature",
-                "error_description": "restore archive must carry a detached_signature_b64 when backup_verify_key is configured"
-            })),
-        )
-    })?;
-
-    let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(sig_b64)
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "invalid_manifest_signature",
-                    "error_description": "detached_signature_b64 is not valid base64url"
-                })),
-            )
-        })?;
-
-    let canonical = manifest.canonical_bytes().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "failed to serialize manifest for signature verification"})),
-        )
-    })?;
-
-    let pk = UnparsedPublicKey::new(&ED25519, public_key_bytes.as_slice());
-    pk.verify(&canonical, &sig_bytes).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "invalid_manifest_signature",
-                "error_description": "manifest signature verification failed; archive may be tampered or signed with the wrong key"
-            })),
-        )
-    })
-}
-
 /// Checks the per-`(realm, client)` token endpoint rate limit.
 ///
 /// Returns `Ok(())` when the request is allowed; `Err(Response)` with
@@ -564,6 +526,25 @@ pub(crate) fn check_anonymous_token_rate_limit(
             .token_rate_limiter
             .check_bucket(realm_id, &bucket, now_micros()),
     )
+}
+
+/// Checks a per-client limiter shaped like the token limiter — the claimed
+/// client's bucket, or the client-IP bucket when no client id parses — for an
+/// endpoint with a budget of its own (`/as/par`).
+pub(crate) fn check_client_or_ip_rate_limit(
+    limiter: &TokenRateLimiter,
+    realm_id: &RealmId,
+    claimed_client: Option<&ClientId>,
+    peer_ip: &str,
+) -> Result<(), Response> {
+    token_rate_limit_outcome(match claimed_client {
+        Some(client) => limiter.check(realm_id, client, now_micros()),
+        None => limiter.check_bucket(
+            realm_id,
+            &TokenRateLimiter::anonymous_ip_bucket(peer_ip),
+            now_micros(),
+        ),
+    })
 }
 
 /// Maps a [`TokenRateLimitOutcome`] onto the shared 429 response shape.
@@ -657,6 +638,20 @@ pub(crate) fn identity_error_to_response(
         );
     }
 
+    // A FAPI auth-method refusal says which method is required (RFC 6749 §5.2
+    // `error_description`); it names the realm's or client's profile, never
+    // whether a presented credential was right.
+    if matches!(err, IdentityError::PrivateKeyJwtRequired) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "invalid_client",
+                "error_description": err.to_string(),
+                "error_code": crate::protocol::error_codes::for_identity_error(err),
+            })),
+        );
+    }
+
     let (status, message) = match err {
         IdentityError::RealmNotFound | IdentityError::UserNotFound => {
             (StatusCode::NOT_FOUND, "not found")
@@ -668,7 +663,8 @@ pub(crate) fn identity_error_to_response(
         ),
         IdentityError::YamlManagedResource { .. } => (
             StatusCode::CONFLICT,
-            "this resource is managed by hearth.yaml and cannot be deleted at runtime",
+            "this resource is managed by hearth.yaml: it cannot be deleted, and its \
+             credentials and security profile cannot be changed, at runtime",
         ),
         IdentityError::DuplicateRealmName => (StatusCode::CONFLICT, "duplicate realm name"),
         IdentityError::DuplicateEmail => (StatusCode::CONFLICT, "duplicate email"),
@@ -691,7 +687,9 @@ pub(crate) fn identity_error_to_response(
             (StatusCode::BAD_REQUEST, "invalid authorization code")
         }
         IdentityError::InvalidGrant { .. } => (StatusCode::BAD_REQUEST, "invalid grant"),
-        IdentityError::InvalidClientSecret => (StatusCode::UNAUTHORIZED, "invalid_client"),
+        IdentityError::InvalidClientSecret | IdentityError::PrivateKeyJwtRequired => {
+            (StatusCode::UNAUTHORIZED, "invalid_client")
+        }
         IdentityError::AuthorizationPending => (StatusCode::BAD_REQUEST, "authorization_pending"),
         IdentityError::SlowDown => (StatusCode::BAD_REQUEST, "slow_down"),
         IdentityError::DeviceCodeExpired => (StatusCode::BAD_REQUEST, "expired_token"),
@@ -873,6 +871,9 @@ pub(crate) fn identity_error_to_response(
         IdentityError::SilentAuthRateLimited => {
             (StatusCode::TOO_MANY_REQUESTS, "silent_auth_rate_limited")
         }
+        // Shed by the KDF admission gate; callers that can set headers use
+        // `identity_error_response`, which adds `Retry-After`.
+        IdentityError::KdfOverloaded { .. } => (StatusCode::SERVICE_UNAVAILABLE, "kdf_overloaded"),
         // A-13: attestation policy violation (AAGUID not in allowlist, "none" rejected, etc.).
         IdentityError::AttestationPolicyViolation { .. } => {
             (StatusCode::FORBIDDEN, "attestation_policy_violation")
@@ -932,6 +933,17 @@ pub(crate) fn identity_error_to_response(
         }
         IdentityError::SpiffeCertExpired => (StatusCode::UNAUTHORIZED, "spiffe_cert_expired"),
     };
+
+    // The body of a 500 is deliberately vague and the trace layer logs only
+    // the status, so this is the one place the cause of a 500 is recorded —
+    // in a PII-safe form: an internal error can wrap text Hearth did not
+    // write, such as an SMTP rejection naming the recipient.
+    if status == StatusCode::INTERNAL_SERVER_ERROR {
+        tracing::error!(
+            error = %crate::protocol::redact::LogSafeError(err),
+            "request failed with an internal error"
+        );
+    }
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);
     (
@@ -1321,5 +1333,135 @@ mod rate_limit_attribution_tests {
         let unique: std::collections::BTreeSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "limiter ids must be distinct");
         assert!(ids.iter().all(|id| !id.is_empty()));
+    }
+}
+
+#[cfg(test)]
+mod internal_error_logging_tests {
+    //! A `500` must leave its cause in the server log.
+    //!
+    //! The body of a `500` is deliberately vague ("internal error"), and the
+    //! HTTP trace layer logs only "response failed … 500". Before this, nothing
+    //! logged which [`crate::identity::IdentityError`] produced it, so the 500s
+    //! of a load-test run could not be explained even from the kept server log.
+    use super::identity_error_to_response;
+    use crate::identity::IdentityError;
+    use crate::storage::StorageError;
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture mutex").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for CaptureWriter {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Maps `err` with every event at ERROR captured; returns the status, the
+    /// body, and the captured log.
+    fn map_capturing(err: &IdentityError) -> (StatusCode, serde_json::Value, String) {
+        let writer = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_max_level(tracing::Level::ERROR)
+            .with_ansi(false)
+            .finish();
+        let (status, Json(body)) =
+            tracing::subscriber::with_default(subscriber, || identity_error_to_response(err));
+        let bytes = writer.0.lock().expect("capture mutex").clone();
+        (status, body, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[test]
+    fn a_storage_error_500_logs_its_cause_but_not_in_the_body() {
+        let err = IdentityError::Storage(Box::new(StorageError::Crypto {
+            reason: "SST 000007.sst DEK unwrapping failed".to_string(),
+        }));
+        let (status, body, logs) = map_capturing(&err);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            logs.contains("ERROR") && logs.contains("DEK unwrapping failed"),
+            "the cause of a 500 must be logged at ERROR: {logs:?}"
+        );
+        assert_eq!(
+            body["error"].as_str(),
+            Some("internal error"),
+            "the body stays vague"
+        );
+        assert!(
+            !body.to_string().contains("DEK"),
+            "the cause must not reach the client: {body}"
+        );
+    }
+
+    #[test]
+    fn an_audit_failure_500_logs_its_cause() {
+        let err = IdentityError::AuditFailure {
+            action: "user_deleted".to_string(),
+            reason: "audit chain append refused".to_string(),
+        };
+        let (status, _, logs) = map_capturing(&err);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            logs.contains("audit chain append refused"),
+            "the cause of a 500 must be logged: {logs:?}"
+        );
+    }
+
+    /// A 500's cause is logged in a PII-safe form: an email-transport failure
+    /// carries the SMTP server's rejection, which names the recipient.
+    #[test]
+    fn an_email_transport_500_is_logged_without_the_address() {
+        let err = IdentityError::Internal {
+            reason: format!(
+                "email OTP delivery failed: {}",
+                crate::identity::EmailError::Transport {
+                    reason: "550 5.1.1 <alice.smith+otp@example.com>: Recipient address \
+                             rejected; auth token=tok_0123456789abcdefABCDEF0123456789"
+                        .to_string(),
+                }
+            ),
+        };
+        let (status, _, logs) = map_capturing(&err);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            logs.contains("ERROR") && logs.contains("Recipient address rejected"),
+            "the cause is still logged: {logs:?}"
+        );
+        assert!(
+            logs.contains("Internal"),
+            "the error kind is logged: {logs:?}"
+        );
+        for leaked in ["alice", "example.com", "tok_", "0123456789abcdef"] {
+            assert!(
+                !logs.contains(leaked),
+                "the log must not carry {leaked:?}: {logs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_client_error_is_not_logged_as_an_error() {
+        let (status, _, logs) = map_capturing(&IdentityError::InvalidClient);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            logs.is_empty(),
+            "a 4xx is the client's problem, not an ERROR: {logs:?}"
+        );
     }
 }

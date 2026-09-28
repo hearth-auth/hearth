@@ -565,14 +565,27 @@
     },
     "/admin/cluster/transfer-leadership": {
       "post": {
-        "summary": "Transfer Raft leadership",
+        "summary": "Step the Raft leader down",
+        "description": "Steps this node down so another voter wins the next election. This is not a targeted transfer: the pinned Raft library cannot choose the winner, so a body naming target_node_id is refused with 422, and a body with any other field is refused with 400.",
         "operationId": "adminClusterTransferLeadership",
         "tags": [
           "Cluster"
         ],
         "responses": {
-          "204": {
-            "description": "Leadership transferred"
+          "200": {
+            "description": "Another voter now leads; body is {\"new_leader_id\":<u64>,\"exact_target\":false}. exact_target is deprecated and always false (a request naming a target is refused with 422)."
+          },
+          "400": {
+            "description": "Body is not valid JSON or contains an unknown field"
+          },
+          "409": {
+            "description": "This node is not the leader"
+          },
+          "422": {
+            "description": "target_node_id was supplied; targeted leadership transfer is not supported"
+          },
+          "503": {
+            "description": "Not in cluster mode"
           }
         }
       }
@@ -2415,6 +2428,7 @@
     "/as/par": {
       "post": {
         "summary": "Pushed Authorization Request (RFC 9126)",
+        "description": "The client authenticates exactly as at the token endpoint (RFC 9126 \u00a72):\na confidential client with `client_secret_basic`, `client_secret_post`\nor `private_key_jwt` (`client_assertion_type` + `client_assertion`); a\npublic client identifies itself with `client_id` alone and may not\npresent a secret. Body `client_id` is optional under\n`client_secret_basic`.\n",
         "operationId": "pushedAuthorizationRequest",
         "tags": [
           "OAuth"
@@ -2432,6 +2446,18 @@
         "responses": {
           "201": {
             "description": "Request URI created"
+          },
+          "400": {
+            "description": "Invalid request \u2014 including Basic and body credentials naming different clients, an assertion combined with a secret, or a request object whose `iss`/`client_id` is not the authenticated client"
+          },
+          "401": {
+            "description": "`invalid_client` \u2014 missing, wrong or unverifiable client authentication (carries `WWW-Authenticate: Basic`)"
+          },
+          "429": {
+            "description": "The client's `security.rate_limiting.token_per_minute` budget (keyed on the claimed `client_id`, else the client IP) is spent; retry after `Retry-After` seconds"
+          },
+          "503": {
+            "description": "`kdf_overloaded` (`error_code` `HEARTH_RATE_LIMITED`) \u2014 the client-secret verification was shed by the KDF admission gate; retry after `Retry-After` seconds"
           }
         }
       }
@@ -3976,6 +4002,18 @@
           },
           "scope": {
             "type": "string"
+          },
+          "clientSecret": {
+            "type": "string",
+            "description": "Client secret for a confidential client (RFC 8628 s3.1). HTTP Basic Auth\nis preferred and takes precedence; this is the client_secret_post\nfallback. Public clients omit it."
+          },
+          "client_assertion_type": {
+            "type": "string",
+            "description": "private_key_jwt client authentication (RFC 7523 s2.2, RFC 8628 s3.1):\nmust be \"urn:ietf:params:oauth:client-assertion-type:jwt-bearer\" when\npresent. A request carrying either assertion field is authenticated by\nthe assertion alone; combining it with a secret is refused."
+          },
+          "client_assertion": {
+            "type": "string",
+            "description": "The signed client assertion JWT (RFC 7523 s2.2), `aud` = the realm\nissuer."
           }
         },
         "description": "Request for the Device Authorization Grant (RFC 8628)."

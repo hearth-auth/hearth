@@ -926,7 +926,7 @@ async fn jarm_error_response_is_jwt_wrapped() {
         )
         .expect("register client");
 
-    // sign_jarm_error_jwt is the engine method called by jarm_aware_error_redirect
+    // sign_jarm_error_jwt is the engine method called by authorization_error_redirect
     // when a mandatory-JARM client triggers an error on the authorization endpoint.
     let jwt = harness
         .identity()

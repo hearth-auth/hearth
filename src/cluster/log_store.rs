@@ -199,6 +199,23 @@ impl HearthLogStore {
             inner: Arc::new(Mutex::new(inner)),
         })
     }
+
+    /// Test helper: writes `entries` straight into the log table, bypassing
+    /// the `append` callback plumbing.
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    pub(crate) fn append_for_test(&self, entries: &[openraft::Entry<HearthRaftConfig>]) {
+        let inner = self.inner.lock().unwrap();
+        let txn = inner.db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(LOG_TABLE).unwrap();
+            for entry in entries {
+                let bytes = serde_json::to_vec(entry).unwrap();
+                table.insert(entry.log_id.index, bytes.as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
 }
 
 // ── HearthLogReader ───────────────────────────────────────────────────────────
