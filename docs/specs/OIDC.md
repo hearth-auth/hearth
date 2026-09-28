@@ -435,6 +435,27 @@ curl -s -X POST "$ISSUER/realms/$REALM/token" \
 # → 401 invalid_client
 ```
 
+#### 3.4.1a Exchange Policy (GA audit M8)
+
+Authenticating the client is necessary but not sufficient. The engine then applies a per-client
+policy before it looks at the subject token:
+
+- The client **MUST** be a registered client whose status is `active`. An archived or unknown
+  client is refused with `401 invalid_client`.
+- The client **MUST** be confidential (a client secret, or `private_key_jwt` keys). A public
+  client's `client_id` is public, so it proves nothing: refused with `400 unauthorized_client`.
+- The client's `grant_types` **MUST** include
+  `urn:ietf:params:oauth:grant-type:token-exchange`, else `400 unauthorized_client`.
+
+`audience` and `resource` are restricted to an allowlist: each **MUST** either be an audience the
+subject token already carries (narrowing widens nothing) or equal the `resource_uri` of a
+protected resource registered in the realm's identity registry
+(`IdentityEngine::register_protected_resource`). Any other value is refused with
+`400 invalid_target` (RFC 8693 §2.2.2), so the holder of a token for one resource server cannot
+mint a token that another resource server accepts. The registry has no REST/gRPC surface yet and
+YAML `protected_resources` feed only RBAC scope bundles, so over the wire today only narrowing
+is available — an open owner decision.
+
 #### 3.4.2 DPoP-Bound Subject Tokens
 
 If the `subject_token` carries a `cnf.jkt` claim (i.e., it was issued with a DPoP proof at

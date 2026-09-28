@@ -123,7 +123,11 @@ fn make_actor_token_no_rbac(
             &RegisterClientRequest {
                 client_name: format!("actor-{}", uuid::Uuid::new_v4()),
                 client_secret: Some(SECRET.to_string()),
-                grant_types: vec!["client_credentials".to_string()],
+                // GA audit M8: an exchanging client must hold the grant.
+                grant_types: vec![
+                    "client_credentials".to_string(),
+                    "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+                ],
                 require_consent: false,
                 trust_level: ClientTrustLevel::FirstParty,
                 declared_scopes: declared,

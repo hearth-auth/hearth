@@ -17196,6 +17196,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // suspension control that reaches it (audit 2026-08-28 §4.19#6).
         self.require_active_realm(realm_id)?;
 
+        // 0. Per-client exchange policy (GA audit M8, B9). The protocol layer
+        //    authenticated `client_id`; this decides whether that client may
+        //    exchange at all: it must be a registered Active client, hold the
+        //    token-exchange grant, and be confidential — a public client's
+        //    `client_id` is public, so "authenticating" it proves nothing.
+        self.require_token_exchange_client(realm_id, &request.client_id)?;
+
         let now_micros = self.clock.now().as_micros();
         let now_secs = now_micros / 1_000_000;
 
@@ -17380,7 +17387,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             act: subject_claims.act.clone().map(Box::new),
         };
 
-        // 8. Audience.
+        // 8. Audience. A requested `resource` or `audience` must either be an
+        //    audience the subject token already carries (narrowing) or name a
+        //    protected resource registered in this realm (GA audit M8): taken
+        //    verbatim, it let the holder of a token for one resource server
+        //    mint a token another would accept.
+        for target in [request.resource.as_deref(), request.audience.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if !subject_claims.aud.contains(target) {
+                self.require_registered_exchange_target(realm_id, target)?;
+            }
+        }
         let aud = if let Some(ref resource_uri) = request.resource {
             crate::identity::tokens::Audience::Multi(vec![
                 subject_claims.aud.base().to_string(),

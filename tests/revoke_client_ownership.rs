@@ -508,7 +508,7 @@ async fn another_client_cannot_revoke_a_device_grant_token() {
 // ===== RFC 8693 token exchange: the exchanged token belongs to the actor =====
 
 /// Registers a confidential client declaring `scope`, able to mint
-/// `client_credentials` tokens.
+/// `client_credentials` tokens and to perform token exchange.
 fn register_scoped(h: &common::TestHarness, realm: &RealmId, scope: &str) -> ClientId {
     h.identity()
         .register_client(
@@ -517,7 +517,11 @@ fn register_scoped(h: &common::TestHarness, realm: &RealmId, scope: &str) -> Cli
                 client_name: format!("scoped-{}", uuid::Uuid::new_v4()),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
                 client_secret: Some(SECRET.to_string()),
-                grant_types: vec!["client_credentials".to_string()],
+                // GA audit M8: an exchanging client must hold the grant.
+                grant_types: vec![
+                    "client_credentials".to_string(),
+                    "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+                ],
                 trust_level: ClientTrustLevel::FirstParty,
                 declared_scopes: scope.split_whitespace().map(String::from).collect(),
                 access_token_authorization: AccessTokenAuthorization::Embedded,

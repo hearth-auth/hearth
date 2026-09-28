@@ -3462,6 +3462,66 @@ impl EmbeddedIdentityEngine {
         }
     }
 
+    /// RFC 8693 per-client policy (GA audit M8): the exchanging client must be
+    /// a registered [`ApplicationStatus::Active`] client (else
+    /// `invalid_client`), must list the token-exchange grant in its
+    /// `grant_types`, and must be confidential (else `unauthorized_client`).
+    ///
+    /// A public client "authenticates" by its `client_id` alone, which is
+    /// public by construction, so letting one exchange let anyone holding a
+    /// subject token re-mint it under that client's name.
+    pub(super) fn require_token_exchange_client(
+        &self,
+        realm_id: &RealmId,
+        client_id: &ClientId,
+    ) -> Result<(), IdentityError> {
+        const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+        let client = self
+            .get_client(realm_id, client_id)?
+            .ok_or(IdentityError::InvalidClient)?;
+        Self::refuse_inactive_client(&client)?;
+        if client.is_public() {
+            return Err(IdentityError::TokenExchangeRejected {
+                reason: "token exchange requires a confidential client".to_string(),
+                oauth_error: "unauthorized_client",
+            });
+        }
+        if !client
+            .grant_types()
+            .iter()
+            .any(|g| g == TOKEN_EXCHANGE_GRANT)
+        {
+            return Err(IdentityError::TokenExchangeRejected {
+                reason: "client is not registered for the token-exchange grant".to_string(),
+                oauth_error: "unauthorized_client",
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuses an RFC 8693 `audience` or `resource` that is not the URI of a
+    /// protected resource registered in the realm (GA audit M8): RFC 8693
+    /// §2.2.2 `invalid_target`.
+    pub(super) fn require_registered_exchange_target(
+        &self,
+        realm_id: &RealmId,
+        target: &str,
+    ) -> Result<(), IdentityError> {
+        let registered = self
+            .storage
+            .get(realm_id, &keys::encode_resource_server_uri_index(target))
+            .map_err(Self::storage_err)?
+            .is_some();
+        if registered {
+            Ok(())
+        } else {
+            Err(IdentityError::TokenExchangeRejected {
+                reason: "audience/resource is not a registered protected resource".to_string(),
+                oauth_error: "invalid_target",
+            })
+        }
+    }
+
     pub(super) fn authenticate_client_inner(
         &self,
         realm_id: &RealmId,
