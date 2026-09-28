@@ -21,6 +21,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::Deserialize;
 
+use crate::core::FormSecret;
 use crate::identity::{CleartextPassword, StepUpAssertion, StepUpProof};
 
 /// The step-up proof fields of an enrolment request body.
@@ -31,7 +32,7 @@ use crate::identity::{CleartextPassword, StepUpAssertion, StepUpProof};
 pub struct StepUpProofBody {
     /// The account's current password.
     #[serde(default)]
-    pub password: Option<String>,
+    pub password: Option<FormSecret>,
     /// A current code from the account's enrolled TOTP factor.
     #[serde(default)]
     pub totp_code: Option<String>,
@@ -69,7 +70,7 @@ impl StepUpProofBody {
     #[must_use]
     pub fn into_proof(self, origin: &str) -> StepUpProof {
         if let Some(password) = self.password.filter(|p| !p.trim().is_empty()) {
-            return StepUpProof::Password(CleartextPassword::from_string(password));
+            return StepUpProof::Password(CleartextPassword::new(password.as_bytes().to_vec()));
         }
         if let Some(code) = self.totp_code.filter(|c| !c.trim().is_empty()) {
             return StepUpProof::TotpCode(code.trim().to_string());
@@ -85,5 +86,23 @@ impl StepUpProofBody {
             }));
         }
         StepUpProof::None
+    }
+}
+
+/// The step-up password is wiped on drop (GA audit L20). The body implements
+/// no `Debug`, so there is nothing to redact.
+#[cfg(test)]
+mod secret_field_tests {
+    use super::*;
+
+    #[test]
+    fn step_up_proof_password_is_zeroized() {
+        let body: StepUpProofBody =
+            serde_json::from_str(r#"{"password":"CANARY-pw"}"#).expect("json parses");
+        crate::core::secrets::assert_zeroize_on_drop(&body.password);
+        assert_eq!(
+            body.password.as_ref().map(crate::core::FormSecret::expose),
+            Some("CANARY-pw")
+        );
     }
 }

@@ -27,6 +27,7 @@
     {% endmatch %}
 
     <form method="post" action="/required-action/ENROLL_EMAIL_OTP/send" data-testid="enroll-email-otp-send-form">
+      {% match csrf %}{% when Some with (c) %}<input type="hidden" name="_csrf" value="{{ c }}">{% when None %}{% endmatch %}
       <button type="submit"
         class="btn-ember w-full rounded-md px-4 py-2.5 text-sm font-medium">
         Send verification code

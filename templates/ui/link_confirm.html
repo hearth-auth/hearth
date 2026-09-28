@@ -1,0 +1,23 @@
+{% extends "ui/_layout.html" %}
+{% block title %}{{ product_name }} · {{ heading }}{% endblock %}
+{% block body %}
+{#- The landing page of an emailed one-time link. It spends nothing: a mail
+    scanner or link preview that fetches the URL only sees this form. The
+    token is spent by the POST, which carries the link binding and the CSRF
+    token (GA audit L18). -#}
+<div class="rounded-md bg-ht-surface-elevated p-8 ring-1 ring-divider-subtle text-center">
+  <h1 class="mb-2 font-display text-xl font-medium text-ht-content-primary">{{ heading }}</h1>
+  <p class="mb-6 text-sm text-ht-content-secondary">{{ message }}</p>
+  <form method="post" action="{{ form_action }}" data-testid="link-confirm-form">
+    <input type="hidden" name="link_binding" value="{{ link_binding }}">
+    {% match csrf %}
+      {% when Some with (c) %}
+        <input type="hidden" name="_csrf" value="{{ c }}">
+      {% when None %}
+    {% endmatch %}
+    <button type="submit" class="w-full btn-ember rounded px-4 py-2.5 text-sm font-semibold">
+      {{ button_label }}
+    </button>
+  </form>
+</div>
+{% endblock %}

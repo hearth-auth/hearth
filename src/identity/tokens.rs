@@ -22,7 +22,6 @@ use zeroize::Zeroize;
 use crate::core::Timestamp;
 use crate::core::Uri;
 use crate::identity::error::IdentityError;
-use crate::identity::types::RequiredAction;
 
 /// The algorithm of every token Hearth issues **and** validates.
 ///
@@ -63,9 +62,6 @@ pub const RSA_ID_TOKEN_MODULUS_BITS: usize = 3072;
 /// industry-standard tolerance; it handles NTP drift without widening the
 /// window enough to be exploitable.
 const CLOCK_SKEW_SECS: i64 = 60;
-
-/// Token type value used in the `token_type` claim of required-action JWTs.
-pub const REQUIRED_ACTION_TOKEN_TYPE: &str = "ra";
 
 /// The JWT type header value.
 const JWT_TYPE: &str = "JWT";
@@ -343,12 +339,6 @@ pub struct TokenClaims {
     /// this field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permissions: Vec<String>,
-    /// Pending required actions (non-empty only in RA tokens).
-    ///
-    /// Present when `token_type == REQUIRED_ACTION_TOKEN_TYPE`. The browser
-    /// interstitial handlers read this field to determine the next action page.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_actions: Vec<RequiredAction>,
     /// Authentication Methods References (RFC 8176).
     ///
     /// Lists the authentication method(s) used during the session. Examples:
@@ -834,7 +824,6 @@ impl SigningKey {
             groups: request.groups.to_vec(),
             org_groups: org_groups.clone(),
             permissions: request.permissions.to_vec(),
-            required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
             sv: request.sv,
@@ -862,7 +851,6 @@ impl SigningKey {
             groups: Vec::new(),
             org_groups: Vec::new(),
             permissions: Vec::new(),
-            required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
             sv: None, // sv is never present on refresh tokens
@@ -1773,7 +1761,6 @@ mod tests {
             org_groups: Vec::new(),
             permissions: Vec::new(),
             custom: BTreeMap::new(),
-            required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
             sv: None,
@@ -2697,7 +2684,7 @@ mod tests {
     #[test]
     fn rsa_id_token_key_refuses_to_sign_anything_but_an_id_token() {
         let key = RsaIdTokenSigningKey::generate().expect("generate");
-        for token_type in ["access", "refresh", REQUIRED_ACTION_TOKEN_TYPE, ""] {
+        for token_type in ["access", "refresh", ""] {
             let mut claims = id_token_claims(1_700_000_000);
             claims.token_type = token_type.to_string();
             assert!(

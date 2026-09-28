@@ -85,7 +85,7 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 | C-ID | Capability | Behavioral contract |
 |------|-----------|---------------------|
 | **C-17** | PKCE utilities | `generateCodeVerifier()`, `generateCodeChallenge(verifier)`, `buildAuthorizationUrl(params)`. RFC 7636 compliant. |
-| **C-18** | Browser auth flow | `createHearthAuth(config)` → `{ startLogin(), handleCallback(), logout() }`. PKCE login redirect, callback token exchange (with `RequiredActionError` detection), logout + RP-initiated redirect. See SDK.md §7. |
+| **C-18** | Browser auth flow | `createHearthAuth(config)` → `{ startLogin(), handleCallback(), logout() }`. PKCE login redirect, callback token exchange, logout + RP-initiated redirect. See SDK.md §7. |
 
 ### Tier 6 — Admin (all SDKs)
 

@@ -4,7 +4,8 @@
 //! - `Content-Security-Policy` — restricts script/style/connect sources.
 //! - `X-Frame-Options: DENY` — prevents clickjacking.
 //! - `X-Content-Type-Options: nosniff` — blocks MIME-type sniffing.
-//! - `Referrer-Policy: strict-origin-when-cross-origin`
+//! - `Referrer-Policy: strict-origin-when-cross-origin`, unless the handler set
+//!   its own (the one-time-link pages send `no-referrer`)
 //! - `Strict-Transport-Security` — when Hearth serves TLS, or when a trusted
 //!   proxy attests `X-Forwarded-Proto: https` (21.9).
 //! - `Cross-Origin-Opener-Policy: same-origin` (A-40)
@@ -127,11 +128,16 @@ where
             let headers = resp.headers_mut();
             insert(headers, "x-frame-options", "DENY");
             insert(headers, "x-content-type-options", "nosniff");
-            insert(
-                headers,
-                "referrer-policy",
-                "strict-origin-when-cross-origin",
-            );
+            // Yields to a handler-set policy: the pages an emailed one-time
+            // link lands on send `no-referrer` (GA audit L18), and this
+            // default must not loosen it.
+            let referrer = HeaderName::from_static("referrer-policy");
+            if !headers.contains_key(&referrer) {
+                headers.insert(
+                    referrer,
+                    HeaderValue::from_static("strict-origin-when-cross-origin"),
+                );
+            }
             // Alpine.js removed (HEA-850), Hyperscript removed (HEA-1049):
             // 'unsafe-eval' and 'unsafe-inline' are no longer needed. All
             // interactivity is vanilla JS via data-component attributes backed
@@ -590,6 +596,50 @@ mod tests {
         assert!(
             resp.headers().get("cache-control").is_none(),
             "non-HTML responses must not get Cache-Control: no-store"
+        );
+    }
+
+    /// GA audit L18: pages reached from an emailed one-time link set
+    /// `Referrer-Policy: no-referrer` themselves. The layer's default must
+    /// yield to it rather than loosen it back to
+    /// `strict-origin-when-cross-origin`.
+    #[tokio::test]
+    async fn a_handler_referrer_policy_is_kept() {
+        async fn no_referrer(_req: Request<Body>) -> Result<axum::response::Response, Infallible> {
+            Ok(([("referrer-policy", "no-referrer")], StatusCode::OK).into_response())
+        }
+        let layer = SecurityHeadersLayer::new(SecurityConfig {
+            hsts_enabled: false,
+            hsts_on_forwarded_proto: false,
+            coop_coep_enabled: false,
+            extra_form_action_origins: Vec::new(),
+        });
+        let resp = layer
+            .layer(tower::service_fn(no_referrer))
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("service call");
+        assert_eq!(resp.headers()["referrer-policy"], "no-referrer");
+
+        let default = layer
+            .layer(tower::service_fn(ok_handler))
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("service call");
+        assert_eq!(
+            default.headers()["referrer-policy"],
+            "strict-origin-when-cross-origin",
+            "every other page keeps the default"
         );
     }
 }

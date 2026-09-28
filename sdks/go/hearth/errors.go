@@ -181,9 +181,6 @@ type RequiredActionError struct {
 	// RequiredActions lists the pending action names embedded in the token's
 	// required_actions claim (e.g. ["VERIFY_EMAIL", "UPDATE_PASSWORD"]).
 	RequiredActions []string
-	// RedirectURI is an optional URL to the Hearth interstitial page, when
-	// one is provided by the server. May be empty.
-	RedirectURI string
 }
 
 func (e *RequiredActionError) Error() string {

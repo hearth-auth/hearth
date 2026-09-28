@@ -287,7 +287,6 @@ try {
   if (err instanceof RequiredActionError) {
     // Token is valid but requires user to complete actions before using the API
     console.log("Pending actions:", err.requiredActions); // string[]
-    // Redirect to err.redirectUri if present
   } else if (err instanceof TokenExpiredError) {
     // Ask client to refresh
   }

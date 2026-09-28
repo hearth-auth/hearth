@@ -117,8 +117,7 @@ pub use tokens::{
     decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
     verify_rs256_id_token_signature, verify_token_signature, CnfClaim, IssueTokenRequest, Jwk,
     JwksDocument, JwtAssertionClaims, RsaIdTokenSigningKey, SigningKey, TokenClaims, TokenConfig,
-    TokenPair, REQUIRED_ACTION_TOKEN_TYPE, RSA_ID_TOKEN_MIN_MODULUS_BITS,
-    RSA_ID_TOKEN_MODULUS_BITS,
+    TokenPair, RSA_ID_TOKEN_MIN_MODULUS_BITS, RSA_ID_TOKEN_MODULUS_BITS,
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
@@ -132,10 +131,10 @@ pub use types::{
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
     PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential,
     Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse,
-    RegistrationPolicy, RequiredAction, RequiredActionTokenResponse, ScimMappingExport,
-    ScimMappingKind, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
-    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User,
-    UserStatus, WebAuthnAttestationPolicy, Webhook,
+    RegistrationPolicy, RequiredAction, ScimMappingExport, ScimMappingKind, Session,
+    SessionContext, SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest,
+    UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
+    WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
     AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
@@ -281,48 +280,6 @@ pub trait IdentityEngine: Send + Sync {
         token: &str,
         now: Timestamp,
     ) -> Result<ra_token::RaClaims, ra_token::RaTokenError>;
-
-    /// Validates a `TokenClaims`-based Required-Action JWT issued for the new
-    /// browser interstitial flow (`/ui/required-actions/…`).
-    ///
-    /// Verifies the Ed25519 signature against the realm key, checks that
-    /// `token_type == REQUIRED_ACTION_TOKEN_TYPE`, checks expiry, and asserts
-    /// that `required_actions` contains `action`.  Returns the decoded claims.
-    fn validate_required_action_token(
-        &self,
-        realm_id: &RealmId,
-        token: &str,
-        action: RequiredAction,
-    ) -> Result<tokens::TokenClaims, IdentityError>;
-
-    /// Completes the `UPDATE_PASSWORD` required action for a browser-flow user.
-    ///
-    /// Validates the RA JWT, applies the new password (enforcing realm policy),
-    /// removes `UPDATE_PASSWORD` from the user's pending action set, then:
-    /// - if further actions remain — issues a new RA JWT for the next action;
-    /// - if all actions are satisfied — creates a session and issues a
-    ///   full-access token.
-    ///
-    /// The caller distinguishes the two outcomes by checking `token_type` in
-    /// the decoded `access_token` claims: `"ra"` vs `"access"`.
-    fn complete_update_password(
-        &self,
-        realm_id: &RealmId,
-        ra_token: &str,
-        new_password: CleartextPassword,
-    ) -> Result<types::RequiredActionTokenResponse, IdentityError>;
-
-    /// Initiates or re-sends an email-verification request for a user.
-    ///
-    /// Issues a single-use verification token (rate-limited), stores the
-    /// SHA-256 hash, and returns `Ok(())`.  Email delivery is best-effort;
-    /// callers may observe `RateLimited` when the user has requested too
-    /// many tokens in a short window.
-    fn request_email_verification(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-    ) -> Result<(), IdentityError>;
 
     /// Rotates the Ed25519 signing key for a realm.
     ///
@@ -535,6 +492,27 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         user_id: &UserId,
         old_password: &CleartextPassword,
+        new_password: &CleartextPassword,
+    ) -> Result<(), IdentityError>;
+
+    /// Completes the `UPDATE_PASSWORD` required action once per
+    /// required-action session token.
+    ///
+    /// Claims the single use of `ra_session_token` cluster-wide before
+    /// writing, then changes the password (proving `current_password`), or
+    /// sets it when the user has no password credential yet. A submission the
+    /// engine refuses — wrong current password, password policy, reuse —
+    /// releases the claim, so the user can correct it and resubmit with the
+    /// same session. Returns `Err(InvalidToken)` when the token was already
+    /// spent. `ra_expires_at` is the token's expiry; the claim marker lives
+    /// until then.
+    fn complete_required_password_update(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        ra_session_token: &str,
+        ra_expires_at: Timestamp,
+        current_password: &CleartextPassword,
         new_password: &CleartextPassword,
     ) -> Result<(), IdentityError>;
 

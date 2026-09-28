@@ -43,7 +43,7 @@ use serde::Deserialize;
 
 use crate::abuse::device_approval::{DeviceApprovalDecision, DeviceApprovalGuard};
 use crate::abuse::runtime::PreAuthVerdict;
-use crate::core::RealmId;
+use crate::core::{FormSecret, RealmId};
 use crate::identity::onboarding::OnboardingError;
 use crate::identity::{
     admin_gate, gate, AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams,
@@ -56,6 +56,7 @@ use super::auth::{
     issue_mfa_pending_cookie, parse_mfa_pending_cookie, revoke_prior_session_cookie,
     sanitize_return_to, IssuedCookies, MFA_PENDING_COOKIE,
 };
+use super::link_token;
 use super::realm_resolver::{self, Resolved};
 use super::templates::{render, render_status, Flash};
 use super::WebState;
@@ -69,7 +70,9 @@ use crate::identity::Realm;
 #[derive(Template)]
 #[template(path = "ui/setup.html")]
 struct SetupTemplate {
-    token: String,
+    /// [`link_token::link_binding`] of the stashed setup token — never the
+    /// token itself (GA audit L18).
+    link_binding: String,
     error: Option<String>,
     // Layout fields (nav disabled for public pages).
     chrome: bool,
@@ -86,9 +89,14 @@ struct SetupTemplate {
 }
 
 impl SetupTemplate {
-    fn new(token: String, error: Option<String>, product_name: String, logo_url: String) -> Self {
+    fn new(
+        link_binding: String,
+        error: Option<String>,
+        product_name: String,
+        logo_url: String,
+    ) -> Self {
         Self {
-            token,
+            link_binding,
             error,
             chrome: false,
             active: "",
@@ -1108,34 +1116,28 @@ fn finish_otp_login(
 // Setup form
 // ============================================================================
 
-/// Query parameters for the setup GET handler.
-#[derive(Debug, Deserialize)]
-pub struct SetupQuery {
-    /// Setup token provided by the operator (from the startup log line).
-    pub token: Option<String>,
-}
-
 /// Renders the first-run setup form.
 ///
+/// The operator's setup link carries `?token=`; the link-token middleware
+/// moves it into a cookie and redirects here without it (GA audit L18), so
+/// the token is read from that cookie and the page never renders it.
+///
 /// Returns `404 Not Found` if:
-/// - the `token` query parameter is missing,
+/// - no setup token was stashed,
 /// - the token does not match the on-disk file, or
 /// - Hearth is already configured (a realm exists).
 ///
 /// The 404 is deliberately generic so that a would-be attacker cannot
 /// distinguish "wrong token" from "system already set up".
-pub async fn setup_form(
-    State(state): State<Arc<WebState>>,
-    Query(query): Query<SetupQuery>,
-) -> Response {
-    let Some(token) = query.token.as_deref() else {
+pub async fn setup_form(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    let Some(token) = link_token::read(&headers) else {
         return not_found_response("Setup page is not available.");
     };
 
-    match state.onboarding.verify_setup_token(token) {
+    match state.onboarding.verify_setup_token(&token) {
         Ok(()) => {}
         Err(OnboardingError::InvalidSetupToken | OnboardingError::AlreadyConfigured) => {
-            return not_found_response("Setup page is not available.");
+            return link_token::mark_spent(not_found_response("Setup page is not available."));
         }
         Err(e) => {
             tracing::error!(error = %e, "failed to verify setup token");
@@ -1144,7 +1146,7 @@ pub async fn setup_form(
     }
 
     let tmpl = SetupTemplate::new(
-        token.to_string(),
+        link_token::link_binding(&state.cookie_secret, &token),
         None,
         state.product_name.clone(),
         state.logo_url.clone(),
@@ -1152,17 +1154,20 @@ pub async fn setup_form(
     render(&tmpl)
 }
 
-/// Form body submitted by the setup page.
+/// Form body submitted by the setup page. The setup token itself comes from
+/// the link-token cookie, never the form (GA audit L18).
 #[derive(Debug, Deserialize)]
 pub struct SetupForm {
-    /// Setup token echoed from the hidden input.
-    pub token: String,
+    /// [`link_token::link_binding`] of the stashed token, echoed from the
+    /// hidden input. Binds the POST to the page the cookie holder was served.
+    #[serde(default)]
+    pub link_binding: String,
     /// Admin email address.
     pub admin_email: String,
     /// Admin display name.
     pub admin_display_name: String,
     /// Admin password.
-    pub admin_password: String,
+    pub admin_password: FormSecret,
 }
 
 /// Handles setup form submission.
@@ -1174,12 +1179,21 @@ pub async fn setup_submit(
     headers: HeaderMap,
     Form(form): Form<SetupForm>,
 ) -> Response {
+    // The token comes from the cookie, and the form must carry its binding:
+    // a POST that did not come from the served page is refused before the
+    // token is even checked.
+    let Some(token) = link_token::read(&headers) else {
+        return not_found_response("Setup page is not available.");
+    };
+    if !link_token::binding_matches(&state.cookie_secret, &token, &form.link_binding) {
+        return not_found_response("Setup page is not available.");
+    }
     // Re-verify token as defence in depth — the GET validated it, but an
     // attacker could POST directly.
-    match state.onboarding.verify_setup_token(&form.token) {
+    match state.onboarding.verify_setup_token(&token) {
         Ok(()) => {}
         Err(OnboardingError::InvalidSetupToken | OnboardingError::AlreadyConfigured) => {
-            return not_found_response("Setup page is not available.");
+            return link_token::mark_spent(not_found_response("Setup page is not available."));
         }
         Err(e) => {
             tracing::error!(error = %e, "failed to verify setup token on submit");
@@ -1189,16 +1203,22 @@ pub async fn setup_submit(
 
     let product_name = state.product_name.clone();
     let logo_url = state.logo_url.clone();
-    let setup_err = |token: String, msg: String, status: StatusCode| {
-        let tmpl = SetupTemplate::new(token, Some(msg), product_name.clone(), logo_url.clone());
+    let binding = form.link_binding.clone();
+    let setup_err = |msg: String, status: StatusCode| {
+        let tmpl = SetupTemplate::new(
+            binding.clone(),
+            Some(msg),
+            product_name.clone(),
+            logo_url.clone(),
+        );
         render_status(&tmpl, status)
     };
 
     if let Err(msg) = validate_setup_form(&form) {
-        return setup_err(form.token.clone(), msg, StatusCode::BAD_REQUEST);
+        return setup_err(msg, StatusCode::BAD_REQUEST);
     }
 
-    let password = CleartextPassword::from_string(form.admin_password.clone());
+    let password = CleartextPassword::new(form.admin_password.as_bytes().to_vec());
 
     let base_url = derive_base_url(
         state
@@ -1219,33 +1239,28 @@ pub async fn setup_submit(
             // future logins through this process. On restart the first
             // realm is re-resolved at login time.
             state.set_current_realm(outcome.realm_id.clone());
-            Redirect::to("/ui/setup/sent").into_response()
+            link_token::mark_spent(Redirect::to("/ui/setup/sent").into_response())
         }
         Err(OnboardingError::AlreadyConfigured) => {
-            not_found_response("Setup page is not available.")
+            link_token::mark_spent(not_found_response("Setup page is not available."))
         }
         Err(OnboardingError::Identity(IdentityError::DuplicateEmail)) => setup_err(
-            form.token.clone(),
             "An account with that email already exists in this system.".to_string(),
             StatusCode::CONFLICT,
         ),
         Err(OnboardingError::Identity(IdentityError::RealmNotFound)) => setup_err(
-            form.token.clone(),
             "No realm is configured. Add a realm to hearth.yaml and restart.".to_string(),
             StatusCode::CONFLICT,
         ),
-        Err(OnboardingError::Identity(IdentityError::InvalidInput { reason })) => setup_err(
-            form.token.clone(),
-            format!("Invalid input: {reason}"),
-            StatusCode::BAD_REQUEST,
-        ),
+        Err(OnboardingError::Identity(IdentityError::InvalidInput { reason })) => {
+            setup_err(format!("Invalid input: {reason}"), StatusCode::BAD_REQUEST)
+        }
         Err(OnboardingError::Email(e)) => {
             tracing::error!(
                 error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
                 "setup: failed to send verification email"
             );
             setup_err(
-                form.token.clone(),
                 "The account was created but the verification email could not be sent. \
                 Check the server logs for the verification link, or retry after fixing the email \
                 transport."
@@ -1274,92 +1289,260 @@ pub async fn setup_sent(State(state): State<Arc<WebState>>) -> Response {
 }
 
 // ============================================================================
+// Emailed-link confirmation pages (GA audit L18)
+// ============================================================================
+
+/// Page an emailed one-time link lands on. It spends nothing: a mail scanner
+/// or link preview that fetches the URL sees only this form, and the token is
+/// spent by its `POST`.
+#[derive(Template)]
+#[template(path = "ui/link_confirm.html")]
+struct LinkConfirmTemplate {
+    heading: &'static str,
+    message: &'static str,
+    button_label: &'static str,
+    /// Must be the route the link cookie is scoped to.
+    form_action: String,
+    /// [`link_token::link_binding`] of the stashed token.
+    link_binding: String,
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    flash: Option<Flash>,
+    /// CSRF double-submit token, embedded as the form's `_csrf` field.
+    csrf: Option<String>,
+    narrow: bool,
+    product_name: String,
+    logo_url: String,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+/// The wording of a link-confirmation page.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct LinkConfirmCopy {
+    /// Page heading.
+    pub heading: &'static str,
+    /// One-sentence explanation above the button.
+    pub message: &'static str,
+    /// Label of the button that spends the token.
+    pub button_label: &'static str,
+}
+
+/// Form every link-confirmation page posts.
+#[derive(Debug, Deserialize)]
+pub struct LinkConfirmForm {
+    /// [`link_token::link_binding`] of the stashed token, from the page.
+    #[serde(default)]
+    pub link_binding: String,
+    /// CSRF double-submit token (matches the `hearth_ui_csrf` cookie).
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
+}
+
+/// Renders the confirmation page for the stashed `token`.
+///
+/// With `issue_csrf` the form carries the `hearth_ui_csrf` double-submit
+/// token, minting the cookie when the browser has none. That cookie is
+/// scoped to `/ui`, so pages outside it pass `false` and rely on the link
+/// binding alone.
+pub(super) fn render_link_confirm(
+    state: &WebState,
+    headers: &HeaderMap,
+    token: &str,
+    copy: LinkConfirmCopy,
+    form_action: String,
+    realm_theme_url: Option<String>,
+    issue_csrf: bool,
+) -> Response {
+    let (csrf, fresh_cookie) = if issue_csrf {
+        match super::auth::csrf_cookie_value_from_headers(headers) {
+            Some(existing) => (Some(existing.to_string()), None),
+            None => {
+                let (value, cookie) =
+                    super::auth::fresh_csrf_cookie(state.is_secure_request(headers));
+                (Some(value), Some(cookie))
+            }
+        }
+    } else {
+        (None, None)
+    };
+    let mut resp = render(&LinkConfirmTemplate {
+        heading: copy.heading,
+        message: copy.message,
+        button_label: copy.button_label,
+        form_action,
+        link_binding: link_token::link_binding(&state.cookie_secret, token),
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        flash: None,
+        csrf,
+        narrow: true,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        realm_theme_url,
+        inline_theme_css: state.inline_theme_css(),
+    });
+    if let Some(cookie) = fresh_cookie {
+        append_cookie(&mut resp, &cookie);
+    }
+    resp
+}
+
+// ============================================================================
 // Email verification
 // ============================================================================
 
-/// Query parameters for `/ui/verify-email`.
-#[derive(Debug, Deserialize)]
-pub struct VerifyQuery {
-    /// Single-use email-verification token.
-    pub token: Option<String>,
+const VERIFY_EMAIL_COPY: LinkConfirmCopy = LinkConfirmCopy {
+    heading: "Confirm your email address",
+    message: "Confirm that this address is yours to activate your account.",
+    button_label: "Verify email",
+};
+
+/// `GET /ui/verify-email` — the confirmation page for an emailed
+/// verification link. The link's `?token=` was moved into the link-token
+/// cookie by the route's middleware; nothing is verified until the `POST`
+/// (GA audit L18).
+pub async fn verify_email(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    verify_email_page_impl(&state, &headers, RealmSource::Path(None))
 }
 
-/// Handles email verification on the bare `/ui/verify-email?token=...` URL.
-pub async fn verify_email(
-    State(state): State<Arc<WebState>>,
-    Query(query): Query<VerifyQuery>,
-) -> Response {
-    verify_email_impl(state, query, RealmSource::Path(None))
-}
-
-/// Handles email verification on `/ui/realms/<name>/verify-email?token=...`.
+/// `GET /ui/realms/<name>/verify-email` — see [`verify_email`].
 pub async fn verify_email_scoped(
     State(state): State<Arc<WebState>>,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
-    Query(query): Query<VerifyQuery>,
+    headers: HeaderMap,
 ) -> Response {
-    verify_email_impl(state, query, RealmSource::Path(Some(realm_name)))
+    verify_email_page_impl(&state, &headers, RealmSource::Path(Some(realm_name)))
 }
 
-/// Handles email verification on `/ui/admin/verify-email?token=...`.
+/// `GET /ui/admin/verify-email` — see [`verify_email`].
 ///
 /// This is the link admins receive in their setup confirmation email.
 /// Resolves to the system realm regardless of application realm state.
 pub async fn admin_verify_email(
     State(state): State<Arc<WebState>>,
-    Query(query): Query<VerifyQuery>,
+    headers: HeaderMap,
 ) -> Response {
-    verify_email_impl(state, query, RealmSource::Admin)
+    verify_email_page_impl(&state, &headers, RealmSource::Admin)
 }
 
-/// Shared implementation. On success the user transitions
-/// `PendingVerification` → `Active` and can thereafter sign in.
-#[allow(clippy::needless_pass_by_value)]
-fn verify_email_impl(state: Arc<WebState>, query: VerifyQuery, source: RealmSource) -> Response {
-    let product_name = state.product_name.clone();
-    let logo_url = state.logo_url.clone();
+/// `POST /ui/verify-email` — verifies the stashed token.
+pub async fn verify_email_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<LinkConfirmForm>,
+) -> Response {
+    verify_email_impl(&state, &headers, &form, RealmSource::Path(None))
+}
 
-    let Some(token) = query.token.as_deref() else {
-        let tmpl = VerifyInvalidTemplate::new(
-            "Invalid link",
-            "This verification link is missing or malformed.",
-            product_name,
-            logo_url,
-        );
-        return render_status(&tmpl, StatusCode::BAD_REQUEST);
+/// `POST /ui/realms/<name>/verify-email` — see [`verify_email_submit`].
+pub async fn verify_email_submit_scoped(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(realm_name): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<LinkConfirmForm>,
+) -> Response {
+    verify_email_impl(&state, &headers, &form, RealmSource::Path(Some(realm_name)))
+}
+
+/// `POST /ui/admin/verify-email` — see [`verify_email_submit`].
+pub async fn admin_verify_email_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<LinkConfirmForm>,
+) -> Response {
+    verify_email_impl(&state, &headers, &form, RealmSource::Admin)
+}
+
+/// The page every missing, refused or malformed verification link gets.
+fn verify_link_invalid(state: &WebState) -> Response {
+    let tmpl = VerifyInvalidTemplate::new(
+        "Invalid link",
+        "This verification link is missing or malformed.",
+        state.product_name.clone(),
+        state.logo_url.clone(),
+    );
+    render_status(&tmpl, StatusCode::BAD_REQUEST)
+}
+
+fn verify_email_page_impl(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    source: RealmSource,
+) -> Response {
+    let Some(token) = link_token::read(headers) else {
+        return verify_link_invalid(state);
     };
-
-    let (realm, action_prefix) = match resolve_for_source(&state, source, false) {
+    let (realm, action_prefix) = match resolve_for_source(state, source, false) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
         } => (realm, action_prefix),
         PreAuthRealm::Handled(resp) => return resp,
     };
+    render_link_confirm(
+        state,
+        headers,
+        &token,
+        VERIFY_EMAIL_COPY,
+        format!("{action_prefix}/verify-email"),
+        state.realm_theme_url_for(realm.id()),
+        true,
+    )
+}
 
-    match state.identity.verify_email_token(realm.id(), token) {
-        Ok(_) => {
-            let login_url = format!("{action_prefix}/login");
-            let mut tmpl = VerifyOkTemplate::new(login_url, product_name, logo_url);
-            tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
-            tmpl.inline_theme_css = state.inline_theme_css();
-            render(&tmpl)
-        }
-        Err(IdentityError::VerificationTokenInvalid) => {
-            let tmpl = VerifyInvalidTemplate::new(
+/// Shared `POST` implementation. On success the user transitions
+/// `PendingVerification` → `Active` and can thereafter sign in.
+fn verify_email_impl(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    form: &LinkConfirmForm,
+    source: RealmSource,
+) -> Response {
+    let (realm, action_prefix) = match resolve_for_source(state, source, true) {
+        PreAuthRealm::Ok {
+            realm,
+            action_prefix,
+        } => (realm, action_prefix),
+        PreAuthRealm::Handled(resp) => return resp,
+    };
+    let Some(token) =
+        link_token::confirmed_token(state, headers, &form.link_binding, &form.csrf, true)
+    else {
+        return verify_link_invalid(state);
+    };
+    let product_name = state.product_name.clone();
+    let logo_url = state.logo_url.clone();
+
+    link_token::mark_spent(
+        match state.identity.verify_email_token(realm.id(), &token) {
+            Ok(_) => {
+                let login_url = format!("{action_prefix}/login");
+                let mut tmpl = VerifyOkTemplate::new(login_url, product_name, logo_url);
+                tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
+                tmpl.inline_theme_css = state.inline_theme_css();
+                render(&tmpl)
+            }
+            Err(IdentityError::VerificationTokenInvalid) => {
+                let tmpl = VerifyInvalidTemplate::new(
                 "Link expired or already used",
                 "This verification link is no longer valid. Request a new verification email from \
                 the sign-in page once it becomes available.",
                 product_name,
                 logo_url,
             );
-            render_status(&tmpl, StatusCode::GONE)
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "verify-email: unexpected failure");
-            internal_error_response()
-        }
-    }
+                render_status(&tmpl, StatusCode::GONE)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "verify-email: unexpected failure");
+                internal_error_response()
+            }
+        },
+    )
 }
 
 // ============================================================================
@@ -1494,7 +1677,7 @@ pub struct LoginForm {
     /// Email address.
     pub email: String,
     /// Password.
-    pub password: String,
+    pub password: FormSecret,
     /// Optional `return_to` path submitted via hidden field.
     #[serde(default)]
     pub return_to: Option<String>,
@@ -1987,7 +2170,7 @@ fn login_finish(
         // cost answers an unknown address measurably faster (GA audit L14).
         state.identity.dummy_verify_password_for_realm(
             realm.id(),
-            &CleartextPassword::from_string(form.password.clone()),
+            &CleartextPassword::new(form.password.as_bytes().to_vec()),
         );
         state
             .identity
@@ -2021,7 +2204,7 @@ fn login_finish(
         return render_ctx.generic_error(&email);
     };
 
-    let password = CleartextPassword::from_string(form.password.clone());
+    let password = CleartextPassword::new(form.password.as_bytes().to_vec());
     match state
         .identity
         .verify_password(realm.id(), user.id(), &password)
@@ -3744,11 +3927,13 @@ impl ForgotPasswordSentTemplate {
     }
 }
 
-/// Reset password form (token in URL).
+/// Reset password form. The token itself stays in the link-token cookie; the
+/// form carries only its binding (GA audit L18).
 #[derive(Template)]
 #[template(path = "ui/reset_password.html")]
 struct ResetPasswordTemplate {
-    token: String,
+    /// [`link_token::link_binding`] of the stashed reset token.
+    link_binding: String,
     error: Option<String>,
     form_action: String,
     chrome: bool,
@@ -3766,14 +3951,14 @@ struct ResetPasswordTemplate {
 
 impl ResetPasswordTemplate {
     fn new(
-        token: String,
+        link_binding: String,
         error: Option<String>,
         action_prefix: &str,
         product_name: String,
         logo_url: String,
     ) -> Self {
         Self {
-            token,
+            link_binding,
             error,
             form_action: format!("{action_prefix}/reset-password"),
             chrome: false,
@@ -4085,28 +4270,25 @@ fn forgot_password_sent_impl(state: Arc<WebState>, source: RealmSource) -> Respo
     render(&tmpl)
 }
 
-/// Query parameters for the reset-password page.
-#[derive(Debug, Deserialize)]
-pub struct ResetPasswordQuery {
-    /// The plaintext token from the password reset email.
-    pub token: Option<String>,
-}
-
 /// Renders the reset-password form at the bare URL.
+///
+/// The emailed link's `?token=` is moved into the link-token cookie by the
+/// route's middleware before this runs; the page renders only the token's
+/// binding (GA audit L18).
 pub async fn reset_password_form(
     State(state): State<Arc<WebState>>,
-    Query(query): Query<ResetPasswordQuery>,
+    headers: HeaderMap,
 ) -> Response {
-    reset_password_form_impl(state, query, RealmSource::Path(None))
+    reset_password_form_impl(state, &headers, RealmSource::Path(None))
 }
 
 /// Renders the reset-password form at `/ui/realms/<name>/reset-password`.
 pub async fn reset_password_form_scoped(
     State(state): State<Arc<WebState>>,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
-    Query(query): Query<ResetPasswordQuery>,
+    headers: HeaderMap,
 ) -> Response {
-    reset_password_form_impl(state, query, RealmSource::Path(Some(realm_name)))
+    reset_password_form_impl(state, &headers, RealmSource::Path(Some(realm_name)))
 }
 
 /// Renders the admin reset-password form at `/ui/admin/reset-password`.
@@ -4116,19 +4298,17 @@ pub async fn reset_password_form_scoped(
 /// (audit 2026-08-28 §4.24#7).
 pub async fn admin_reset_password_form(
     State(state): State<Arc<WebState>>,
-    Query(query): Query<ResetPasswordQuery>,
+    headers: HeaderMap,
 ) -> Response {
-    reset_password_form_impl(state, query, RealmSource::Admin)
+    reset_password_form_impl(state, &headers, RealmSource::Admin)
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn reset_password_form_impl(
     state: Arc<WebState>,
-    query: ResetPasswordQuery,
+    headers: &HeaderMap,
     source: RealmSource,
 ) -> Response {
-    let product_name = state.product_name.clone();
-    let logo_url = state.logo_url.clone();
     let (realm, action_prefix) = match resolve_for_source(&state, source, false) {
         PreAuthRealm::Ok {
             realm,
@@ -4136,44 +4316,69 @@ fn reset_password_form_impl(
         } => (realm, action_prefix),
         PreAuthRealm::Handled(resp) => return resp,
     };
-    let realm_theme = state.realm_theme_url_for(realm.id());
-    let inline_css = state.inline_theme_css();
-    if let Some(token) = query.token {
-        let mut tmpl =
-            ResetPasswordTemplate::new(token, None, &action_prefix, product_name, logo_url);
-        tmpl.realm_theme_url = realm_theme;
-        tmpl.inline_theme_css = inline_css;
-        render(&tmpl)
-    } else {
-        let mut tmpl = ResetPasswordTemplate::new(
-            String::new(),
-            Some("Missing or invalid reset link.".to_string()),
-            &action_prefix,
-            product_name,
-            logo_url,
-        );
-        tmpl.realm_theme_url = realm_theme;
-        tmpl.inline_theme_css = inline_css;
-        render_status(&tmpl, StatusCode::BAD_REQUEST)
+    match link_token::read(headers) {
+        Some(token) => {
+            let binding = link_token::link_binding(&state.cookie_secret, &token);
+            render(&reset_template(
+                &state,
+                &realm,
+                &action_prefix,
+                binding,
+                None,
+            ))
+        }
+        None => render_status(
+            &reset_template(
+                &state,
+                &realm,
+                &action_prefix,
+                String::new(),
+                Some("Missing or invalid reset link.".to_string()),
+            ),
+            StatusCode::BAD_REQUEST,
+        ),
     }
 }
 
-/// Form data for the reset-password submission.
-#[derive(Deserialize)]
-pub struct ResetPasswordFormData {
-    /// The plaintext token from the password reset email.
-    pub token: String,
-    /// The new password.
-    pub password: String,
-    /// Password confirmation.
-    pub password_confirm: String,
+/// Builds the reset-password page for `realm`.
+fn reset_template(
+    state: &WebState,
+    realm: &Realm,
+    action_prefix: &str,
+    link_binding: String,
+    error: Option<String>,
+) -> ResetPasswordTemplate {
+    let mut tmpl = ResetPasswordTemplate::new(
+        link_binding,
+        error,
+        action_prefix,
+        state.product_name.clone(),
+        state.logo_url.clone(),
+    );
+    tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
+    tmpl.inline_theme_css = state.inline_theme_css();
+    tmpl
 }
 
-/// Redacts the reset token and both passwords (GA audit L20).
+/// Form data for the reset-password submission. The reset token itself comes
+/// from the link-token cookie, never the form (GA audit L18).
+#[derive(Deserialize)]
+pub struct ResetPasswordFormData {
+    /// [`link_token::link_binding`] of the stashed token, echoed from the
+    /// hidden input. Binds the POST to the page the cookie holder was served.
+    #[serde(default)]
+    pub link_binding: String,
+    /// The new password.
+    pub password: FormSecret,
+    /// Password confirmation.
+    pub password_confirm: FormSecret,
+}
+
+/// Redacts both passwords (GA audit L20).
 impl std::fmt::Debug for ResetPasswordFormData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResetPasswordFormData")
-            .field("token", &"<redacted>")
+            .field("link_binding", &self.link_binding)
             .field("password", &"<redacted>")
             .field("password_confirm", &"<redacted>")
             .finish()
@@ -4189,20 +4394,30 @@ impl std::fmt::Debug for ResetPasswordFormData {
 /// deep in the engine with a generic message (audit 2026-08-28 §4.24#5).
 const MIN_BROWSER_PASSWORD_LENGTH: usize = 12;
 
+/// The message every refused or spent reset link gets.
+const RESET_LINK_INVALID: &str =
+    "This reset link is invalid or has expired. Please request a new one.";
+
 /// Context resolved pre-gate for reset-password submissions. Built outside the
 /// KDF admission gate so cheap validation rejects (password mismatch, minimum
 /// length) never consume a permit (HEA-1981 / F4).
 struct PreparedReset {
     realm: Realm,
     action_prefix: String,
+    /// The reset token, read from the link-token cookie.
+    token: FormSecret,
 }
 
-/// Resolves the realm and validates cheap form constraints before the KDF gate.
+/// Resolves the realm, reads the stashed token and checks the form's binding
+/// and cheap constraints before the KDF gate.
 ///
 /// Password mismatch and minimum-length checks run here so that a flood of
-/// trivially-invalid requests cannot exhaust the Argon2id admission pool.
+/// trivially-invalid requests cannot exhaust the Argon2id admission pool. A
+/// missing token or a binding that does not match refuses with `400` and
+/// leaves the cookie alone: the legitimate holder's page still works.
 fn reset_prepare(
     state: &Arc<WebState>,
+    headers: &HeaderMap,
     form: &ResetPasswordFormData,
     source: RealmSource,
 ) -> Result<PreparedReset, Response> {
@@ -4213,44 +4428,45 @@ fn reset_prepare(
         } => (realm, action_prefix),
         PreAuthRealm::Handled(resp) => return Err(resp),
     };
-    let product_name = state.product_name.clone();
-    let logo_url = state.logo_url.clone();
-    let realm_theme = state.realm_theme_url_for(realm.id());
-    let inline_css = state.inline_theme_css();
-    // Clone so the closure captures its own copy and `action_prefix` can be
-    // moved into `PreparedReset` at the end.
-    let action_prefix_for_err = action_prefix.clone();
-    let reset_err = move |token: String, msg: String| {
-        let mut tmpl = ResetPasswordTemplate::new(
-            token,
-            Some(msg),
-            &action_prefix_for_err,
-            product_name.clone(),
-            logo_url.clone(),
-        );
-        tmpl.realm_theme_url.clone_from(&realm_theme);
-        tmpl.inline_theme_css.clone_from(&inline_css);
-        render(&tmpl)
-    };
-    if form.password != form.password_confirm {
-        return Err(reset_err(
-            form.token.clone(),
-            "Passwords do not match.".to_string(),
+    let Some(token) = link_token::read(headers)
+        .filter(|t| link_token::binding_matches(&state.cookie_secret, t, &form.link_binding))
+    else {
+        return Err(render_status(
+            &reset_template(
+                state,
+                &realm,
+                &action_prefix,
+                String::new(),
+                Some(RESET_LINK_INVALID.to_string()),
+            ),
+            StatusCode::BAD_REQUEST,
         ));
+    };
+    let reset_err = |msg: String| {
+        render(&reset_template(
+            state,
+            &realm,
+            &action_prefix,
+            form.link_binding.clone(),
+            Some(msg),
+        ))
+    };
+    if *form.password != *form.password_confirm {
+        return Err(reset_err("Passwords do not match.".to_string()));
     }
     // The pre-gate threshold must be the real policy floor. It used to be 8
     // while the message said 12, so an 8-to-11-character password sailed past
     // here, was rejected deep inside the engine, and came back as a generic
     // "try again" that named no requirement (audit 2026-08-28 §4.24#5).
     if form.password.len() < MIN_BROWSER_PASSWORD_LENGTH {
-        return Err(reset_err(
-            form.token.clone(),
-            format!("Password must be at least {MIN_BROWSER_PASSWORD_LENGTH} characters."),
-        ));
+        return Err(reset_err(format!(
+            "Password must be at least {MIN_BROWSER_PASSWORD_LENGTH} characters."
+        )));
     }
     Ok(PreparedReset {
         realm,
         action_prefix,
+        token,
     })
 }
 
@@ -4260,24 +4476,7 @@ pub async fn reset_password_submit(
     headers: HeaderMap,
     Form(form): Form<ResetPasswordFormData>,
 ) -> Response {
-    // Cheap pre-gate validation — password mismatch/length never consumes a KDF
-    // permit (HEA-1981 / F4).
-    let prepared = match reset_prepare(&state, &form, RealmSource::Path(None)) {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-    let shed_state = Arc::clone(&state);
-    let shed_headers = headers.clone();
-    match gate()
-        .run(move || reset_password_submit_impl(state, form, prepared))
-        .await
-    {
-        Ok(resp) => resp,
-        Err(KdfGateError::Overloaded { retry_after }) => {
-            kdf_shed_html_response(&shed_state, &shed_headers, retry_after, None, None, None)
-        }
-        Err(KdfGateError::Join(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
+    reset_password_submit_gated(state, headers, form, RealmSource::Path(None)).await
 }
 
 /// Handles reset-password form submission at `/ui/realms/<name>/reset-password`.
@@ -4287,22 +4486,7 @@ pub async fn reset_password_submit_scoped(
     headers: HeaderMap,
     Form(form): Form<ResetPasswordFormData>,
 ) -> Response {
-    let prepared = match reset_prepare(&state, &form, RealmSource::Path(Some(realm_name))) {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-    let shed_state = Arc::clone(&state);
-    let shed_headers = headers.clone();
-    match gate()
-        .run(move || reset_password_submit_impl(state, form, prepared))
-        .await
-    {
-        Ok(resp) => resp,
-        Err(KdfGateError::Overloaded { retry_after }) => {
-            kdf_shed_html_response(&shed_state, &shed_headers, retry_after, None, None, None)
-        }
-        Err(KdfGateError::Join(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
+    reset_password_submit_gated(state, headers, form, RealmSource::Path(Some(realm_name))).await
 }
 
 /// Handles reset-password form submission at `/ui/admin/reset-password`.
@@ -4316,19 +4500,29 @@ pub async fn admin_reset_password_submit(
     headers: HeaderMap,
     Form(form): Form<ResetPasswordFormData>,
 ) -> Response {
-    let prepared = match reset_prepare(&state, &form, RealmSource::Admin) {
+    reset_password_submit_gated(state, headers, form, RealmSource::Admin).await
+}
+
+/// Cheap pre-gate validation, then the reset itself under the KDF admission
+/// gate — password mismatch/length never consumes a permit (HEA-1981 / F4).
+async fn reset_password_submit_gated(
+    state: Arc<WebState>,
+    headers: HeaderMap,
+    form: ResetPasswordFormData,
+    source: RealmSource,
+) -> Response {
+    let prepared = match reset_prepare(&state, &headers, &form, source) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
     let shed_state = Arc::clone(&state);
-    let shed_headers = headers.clone();
     match gate()
         .run(move || reset_password_submit_impl(state, form, prepared))
         .await
     {
         Ok(resp) => resp,
         Err(KdfGateError::Overloaded { retry_after }) => {
-            kdf_shed_html_response(&shed_state, &shed_headers, retry_after, None, None, None)
+            kdf_shed_html_response(&shed_state, &headers, retry_after, None, None, None)
         }
         Err(KdfGateError::Join(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -4336,8 +4530,9 @@ pub async fn admin_reset_password_submit(
 
 /// Shared implementation — runs inside the KDF admission gate.
 ///
-/// Receives a pre-validated realm and action prefix from [`reset_prepare`];
-/// password mismatch and length checks already ran pre-gate.
+/// Receives a pre-validated realm, action prefix and token from
+/// [`reset_prepare`]; password mismatch and length checks already ran
+/// pre-gate. A completed or definitively refused token clears the cookie.
 #[allow(clippy::needless_pass_by_value)]
 fn reset_password_submit_impl(
     state: Arc<WebState>,
@@ -4347,61 +4542,58 @@ fn reset_password_submit_impl(
     let PreparedReset {
         realm,
         action_prefix,
+        token,
     } = prepared;
-    let product_name = state.product_name.clone();
-    let logo_url = state.logo_url.clone();
-    let realm_theme = state.realm_theme_url_for(realm.id());
-    let inline_css = state.inline_theme_css();
-
-    let reset_err = |token: String, msg: String| {
-        let mut tmpl = ResetPasswordTemplate::new(
-            token,
-            Some(msg),
+    let reset_err = |binding: String, msg: String| {
+        render(&reset_template(
+            &state,
+            &realm,
             &action_prefix,
-            product_name.clone(),
-            logo_url.clone(),
-        );
-        tmpl.realm_theme_url.clone_from(&realm_theme);
-        tmpl.inline_theme_css.clone_from(&inline_css);
-        render(&tmpl)
+            binding,
+            Some(msg),
+        ))
     };
 
-    let password = CleartextPassword::from_string(form.password);
+    let password = CleartextPassword::new(form.password.as_bytes().to_vec());
 
     match state
         .identity
-        .reset_password_with_token(realm.id(), &form.token, &password)
+        .reset_password_with_token(realm.id(), &token, &password)
     {
         Ok(_user_id) => {
             let login_url = format!("{action_prefix}/login");
-            let mut tmpl = ResetPasswordOkTemplate::new(login_url, product_name, logo_url);
-            tmpl.realm_theme_url.clone_from(&realm_theme);
-            tmpl.inline_theme_css.clone_from(&inline_css);
-            render(&tmpl)
+            let mut tmpl = ResetPasswordOkTemplate::new(
+                login_url,
+                state.product_name.clone(),
+                state.logo_url.clone(),
+            );
+            tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
+            tmpl.inline_theme_css = state.inline_theme_css();
+            link_token::mark_spent(render(&tmpl))
         }
-        Err(IdentityError::PasswordResetTokenInvalid) => reset_err(
-            String::new(),
-            "This reset link is invalid or has expired. Please request a new one.".to_string(),
-        ),
+        Err(IdentityError::PasswordResetTokenInvalid) => {
+            link_token::mark_spent(reset_err(String::new(), RESET_LINK_INVALID.to_string()))
+        }
         // The realm's password policy refused the new password. The token is
-        // NOT consumed on this path, so hand back the reason AND the token so
-        // the user can retry on the same link rather than being told to "try
-        // again" with no idea what to change (audit 2026-08-28 §4.24#5).
+        // NOT consumed on this path, so hand back the reason and keep the
+        // link live so the user can retry on the same page rather than being
+        // told to "try again" with no idea what to change
+        // (audit 2026-08-28 §4.24#5).
         Err(IdentityError::InvalidInput { ref reason }) => {
             let mut msg = reason.clone();
             if let Some(first) = msg.get_mut(0..1) {
                 first.make_ascii_uppercase();
             }
-            reset_err(form.token, format!("{msg}."))
+            reset_err(form.link_binding.clone(), format!("{msg}."))
         }
         Err(IdentityError::PasswordReused) => reset_err(
-            form.token,
+            form.link_binding.clone(),
             "That password has been used before. Please choose a different one.".to_string(),
         ),
         Err(e) => {
             tracing::warn!(error = %e, "reset_password: error resetting password");
             reset_err(
-                form.token,
+                form.link_binding.clone(),
                 "Failed to reset password. Please try again.".to_string(),
             )
         }
@@ -4412,14 +4604,32 @@ fn reset_password_submit_impl(
 // Magic-link redemption
 // ============================================================================
 
-/// Query parameters for the magic-link redemption route.
-#[derive(Debug, Deserialize)]
-pub struct MagicLinkQuery {
-    /// The opaque single-use token from the emailed link.
-    pub token: Option<String>,
+const MAGIC_LINK_COPY: LinkConfirmCopy = LinkConfirmCopy {
+    heading: "Sign in",
+    message: "Continue to sign in with the link from your email.",
+    button_label: "Sign in",
+};
+
+/// `GET /ui/magic-link` — the confirmation page for an emailed sign-in link.
+///
+/// The emailed `?token=` was moved into the link-token cookie by the route's
+/// middleware, and nothing is redeemed here: a mail scanner or link preview
+/// that fetches the URL must not sign the user in (GA audit L18). The page's
+/// `POST` ([`magic_link_redeem`]) redeems.
+pub async fn magic_link_page(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    magic_link_page_impl(&state, &headers, RealmSource::Path(None))
 }
 
-/// `GET /ui/magic-link` — redeems a magic link and starts a browser session.
+/// `GET /ui/realms/<name>/magic-link` — see [`magic_link_page`].
+pub async fn magic_link_page_scoped(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(realm_name): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    magic_link_page_impl(&state, &headers, RealmSource::Path(Some(realm_name)))
+}
+
+/// `POST /ui/magic-link` — redeems a magic link and starts a browser session.
 ///
 /// Before this existed the flow had no terminal step: a token could be minted
 /// and mailed but never exchanged for anything (audit 2026-08-28 §4.24#6).
@@ -4427,26 +4637,94 @@ pub async fn magic_link_redeem(
     State(state): State<Arc<WebState>>,
     PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
-    Query(query): Query<MagicLinkQuery>,
+    Form(form): Form<LinkConfirmForm>,
 ) -> Response {
-    magic_link_redeem_impl(state, &headers, peer_addr, query, RealmSource::Path(None))
+    magic_link_post(state, &headers, peer_addr, &form, RealmSource::Path(None))
 }
 
-/// `GET /ui/realms/<name>/magic-link` — realm-scoped magic-link redemption.
+/// `POST /ui/realms/<name>/magic-link` — realm-scoped magic-link redemption.
 pub async fn magic_link_redeem_scoped(
     State(state): State<Arc<WebState>>,
     PeerAddr(peer_addr): PeerAddr,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     headers: HeaderMap,
-    Query(query): Query<MagicLinkQuery>,
+    Form(form): Form<LinkConfirmForm>,
 ) -> Response {
-    magic_link_redeem_impl(
+    magic_link_post(
         state,
         &headers,
         peer_addr,
-        query,
+        &form,
         RealmSource::Path(Some(realm_name)),
     )
+}
+
+fn magic_link_page_impl(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    source: RealmSource,
+) -> Response {
+    let (realm, action_prefix) = match resolve_for_source(state, source, false) {
+        PreAuthRealm::Ok {
+            realm,
+            action_prefix,
+        } => (realm, action_prefix),
+        PreAuthRealm::Handled(resp) => return resp,
+    };
+    match link_token::read(headers) {
+        Some(token) => render_link_confirm(
+            state,
+            headers,
+            &token,
+            MAGIC_LINK_COPY,
+            format!("{action_prefix}/magic-link"),
+            state.realm_theme_url_for(realm.id()),
+            true,
+        ),
+        None => magic_link_expired(state, &realm, &action_prefix),
+    }
+}
+
+/// Checks the confirmation `POST` and redeems. A refused `POST` (no link
+/// cookie, wrong binding, bad CSRF) keeps the link; any answer after the
+/// token reached the engine clears it.
+fn magic_link_post(
+    state: Arc<WebState>,
+    headers: &HeaderMap,
+    peer_addr: SocketAddr,
+    form: &LinkConfirmForm,
+    source: RealmSource,
+) -> Response {
+    let token = link_token::confirmed_token(&state, headers, &form.link_binding, &form.csrf, true);
+    let reached_engine = token.is_some();
+    let resp = magic_link_redeem_impl(state, headers, peer_addr, token, source);
+    if reached_engine {
+        link_token::mark_spent(resp)
+    } else {
+        resp
+    }
+}
+
+/// The login page with a neutral "expired or already used" banner — never a
+/// hint about whether the address exists.
+fn magic_link_expired(state: &WebState, realm: &Realm, action_prefix: &str) -> Response {
+    let mut tmpl = LoginTemplate::new(
+        Some(
+            "This sign-in link has expired or has already been used. \
+             Request a new one."
+                .to_string(),
+        ),
+        None,
+        action_prefix,
+        registration_enabled(realm),
+        DEFAULT_LOGIN_LOCALE,
+        state.product_name.clone(),
+        state.logo_url.clone(),
+    );
+    tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
+    tmpl.inline_theme_css = state.inline_theme_css();
+    tmpl.new_magic_link_url = Some(format!("{action_prefix}/login"));
+    render_status(&tmpl, StatusCode::BAD_REQUEST)
 }
 
 /// Shared implementation for both magic-link redemption routes.
@@ -4465,10 +4743,10 @@ fn magic_link_redeem_impl(
     state: Arc<WebState>,
     headers: &HeaderMap,
     peer_addr: SocketAddr,
-    query: MagicLinkQuery,
+    token: Option<FormSecret>,
     source: RealmSource,
 ) -> Response {
-    let (realm, action_prefix) = match resolve_for_source(&state, source, false) {
+    let (realm, action_prefix) = match resolve_for_source(&state, source, true) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
@@ -4476,27 +4754,9 @@ fn magic_link_redeem_impl(
         PreAuthRealm::Handled(resp) => return resp,
     };
 
-    let expired = |state: &Arc<WebState>| -> Response {
-        let mut tmpl = LoginTemplate::new(
-            Some(
-                "This sign-in link has expired or has already been used. \
-                 Request a new one."
-                    .to_string(),
-            ),
-            None,
-            &action_prefix,
-            registration_enabled(&realm),
-            DEFAULT_LOGIN_LOCALE,
-            state.product_name.clone(),
-            state.logo_url.clone(),
-        );
-        tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
-        tmpl.inline_theme_css = state.inline_theme_css();
-        tmpl.new_magic_link_url = Some(format!("{action_prefix}/login"));
-        render_status(&tmpl, StatusCode::BAD_REQUEST)
-    };
+    let expired = |state: &Arc<WebState>| magic_link_expired(state, &realm, &action_prefix);
 
-    let Some(token) = query.token.filter(|t| !t.trim().is_empty()) else {
+    let Some(token) = token.filter(|t| !t.trim().is_empty()) else {
         return expired(&state);
     };
 
@@ -4721,12 +4981,12 @@ pub struct RegisterForm {
     #[serde(default)]
     pub last_name: String,
     /// New password.
-    pub password: String,
+    pub password: FormSecret,
     /// Password confirmation.
-    pub password_confirm: String,
+    pub password_confirm: FormSecret,
     /// Optional invitation token (required when policy is invite-only).
     #[serde(default)]
-    pub invitation_token: Option<String>,
+    pub invitation_token: Option<FormSecret>,
     /// CAPTCHA response token populated by the Turnstile widget (P-1).
     ///
     /// Empty string when no CAPTCHA provider is configured (`NoopCaptchaProvider`).
@@ -5133,7 +5393,7 @@ fn register_submit_impl(
             form.email,
         );
     }
-    if form.password != form.password_confirm {
+    if *form.password != *form.password_confirm {
         return render_err("Passwords do not match.".to_string(), form.email);
     }
     if form.password.len() < MIN_BROWSER_PASSWORD_LENGTH {
@@ -5169,9 +5429,9 @@ fn register_submit_impl(
         display_name: form.display_name.clone(),
         first_name: form.first_name.clone(),
         last_name: form.last_name.clone(),
-        password: CleartextPassword::from_string(form.password.clone()),
+        password: CleartextPassword::new(form.password.as_bytes().to_vec()),
         client_ip: register_client_ip(&headers, peer_addr, &state.trusted_proxies),
-        invitation_token: form.invitation_token.clone(),
+        invitation_token: form.invitation_token.as_deref().map(str::to_string),
     };
 
     let response = match state.identity.register_user(realm.id(), &request) {
@@ -5466,13 +5726,6 @@ fn realm_required_response(state: &WebState) -> Response {
 // Invitation acceptance
 // ============================================================================
 
-/// Query params for the invitation acceptance page.
-#[derive(Debug, Deserialize)]
-pub struct AcceptInvitationParams {
-    /// The plaintext invitation token from the email link.
-    pub token: Option<String>,
-}
-
 /// Template for invitation acceptance result.
 #[derive(Template)]
 #[template(path = "ui/accept_invitation.html")]
@@ -5496,29 +5749,62 @@ struct AcceptInvitationTemplate {
     inline_theme_css: Option<String>,
 }
 
-/// `GET /ui/accept-invitation?token=...` — bare URL variant.
+const INVITATION_COPY: LinkConfirmCopy = LinkConfirmCopy {
+    heading: "Accept invitation",
+    message: "Accept the invitation to join the organization.",
+    button_label: "Accept invitation",
+};
+
+/// `GET /ui/accept-invitation` — bare URL variant of the confirmation page.
+///
+/// The emailed `?token=` was moved into the link-token cookie by the route's
+/// middleware, and nothing is accepted here: a mail scanner or link preview
+/// that fetches the URL must not join the organization for the user (GA
+/// audit L18). The page's `POST` accepts.
 pub async fn accept_invitation_page(
     State(state): State<Arc<WebState>>,
-    Query(params): Query<AcceptInvitationParams>,
+    headers: HeaderMap,
 ) -> Response {
-    accept_invitation_page_impl(state, params, None)
+    accept_invitation_impl(state, &headers, None, None)
 }
 
-/// `GET /ui/realms/<name>/accept-invitation?token=...` — realm-scoped variant.
+/// `GET /ui/realms/<name>/accept-invitation` — realm-scoped variant.
 pub async fn accept_invitation_page_scoped(
     State(state): State<Arc<WebState>>,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
-    Query(params): Query<AcceptInvitationParams>,
+    headers: HeaderMap,
 ) -> Response {
-    accept_invitation_page_impl(state, params, Some(realm_name))
+    accept_invitation_impl(state, &headers, Some(realm_name), None)
 }
 
-/// Accepts an organization invitation against the resolved realm only.
+/// `POST /ui/accept-invitation` — accepts the stashed invitation.
+pub async fn accept_invitation_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<LinkConfirmForm>,
+) -> Response {
+    accept_invitation_impl(state, &headers, None, Some(&form))
+}
+
+/// `POST /ui/realms/<name>/accept-invitation` — realm-scoped variant.
+pub async fn accept_invitation_submit_scoped(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(realm_name): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<LinkConfirmForm>,
+) -> Response {
+    accept_invitation_impl(state, &headers, Some(realm_name), Some(&form))
+}
+
+/// Renders the confirmation page (`form` is `None`, a `GET`) or accepts an
+/// organization invitation against the resolved realm only (`form` is the
+/// confirmation `POST`).
 #[allow(clippy::needless_pass_by_value)]
-fn accept_invitation_page_impl(
+fn accept_invitation_impl(
     state: Arc<WebState>,
-    params: AcceptInvitationParams,
+    headers: &HeaderMap,
     path_realm: Option<String>,
+    form: Option<&LinkConfirmForm>,
 ) -> Response {
     let render_result = |success: bool,
                          org_name: String,
@@ -5544,7 +5830,7 @@ fn accept_invitation_page_impl(
         })
     };
 
-    let (realm, action_prefix) = match resolve_pre_auth_realm(&state, path_realm, false) {
+    let (realm, action_prefix) = match resolve_pre_auth_realm(&state, path_realm, form.is_some()) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
@@ -5554,20 +5840,48 @@ fn accept_invitation_page_impl(
     let realm_theme = state.realm_theme_url_for(realm.id());
     let login_url = format!("{action_prefix}/login");
 
-    let token = match &params.token {
-        Some(t) if !t.is_empty() => t.as_str(),
-        _ => {
-            return render_result(
-                false,
-                String::new(),
-                "No invitation token provided.".to_string(),
-                login_url,
-                realm_theme,
-            );
+    let token = match form {
+        None => link_token::read(headers),
+        Some(form) => {
+            link_token::confirmed_token(&state, headers, &form.link_binding, &form.csrf, true)
         }
     };
+    let Some(token) = token else {
+        // A refused POST keeps the link: the genuine page can still submit.
+        return render_status(
+            &AcceptInvitationTemplate {
+                success: false,
+                org_name: String::new(),
+                error_message: "This invitation link is missing or invalid.".to_string(),
+                login_url,
+                chrome: false,
+                active: "",
+                user_email: None,
+                is_admin: false,
+                flash: None,
+                csrf: None,
+                narrow: true,
+                product_name: state.product_name.clone(),
+                logo_url: state.logo_url.clone(),
+                realm_theme_url: realm_theme,
+                inline_theme_css: state.inline_theme_css(),
+            },
+            StatusCode::BAD_REQUEST,
+        );
+    };
+    if form.is_none() {
+        return render_link_confirm(
+            &state,
+            headers,
+            &token,
+            INVITATION_COPY,
+            format!("{action_prefix}/accept-invitation"),
+            realm_theme,
+            true,
+        );
+    }
 
-    match state.identity.accept_invitation(realm.id(), token) {
+    link_token::mark_spent(match state.identity.accept_invitation(realm.id(), &token) {
         Ok(membership) => {
             let org_name = state
                 .identity
@@ -5584,7 +5898,7 @@ fn accept_invitation_page_impl(
             login_url,
             realm_theme,
         ),
-    }
+    })
 }
 
 // ============================================================================
@@ -6055,422 +6369,6 @@ fn device_approval_refusal(decision: DeviceApprovalDecision) -> Response {
         .into_response()
 }
 
-// ============================================================================
-// Required-action UI interstitials
-// ============================================================================
-
-/// Required-action "update your password" page template.
-#[derive(Template)]
-#[template(path = "ui/required-actions/update_password.html")]
-struct UpdatePasswordTemplate {
-    chrome: bool,
-    active: &'static str,
-    user_email: Option<String>,
-    is_admin: bool,
-    flash: Option<Flash>,
-    csrf: Option<String>,
-    narrow: bool,
-    product_name: String,
-    logo_url: String,
-    realm_theme_url: Option<String>,
-    inline_theme_css: Option<String>,
-    /// POST target URL.
-    form_action: String,
-    /// Required-action JWT forwarded as a hidden form field.
-    ra_token: String,
-    /// Inline form error message (password mismatch, policy violation, etc.).
-    error: Option<String>,
-}
-
-/// Required-action "verify your email" page template.
-#[derive(Template)]
-#[template(path = "ui/required-actions/verify_email.html")]
-struct VerifyEmailTemplate {
-    chrome: bool,
-    active: &'static str,
-    user_email: Option<String>,
-    is_admin: bool,
-    flash: Option<Flash>,
-    csrf: Option<String>,
-    narrow: bool,
-    product_name: String,
-    logo_url: String,
-    realm_theme_url: Option<String>,
-    inline_theme_css: Option<String>,
-    /// Email address the verification link was sent to.
-    email: String,
-    /// POST URL for the "Resend" button.
-    resend_action: String,
-    /// Required-action JWT forwarded in the resend POST body.
-    ra_token: String,
-    /// Inline error (e.g. rate-limit message).
-    error: Option<String>,
-}
-
-/// Required-action "email verified" success page template.
-#[derive(Template)]
-#[template(path = "ui/required-actions/verify_email_success.html")]
-struct VerifyEmailSuccessTemplate {
-    chrome: bool,
-    active: &'static str,
-    user_email: Option<String>,
-    is_admin: bool,
-    flash: Option<Flash>,
-    csrf: Option<String>,
-    narrow: bool,
-    product_name: String,
-    logo_url: String,
-    realm_theme_url: Option<String>,
-    inline_theme_css: Option<String>,
-    /// Destination URL for the 3-second auto-redirect.
-    redirect_url: String,
-}
-
-/// Query parameters shared by the required-action GET pages.
-#[derive(Debug, Deserialize)]
-pub struct RaTokenQuery {
-    /// Required-action JWT passed as a query parameter.
-    pub ra_token: String,
-}
-
-/// Query parameters for the verify-email success page.
-#[derive(Debug, Deserialize)]
-pub struct RaSuccessQuery {
-    /// Destination after the auto-redirect countdown.
-    pub redirect_url: Option<String>,
-}
-
-/// Form data for the update-password required-action submission.
-#[derive(Debug, Deserialize)]
-pub struct RaUpdatePasswordForm {
-    /// Required-action JWT forwarded from the hidden field.
-    pub ra_token: String,
-    /// New password.
-    pub password: String,
-    /// Confirmation — must match `password`.
-    pub password_confirm: String,
-}
-
-/// Form data for the verify-email resend submission.
-#[derive(Debug, Deserialize)]
-pub struct RaResendForm {
-    /// Required-action JWT forwarded from the hidden field.
-    pub ra_token: String,
-}
-
-/// Decodes the realm ID from an ra-JWT without verifying the signature.
-///
-/// Used to locate the realm's signing key before the full cryptographic
-/// validation. Returns `None` for tokens that are structurally invalid.
-fn realm_id_from_ra_token(token: &str) -> Option<crate::core::RealmId> {
-    let claims = crate::identity::decode_claims_unverified(token).ok()?;
-    let realm_uuid_str = claims.tid.strip_prefix("realm_").unwrap_or(&claims.tid);
-    let realm_uuid: uuid::Uuid = realm_uuid_str.parse().ok()?;
-    Some(crate::core::RealmId::new(realm_uuid))
-}
-
-/// Extracts a `SessionId` from the `sid` claim of decoded token claims.
-fn session_id_from_ra_claims(
-    claims: &crate::identity::tokens::TokenClaims,
-) -> Option<crate::core::SessionId> {
-    let uuid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
-    let uuid: uuid::Uuid = uuid_str.parse().ok()?;
-    Some(crate::core::SessionId::new(uuid))
-}
-
-/// Extracts a `UserId` from the `sub` claim of decoded token claims.
-fn user_id_from_ra_claims(
-    claims: &crate::identity::tokens::TokenClaims,
-) -> Option<crate::core::UserId> {
-    let uuid_str = claims.sub.strip_prefix("user_").unwrap_or(&claims.sub);
-    let uuid: uuid::Uuid = uuid_str.parse().ok()?;
-    Some(crate::core::UserId::new(uuid))
-}
-
-/// `GET /ui/required-actions/update-password` — renders the password-update
-/// form. The `ra_token` query parameter carries the required-action JWT.
-pub async fn ra_update_password_form(
-    State(state): State<Arc<WebState>>,
-    Query(params): Query<RaTokenQuery>,
-) -> Response {
-    let Some(realm_id) = realm_id_from_ra_token(&params.ra_token) else {
-        return internal_error_response();
-    };
-    render(&UpdatePasswordTemplate {
-        chrome: false,
-        active: "",
-        user_email: None,
-        is_admin: false,
-        flash: None,
-        csrf: None,
-        narrow: true,
-        product_name: state.product_name.clone(),
-        logo_url: state.logo_url.clone(),
-        realm_theme_url: state.realm_theme_url_for(&realm_id),
-        inline_theme_css: state.inline_theme_css(),
-        form_action: "/ui/required-actions/update-password".to_string(),
-        ra_token: params.ra_token,
-        error: None,
-    })
-}
-
-/// `POST /ui/required-actions/update-password` — validates the new password
-/// and, on success, issues UI session cookies and redirects to `/ui/account`.
-pub async fn ra_update_password_submit(
-    State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
-    Form(form): Form<RaUpdatePasswordForm>,
-) -> Response {
-    let Some(realm_id) = realm_id_from_ra_token(&form.ra_token) else {
-        return internal_error_response();
-    };
-
-    let realm_theme = state.realm_theme_url_for(&realm_id);
-    let product_name = state.product_name.clone();
-    let logo_url = state.logo_url.clone();
-
-    let render_err = |ra_token: String, msg: String| {
-        render(&UpdatePasswordTemplate {
-            chrome: false,
-            active: "",
-            user_email: None,
-            is_admin: false,
-            flash: None,
-            csrf: None,
-            narrow: true,
-            product_name: product_name.clone(),
-            logo_url: logo_url.clone(),
-            realm_theme_url: realm_theme.clone(),
-            inline_theme_css: state.inline_theme_css(),
-            form_action: "/ui/required-actions/update-password".to_string(),
-            ra_token,
-            error: Some(msg),
-        })
-    };
-
-    if form.password != form.password_confirm {
-        return render_err(form.ra_token, "Passwords do not match.".to_string());
-    }
-    if form.password.len() < 8 {
-        return render_err(
-            form.ra_token,
-            "Password must be at least 12 characters.".to_string(),
-        );
-    }
-
-    let password = CleartextPassword::from_string(form.password);
-    match state
-        .identity
-        .complete_update_password(&realm_id, &form.ra_token, password)
-    {
-        Ok(response) => {
-            let Ok(new_claims) = crate::identity::decode_claims_unverified(&response.access_token)
-            else {
-                return internal_error_response();
-            };
-
-            // More required actions remain — redirect to the next interstitial.
-            if new_claims.token_type == crate::identity::tokens::REQUIRED_ACTION_TOKEN_TYPE {
-                let next = new_claims.required_actions.first().copied();
-                let path = match next {
-                    Some(crate::identity::RequiredAction::VerifyEmail) => {
-                        format!(
-                            "/ui/required-actions/verify-email?ra_token={}",
-                            response.access_token
-                        )
-                    }
-                    _ => format!(
-                        "/ui/required-actions/update-password?ra_token={}",
-                        response.access_token
-                    ),
-                };
-                return Redirect::to(&path).into_response();
-            }
-
-            // Full-access token — set UI session cookies and go to account.
-            let Some(session_id) = session_id_from_ra_claims(&new_claims) else {
-                return internal_error_response();
-            };
-            let secure = state.is_secure_request(&headers);
-            let issued = super::auth::issue_auth_cookies(
-                &state.cookie_secret,
-                &realm_id,
-                &session_id,
-                secure,
-            );
-            let mut resp = Redirect::to("/ui/account").into_response();
-            append_cookie(&mut resp, &issued.session_cookie);
-            append_cookie(&mut resp, &issued.csrf_cookie);
-            resp
-        }
-        Err(IdentityError::PasswordReused) => render_err(
-            form.ra_token,
-            "Password has been used before. Please choose a different password.".to_string(),
-        ),
-        Err(IdentityError::InvalidInput { ref reason }) => {
-            render_err(form.ra_token, reason.clone())
-        }
-        Err(IdentityError::InvalidToken | IdentityError::TokenExpired) => render_err(
-            String::new(),
-            "This link has expired. Please request a new one.".to_string(),
-        ),
-        Err(e) => {
-            tracing::warn!(error = %e, "ra_update_password: failed");
-            render_err(
-                form.ra_token,
-                "Failed to update password. Please try again.".to_string(),
-            )
-        }
-    }
-}
-
-/// `GET /ui/required-actions/verify-email` — renders the "check your email"
-/// interstitial. Validates the ra-JWT and looks up the user's email address
-/// to display in the template.
-pub async fn ra_verify_email_page(
-    State(state): State<Arc<WebState>>,
-    Query(params): Query<RaTokenQuery>,
-) -> Response {
-    let Some(realm_id) = realm_id_from_ra_token(&params.ra_token) else {
-        return internal_error_response();
-    };
-
-    let claims = match state.identity.validate_required_action_token(
-        &realm_id,
-        &params.ra_token,
-        crate::identity::RequiredAction::VerifyEmail,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "ra_verify_email_page: invalid token");
-            return internal_error_response();
-        }
-    };
-
-    let Some(user_id) = user_id_from_ra_claims(&claims) else {
-        return internal_error_response();
-    };
-
-    let email = match state.identity.get_user(&realm_id, &user_id) {
-        Ok(Some(u)) => u.email().to_string(),
-        _ => {
-            tracing::warn!("ra_verify_email_page: user not found");
-            return internal_error_response();
-        }
-    };
-
-    render(&VerifyEmailTemplate {
-        chrome: false,
-        active: "",
-        user_email: None,
-        is_admin: false,
-        flash: None,
-        csrf: None,
-        narrow: true,
-        product_name: state.product_name.clone(),
-        logo_url: state.logo_url.clone(),
-        realm_theme_url: state.realm_theme_url_for(&realm_id),
-        inline_theme_css: state.inline_theme_css(),
-        email,
-        resend_action: "/ui/required-actions/verify-email/resend".to_string(),
-        ra_token: params.ra_token,
-        error: None,
-    })
-}
-
-/// `POST /ui/required-actions/verify-email/resend` — triggers a new
-/// verification email. Redirects back to the verify-email page with a flash
-/// message indicating success or rate-limit.
-pub async fn ra_verify_email_resend(
-    State(state): State<Arc<WebState>>,
-    headers: axum::http::HeaderMap,
-    Form(form): Form<RaResendForm>,
-) -> Response {
-    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
-    let secure = state.is_secure_request(&headers);
-    let Some(realm_id) = realm_id_from_ra_token(&form.ra_token) else {
-        return internal_error_response();
-    };
-
-    let claims = match state.identity.validate_required_action_token(
-        &realm_id,
-        &form.ra_token,
-        crate::identity::RequiredAction::VerifyEmail,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "ra_verify_email_resend: invalid token");
-            return internal_error_response();
-        }
-    };
-
-    let Some(user_id) = user_id_from_ra_claims(&claims) else {
-        return internal_error_response();
-    };
-
-    let return_url = format!(
-        "/ui/required-actions/verify-email?ra_token={}",
-        form.ra_token
-    );
-
-    match state
-        .identity
-        .request_email_verification(&realm_id, &user_id)
-    {
-        Ok(_) => super::templates::redirect_with_flash(
-            &return_url,
-            "Verification email sent. Check your inbox.",
-            "success",
-            secure,
-        ),
-        Err(IdentityError::RateLimited) => super::templates::redirect_with_flash(
-            &return_url,
-            "Please wait a moment before requesting another email.",
-            "error",
-            secure,
-        ),
-        Err(e) => {
-            tracing::warn!(error = %e, "ra_verify_email_resend: request_email_verification failed");
-            super::templates::redirect_with_flash(
-                &return_url,
-                "Failed to send verification email. Please try again.",
-                "error",
-                secure,
-            )
-        }
-    }
-}
-
-/// `GET /ui/required-actions/verify-email/success` — shown after the
-/// verification token is redeemed. Displays a 3-second countdown and then
-/// redirects to `redirect_url` (defaults to `/ui/account`).
-pub async fn ra_verify_email_success(
-    State(state): State<Arc<WebState>>,
-    Query(params): Query<RaSuccessQuery>,
-    headers: HeaderMap,
-) -> Response {
-    let redirect_url = params
-        .redirect_url
-        .as_deref()
-        .and_then(sanitize_return_to)
-        .unwrap_or_else(|| "/ui/account".to_string());
-    let flash = super::templates::take_flash_cookie(&headers);
-    render(&VerifyEmailSuccessTemplate {
-        chrome: false,
-        active: "",
-        user_email: None,
-        is_admin: false,
-        flash,
-        csrf: None,
-        narrow: true,
-        product_name: state.product_name.clone(),
-        logo_url: state.logo_url.clone(),
-        realm_theme_url: None,
-        inline_theme_css: None,
-        redirect_url,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6566,10 +6464,10 @@ mod tests {
     #[test]
     fn validate_setup_form_requires_email_at_sign() {
         let form = SetupForm {
-            token: "t".to_string(),
+            link_binding: String::new(),
             admin_email: "no-at-sign".to_string(),
             admin_display_name: "d".to_string(),
-            admin_password: "longenough1234".to_string(),
+            admin_password: FormSecret::new("longenough1234".to_string()),
         };
         let err = validate_setup_form(&form).expect_err("should reject");
         assert!(err.contains("email"), "got: {err}");
@@ -6578,10 +6476,10 @@ mod tests {
     #[test]
     fn validate_setup_form_requires_password_min_length() {
         let form = SetupForm {
-            token: "t".to_string(),
+            link_binding: String::new(),
             admin_email: "a@b.com".to_string(),
             admin_display_name: "d".to_string(),
-            admin_password: "short".to_string(),
+            admin_password: FormSecret::new("short".to_string()),
         };
         let err = validate_setup_form(&form).expect_err("should reject");
         assert!(err.contains("12 characters"), "got: {err}");
@@ -6590,10 +6488,10 @@ mod tests {
     #[test]
     fn validate_setup_form_accepts_valid_input() {
         let form = SetupForm {
-            token: "t".to_string(),
+            link_binding: String::new(),
             admin_email: "alice@acme.com".to_string(),
             admin_display_name: "Alice".to_string(),
-            admin_password: "super-secret-123".to_string(),
+            admin_password: FormSecret::new("super-secret-123".to_string()),
         };
         assert!(validate_setup_form(&form).is_ok());
     }
@@ -6699,5 +6597,64 @@ mod tests {
         assert!(!singular.contains("1 seconds"), "no trailing s: {singular}");
         let plural = make(30).render().expect("renders");
         assert!(plural.contains("30 seconds"), "plural: {plural}");
+    }
+}
+
+/// Secret-bearing form fields are wiped on drop and never printed by `Debug`
+/// (GA audit L20).
+#[cfg(test)]
+mod secret_field_tests {
+    use super::*;
+    use crate::core::secrets::assert_zeroize_on_drop;
+
+    fn assert_redacted(dbg: &str) {
+        assert!(!dbg.contains("CANARY"), "Debug leaked a secret: {dbg}");
+    }
+
+    #[test]
+    fn login_form_password_is_zeroized_and_redacted() {
+        let form: LoginForm =
+            serde_urlencoded::from_str("email=a%40b.test&password=CANARY-pw").expect("form parses");
+        assert_zeroize_on_drop(&form.password);
+        assert_eq!(form.password.expose(), "CANARY-pw");
+        assert_redacted(&format!("{form:?}"));
+    }
+
+    #[test]
+    fn register_form_secrets_are_zeroized_and_redacted() {
+        let form: RegisterForm = serde_urlencoded::from_str(
+            "email=a%40b.test&password=CANARY-pw&password_confirm=CANARY-pc\
+             &invitation_token=CANARY-inv",
+        )
+        .expect("form parses");
+        assert_zeroize_on_drop(&form.password);
+        assert_zeroize_on_drop(&form.password_confirm);
+        assert_zeroize_on_drop(&form.invitation_token);
+        assert_eq!(form.password.expose(), "CANARY-pw");
+        assert_redacted(&format!("{form:?}"));
+    }
+
+    #[test]
+    fn setup_form_password_is_zeroized_and_redacted() {
+        let form: SetupForm = serde_urlencoded::from_str(
+            "link_binding=b&admin_email=a%40b.test&admin_display_name=A\
+             &admin_password=CANARY-pw",
+        )
+        .expect("form parses");
+        assert_zeroize_on_drop(&form.admin_password);
+        assert_eq!(form.admin_password.expose(), "CANARY-pw");
+        assert_redacted(&format!("{form:?}"));
+    }
+
+    #[test]
+    fn reset_password_form_is_zeroized_and_redacted() {
+        let form: ResetPasswordFormData = serde_urlencoded::from_str(
+            "link_binding=b&password=CANARY-pw&password_confirm=CANARY-pc",
+        )
+        .expect("form parses");
+        assert_zeroize_on_drop(&form.password);
+        assert_zeroize_on_drop(&form.password_confirm);
+        assert_eq!(form.password_confirm.expose(), "CANARY-pc");
+        assert_redacted(&format!("{form:?}"));
     }
 }

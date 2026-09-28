@@ -293,7 +293,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
 ## Required-action tokens
 
-If a user has a pending required action (e.g. email verification, MFA enrollment), their access token has `token_type: "required_action"`. Both `hearthEdgeMiddleware` and `withHearthAuth` automatically return `401` on required-action tokens. When using `getHearthToken`, check explicitly:
+Hearth never issues a token to a user with pending required actions (e.g. email verification, MFA enrollment): a browser login runs them at `/required-action/{ACTION}` before any code is issued, and a REST login answers `400 required_actions_pending`. As a defence, should a token with `token_type: "required_action"` ever be presented, both `hearthEdgeMiddleware` and `withHearthAuth` automatically return `401` on required-action tokens. When using `getHearthToken`, check explicitly:
 
 ```typescript
 export async function GET(request: NextRequest) {

@@ -32,6 +32,16 @@ use tower::ServiceExt;
 // ---------------------------------------------------------------------------
 
 const COOKIE_SECRET: [u8; 32] = [13u8; 32];
+
+/// Appends the `_csrf` form token a `/required-action/*` page embeds for the RA
+/// session cookie `ra_token` (bound to the cookie, not a `/ui` CSRF cookie).
+fn with_ra_csrf(ra_token: &str, body: impl std::fmt::Display) -> String {
+    let token = hearth::protocol::web::required_action::ra_form_token_for(
+        &hearth::protocol::web::CookieSecret::from_bytes(COOKIE_SECRET),
+        ra_token,
+    );
+    format!("{body}&_csrf={token}")
+}
 const PASSWORD: &str = "correct-horse-battery-staple-97";
 const NEW_PASSWORD: &str = "new-password-after-required-action-99";
 
@@ -337,7 +347,7 @@ async fn update_password_completion_issues_session_and_redirects_to_ui() {
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_cookie_val}"))
-                .body(Body::from(body))
+                .body(Body::from(with_ra_csrf(&ra_cookie_val, body)))
                 .expect("build request"),
         )
         .await
@@ -408,7 +418,7 @@ async fn update_password_completion_with_return_to_redirects_to_original_dest() 
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_cookie_val}"))
-                .body(Body::from(body))
+                .body(Body::from(with_ra_csrf(&ra_cookie_val, body)))
                 .expect("build request"),
         )
         .await

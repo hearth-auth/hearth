@@ -643,13 +643,22 @@ fn par_uri(
 async fn complete_password_update(rig: &Rig, authorize_resp: &Response<Body>) -> Response<Body> {
     let ra = cookie_pair(authorize_resp, "hearth_ra_session").expect("RA cookie");
     let new_password = ["a", "fresh", "gate", "parity", "phrase", "3"].join("-");
+    // The form token is bound to the RA session cookie; a `/ui` CSRF cookie
+    // never reaches `/required-action/*` in a browser.
+    let ra_value = ra
+        .strip_prefix("hearth_ra_session=")
+        .expect("RA cookie pair");
+    let form_token = hearth::protocol::web::required_action::ra_form_token_for(
+        &CookieSecret::from_bytes(COOKIE_SECRET),
+        ra_value,
+    );
     post_form(
         rig,
         "/required-action/UPDATE_PASSWORD",
-        &format!("{ra}; hearth_ui_csrf={CSRF}"),
+        &ra,
         format!(
             "current_password={}&new_password={new_password}&confirm_password={new_password}\
-             &_csrf={CSRF}",
+             &_csrf={form_token}",
             password()
         ),
     )

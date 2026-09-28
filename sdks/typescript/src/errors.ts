@@ -90,17 +90,16 @@ export class TokenAudienceError extends HearthSdkError {
 }
 
 /**
- * Thrown when a token has `token_type === "required_action"`, indicating the
- * user must complete pending actions before the token can be used for general
- * API access. Also thrown when the callback URL contains
- * `required_action_redirect_uri` (spec §5, §7).
+ * Thrown when a token has `token_type === "required_action"`: the subject must
+ * complete pending actions before the token can be used for general API
+ * access (spec §5). The browser SDK exports it for the shared error taxonomy;
+ * Hearth itself resolves pending actions during `/authorize`, so
+ * `handleCallback()` never receives such a token.
  */
 export class RequiredActionError extends HearthSdkError {
   constructor(
-    /** Pending action names from the token's `required_actions` claim. */
+    /** Pending action names (e.g. `["VERIFY_EMAIL"]`). */
     public readonly requiredActions: string[],
-    /** Optional URL to the Hearth interstitial page for completing the actions. */
-    public readonly redirectUri?: string,
     message = `Required actions pending: ${requiredActions.join(", ")}`,
   ) {
     super(message);

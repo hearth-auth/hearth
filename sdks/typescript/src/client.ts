@@ -1,5 +1,3 @@
-import { decodeJwt } from "jose";
-import { RequiredActionError } from "./errors.js";
 import type {
   AuthorizeParams,
   AuthorizeResponse,
@@ -144,58 +142,25 @@ export class HearthApiClient {
   /**
    * Handle a PKCE authorization-code callback (spec §7).
    *
-   * Extracts the `code` from `callbackUrl`, exchanges it for tokens, then
-   * inspects the JWT's `token_type` claim before returning:
-   *
-   * - If `token_type === "required_action"`: throws {@link RequiredActionError}
-   *   with `requiredActions` populated from the JWT's `required_actions` claim.
-   * - If the callback URL contains `required_action_redirect_uri`: throws
-   *   {@link RequiredActionError} with `redirectUri` set to that value.
-   * - Otherwise: returns the token response normally.
+   * Extracts the `code` from `callbackUrl` and exchanges it for tokens.
+   * There is no required-action detection here: Hearth runs any pending
+   * required actions itself, at `/required-action/{ACTION}` during
+   * `/authorize`, before it issues a code.
    */
   async handleCallback(params: HandleCallbackParams): Promise<TokenResponse> {
     const url = new URL(params.callbackUrl);
     const code = url.searchParams.get("code");
-    const requiredActionRedirectUri = url.searchParams.get(
-      "required_action_redirect_uri",
-    );
 
     if (!code) {
       throw new Error("handleCallback: no authorization code found in callback URL");
     }
 
-    const tokens = await this.exchangeCode({
+    return this.exchangeCode({
       clientId: params.clientId,
       code,
       redirectUri: params.redirectUri,
       codeVerifier: params.codeVerifier,
     });
-
-    // Decode the access token to read Hearth-specific claims.
-    let jwtPayload: Record<string, unknown> = {};
-    try {
-      jwtPayload = decodeJwt(tokens.access_token) as Record<string, unknown>;
-    } catch {
-      // Non-JWT access tokens (opaque) skip required-action detection.
-    }
-
-    const tokenType = jwtPayload["token_type"];
-    const requiredActions = Array.isArray(jwtPayload["required_actions"])
-      ? (jwtPayload["required_actions"] as string[])
-      : [];
-
-    if (tokenType === "required_action") {
-      throw new RequiredActionError(
-        requiredActions,
-        requiredActionRedirectUri ?? undefined,
-      );
-    }
-
-    if (requiredActionRedirectUri !== null) {
-      throw new RequiredActionError([], requiredActionRedirectUri);
-    }
-
-    return tokens;
   }
 
   /** POST /token — refresh tokens using a refresh token. */

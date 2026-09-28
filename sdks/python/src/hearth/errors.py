@@ -104,11 +104,9 @@ class RequiredActionError(HearthSdkError):
     def __init__(
         self,
         required_actions: List[str],
-        redirect_uri: Optional[str] = None,
         message: Optional[str] = None,
     ):
         self.required_actions = required_actions
-        self.redirect_uri = redirect_uri
         default_msg = f"Required actions pending: {required_actions}"
         super().__init__(message or default_msg)
 

@@ -75,18 +75,12 @@ describe("HearthError taxonomy", () => {
     expect(err.message).toContain("my-client");
   });
 
-  it("RequiredActionError exposes requiredActions and optional redirectUri", () => {
+  it("RequiredActionError exposes requiredActions", () => {
     const err = new RequiredActionError(["VERIFY_EMAIL", "UPDATE_PASSWORD"]);
     expect(err).toBeInstanceOf(HearthError);
     expect(err.name).toBe("RequiredActionError");
     expect(err.requiredActions).toEqual(["VERIFY_EMAIL", "UPDATE_PASSWORD"]);
-    expect(err.redirectUri).toBeUndefined();
-  });
-
-  it("RequiredActionError accepts optional redirectUri", () => {
-    const err = new RequiredActionError(["VERIFY_EMAIL"], "https://auth.example.com/ui/required-actions");
-    expect(err.requiredActions).toEqual(["VERIFY_EMAIL"]);
-    expect(err.redirectUri).toBe("https://auth.example.com/ui/required-actions");
+    expect(Object.keys(err)).not.toContain("redirectUri");
   });
 
   it("supports cause chaining", () => {

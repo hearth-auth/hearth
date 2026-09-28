@@ -94,17 +94,11 @@ final class ExceptionsTest extends TestCase
         self::assertSame(503, $e->getHttpStatus());
     }
 
-    public function testRequiredActionExceptionExposesActionsAndRedirectUri(): void
+    public function testRequiredActionExceptionExposesActions(): void
     {
-        $e = new RequiredActionException(['VERIFY_EMAIL', 'UPDATE_PASSWORD'], 'https://auth.example.com/actions');
+        $e = new RequiredActionException(['VERIFY_EMAIL', 'UPDATE_PASSWORD']);
         self::assertSame(['VERIFY_EMAIL', 'UPDATE_PASSWORD'], $e->getRequiredActions());
-        self::assertSame('https://auth.example.com/actions', $e->getRedirectUri());
-    }
-
-    public function testRequiredActionExceptionRedirectUriIsOptional(): void
-    {
-        $e = new RequiredActionException(['VERIFY_EMAIL']);
-        self::assertNull($e->getRedirectUri());
+        self::assertFalse(method_exists($e, 'getRedirectUri'));
     }
 
     public function testExceptionMessagesDoNotLeakSensitiveData(): void
