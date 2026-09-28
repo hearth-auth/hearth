@@ -271,6 +271,14 @@ the realm already holds (same id) is skipped, so restoring the same archive
 twice adds nothing. The `BackupRestored` event of `POST /admin/backup/restore`
 is recorded after the import, in the caller's realm.
 
+**A restore does not stall live audit writes.** Events are imported in atomic
+chunks of 512. The realm's audit chain is locked for one chunk's hashing and
+write at a time — never across its fsync, nor across the whole import — so
+audit writes to the same realm made while a large archive is restoring wait at
+most for one chunk, and the chain keeps verifying with them interleaved: once a
+live event lands between two chunks, the rest of the import is stamped after it.
+A chunk that fails leaves the chunks before it written and verifiable.
+
 ### Signed archives
 
 Encryption and checksums do not prove **who** produced an archive: the

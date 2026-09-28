@@ -123,9 +123,16 @@ pub trait AuditEngine: Send + Sync {
     ///   import time — the original stays in the marker — so storage order
     ///   stays chain order and the realm keeps verifying.
     ///
+    /// - Once any other event is in the chain — before the import, or a live
+    ///   append landing between two chunks — the remaining events are stamped
+    ///   no earlier than it, for the same reason.
+    ///
     /// An event whose `id` the realm already holds is skipped, so re-importing
-    /// an archive adds nothing. Events are written under the realm's chain lock
-    /// in atomic chunks, each advancing the signed chain head with it.
+    /// an archive adds nothing. Events are written in atomic chunks, each
+    /// advancing the signed chain head with it; the realm's chain lock is held
+    /// per chunk (never across a chunk's fsync or the whole import), so live
+    /// audit writes to the realm wait at most for one chunk. A chunk that fails
+    /// leaves the chunks before it durable, chained and anchored.
     fn import_events(
         &self,
         realm_id: &RealmId,

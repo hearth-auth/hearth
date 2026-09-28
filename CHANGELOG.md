@@ -437,6 +437,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   MX lookup is performed. Registration behaviour does not change.
 
 ### Fixed
+- **A large audit restore no longer freezes the node** — the audit import of a backup restore held
+  the realm's audit-chain lock for the whole import: a scan decoding every existing event, every
+  chunk's fsync, for archives up to 4 GiB. Audit writes to that realm run on the async runtime's
+  worker threads, so each one blocked a worker until the runtime stalled — token validation for
+  every realm included. The existing events are now read before the lock, the lock is taken per
+  512-event chunk for its hashing and write only (never across the fsync), and a live audit write
+  lands between chunks with the chain still verifying.
+- **A restore whose audit import fails part-way keeps the realm's chain anchor** — the anchor that
+  lets verification tell an erased audit log from one that never existed was recorded only after
+  the last chunk, so a failure after earlier chunks were written left those without it.
 - **Argon2id costs above the verifier ceilings are refused at start-up** — `auth.password_memory_cost`
   / `password_time_cost` and their `realms.<name>` overrides had lower bounds only. Above the
   ceilings every stored-hash verifier enforces (1 GiB memory, 64 passes), Hearth minted client
