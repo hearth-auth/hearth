@@ -161,21 +161,19 @@ export class AuthorizeError extends HearthError {
 
 /**
  * Thrown when a token with `token_type === "required_action"` is presented as a regular access
- * token, or when the server returns `error_code: "HEARTH_REQUIRED_ACTIONS_PENDING"`.
+ * token: the subject must complete pending actions before the token can be used for general API
+ * access (spec §5, §6).
  */
 export class RequiredActionError extends HearthError {
   /** Pending action names from the token's `required_actions` claim. */
   readonly requiredActions: string[];
-  /** Optional URL to the Hearth interstitial page for completing required actions. */
-  readonly redirectUri: string | undefined;
 
-  constructor(requiredActions: string[], redirectUri?: string, options?: { cause?: unknown }) {
+  constructor(requiredActions: string[], options?: { cause?: unknown }) {
     super(
       `Token requires completion of required actions: ${requiredActions.join(", ") || "(none)"}`,
       options,
     );
     this.requiredActions = requiredActions;
-    this.redirectUri = redirectUri;
   }
 }
 

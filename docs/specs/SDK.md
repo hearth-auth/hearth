@@ -430,11 +430,17 @@ All SDKs must define and expose the following error/exception types. Language-na
 | `TokenIssuerError` | `iss` does not match configured issuer |
 | `TokenAudienceError` | `aud` does not contain expected audience |
 | `IntrospectionError` | Introspection endpoint unreachable or returned error |
-| `RequiredActionError` | Token has `token_type === "required_action"` (required-action JWT presented as a regular access token), or server returns `error_code: "HEARTH_REQUIRED_ACTIONS_PENDING"` |
+| `RequiredActionError` | The server answered `400 required_actions_pending` (below), or a token with `token_type === "required_action"` is presented as an access token (defensive: Hearth issues no such token) |
 
 `RequiredActionError` must additionally expose:
-- `requiredActions: string[]` — the pending action names from the token's `required_actions` claim (e.g. `["VERIFY_EMAIL", "UPDATE_PASSWORD"]`).
-- `redirectUri?: string` — optional URL to the Hearth interstitial page, when one is provided by the server.
+- `requiredActions: string[]` — the pending action names (e.g. `["VERIFY_EMAIL", "UPDATE_PASSWORD"]`), from the token's `required_actions` claim.
+
+It carries no redirect URL: the server never supplies one.
+
+What the server returns for a user with pending required actions:
+
+- **REST** (password login, `/token` password and magic-link grants): HTTP `400` with body `{"error": "required_actions_pending", "error_code": "HEARTH_REQUIRED_ACTIONS_PENDING", "actions": ["VERIFY_EMAIL", ...]}`. An SDK that maps this response to `RequiredActionError` MUST populate `requiredActions` from `actions`.
+- **Browser / OIDC**: nothing reaches the application. Hearth runs the pending actions itself, at `/required-action/{ACTION}` during `/authorize`, before it issues an authorization code.
 
 All errors must include a human-readable `message`. Errors that wrap an underlying network or parse error must expose the original cause (Go: `Unwrap()`; Python: `__cause__`; TypeScript: `cause` property).
 
@@ -470,15 +476,9 @@ The browser SDK must additionally implement:
 - **Storage abstraction**: Default `sessionStorage`; pluggable (localStorage, in-memory, custom). Storage key prefix must be configurable.
 - **Cross-tab state sync**: Broadcast channel or storage events to sync login/logout across tabs (optional but recommended).
 
-### `handleCallback()` — required-action detection
+### `handleCallback()` — required actions
 
-After exchanging the authorization code for tokens, `handleCallback()` MUST inspect `token_type` before resolving with a usable access token:
-
-1. If the server issues a token with `token_type === "required_action"`: MUST throw `RequiredActionError` instead of storing the token as a valid access token. Populate `requiredActions` from the token's `required_actions` claim.
-2. If the callback URL contains a `required_action_redirect_uri` query parameter (server-supplied interstitial redirect): MUST throw `RequiredActionError` and set `error.redirectUri` to that value so the application can forward the user to the Hearth interstitial page.
-3. If neither condition applies, resolve normally and return the access/refresh token pair.
-
-Applications that catch `RequiredActionError` from `handleCallback()` SHOULD redirect the user to `error.redirectUri` (when present) or restart the browser authorization flow: Hearth runs the pending actions itself, at `/required-action/{ACTION}`, before it issues an authorization code. (The former `/ui/required-actions/*` pages, which carried their token in a `?ra_token=` query parameter, were removed — GA audit L18.)
+`handleCallback()` needs no required-action detection. Hearth runs any pending required actions itself, at `/required-action/{ACTION}` during `/authorize`, before it issues an authorization code, so the callback always carries an ordinary `code` and the exchange yields an ordinary access token. The server never adds a `required_action_redirect_uri` callback parameter and never issues a `token_type === "required_action"` token from the code exchange. (The former `/ui/required-actions/*` pages, which carried their token in a `?ra_token=` query parameter, were removed — GA audit L18.)
 
 ---
 
@@ -627,8 +627,7 @@ All list methods must accept an optional `limit` (integer, server-defined defaul
 For use in PR reviews and automated CI checks (see `.github/workflows/sdk-conformance.yml` and `scripts/check-sdk-conformance.sh`):
 
 - [ ] Error types match the 10 names from Section 5 (`ConfigurationError`, `DiscoveryError`, `JWKSFetchError`, `TokenExpiredError`, `TokenNotYetValidError`, `TokenInvalidError`, `TokenIssuerError`, `TokenAudienceError`, `IntrospectionError`, `RequiredActionError`)
-- [ ] `RequiredActionError` exposes `requiredActions: string[]` and optional `redirectUri: string` (Section 5)
-- [ ] Browser SDK `handleCallback()` throws `RequiredActionError` on `token_type === "required_action"` or `required_action_redirect_uri` callback param (Section 7)
+- [ ] `RequiredActionError` exposes `requiredActions: string[]` and no redirect URL (Section 5)
 - [ ] Server-side middleware returns `401` and throws `RequiredActionError` on `token_type === "required_action"` (Section 6)
 - [ ] All 17 public Claims API methods from Section 4 are present (`subject`, `issuer`, `audiences`, `expiry`, `issuedAt`, `jwtID`, `scope`, `scopes`, `hasScope`, `hasRole`, `hasPermission`, `inGroup`, `inOrg`, `tokenType`, `organizationId`, `orgGroups`, `get`)
 - [ ] No tokens or secrets can appear in error messages or logs (Section 11)

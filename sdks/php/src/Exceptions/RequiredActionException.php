@@ -17,11 +17,9 @@ class RequiredActionException extends HearthException
 {
     /**
      * @param string[] $requiredActions Pending action names from the `required_actions` claim
-     * @param string|null $redirectUri  Optional URL to the Hearth interstitial page
      */
     public function __construct(
         private readonly array $requiredActions,
-        private readonly ?string $redirectUri = null,
         string $message = 'Token requires completing pending actions before access is granted',
         int $code = 0,
         ?Throwable $previous = null,
@@ -37,15 +35,5 @@ class RequiredActionException extends HearthException
     public function getRequiredActions(): array
     {
         return $this->requiredActions;
-    }
-
-    /**
-     * Returns the URL to the Hearth required-actions interstitial page, if provided.
-     *
-     * Applications should redirect the user to this URL when present.
-     */
-    public function getRedirectUri(): ?string
-    {
-        return $this->redirectUri;
     }
 }

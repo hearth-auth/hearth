@@ -8,16 +8,12 @@ import (
 func TestRequiredActionErrorFields(t *testing.T) {
 	e := &RequiredActionError{
 		RequiredActions: []string{"VERIFY_EMAIL", "UPDATE_PASSWORD"},
-		RedirectURI:     "https://auth.example.com/required-actions",
 	}
 	if len(e.RequiredActions) != 2 {
 		t.Errorf("RequiredActions len: %d", len(e.RequiredActions))
 	}
 	if e.RequiredActions[0] != "VERIFY_EMAIL" {
 		t.Errorf("RequiredActions[0] = %q", e.RequiredActions[0])
-	}
-	if e.RedirectURI != "https://auth.example.com/required-actions" {
-		t.Errorf("RedirectURI = %q", e.RedirectURI)
 	}
 }
 
@@ -28,15 +24,6 @@ func TestRequiredActionErrorMessage(t *testing.T) {
 	msg := e.Error()
 	if msg == "" {
 		t.Error("Error() should return non-empty message")
-	}
-}
-
-func TestRequiredActionErrorOptionalRedirectURI(t *testing.T) {
-	e := &RequiredActionError{
-		RequiredActions: []string{"UPDATE_PASSWORD"},
-	}
-	if e.RedirectURI != "" {
-		t.Errorf("RedirectURI should default to empty, got %q", e.RedirectURI)
 	}
 }
 
