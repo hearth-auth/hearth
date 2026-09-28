@@ -2311,37 +2311,70 @@ pub(crate) fn par_scan_prefix() -> Vec<u8> {
 /// Prefix for single-use redemption markers.
 ///
 /// One marker is claimed with a replicated `put_if_absent` when a single-use
-/// artifact — a PAR `request_uri`, an authorization code, a device code — is
-/// redeemed. In cluster mode the claim is a `PutIfAbsent` Raft command whose
-/// presence check runs in the state machine's apply, so exactly one
-/// redemption wins across every node. The value is an 8-byte little-endian
-/// `i64` expiry (Unix seconds); the periodic cleanup sweep reclaims a marker
-/// once it has passed.
+/// artifact is redeemed (see `identity::engine::single_use`). In cluster mode
+/// the claim is a `PutIfAbsent` Raft command whose presence check runs in the
+/// state machine's apply, so exactly one redemption wins across every node.
+/// The value is an 8-byte little-endian `i64` expiry (Unix seconds); the
+/// periodic cleanup sweep reclaims a marker once it has passed.
 ///
 /// Its own prefix, not a row under the artifact's: the PAR and code sweepers
 /// decode every row under theirs as a JSON record, and a marker there would
 /// fail that decode and abort the sweep.
-const CONSUMED_PREFIX: &str = "oauth:consumed:";
+const CONSUMED_PREFIX: &str = "consumed:";
+
+fn encode_consumed(kind: &str, id: &str) -> Vec<u8> {
+    format!("{CONSUMED_PREFIX}{kind}:{id}").into_bytes()
+}
 
 /// Single-use marker for a PAR `request_uri`.
 ///
-/// Format: `oauth:consumed:par:{request_uri_id}`
+/// Format: `consumed:par:{request_uri_id}`
 pub(crate) fn encode_consumed_par(request_uri_id: &str) -> Vec<u8> {
-    format!("{CONSUMED_PREFIX}par:{request_uri_id}").into_bytes()
+    encode_consumed("par", request_uri_id)
 }
 
 /// Single-use marker for an authorization code, keyed by its SHA-256 hex.
 ///
-/// Format: `oauth:consumed:code:{sha256_hex}`
+/// Format: `consumed:code:{sha256_hex}`
 pub(crate) fn encode_consumed_code(code_hash: &str) -> Vec<u8> {
-    format!("{CONSUMED_PREFIX}code:{code_hash}").into_bytes()
+    encode_consumed("code", code_hash)
 }
 
 /// Single-use marker for a device code, keyed by its SHA-256 hex.
 ///
-/// Format: `oauth:consumed:device:{sha256_hex}`
+/// Format: `consumed:device:{sha256_hex}`
 pub(crate) fn encode_consumed_device_code(device_code_hash: &str) -> Vec<u8> {
-    format!("{CONSUMED_PREFIX}device:{device_code_hash}").into_bytes()
+    encode_consumed("device", device_code_hash)
+}
+
+/// Single-use marker for a magic link, keyed by its token's SHA-256 hex.
+///
+/// Format: `consumed:magic:{sha256_hex}`
+pub(crate) fn encode_consumed_magic_link(token_hash: &str) -> Vec<u8> {
+    encode_consumed("magic", token_hash)
+}
+
+/// Single-use marker for a password-reset link, keyed by its token's SHA-256.
+///
+/// Format: `consumed:reset:{sha256_hex}`
+pub(crate) fn encode_consumed_password_reset(token_hash: &str) -> Vec<u8> {
+    encode_consumed("reset", token_hash)
+}
+
+/// Single-use marker for an email-verification link, keyed by its token's
+/// SHA-256 hex.
+///
+/// Format: `consumed:verify:{sha256_hex}`
+pub(crate) fn encode_consumed_email_verify(token_hash: &str) -> Vec<u8> {
+    encode_consumed("verify", token_hash)
+}
+
+/// Single-use marker for a presented refresh token, keyed by its SHA-256 hex
+/// (the digest the grant family stores as `current_refresh_hash`).
+///
+/// Format: `consumed:refresh:{sha256_hex}`
+pub(crate) fn encode_consumed_refresh(refresh_hash: &str) -> Vec<u8> {
+    encode_consumed("refresh", refresh_hash)
 }
 
 /// Scan prefix for every single-use redemption marker in a realm.

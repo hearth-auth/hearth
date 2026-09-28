@@ -1750,7 +1750,7 @@ fn register_client(
     node: &Node,
     realm: &RealmId,
     name: &str,
-    grant_type: &str,
+    grant_types: &[&str],
 ) -> hearth::core::ClientId {
     node.identity
         .register_client(
@@ -1758,7 +1758,7 @@ fn register_client(
             &hearth::identity::RegisterClientRequest {
                 client_name: name.to_string(),
                 redirect_uris: vec![SINGLE_USE_REDIRECT.to_string()],
-                grant_types: vec![grant_type.to_string()],
+                grant_types: grant_types.iter().map(|g| (*g).to_string()).collect(),
                 require_consent: false,
                 ..Default::default()
             },
@@ -1780,7 +1780,12 @@ async fn a_par_request_uri_is_consumed_once_across_a_leader_change() {
     let (cluster, gates) = gated_cluster(&clock).await;
     let seeded = seed_realm_user_and_token(&cluster, &clock, "par-single-use").await;
     let leader = cluster.leader();
-    let client = register_client(leader, &seeded.realm_id, "par-racer", "authorization_code");
+    let client = register_client(
+        leader,
+        &seeded.realm_id,
+        "par-racer",
+        &["authorization_code"],
+    );
     let pushed = leader
         .identity
         .push_authorization_request(
@@ -1825,7 +1830,12 @@ async fn an_authorization_code_is_redeemed_once_across_a_leader_change() {
     let (cluster, gates) = gated_cluster(&clock).await;
     let seeded = seed_realm_user_and_token(&cluster, &clock, "code-single-use").await;
     let leader = cluster.leader();
-    let client = register_client(leader, &seeded.realm_id, "code-racer", "authorization_code");
+    let client = register_client(
+        leader,
+        &seeded.realm_id,
+        "code-racer",
+        &["authorization_code"],
+    );
     let code = leader
         .identity
         .authorize(
@@ -1890,7 +1900,7 @@ async fn a_device_code_is_redeemed_once_across_a_leader_change() {
         leader,
         &seeded.realm_id,
         "device-racer",
-        "urn:ietf:params:oauth:grant-type:device_code",
+        &["urn:ietf:params:oauth:grant-type:device_code"],
     );
     let issued = leader
         .identity
@@ -1918,6 +1928,189 @@ async fn a_device_code_is_redeemed_once_across_a_leader_change() {
     let wins =
         redemptions_across_a_leader_change(&cluster, &gates, b"oauth:device:", &redeem).await;
     assert_eq!(wins, 1, "one device code was redeemed {wins} times");
+
+    cluster.shutdown();
+}
+
+fn seeded_email(realm_name: &str) -> String {
+    format!("coherence@{realm_name}.test")
+}
+
+/// A magic link signs its holder in once across the cluster under the same
+/// interleaving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_magic_link_is_redeemed_once_across_a_leader_change() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let (cluster, gates) = gated_cluster(&clock).await;
+    let seeded = seed_realm_user_and_token(&cluster, &clock, "magic-single-use").await;
+    let link = cluster
+        .leader()
+        .identity
+        .request_magic_link(&seeded.realm_id, &seeded_email("magic-single-use"))
+        .unwrap();
+    cluster.converge().await;
+
+    let realm = seeded.realm_id.clone();
+    let token = link.token().to_string();
+    let redeem: Redeem = Arc::new(move |identity: &EmbeddedIdentityEngine| {
+        identity.validate_magic_link(&realm, &token).is_ok()
+    });
+    let wins = redemptions_across_a_leader_change(&cluster, &gates, b"magic:link:", &redeem).await;
+    assert_eq!(wins, 1, "one magic link was redeemed {wins} times");
+
+    cluster.shutdown();
+}
+
+/// A password-reset link sets a password once across the cluster.
+///
+/// The follower parks on its read of the reset watermark — the last thing it
+/// reads before setting the password — and the clock moves before the leader
+/// resets, so a follower that re-read the watermark afterwards would already
+/// refuse. Only a stale read that the Raft log does not re-check gets through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_password_reset_link_is_redeemed_once_across_a_leader_change() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let (cluster, gates) = gated_cluster(&clock).await;
+    let seeded = seed_realm_user_and_token(&cluster, &clock, "reset-single-use").await;
+    let token = cluster
+        .leader()
+        .identity
+        .request_password_reset(&seeded.realm_id, &seeded_email("reset-single-use"))
+        .unwrap()
+        .expect("a reset link for a known address");
+    clock.advance(1_000_000);
+    cluster.converge().await;
+
+    let realm = seeded.realm_id.clone();
+    let redeem: Redeem = Arc::new(move |identity: &EmbeddedIdentityEngine| {
+        let password =
+            hearth::identity::CleartextPassword::from_string("Correct-Horse-Battery-9".to_string());
+        identity
+            .reset_password_with_token(&realm, &token, &password)
+            .is_ok()
+    });
+    let wins = redemptions_across_a_leader_change(&cluster, &gates, b"rst:wm:", &redeem).await;
+    assert_eq!(wins, 1, "one password-reset link was redeemed {wins} times");
+
+    cluster.shutdown();
+}
+
+/// An email-verification link is redeemed once across the cluster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn an_email_verification_link_is_redeemed_once_across_a_leader_change() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let (cluster, gates) = gated_cluster(&clock).await;
+    let seeded = seed_realm_user_and_token(&cluster, &clock, "verify-single-use").await;
+    let token = cluster
+        .leader()
+        .identity
+        .issue_email_verification_token(&seeded.realm_id, &seeded.user_id)
+        .unwrap();
+    cluster.converge().await;
+
+    let realm = seeded.realm_id.clone();
+    let redeem: Redeem = Arc::new(move |identity: &EmbeddedIdentityEngine| {
+        identity.verify_email_token(&realm, &token).is_ok()
+    });
+    let wins =
+        redemptions_across_a_leader_change(&cluster, &gates, b"email:verify:", &redeem).await;
+    assert_eq!(
+        wins, 1,
+        "one email-verification link was redeemed {wins} times"
+    );
+
+    cluster.shutdown();
+}
+
+/// A refresh token rotates once across the cluster: a presentation that read
+/// the grant family before another node rotated it must not mint a second
+/// pair after leadership moves to its own node.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_refresh_token_rotates_once_across_a_leader_change() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let (cluster, gates) = gated_cluster(&clock).await;
+    let seeded = seed_realm_user_and_token(&cluster, &clock, "refresh-single-use").await;
+    let leader = cluster.leader();
+    let client = register_client(
+        leader,
+        &seeded.realm_id,
+        "refresh-racer",
+        &["authorization_code", "refresh_token"],
+    );
+    let code = leader
+        .identity
+        .authorize(
+            &seeded.realm_id,
+            &hearth::identity::AuthorizationRequest {
+                client_id: client.clone(),
+                redirect_uri: SINGLE_USE_REDIRECT.to_string(),
+                scope: "openid offline_access".to_string(),
+                state: "st".to_string(),
+                response_type: "code".to_string(),
+                user_id: seeded.user_id.clone(),
+                code_challenge: Some(single_use_challenge()),
+                code_challenge_method: Some(hearth::identity::CodeChallengeMethod::S256),
+                nonce: None,
+                resource: None,
+                amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
+            },
+        )
+        .unwrap()
+        .code()
+        .to_string();
+    let refresh_token = leader
+        .identity
+        .exchange_authorization_code(
+            &seeded.realm_id,
+            &hearth::identity::TokenExchangeRequest {
+                client_id: client.clone(),
+                code,
+                redirect_uri: SINGLE_USE_REDIRECT.to_string(),
+                code_verifier: Some(SINGLE_USE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .unwrap()
+        .refresh_token()
+        .to_string();
+    assert!(!refresh_token.is_empty(), "precondition: a refresh token");
+    clock.advance(1_000_000);
+    cluster.converge().await;
+
+    let realm = seeded.realm_id.clone();
+    let redeem: Redeem = Arc::new(move |identity: &EmbeddedIdentityEngine| {
+        identity
+            .refresh_tokens(
+                &realm,
+                &refresh_token,
+                None,
+                Some(&hearth::identity::RefreshBindContext {
+                    authenticated_client_id: Some(client.clone()),
+                    ..Default::default()
+                }),
+            )
+            .is_ok()
+    });
+    let wins =
+        redemptions_across_a_leader_change(&cluster, &gates, b"oauth:family:", &redeem).await;
+    assert_eq!(wins, 1, "one refresh token was rotated {wins} times");
 
     cluster.shutdown();
 }

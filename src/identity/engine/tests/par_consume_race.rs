@@ -77,7 +77,7 @@ fn a_par_request_uri_is_consumed_once_under_concurrency() {
 }
 
 /// G4 — consumption is decided by a replicated `put_if_absent` on an
-/// `oauth:consumed:par:` marker (linearizable through Raft in cluster mode).
+/// `consumed:par:` marker (linearizable through Raft in cluster mode).
 /// The marker is dated to the `request_uri`'s own expiry plus the clock-skew
 /// grace, the periodic sweep keeps it until then, and reclaims it after.
 #[test]
@@ -135,7 +135,7 @@ fn a_consumed_par_marker_outlives_the_request_uri_then_is_swept() {
     let par_expiry_secs = stored.expires_at.as_micros() / 1_000_000;
     assert_eq!(
         marker_expiry,
-        par_expiry_secs + crate::identity::engine::oauth::CONSUMED_MARKER_GRACE_SECS,
+        par_expiry_secs + crate::identity::engine::single_use::CONSUMED_MARKER_GRACE_SECS,
         "the marker lives for the request_uri's TTL plus the skew grace"
     );
 
@@ -151,7 +151,7 @@ fn a_consumed_par_marker_outlives_the_request_uri_then_is_swept() {
         .is_some());
 
     // Past the grace: reclaimed.
-    clock.advance(crate::identity::engine::oauth::CONSUMED_MARKER_GRACE_SECS * 1_000_000);
+    clock.advance(crate::identity::engine::single_use::CONSUMED_MARKER_GRACE_SECS * 1_000_000);
     let stats = engine.sweep_expired(&realm).expect("sweep");
     assert_eq!(stats.consumed_markers_deleted, 1);
     assert!(engine

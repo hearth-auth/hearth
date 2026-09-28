@@ -98,7 +98,7 @@ pub struct CleanupStats {
     /// was an in-process `HashMap` swept on every `/authorize`; it is now
     /// replicated storage swept here, once per cleanup pass.
     pub oidc_nonces_deleted: u64,
-    /// Single-use redemption markers (`oauth:consumed:`) swept (G4).
+    /// Single-use redemption markers (`consumed:`) swept (G4).
     ///
     /// One marker is claimed per redeemed PAR `request_uri`, authorization
     /// code and device code. It only has to outlive the artifact it guards
@@ -755,7 +755,7 @@ pub(crate) fn sweep_oidc_nonces(
     Ok(deleted)
 }
 
-/// Reclaims expired single-use redemption markers (`oauth:consumed:` — G4).
+/// Reclaims expired single-use redemption markers (`consumed:` — G4).
 ///
 /// The value is an 8-byte little-endian `i64` expiry in Unix seconds: the
 /// guarded artifact's own expiry plus the clock-skew grace. A marker whose
@@ -1469,7 +1469,7 @@ mod tests {
         );
     }
 
-    // ── single-use redemption markers (`oauth:consumed:`) ─────────────────────
+    // ── single-use redemption markers (`consumed:`) ─────────────────────
 
     fn seed_marker(s: &EmbeddedStorageEngine, realm: &RealmId, key: &[u8], expires_at: i64) {
         s.put(realm, key, &expires_at.to_le_bytes())
@@ -1484,11 +1484,19 @@ mod tests {
             keys::encode_consumed_par("par-old"),
             keys::encode_consumed_code("code-old"),
             keys::encode_consumed_device_code("device-old"),
+            keys::encode_consumed_magic_link("magic-old"),
+            keys::encode_consumed_password_reset("reset-old"),
+            keys::encode_consumed_email_verify("verify-old"),
+            keys::encode_consumed_refresh("refresh-old"),
         ];
         let live = [
             keys::encode_consumed_par("par-live"),
             keys::encode_consumed_code("code-live"),
             keys::encode_consumed_device_code("device-live"),
+            keys::encode_consumed_magic_link("magic-live"),
+            keys::encode_consumed_password_reset("reset-live"),
+            keys::encode_consumed_email_verify("verify-live"),
+            keys::encode_consumed_refresh("refresh-live"),
         ];
         for key in &expired {
             seed_marker(&s, &realm, key, NOW_SECS);
@@ -1498,7 +1506,7 @@ mod tests {
         }
 
         let deleted = sweep_consumed_markers(&realm, &s, NOW_SECS).expect("sweep");
-        assert_eq!(deleted, 3, "exactly the three markers at or past expiry go");
+        assert_eq!(deleted, 7, "exactly the markers at or past expiry go");
         for key in &expired {
             assert!(s.get(&realm, key).expect("get").is_none(), "{key:?} kept");
         }

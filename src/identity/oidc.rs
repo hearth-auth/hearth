@@ -1715,7 +1715,7 @@ pub struct StoredPushedAuthorizationRequest {
     pub(crate) created_at: Timestamp,
     /// When this entry expires (created_at + 90 s).
     ///
-    /// Consumption is not recorded here: it is the `oauth:consumed:par:`
+    /// Consumption is not recorded here: it is the `consumed:par:`
     /// marker claimed by one replicated put-if-absent (G4).
     pub(crate) expires_at: Timestamp,
 }
