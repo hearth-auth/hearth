@@ -1,5 +1,10 @@
-//! Every `/required-action/*` form completes in a real browser outside
-//! `--dev`, and refuses a forged cross-site `POST`.
+//! Required-action flows driven through a real-browser cookie jar outside
+//! `--dev`:
+//!
+//! * every `/required-action/*` form completes, and refuses a forged
+//!   cross-site `POST`;
+//! * an enrolment or verification action the user has already satisfied is
+//!   cleared and the login continues — the page never redirects to itself.
 //!
 //! These tests never hand-build a `Cookie:` header. They drive each flow
 //! through a cookie jar that sends only the cookies a browser would send to
@@ -112,6 +117,7 @@ struct Rig {
     realm_id: RealmId,
     client: OAuthClient,
     outbox: Arc<Outbox>,
+    audit: Arc<dyn AuditEngine>,
 }
 
 /// A production-mode (`dev_mode = false`) web router over plain HTTP, in a
@@ -119,6 +125,12 @@ struct Rig {
 /// user lacks is enrolled as an extra required action, so a test offers only
 /// the one it drives).
 fn build_rig(mfa_methods: &[&str]) -> Rig {
+    build_rig_with(mfa_methods, false)
+}
+
+/// [`build_rig`], optionally in a realm that requires a passkey
+/// (`webauthn_required`).
+fn build_rig_with(mfa_methods: &[&str], webauthn_required: bool) -> Rig {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
     std::mem::forget(temp);
@@ -152,6 +164,7 @@ fn build_rig(mfa_methods: &[&str]) -> Rig {
             config: Some(RealmConfig {
                 mfa_methods: (!mfa_methods.is_empty())
                     .then(|| mfa_methods.iter().map(|m| (*m).to_string()).collect()),
+                webauthn_required: webauthn_required.then_some(true),
                 ..Default::default()
             }),
         })
@@ -190,7 +203,7 @@ fn build_rig(mfa_methods: &[&str]) -> Rig {
     let state = WebState::new(
         Arc::clone(&identity),
         rbac,
-        audit,
+        Arc::clone(&audit),
         onboarding,
         CookieSecret::from_bytes(COOKIE_SECRET),
         Some(email),
@@ -206,6 +219,7 @@ fn build_rig(mfa_methods: &[&str]) -> Rig {
         realm_id: realm.id().clone(),
         client,
         outbox,
+        audit,
     }
 }
 
@@ -213,6 +227,16 @@ fn build_rig(mfa_methods: &[&str]) -> Rig {
 /// session cookies the login form would have set (their real `Set-Cookie`
 /// lines, so the jar applies their `Path`).
 fn signed_in_browser(rig: &Rig, email: &str, actions: Vec<RequiredAction>) -> (Browser, UserId) {
+    signed_in_browser_with(rig, email, actions, hearth::identity::MfaProof::Proved)
+}
+
+/// [`signed_in_browser`] with the login's MFA proof spelled out.
+fn signed_in_browser_with(
+    rig: &Rig,
+    email: &str,
+    actions: Vec<RequiredAction>,
+    mfa_proof: hearth::identity::MfaProof,
+) -> (Browser, UserId) {
     let user = rig
         .identity
         .create_user(
@@ -246,7 +270,16 @@ fn signed_in_browser(rig: &Rig, email: &str, actions: Vec<RequiredAction>) -> (B
         .expect("activate");
     let session = rig
         .identity
-        .create_session(&rig.realm_id, user.id(), &SessionContext::default())
+        .create_session(
+            &rig.realm_id,
+            user.id(),
+            // A signed-in browser: the login proved whatever factors the realm
+            // demands (a passkey-requiring realm refuses a session otherwise).
+            &SessionContext {
+                mfa_proof,
+                ..SessionContext::default()
+            },
+        )
         .expect("session");
     let issued = web::auth::issue_auth_cookies(
         &CookieSecret::from_bytes(COOKIE_SECRET),
@@ -685,4 +718,266 @@ async fn an_action_cannot_be_skipped_by_posting_to_its_page() {
             "POST {path} completed {action:?} without doing it"
         );
     }
+}
+
+// ── Already-satisfied actions never loop ────────────────────────────────────
+//
+// A pending enrolment or verification action can already be satisfied when
+// the page is reached: an operator put it on an account that holds the
+// factor, or the user completed it in another tab. `/required-action/enroll-mfa`
+// used to redirect to itself in that case — a loop the browser gives up on.
+// Each such page now records the action as completed, clears it from the
+// account, and continues the login.
+
+/// Enrols TOTP for `user` through the engine, as the account page would.
+fn enrol_totp(rig: &Rig, user: &UserId) {
+    let enrolment = rig
+        .identity
+        .enroll_totp(&rig.realm_id, user)
+        .expect("start TOTP enrolment");
+    rig.identity
+        .verify_totp_enrollment(&rig.realm_id, user, &totp_now(&enrolment.secret_base32))
+        .expect("confirm TOTP enrolment");
+}
+
+fn pending_on_account(rig: &Rig, user: &UserId) -> Vec<RequiredAction> {
+    rig.identity
+        .get_user(&rig.realm_id, user)
+        .expect("lookup")
+        .expect("user")
+        .required_actions()
+        .to_vec()
+}
+
+fn auto_cleared_events(rig: &Rig) -> Vec<hearth::audit::AuditEvent> {
+    rig.audit
+        .query(&hearth::audit::AuditQuery {
+            action: Some(hearth::audit::AuditAction::RequiredActionAutoCleared),
+            ..hearth::audit::AuditQuery::for_realm(rig.realm_id.clone())
+        })
+        .expect("audit query")
+}
+
+/// GETs the page `page` and asserts it did not answer with a redirect back to
+/// itself; returns the response.
+async fn get_without_self_redirect(browser: &mut Browser, page: &str) -> axum::response::Response {
+    let resp = browser.get(page).await;
+    assert_ne!(
+        location(&resp).as_deref(),
+        Some(page),
+        "{page} redirected to itself"
+    );
+    resp
+}
+
+#[tokio::test]
+async fn a_totp_holder_with_a_pending_enrol_mfa_continues_the_login() {
+    let rig = build_rig(&["totp"]);
+    let (mut browser, user) = signed_in_browser(
+        &rig,
+        "sat-totp@example.com",
+        vec![RequiredAction::EnrollMfa],
+    );
+    enrol_totp(&rig, &user);
+    let page = start_flow(&rig, &mut browser).await;
+    assert_eq!(page, "/required-action/enroll-mfa");
+
+    let resp = get_without_self_redirect(&mut browser, &page).await;
+    assert_flow_finished(&resp);
+    assert!(
+        !pending_on_account(&rig, &user).contains(&RequiredAction::EnrollMfa),
+        "the satisfied action is cleared from the account"
+    );
+    assert_eq!(
+        auto_cleared_events(&rig).len(),
+        1,
+        "and recorded as completed"
+    );
+}
+
+#[tokio::test]
+async fn a_satisfied_enrol_mfa_hands_over_to_the_next_pending_action() {
+    let rig = build_rig(&["totp", "email_otp"]);
+    let (mut browser, user) = signed_in_browser(
+        &rig,
+        "sat-totp-next@example.com",
+        vec![RequiredAction::EnrollMfa, RequiredAction::EnrollEmailOtp],
+    );
+    enrol_totp(&rig, &user);
+    let page = start_flow(&rig, &mut browser).await;
+    assert_eq!(page, "/required-action/enroll-mfa");
+
+    let resp = get_without_self_redirect(&mut browser, &page).await;
+    assert!(resp.status().is_redirection(), "got {}", resp.status());
+    let next = "/required-action/ENROLL_EMAIL_OTP";
+    assert_eq!(location(&resp).as_deref(), Some(next));
+
+    // The next action works with the cookie the hand-over set.
+    let html = open(&mut browser, next).await;
+    let resp = submit(
+        &mut browser,
+        &html,
+        "/required-action/ENROLL_EMAIL_OTP/send",
+        &[],
+    )
+    .await;
+    let html = body_text(resp).await;
+    let code = six_digit_code(&rig.outbox.last_mail());
+    let done = submit(
+        &mut browser,
+        &html,
+        "/required-action/ENROLL_EMAIL_OTP/verify",
+        &[("code", &code)],
+    )
+    .await;
+    assert_flow_finished(&done);
+    assert!(!pending_on_account(&rig, &user).contains(&RequiredAction::EnrollMfa));
+}
+
+#[tokio::test]
+async fn completing_enrol_mfa_clears_it_from_the_account() {
+    let rig = build_rig(&["totp"]);
+    let (mut browser, user) = signed_in_browser(
+        &rig,
+        "sat-totp-clear@example.com",
+        vec![RequiredAction::EnrollMfa],
+    );
+    let page = start_flow(&rig, &mut browser).await;
+    let html = open(&mut browser, &page).await;
+    let secret = rig
+        .identity
+        .load_pending_totp_secret(&rig.realm_id, &user)
+        .expect("load secret")
+        .expect("a pending enrolment");
+    let resp = submit(&mut browser, &html, &page, &[("code", &totp_now(&secret))]).await;
+    assert_flow_finished(&resp);
+    assert!(
+        !pending_on_account(&rig, &user).contains(&RequiredAction::EnrollMfa),
+        "an enrolled user must not be sent back to enrolment on the next login"
+    );
+}
+
+#[tokio::test]
+async fn a_verified_phone_with_a_pending_phone_enrolment_continues_the_login() {
+    let rig = build_rig(&["sms"]);
+    let (mut browser, user) = signed_in_browser(
+        &rig,
+        "sat-phone@example.com",
+        vec![RequiredAction::EnrollPhoneOtp],
+    );
+    rig.identity
+        .update_user(
+            &rig.realm_id,
+            &user,
+            &UpdateUserRequest {
+                phone_number: Some(Some("+15555550177".to_string())),
+                phone_verified: Some(true),
+                ..Default::default()
+            },
+        )
+        .expect("verified phone");
+    let page = start_flow(&rig, &mut browser).await;
+    assert_eq!(page, "/required-action/ENROLL_PHONE_OTP");
+
+    let resp = get_without_self_redirect(&mut browser, &page).await;
+    assert_flow_finished(&resp);
+    assert!(!pending_on_account(&rig, &user).contains(&RequiredAction::EnrollPhoneOtp));
+    assert_eq!(auto_cleared_events(&rig).len(), 1);
+}
+
+#[tokio::test]
+async fn an_email_otp_holder_with_a_pending_email_otp_enrolment_continues_the_login() {
+    let rig = build_rig(&["email_otp"]);
+    let (mut browser, user) = signed_in_browser(
+        &rig,
+        "sat-emailotp@example.com",
+        vec![RequiredAction::EnrollEmailOtp],
+    );
+    rig.identity
+        .update_user(
+            &rig.realm_id,
+            &user,
+            &UpdateUserRequest {
+                email_otp_enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .expect("email OTP enabled");
+    let page = start_flow(&rig, &mut browser).await;
+    assert_eq!(page, "/required-action/ENROLL_EMAIL_OTP");
+
+    let resp = get_without_self_redirect(&mut browser, &page).await;
+    assert_flow_finished(&resp);
+    assert!(!pending_on_account(&rig, &user).contains(&RequiredAction::EnrollEmailOtp));
+    assert_eq!(auto_cleared_events(&rig).len(), 1);
+    #[allow(clippy::unwrap_used)] // INVARIANT: test-only mutex, never poisoned.
+    let mail_count = rig.outbox.mail.lock().unwrap().len();
+    assert_eq!(
+        mail_count, 0,
+        "no enrolment code is sent to an enrolled user"
+    );
+}
+
+#[tokio::test]
+async fn a_verified_email_with_a_pending_verification_continues_the_login() {
+    let rig = build_rig(&[]);
+    let (mut browser, user) = signed_in_browser(
+        &rig,
+        "sat-verify@example.com",
+        vec![RequiredAction::VerifyEmail],
+    );
+    let token = rig
+        .identity
+        .issue_email_verification_token(&rig.realm_id, &user)
+        .expect("token");
+    rig.identity
+        .verify_email_token(&rig.realm_id, &token)
+        .expect("verify");
+    rig.identity
+        .update_user(
+            &rig.realm_id,
+            &user,
+            &UpdateUserRequest {
+                required_actions: Some(vec![RequiredAction::VerifyEmail]),
+                ..Default::default()
+            },
+        )
+        .expect("re-add the action");
+    let page = start_flow(&rig, &mut browser).await;
+    assert_eq!(page, "/required-action/VERIFY_EMAIL");
+
+    let resp = get_without_self_redirect(&mut browser, &page).await;
+    assert_flow_finished(&resp);
+    assert!(!pending_on_account(&rig, &user).contains(&RequiredAction::VerifyEmail));
+}
+
+/// A realm that requires a passkey is not satisfied by TOTP, and this page
+/// cannot register a passkey: it must say so rather than loop.
+#[tokio::test]
+async fn a_passkey_requirement_a_totp_holder_cannot_meet_here_does_not_loop() {
+    let rig = build_rig_with(&["totp"], true);
+    // The realm demands a passkey to sign in at all; the session stands in
+    // for one proved at login, while the account itself holds only TOTP.
+    let (mut browser, user) = signed_in_browser_with(
+        &rig,
+        "sat-passkey@example.com",
+        vec![],
+        hearth::identity::MfaProof::ProvedWebAuthn,
+    );
+    enrol_totp(&rig, &user);
+    let page = start_flow(&rig, &mut browser).await;
+    assert_eq!(page, "/required-action/enroll-mfa");
+
+    let resp = get_without_self_redirect(&mut browser, &page).await;
+    assert!(
+        !resp.status().is_redirection(),
+        "the passkey requirement is not met; nothing may be skipped"
+    );
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let html = body_text(resp).await;
+    assert!(
+        html.contains("passkey"),
+        "the page names what is required: {html}"
+    );
+    assert!(auto_cleared_events(&rig).is_empty());
 }
