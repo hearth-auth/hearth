@@ -512,6 +512,17 @@ fn build_email_reputation(security: &SecurityYaml) -> Arc<dyn EmailReputation> {
     }))
 }
 
+/// Whether a realm's [`CidrPolicy`] refuses `ip` (A-9).
+///
+/// The one decision every session-establishing path applies — the web
+/// password form through [`AbuseGuards::pre_auth_login`], and every other path
+/// through the identity engine's session gate (GA audit M13). An empty policy
+/// refuses nothing.
+#[must_use]
+pub fn cidr_policy_denies(policy: &CidrPolicy, ip: IpAddr) -> bool {
+    !policy.is_empty() && compile_filter(policy).check(ip) == CidrOutcome::Deny
+}
+
 /// Compiles a stored [`CidrPolicy`] into a [`CidrFilter`].
 ///
 /// Unparseable entries are dropped rather than failing the request: the

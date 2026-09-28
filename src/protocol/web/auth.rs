@@ -625,6 +625,10 @@ pub struct UiSession {
     /// and an `hx-headers` attribute so HTMX requests echo it back on
     /// every mutation.
     pub csrf: Option<String>,
+    /// What the authentication that opened this session proved about a
+    /// second factor. Gates that demand one for a particular client or role
+    /// read this, never the account's enrolled factors (GA audit B5).
+    pub mfa_proof: crate::identity::MfaProof,
 }
 
 /// Parses and verifies the session cookie. Returns the underlying
@@ -723,6 +727,7 @@ where
             // echoed into the page, or `verify_csrf_form_field` would compare an
             // attacker-chosen value against itself.
             csrf: csrf_cookie_value(parts).map(ToString::to_string),
+            mfa_proof: session.mfa_proof(),
         })
     }
 }

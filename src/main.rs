@@ -2665,6 +2665,27 @@ async fn run_serve(
         format!("{scheme}://{host}:{}", config.server.port)
     });
 
+    // Task 20.13 (audit §4.17#9): construct the abuse-prevention guards from
+    // the `security:` block. Nine guards documented "Shipped" in
+    // `docs/specs/ABUSE.md` had no constructor outside their own test modules;
+    // this is the production path. Every guard is fail-open until an operator
+    // enables it, so an existing config sees no behaviour change.
+    let abuse_guards = Arc::new(hearth::abuse::runtime::AbuseGuards::from_security(
+        &config.security,
+    ));
+    abuse_guards.spawn_background_tasks(&config.security);
+    info!(
+        tarpit = config.security.tarpit.threshold.is_some(),
+        distributed_attack_detector = config.security.distributed_attack_detector.enabled,
+        outbound_volume_shield = config.security.outbound_volume_shield.enabled,
+        cross_realm_aggregation_cap = config.security.cross_realm_aggregation_cap.enabled,
+        bot_signal = config.security.providers.bot_signal.enabled,
+        email_reputation = config.security.providers.email_reputation.enabled,
+        ip_reputation = config.security.ip_reputation.enabled,
+        risk_scorer = config.security.risk_scorer.enabled,
+        "abuse-prevention guards installed"
+    );
+
     let app_state = if config.dev_mode {
         Arc::new(
             AppState::new_dev(
@@ -2691,7 +2712,8 @@ async fn run_serve(
             .with_agent_advanced(true)
             .with_email(Some(Arc::clone(&email_service)))
             .with_public_base_url(public_base_url.clone())
-            .with_sms_transport(config.sms.transport),
+            .with_sms_transport(config.sms.transport)
+            .with_abuse_guards(Arc::clone(&abuse_guards)),
         )
     } else {
         Arc::new(
@@ -2716,7 +2738,8 @@ async fn run_serve(
             .with_agent_advanced(config.agent_auth.capabilities.advanced)
             .with_email(Some(Arc::clone(&email_service)))
             .with_public_base_url(public_base_url.clone())
-            .with_sms_transport(config.sms.transport),
+            .with_sms_transport(config.sms.transport)
+            .with_abuse_guards(Arc::clone(&abuse_guards)),
         )
     };
 
@@ -2732,27 +2755,6 @@ async fn run_serve(
     // The email service still receives the original file path — its
     // `resolve_branding()` reads and inlines local SVGs directly.
     let (web_logo_url, custom_logo) = resolve_web_logo(&config);
-
-    // Task 20.13 (audit §4.17#9): construct the abuse-prevention guards from
-    // the `security:` block. Nine guards documented "Shipped" in
-    // `docs/specs/ABUSE.md` had no constructor outside their own test modules;
-    // this is the production path. Every guard is fail-open until an operator
-    // enables it, so an existing config sees no behaviour change.
-    let abuse_guards = Arc::new(hearth::abuse::runtime::AbuseGuards::from_security(
-        &config.security,
-    ));
-    abuse_guards.spawn_background_tasks(&config.security);
-    info!(
-        tarpit = config.security.tarpit.threshold.is_some(),
-        distributed_attack_detector = config.security.distributed_attack_detector.enabled,
-        outbound_volume_shield = config.security.outbound_volume_shield.enabled,
-        cross_realm_aggregation_cap = config.security.cross_realm_aggregation_cap.enabled,
-        bot_signal = config.security.providers.bot_signal.enabled,
-        email_reputation = config.security.providers.email_reputation.enabled,
-        ip_reputation = config.security.ip_reputation.enabled,
-        risk_scorer = config.security.risk_scorer.enabled,
-        "abuse-prevention guards installed"
-    );
 
     let mut web_state = WebState::new(
         Arc::clone(&identity_engine),

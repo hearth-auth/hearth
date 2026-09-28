@@ -10,6 +10,15 @@ mod common;
 
 use hearth::identity::{CleartextPassword, CreateUserRequest, SessionContext, UpdateUserRequest};
 
+/// A context standing for a completed login. Some users here hold TOTP, and a
+/// session for a user who holds a factor must say it proved one (GA audit B5).
+fn proved() -> SessionContext {
+    SessionContext {
+        mfa_proof: hearth::identity::MfaProof::Proved,
+        ..SessionContext::default()
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // A-41 — Session-ID rotation: old session must not survive re-auth
 // ─────────────────────────────────────────────────────────────────────────────
@@ -43,7 +52,7 @@ async fn a41_pre_planted_session_revoked_on_re_auth() {
     // 1. Attacker plants a session as if the user was already logged in.
     let old_session = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("plant session");
     assert!(
         harness
@@ -65,7 +74,7 @@ async fn a41_pre_planted_session_revoked_on_re_auth() {
     // 3. Create the fresh session (result of successful login).
     let new_session = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("new session");
     assert_ne!(
         old_session.id(),
@@ -118,15 +127,15 @@ async fn a42_revoke_all_user_sessions_revokes_all() {
 
     let s1 = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("s1");
     let s2 = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("s2");
     let s3 = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("s3");
 
     let count = harness
@@ -167,15 +176,15 @@ async fn a42_revoke_all_user_sessions_keeps_specified_session() {
 
     let current = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("current");
     let other_a = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("other_a");
     let other_b = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("other_b");
 
     let count = harness
@@ -259,11 +268,11 @@ async fn a42_set_password_revokes_all_sessions() {
 
     let s1 = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("s1");
     let s2 = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("s2");
 
     harness
@@ -309,11 +318,11 @@ async fn a42_change_password_revokes_all_sessions() {
 
     let s1 = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("s1");
     let s2 = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("s2");
 
     harness
@@ -376,11 +385,11 @@ async fn a42_disable_mfa_revokes_all_sessions() {
 
     let s1 = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("s1");
     let s2 = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("s2");
 
     harness
@@ -420,11 +429,11 @@ async fn a42_email_change_revokes_all_sessions() {
 
     let s1 = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("s1");
     let s2 = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("s2");
 
     harness
@@ -474,7 +483,7 @@ async fn a42_non_email_update_user_does_not_revoke_sessions() {
 
     let session = harness
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&realm, user.id(), &proved())
         .expect("session");
 
     harness

@@ -1693,11 +1693,15 @@ pub async fn admin_test_email(
                 .and_then(|t| t.config().email_branding.clone());
             match email_service.send_test_email(email, realm_branding.as_ref()) {
                 Ok(()) => {
-                    tracing::info!(to = %email, "admin test email sent");
+                    tracing::info!(to = %crate::identity::email::mask_email_address(email), "admin test email sent");
                     Redirect::to("/ui/admin/settings?flash=test_email_sent").into_response()
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, to = %email, "admin test email failed");
+                    tracing::warn!(
+                        error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
+                        to = %crate::identity::email::mask_email_address(email),
+                        "admin test email failed"
+                    );
                     Redirect::to("/ui/admin/settings?flash=test_email_failed").into_response()
                 }
             }

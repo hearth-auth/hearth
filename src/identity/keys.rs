@@ -2265,6 +2265,18 @@ pub(crate) fn sms_resend_count_scan_prefix() -> Vec<u8> {
 /// Prefix for pending Email OTP records.
 const EMAIL_PENDING_OTP_PREFIX: &str = "email:pending_otp:";
 
+/// Prefix for per-address email-OTP resend counters (GA audit M12).
+const EMAIL_RESEND_COUNT_PREFIX: &str = "email:resend_count:";
+
+/// Encodes the per-address email-OTP resend counter key.
+///
+/// Format: `email:resend_count:{address_hash8}` — the first 8 hex characters
+/// of SHA-256(lower-cased address), the same derivation the SMS counter uses.
+/// Value: JSON-serialized `StoredResendCount` (15-minute window).
+pub(crate) fn encode_email_resend_count(address_hash8: &str) -> Vec<u8> {
+    format!("{EMAIL_RESEND_COUNT_PREFIX}{address_hash8}").into_bytes()
+}
+
 /// Encodes the storage key for a pending Email OTP record.
 ///
 /// Format: `email:pending_otp:{nonce_hex}`

@@ -1184,12 +1184,15 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::oidc::PasswordGrantRequest,
     ) -> Result<crate::identity::oidc::PasswordGrantResponse, IdentityError> {
-        // 1. Look up user by email (timing-safe: dummy-hash on miss)
+        // 1. Look up user by email (timing-safe: dummy-hash on miss). The
+        //    dummy verify runs under the REALM's Argon2 parameters: the global
+        //    dummy is cheaper than a realm with a raised cost, so an unknown
+        //    address answered measurably faster (GA audit L14).
         let user = match self.get_user_by_email(realm_id, &request.email)? {
             Some(u) => u,
             None => {
                 let dummy_pw = CleartextPassword::from_string(request.password.clone());
-                let _ = credentials::verify_hash(&dummy_pw, &self.dummy_hash);
+                self.dummy_verify_for_realm(realm_id, &dummy_pw);
                 return Err(IdentityError::InvalidCredential {
                     reason: "verification failed".to_string(),
                 });
@@ -1275,8 +1278,19 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        // 4. Create session and issue token pair. Step 3a-bis has already
-        //    refused this path on an `mfa_required` realm, so the default
+        // 3c. A second factor the user holds binds here too (GA audit B4/B5).
+        //     A recognised device is not a second factor: the fingerprint is an
+        //     HMAC of the client's network and user agent, both of which the
+        //     caller supplies. So a user who holds a factor is sent to the
+        //     step-up grant, which proves it; the engine's session gate would
+        //     refuse the unproved session anyway, with an error that tells the
+        //     client nothing about what to do next.
+        if self.has_second_factor(realm_id, user.id())? {
+            return Err(IdentityError::StepUpChallengeRequired);
+        }
+
+        // 4. Create session and issue token pair. Steps 3a-bis and 3c have
+        //    refused every user who owes a second factor, so the default
         //    (unproven) context is correct here.
         let session = self.create_session(
             realm_id,
@@ -1303,12 +1317,15 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::oidc::StepUpMfaGrantRequest,
     ) -> Result<crate::identity::oidc::PasswordGrantResponse, IdentityError> {
-        // 1. Look up user by email (timing-safe: dummy-hash on miss)
+        // 1. Look up user by email (timing-safe: dummy-hash on miss). The
+        //    dummy verify runs under the REALM's Argon2 parameters: the global
+        //    dummy is cheaper than a realm with a raised cost, so an unknown
+        //    address answered measurably faster (GA audit L14).
         let user = match self.get_user_by_email(realm_id, &request.email)? {
             Some(u) => u,
             None => {
                 let dummy_pw = CleartextPassword::from_string(request.password.clone());
-                let _ = credentials::verify_hash(&dummy_pw, &self.dummy_hash);
+                self.dummy_verify_for_realm(realm_id, &dummy_pw);
                 return Err(IdentityError::InvalidCredential {
                     reason: "verification failed".to_string(),
                 });
@@ -1341,13 +1358,27 @@ impl EmbeddedIdentityEngine {
             return Err(e);
         }
 
+        // 3a. Pending required actions block token issuance, exactly as they
+        //     do for the password grant (HEA-905). This grant skipped them, so
+        //     an operator-forced password change or enrolment could be walked
+        //     around by asking for tokens here (GA audit M11). Checked after
+        //     both factors, so only a caller who holds them learns of it.
+        if !user.required_actions().is_empty() {
+            return Err(IdentityError::RequiredActionsBlocking {
+                actions: user.required_actions().to_vec(),
+            });
+        }
+
         // 4. Create session and issue token pair. Step 3 verified a TOTP or a
-        //    recovery code, so this ceremony proved a second factor.
+        //    recovery code, so this ceremony proved a second factor. The
+        //    client address feeds the realm's `cidr_policy` (GA audit M13).
         let session = self.create_session(
             realm_id,
             user.id(),
             &crate::identity::SessionContext {
                 mfa_proof: crate::identity::MfaProof::Proved,
+                ip_address: request.client_ip.clone(),
+                user_agent_raw: request.user_agent.clone(),
                 ..Default::default()
             },
         )?;

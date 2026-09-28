@@ -257,7 +257,7 @@ pub fn execute_cross_realm_migration(
                 .is_some()
             {
                 warn!(
-                    email = user.email(),
+                    email = %crate::identity::email::mask_email_address(user.email()),
                     src_slug, "skipping user: already exists in destination realm"
                 );
                 report.skipped += 1;
@@ -322,7 +322,7 @@ pub fn execute_cross_realm_migration(
 
         info!(
             user_uuid = %user_id.as_uuid(),
-            email = user.email(),
+            email = %crate::identity::email::mask_email_address(user.email()),
             src_slug,
             "user migrated"
         );

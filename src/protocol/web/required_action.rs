@@ -785,6 +785,35 @@ fn inject_enroll_mfa_if_needed(
         return Ok(());
     }
 
+    if client_or_role_requires_mfa(state, realm, user_id, realm_config, client_id_str)? {
+        actions.push(RequiredAction::EnrollMfa);
+    }
+    Ok(())
+}
+
+/// Whether the client (its `mfa_required`) or one of the user's roles (listed
+/// in the realm's `mfa_required_roles`) demands a second factor for this
+/// authorization.
+///
+/// `Err(())` when a lookup the answer depends on fails: the requirement is
+/// then unknown and the caller refuses. A client or role that does not exist
+/// imposes nothing.
+pub(super) fn client_or_role_requires_mfa(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    realm_config: Option<&crate::identity::RealmConfig>,
+    client_id_str: Option<&str>,
+) -> Result<bool, ()> {
+    let refuse = |what: &str, e: &dyn std::fmt::Display| {
+        tracing::warn!(
+            error = %e,
+            realm_id = %realm.as_uuid(),
+            lookup = what,
+            "required actions: MFA-requirement lookup failed; refusing"
+        );
+    };
+
     // Per-client requirement.
     let client_requires_mfa = match client_id_str
         .and_then(|cid| uuid::Uuid::parse_str(cid).ok())
@@ -798,34 +827,32 @@ fn inject_enroll_mfa_if_needed(
             .unwrap_or(false),
         None => false,
     };
+    if client_requires_mfa {
+        return Ok(true);
+    }
 
     // Per-role requirement: any role the user holds that appears in
     // `realm.config.mfa_required_roles` triggers enforcement.
     let required_roles = realm_config
         .and_then(|c| c.mfa_required_roles.as_deref())
         .unwrap_or_default();
-    let mut role_requires_mfa = false;
-    if !client_requires_mfa && !required_roles.is_empty() {
-        let assignments = state
+    if required_roles.is_empty() {
+        return Ok(false);
+    }
+    let assignments = state
+        .rbac
+        .list_user_assignments(realm, user_id)
+        .map_err(|e| refuse("role assignments", &e))?;
+    for assignment in &assignments {
+        let role = state
             .rbac
-            .list_user_assignments(realm, user_id)
-            .map_err(|e| refuse("role assignments", &e))?;
-        for assignment in &assignments {
-            let role = state
-                .rbac
-                .get_role(realm, &assignment.role_id)
-                .map_err(|e| refuse("role", &e))?;
-            if role.is_some_and(|r| required_roles.iter().any(|req| req == &r.name)) {
-                role_requires_mfa = true;
-                break;
-            }
+            .get_role(realm, &assignment.role_id)
+            .map_err(|e| refuse("role", &e))?;
+        if role.is_some_and(|r| required_roles.iter().any(|req| req == &r.name)) {
+            return Ok(true);
         }
     }
-
-    if client_requires_mfa || role_requires_mfa {
-        actions.push(RequiredAction::EnrollMfa);
-    }
-    Ok(())
+    Ok(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,7 +1042,10 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
                 if let Err(e) =
                     email_svc.send_verification_email(user.email(), &verify_url, None, None, None)
                 {
-                    tracing::warn!(error = %e, "verify_email_page: failed to send verification email");
+                    tracing::warn!(
+                        error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
+                        "verify_email_page: failed to send verification email"
+                    );
                 }
             } else {
                 tracing::warn!("verify_email_page: no email transport configured");
@@ -2102,7 +2132,10 @@ pub async fn enroll_email_otp_send(
     {
         Ok(nonce) => render_enroll_email_otp_verify(&state, &email, Some(&nonce), None),
         Err(e) => {
-            tracing::warn!(error = %e, "enroll_email_otp_send: issue_email_otp failed");
+            tracing::warn!(
+                error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
+                "enroll_email_otp_send: issue_email_otp failed"
+            );
             render_enroll_email_otp_page(
                 &state,
                 &email,

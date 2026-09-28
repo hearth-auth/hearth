@@ -137,6 +137,13 @@ pub struct AppState {
     /// choice: outside dev mode it cannot deliver, so `sms` is refused until
     /// startup wires the real transport via [`Self::with_sms_transport`].
     pub sms_transport: crate::config::SmsTransport,
+
+    /// The abuse-prevention guards shared with the web UI (task 20.13). The
+    /// JSON magic-link endpoint applies their outbound-email caps (A-4, A-50)
+    /// exactly as the browser forgot-password and registration forms do
+    /// (GA audit L17). Defaults to every guard disabled; `serve` wires the
+    /// configured ones via [`Self::with_abuse_guards`].
+    pub abuse_guards: Arc<crate::abuse::runtime::AbuseGuards>,
 }
 
 impl AppState {
@@ -172,6 +179,7 @@ impl AppState {
             email: None,
             public_base_url: "http://localhost:8420".to_string(),
             sms_transport: crate::config::SmsTransport::Log,
+            abuse_guards: Arc::new(crate::abuse::runtime::AbuseGuards::disabled()),
         }
     }
 
@@ -213,6 +221,7 @@ impl AppState {
             email: None,
             public_base_url: "http://localhost:8420".to_string(),
             sms_transport: crate::config::SmsTransport::Log,
+            abuse_guards: Arc::new(crate::abuse::runtime::AbuseGuards::disabled()),
         }
     }
 
@@ -251,7 +260,16 @@ impl AppState {
             email: None,
             public_base_url: "http://localhost:8420".to_string(),
             sms_transport: crate::config::SmsTransport::Log,
+            abuse_guards: Arc::new(crate::abuse::runtime::AbuseGuards::disabled()),
         }
+    }
+
+    /// Installs the configured abuse-prevention guards (see
+    /// [`Self::abuse_guards`]).
+    #[must_use]
+    pub fn with_abuse_guards(mut self, guards: Arc<crate::abuse::runtime::AbuseGuards>) -> Self {
+        self.abuse_guards = guards;
+        self
     }
 
     /// Records the configured `sms.transport` (see [`Self::sms_transport`]).
