@@ -88,6 +88,9 @@ A dry run uses a temporary in-memory store and makes no changes to any data dire
 
 Decide on a data directory. For a fresh deployment this is typically `/var/lib/hearth` (created automatically if it does not exist):
 
+`--data-dir` opens the store as production does, so `HEARTH_MASTER_KEY` must be set to the
+same stable value the server will run with; the command refuses to run without it.
+
 ```bash
 hearth migrate keycloak \
   --file keycloak-export.json \

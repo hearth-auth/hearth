@@ -15,12 +15,14 @@ One-command end-to-end walkthrough of `hearth migrate keycloak`.
 
 1. **Builds** the `hearth` binary (`cargo build --release --features dev-endpoints`).
 2. **Creates** a throwaway temp data dir (`mktemp -d`), deleted on exit.
-3. **Migrates** `sample-export.json` into that dir via `hearth migrate keycloak`.
+3. **Migrates** `sample-export.json` into that dir via `hearth migrate keycloak`. The
+   importer opens the store the way production does, so it needs `HEARTH_MASTER_KEY`;
+   `run.sh` generates a random one for the throwaway store when it is unset.
 4. **Boots** `hearth serve --dev` pointing at the migrated store (`HEARTH_DEV_DATA_DIR`).
 5. **Runs** `verify.mjs` — logs in as a migrated user, checks roles and JWKS.
 6. **Tears down** and exits with `verify.mjs`'s status code.
 
-Prerequisites: Rust toolchain, Node.js ≥ 18.
+Prerequisites: Rust toolchain, Node.js ≥ 18, `openssl` (generates a throwaway `HEARTH_MASTER_KEY` when none is exported).
 
 ---
 
@@ -78,6 +80,9 @@ Use `--users realm_file` (not `--users different_files`) so all users land in on
 ## Importing your own export
 
 ```bash
+# The store's host key: the SAME stable value the server will run with.
+export HEARTH_MASTER_KEY=<64 hex chars from your secrets manager>
+
 # Migrate into a permanent data dir (not a tempdir)
 hearth migrate keycloak \
   --file keycloak-export.json \

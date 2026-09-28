@@ -63,6 +63,28 @@ trap cleanup EXIT
 echo "▸ building hearth (release)"
 (cd "$REPO_ROOT" && cargo build --release --features dev-endpoints --bin hearth --quiet)
 
+# ── Storage master key ──────────────────────────────────────────────────────────
+# `hearth migrate … --data-dir` opens the store the way production does: the
+# storage host key comes from HEARTH_MASTER_KEY only, and the command refuses
+# to run without it. This throwaway demo store gets a random key per run; it
+# is exported, so the `serve --dev` below reopens the same store with it.
+# A PRODUCTION deployment must supply a STABLE key from its secrets manager —
+# lose it and every byte in the data directory is unrecoverable.
+if [[ -z "${HEARTH_MASTER_KEY:-}" ]]; then
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "HEARTH_MASTER_KEY is unset and openssl is not installed to generate one;" \
+      "export HEARTH_MASTER_KEY=<64 hex chars> and re-run" >&2
+    exit 1
+  fi
+  HEARTH_MASTER_KEY="$(openssl rand -hex 32)"
+  echo "▸ HEARTH_MASTER_KEY unset — generated a random key for this run's throwaway store"
+fi
+if [[ ! "$HEARTH_MASTER_KEY" =~ ^[0-9a-fA-F]{64}$ ]]; then
+  echo "HEARTH_MASTER_KEY must be exactly 64 hex characters (openssl rand -hex 32)" >&2
+  exit 1
+fi
+export HEARTH_MASTER_KEY
+
 # ── Migrate ───────────────────────────────────────────────────────────────────
 
 echo "▸ running auth0 migration (data dir: $DATA_DIR)"
