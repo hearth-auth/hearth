@@ -483,10 +483,11 @@ impl KeycloakImporter {
         };
 
         // Keycloak realm exports don't always list every grant type;
-        // default to authorization_code for confidential + public flows.
+        // default to authorization_code (+ refresh_token, which Keycloak
+        // clients use by default) for confidential + public flows.
         // Additional grant types can be added post-import via the admin
         // API.
-        let grant_types = vec!["authorization_code".to_string()];
+        let grant_types = crate::identity::oidc::default_grant_types();
 
         let request = ImportClientRequest {
             id,

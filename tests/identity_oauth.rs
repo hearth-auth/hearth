@@ -77,7 +77,10 @@ fn register_test_client(engine: &EmbeddedIdentityEngine, realm: &RealmId) -> OAu
                 client_name: "Test App".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -216,7 +219,10 @@ fn client_credentials_unsupported_grant_type() {
                 client_name: "Code-Flow App".to_string(),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
                 generated_client_secret: Some(secret.clone()),
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 ..Default::default()
             },
         )
@@ -238,7 +244,10 @@ fn client_credentials_unsupported_grant_type() {
                 client_name: "Public App".to_string(),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -317,7 +326,10 @@ fn refresh_token_rotation_issues_new_pair() {
                 client_name: "Rotation App".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -409,7 +421,10 @@ fn refresh_token_rejects_forged_legacy_payload_without_fid() {
                 client_name: "Forgery App".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -530,7 +545,10 @@ fn revoke_refresh_token_invalidates_family() {
                 client_name: "Revoke App".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -721,7 +739,10 @@ fn adversarial_refresh_token_theft_detection() {
                 client_name: "Theft Test Client".to_string(),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -966,7 +987,7 @@ mod oauth_proptests {
                     client_name: "Prop Test Client".to_string(),
                     redirect_uris: vec!["https://app.example.com/cb".to_string()],
                     client_secret: None,
-                    grant_types: vec!["authorization_code".to_string()],
+                    grant_types: vec!["authorization_code".to_string(), "refresh_token".to_string()],
                     require_consent: true,
                     client_logo_url: None,
                                         ..Default::default()
@@ -1145,7 +1166,7 @@ mod oauth_proptests {
                     client_name: "Rotate Client".to_string(),
                     redirect_uris: vec!["https://app.example.com/cb".to_string()],
                     client_secret: None,
-                    grant_types: vec!["authorization_code".to_string()],
+                    grant_types: vec!["authorization_code".to_string(), "refresh_token".to_string()],
                     require_consent: true,
                     client_logo_url: None,
                                         ..Default::default()
@@ -1258,7 +1279,10 @@ fn setup_consent_env() -> (
                 client_name: "Consent Test App".to_string(),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -1384,7 +1408,10 @@ fn revoke_all_consents_drops_every_user_record() {
                 client_name: "Second Client".to_string(),
                 redirect_uris: vec!["https://other.example.com/cb".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -1629,7 +1656,10 @@ fn deleting_a_client_revokes_its_outstanding_refresh_tokens() {
                 client_name: "Doomed Confidential App".to_string(),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
                 client_secret: Some("delete-me-secret-abcdefgh!".to_string()),
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()

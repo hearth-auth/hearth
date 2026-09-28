@@ -282,6 +282,12 @@ struct BackupClient {
     redirect_uris: Vec<String>,
     #[serde(default)]
     grant_types: Vec<String>,
+    /// `false` on a record written before `grant_types` governed the
+    /// refresh-token grant (GA audit M7): such a client received refresh
+    /// tokens whatever it listed, and is restored with `refresh_token` added
+    /// so the restore does not silently take them away.
+    #[serde(default)]
+    grant_types_enforced: bool,
     #[serde(default)]
     trust_level: ClientTrustLevel,
     #[serde(default)]
@@ -1494,7 +1500,23 @@ impl BackupImporter {
                 // No plaintext exists; the stored hash is restored verbatim.
                 client_secret: None,
                 client_secret_hash: client.client_secret_hash,
-                grant_types: client.grant_types,
+                grant_types: {
+                    let mut grants = client.grant_types;
+                    // Only the grants that ever minted refresh tokens.
+                    let minted_refresh = grants.iter().any(|g| {
+                        g == crate::identity::oidc::GRANT_AUTHORIZATION_CODE
+                            || g == crate::identity::oidc::GRANT_DEVICE_CODE
+                    });
+                    if !client.grant_types_enforced
+                        && minted_refresh
+                        && !grants
+                            .iter()
+                            .any(|g| g == crate::identity::oidc::GRANT_REFRESH_TOKEN)
+                    {
+                        grants.push(crate::identity::oidc::GRANT_REFRESH_TOKEN.to_string());
+                    }
+                    grants
+                },
                 slug: if client.slug.is_empty() {
                     None
                 } else {

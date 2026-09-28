@@ -3743,6 +3743,12 @@ impl EmbeddedIdentityEngine {
             // B9: an archived client's families are revoked on archival; this
             // gate also covers a family written while archival was running.
             Self::refuse_inactive_client(&client)?;
+            // The client must hold the refresh-token grant (GA audit M7), so
+            // withdrawing it — the console's refresh toggle — takes effect on
+            // refresh tokens already issued.
+            if !client.allows_refresh_token() {
+                return Err(IdentityError::UnsupportedGrantType);
+            }
             let realm_fapi = self
                 .get_realm(realm_id)?
                 .ok_or(IdentityError::RealmNotFound)?
@@ -3942,11 +3948,6 @@ impl EmbeddedIdentityEngine {
                     reason: format!("rbac resolve failed: {e}"),
                 },
             })?;
-        let perm_strs: Vec<String> = resolved
-            .permissions
-            .iter()
-            .map(|p| p.as_str().to_string())
-            .collect();
 
         let resolved_client = if let Some(ref cid) = family.client_id {
             self.get_client(realm_id, cid)?
@@ -4000,18 +4001,19 @@ impl EmbeddedIdentityEngine {
             &permissions,
             &custom,
         )?;
-        let custom = crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+        let mut custom =
+            crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+        if let Some(ref cid) = family.client_id {
+            crate::identity::tokens::TokenClaims::insert_client_id(&mut custom, cid);
+        }
 
         let embedded = authz_mode == AccessTokenAuthorization::Embedded;
-        let effective_perms: Vec<String> = if embedded {
-            if permissions.is_empty() {
-                perm_strs
-            } else {
-                permissions
-            }
-        } else {
-            Vec::new()
-        };
+        // The claim profile's output is final: an empty list means the profile
+        // released no permissions to this client (a third-party client under
+        // the default `first_party_only` gate). Falling back to the resolved
+        // set here handed every third-party client the user's full authority
+        // on its first refresh (GA audit B1).
+        let effective_perms: Vec<String> = if embedded { permissions } else { Vec::new() };
         let effective_roles = if embedded { roles } else { Vec::new() };
         let effective_groups = if embedded { groups } else { Vec::new() };
 
@@ -6814,7 +6816,7 @@ impl EmbeddedIdentityEngine {
 
         let now = self.clock.now();
         let grant_types = if request.grant_types.is_empty() {
-            vec!["authorization_code".to_string()]
+            crate::identity::oidc::default_grant_types()
         } else {
             request.grant_types.clone()
         };
@@ -9120,17 +9122,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     reason: format!("rbac resolve failed: {e}"),
                 },
             })?;
-        let perm_strs: Vec<String> = resolved
-            .permissions
-            .iter()
-            .map(|p| p.as_str().to_string())
-            .collect();
 
         // Resolve the OAuth client: use the caller-supplied client_id when
         // present, otherwise fall back to the first-party sentinel used by
         // the legacy session-token path.
+        // A named client that does not exist is refused rather than replaced
+        // by the first-party sentinel, which would release the user's
+        // permissions to whoever holds the token (GA audit B1).
         let resolved_client = if let Some(ref cid) = ctx.client_id {
-            self.get_client(realm_id, cid)?
+            Some(
+                self.get_client(realm_id, cid)?
+                    .ok_or(IdentityError::InvalidClient)?,
+            )
         } else {
             None
         };
@@ -9234,7 +9237,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             &permissions,
             &custom,
         )?;
-        let custom = crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+        let mut custom =
+            crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+        if let Some(ref cid) = ctx.client_id {
+            crate::identity::tokens::TokenClaims::insert_client_id(&mut custom, cid);
+        }
 
         let token_audit_ctx = AuditContext {
             actor: Actor::User(user_id.clone()),
@@ -9258,12 +9265,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             ..self.config.token.clone()
         };
         let realm_issuer = self.realm_issuer_url(realm_id);
+        // The claim profile's output is final — see `rotate_grant_family`: an
+        // empty list is the profile withholding permissions from this client,
+        // not a gap to fill from the resolved set (GA audit B1).
         let effective_perms = if authz_mode == AccessTokenAuthorization::Embedded {
-            if permissions.is_empty() {
-                &perm_strs
-            } else {
-                &permissions
-            }
+            &permissions
         } else {
             &empty_perm_strs
         };
@@ -9736,7 +9742,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &AuthorizationRequest,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        self.authorize_inner(realm_id, request)
+        self.authorize_inner(realm_id, request, None)
+    }
+
+    fn authorize_non_interactive(
+        &self,
+        realm_id: &RealmId,
+        request: &AuthorizationRequest,
+        session_id: &SessionId,
+    ) -> Result<AuthorizationResponse, IdentityError> {
+        self.authorize_inner(realm_id, request, Some(session_id))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -9866,6 +9881,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
     ) -> Result<(), IdentityError> {
         self.approve_device_inner(realm_id, user_code, user_id)
+    }
+
+    fn pending_device_authorization(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+    ) -> Result<Option<crate::identity::oidc::PendingDeviceAuthorization>, IdentityError> {
+        self.pending_device_authorization_inner(realm_id, user_code)
+    }
+
+    fn deny_device(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+        user_id: &UserId,
+    ) -> Result<(), IdentityError> {
+        self.deny_device_inner(realm_id, user_code, user_id)
     }
 
     fn poll_device_token(
@@ -21281,7 +21313,10 @@ mod tests {
                     client_name: "Test App".to_string(),
                     redirect_uris: vec!["https://app.example.com/callback".to_string()],
                     client_secret: None,
-                    grant_types: vec!["authorization_code".to_string()],
+                    grant_types: vec![
+                        "authorization_code".to_string(),
+                        "refresh_token".to_string(),
+                    ],
                     require_consent: true,
                     client_logo_url: None,
                     ..Default::default()

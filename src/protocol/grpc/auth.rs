@@ -84,7 +84,15 @@ pub fn authenticate_admin(md: &MetadataMap, state: &GrpcState) -> Result<AdminAu
                 | "hearth.agents.admin"
         )
     });
-    if !is_admin {
+    // A token held by a third-party client never administers the realm
+    // (GA audit B1) — parity with the REST `extract_admin_auth`.
+    if !is_admin
+        || !crate::protocol::admin_auth::token_client_may_administer(
+            state.identity.as_ref(),
+            &realm_id,
+            &claims,
+        )
+    {
         return Err(Status::new(Code::PermissionDenied, "forbidden"));
     }
 

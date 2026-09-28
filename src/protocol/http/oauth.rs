@@ -334,11 +334,15 @@ const MAGIC_LINK_GRANT_TYPE: &str = "urn:hearth:grant-type:magic-link";
 ///   `MfaRequired` for a session that proved none, and the link is already
 ///   spent, so it cannot be replayed;
 /// * a client address the realm's `cidr_policy` denies, via the same gate.
+///
+/// The tokens are never sender-constrained — `issue_tokens` binds no `cnf` —
+/// so the response always says `Bearer`, whether or not the request carried a
+/// DPoP proof. Answering `DPoP` for an unbound token told the client its token
+/// was bound when a thief could replay it as a plain bearer (GA audit L7).
 fn exchange_magic_link(
     state: &Arc<AppState>,
     realm_id: &crate::core::RealmId,
     token: &str,
-    dpop_jkt: Option<&str>,
     client_ip: Option<&str>,
     user_agent: Option<&str>,
 ) -> Result<serde_json::Value, crate::identity::IdentityError> {
@@ -374,7 +378,7 @@ fn exchange_magic_link(
     Ok(serde_json::json!({
         "access_token": tokens.access_token(),
         "refresh_token": tokens.refresh_token(),
-        "token_type": if dpop_jkt.is_some() { "DPoP" } else { "Bearer" },
+        "token_type": "Bearer",
         "expires_in": 900,
     }))
 }
@@ -1988,9 +1992,16 @@ async fn register_client_dynamic(
         Err(resp) => return resp,
     };
 
+    // RFC 7591 §2: omitted `grant_types` means `authorization_code` alone —
+    // the realm DCR twin's default. Refresh tokens now follow `grant_types`
+    // (GA audit M7), so a DCR client that wants them registers for them.
+    let grant_types_omitted = body.grant_types.is_empty();
     // Strip any client-supplied secret — the server generates its own.
     // RFC 7591 DCR is anonymous; callers cannot self-grant first-party trust.
     let mut request = crate::identity::RegisterClientRequest::from(body);
+    if grant_types_omitted {
+        request.grant_types = vec![crate::identity::oidc::GRANT_AUTHORIZATION_CODE.to_string()];
+    }
     request.client_secret = None;
     request.trust_level = crate::identity::ClientTrustLevel::ThirdParty;
     request.jwks = extras.jwks.clone();
@@ -2146,11 +2157,18 @@ async fn authorize(
     // user identity.  The body's `user_id` field is ignored to prevent unauthenticated
     // account takeover via caller-supplied user IDs.
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let authenticated_user_id =
-        match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
-            Ok(uid) => uid,
-            Err(e) => return e.into_response(),
-        };
+    // The bearer token's session is kept: the engine judges the factor it
+    // proved (GA audit B2/B5).
+    let (authenticated_user_id, bearer_session) = match super::auth::extract_user_session_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
+        Ok(auth) => auth,
+        Err(e) => return e.into_response(),
+    };
 
     // PAR path: when `request_uri` is present, consume the stored entry to
     // obtain the pre-validated parameters and set `via_par = true`.
@@ -2235,7 +2253,12 @@ async fn authorize(
         }
     };
 
-    match state.identity.authorize(&realm_id, &request) {
+    // No consent screen here: issue only for a client that needs no consent
+    // or one the user already consented to (GA audit B2).
+    match state
+        .identity
+        .authorize_non_interactive(&realm_id, &request, &bearer_session)
+    {
         Ok(response) => (
             StatusCode::OK,
             Json(proto_to_rest_json(&pb::AuthorizationResponse::from(
@@ -3146,7 +3169,6 @@ async fn token_exchange_impl(
                 &state,
                 &realm_id,
                 &link_token,
-                dpop_jkt.as_deref(),
                 Some(client_ip.as_str()),
                 user_agent,
             ) {
@@ -3716,7 +3738,10 @@ async fn realm_authorize_browser_redirect(
 async fn realm_authorize(
     State(state): State<Arc<AppState>>,
     method: axum::http::Method,
-    uri: axum::http::Uri,
+    // `nest("/realms/{realm_name}")` strips the prefix from `Uri`, so the path
+    // the client signed in its DPoP proof survives only in `OriginalUri`
+    // (GA audit L8; the `realm_userinfo` twin was fixed the same way).
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: HeaderMap,
     Path(realm_name): Path<String>,
     Json(body): Json<pb::AuthorizationRequest>,
@@ -3728,11 +3753,18 @@ async fn realm_authorize(
 
     // HEA-1721: authenticate the caller; their token's `sub` is the authoritative user identity.
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let authenticated_user_id =
-        match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
-            Ok(uid) => uid,
-            Err(e) => return e.into_response(),
-        };
+    // The bearer token's session is kept: the engine judges the factor it
+    // proved (GA audit B2/B5).
+    let (authenticated_user_id, bearer_session) = match super::auth::extract_user_session_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
+        Ok(auth) => auth,
+        Err(e) => return e.into_response(),
+    };
 
     let mut request = match proto_authorize_to_domain(body) {
         Ok(r) => r,
@@ -3746,7 +3778,12 @@ async fn realm_authorize(
     };
     // Override body-supplied user_id with the authenticated identity (HEA-1721).
     request.user_id = authenticated_user_id;
-    match state.identity.authorize(&realm_id, &request) {
+    // No consent screen here: issue only for a client that needs no consent
+    // or one the user already consented to (GA audit B2).
+    match state
+        .identity
+        .authorize_non_interactive(&realm_id, &request, &bearer_session)
+    {
         Ok(response) => (
             StatusCode::OK,
             Json(proto_to_rest_json(&pb::AuthorizationResponse::from(
@@ -4322,7 +4359,6 @@ async fn realm_token_exchange(
                 &state,
                 &realm_id,
                 &link_token,
-                dpop_jkt.as_deref(),
                 Some(client_ip.as_str()),
                 user_agent,
             ) {

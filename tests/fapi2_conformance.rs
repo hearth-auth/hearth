@@ -129,7 +129,10 @@ fn register_fapi2_client(h: &common::TestHarness, realm: &RealmId) -> hearth::co
                 client_name: "FAPI2 Test Client".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: false,
                 jwks: Some(minimal_jwks()),
                 profile: ClientProfile::Fapi2,
@@ -150,7 +153,10 @@ fn register_std_client(h: &common::TestHarness, realm: &RealmId) -> hearth::core
                 client_name: "Standard Test Client".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
                 client_secret: Some("test-secret".to_string()),
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: false,
                 ..Default::default()
             },
@@ -192,7 +198,10 @@ async fn fapi2_reg01_client_secret_rejected() {
                 client_name: "FAPI2 Bad Client".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
                 client_secret: Some("should-be-rejected".to_string()),
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: false,
                 jwks: Some(minimal_jwks()),
                 profile: ClientProfile::Fapi2,
@@ -222,7 +231,10 @@ async fn fapi2_reg02_no_jwks_rejected() {
                 client_name: "FAPI2 No-JWKS Client".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: false,
                 jwks: None,
                 jwks_uri: None,
@@ -253,7 +265,10 @@ async fn fapi2_reg03_with_jwks_succeeds() {
                 client_name: "FAPI2 Valid Client".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: false,
                 jwks: Some(minimal_jwks()),
                 profile: ClientProfile::Fapi2,
@@ -476,7 +491,10 @@ async fn fapi2_jarm01_s_hash_present_for_fapi2_client() {
                 client_name: "FAPI2 JARM Client".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: false,
                 jwks: Some(minimal_jwks()),
                 authorization_signed_response_alg: Some("EdDSA".to_string()),
@@ -559,7 +577,10 @@ async fn fapi2_jarm02_no_s_hash_for_standard_client() {
                 client_name: "Standard JARM Client".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
                 client_secret: Some("secret".to_string()),
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: false,
                 authorization_signed_response_alg: Some("EdDSA".to_string()),
                 profile: ClientProfile::Standard, // not FAPI2
@@ -905,7 +926,10 @@ async fn fapi2_mut01_update_profile_to_fapi2_with_secret_rejected() {
                 client_name: "Std Confidential Client".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
                 client_secret: Some("my-secret".to_string()),
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: false,
                 ..Default::default()
             },
@@ -946,7 +970,10 @@ async fn fapi2_mut02_update_profile_to_fapi2_on_public_client_succeeds() {
                 client_name: "Std Public Client With JWKS".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: false,
                 jwks: Some(minimal_jwks()),
                 ..Default::default()
@@ -999,7 +1026,10 @@ async fn fapi2_mut04_regenerate_secret_on_standard_client_succeeds() {
                 client_name: "Standard Confidential Client".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
                 client_secret: Some("initial-secret".to_string()),
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: false,
                 ..Default::default()
             },

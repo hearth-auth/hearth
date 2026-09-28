@@ -115,7 +115,15 @@ pub(crate) fn extract_admin_auth(
                 | "hearth.agents.admin"
         )
     });
-    if !is_admin {
+    // A token held by a third-party client never administers the realm, even
+    // when a claim profile releases admin permissions to it (GA audit B1).
+    if !is_admin
+        || !crate::protocol::admin_auth::token_client_may_administer(
+            state.identity.as_ref(),
+            &realm_id,
+            &claims,
+        )
+    {
         return Err((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "forbidden"})),
@@ -1092,6 +1100,41 @@ pub(crate) fn extract_user_auth(
     htm: &str,
     htu: &str,
 ) -> Result<UserId, (StatusCode, Json<serde_json::Value>)> {
+    user_auth_claims(headers, state, realm_id, htm, htu).map(|(user_id, _)| user_id)
+}
+
+/// [`extract_user_auth`] that also returns the session behind the bearer
+/// token, for a surface that must judge what that session proved (the
+/// non-interactive `/authorize`, GA audit B2/B5). A token whose `sid` names
+/// no session (a sessionless token) is refused.
+pub(crate) fn extract_user_session_auth(
+    headers: &HeaderMap,
+    state: &AppState,
+    realm_id: &RealmId,
+    htm: &str,
+    htu: &str,
+) -> Result<(UserId, crate::core::SessionId), (StatusCode, Json<serde_json::Value>)> {
+    let (user_id, claims) = user_auth_claims(headers, state, realm_id, htm, htu)?;
+    let session_id = claims.sid.parse::<crate::core::SessionId>().map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid_token"})),
+        )
+    })?;
+    Ok((user_id, session_id))
+}
+
+/// Validates the bearer token (with its DPoP binding) and parses its user.
+fn user_auth_claims(
+    headers: &HeaderMap,
+    state: &AppState,
+    realm_id: &RealmId,
+    htm: &str,
+    htu: &str,
+) -> Result<
+    (UserId, std::sync::Arc<crate::identity::TokenClaims>),
+    (StatusCode, Json<serde_json::Value>),
+> {
     let Some(token) = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -1107,14 +1150,15 @@ pub(crate) fn extract_user_auth(
 
     // sub is "user_{uuid}" — strip the prefix before UUID parse.
     let sub_str = claims.sub.strip_prefix("user_").unwrap_or(&claims.sub);
-    uuid::Uuid::parse_str(sub_str)
+    let user_id = uuid::Uuid::parse_str(sub_str)
         .map(UserId::new)
         .map_err(|_| {
             (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "invalid_token"})),
             )
-        })
+        })?;
+    Ok((user_id, claims))
 }
 
 /// Validates a bearer `token` and enforces the DPoP sender-constraint

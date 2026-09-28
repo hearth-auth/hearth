@@ -594,7 +594,7 @@ async fn oauth_path_permissions_cap_refuses_issuance() {
                 client_name: "test-client".into(),
                 redirect_uris: vec!["http://localhost/callback".into()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".into()],
+                grant_types: vec!["authorization_code".into(), "refresh_token".into()],
                 require_consent: false,
                 trust_level: hearth::identity::ClientTrustLevel::FirstParty,
                 ..Default::default()
@@ -722,7 +722,7 @@ async fn refresh_re_resolves_claims_instead_of_copying() {
                 client_name: "refresh-claims-client".into(),
                 redirect_uris: vec!["http://localhost/callback".into()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".into()],
+                grant_types: vec!["authorization_code".into(), "refresh_token".into()],
                 require_consent: false,
                 trust_level: hearth::identity::ClientTrustLevel::FirstParty,
                 ..Default::default()

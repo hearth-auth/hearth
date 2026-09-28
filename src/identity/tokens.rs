@@ -377,6 +377,41 @@ pub struct TokenClaims {
     pub custom: BTreeMap<String, serde_json::Value>,
 }
 
+/// Name of the RFC 9068 §2.2 `client_id` claim: the OAuth client an access
+/// token was issued to.
+///
+/// It is carried in [`TokenClaims::custom`] rather than as a typed field so
+/// that adding it touched no claim literal. Neither a claim mapper
+/// (`TIER1_CLAIMS`) nor the pre-token webhook (`RESERVED_CLAIM_KEYS`) may
+/// write this name, so only the issuing grant sets it.
+///
+/// `azp` is deliberately NOT used for this: the RFC 7662 audience gate reads
+/// `azp` to narrow who may introspect a token, and a resource server must keep
+/// introspecting user access tokens issued to other clients (GA audit B1).
+pub const CLIENT_ID_CLAIM: &str = "client_id";
+
+impl TokenClaims {
+    /// Returns the client this access token was issued to (RFC 9068 §2.2
+    /// `client_id`), or `None` for a token no client was issued — a Hearth
+    /// first-party session token, or one minted before the claim existed.
+    pub fn client_id(&self) -> Option<&str> {
+        self.custom
+            .get(CLIENT_ID_CLAIM)
+            .and_then(serde_json::Value::as_str)
+    }
+
+    /// Records `client_id` as the client an access token is issued to.
+    pub(crate) fn insert_client_id(
+        custom: &mut BTreeMap<String, serde_json::Value>,
+        client_id: &crate::core::ClientId,
+    ) {
+        custom.insert(
+            CLIENT_ID_CLAIM.to_string(),
+            serde_json::Value::String(client_id.to_string()),
+        );
+    }
+}
+
 /// Minimal JWT claims for RFC 7523 JWT Bearer assertion validation.
 ///
 /// Client-issued assertions only carry standard JWT claims — they do not

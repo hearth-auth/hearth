@@ -87,6 +87,7 @@ fn register(h: &common::TestHarness, realm: &RealmId, secret: Option<&str>) -> C
                     "authorization_code".to_string(),
                     "client_credentials".to_string(),
                     "refresh_token".to_string(),
+                    "urn:ietf:params:oauth:grant-type:device_code".to_string(),
                 ],
                 trust_level: ClientTrustLevel::FirstParty,
                 ..RegisterClientRequest::default()

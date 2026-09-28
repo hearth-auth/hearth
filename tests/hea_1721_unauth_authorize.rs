@@ -62,6 +62,7 @@ async fn setup() -> TestEnv {
                 redirect_uris: vec![REDIRECT_URI.to_string()],
                 client_secret: None,
                 require_consent: false,
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
                 grant_types: vec!["authorization_code".to_string()],
                 ..Default::default()
             },
@@ -278,6 +279,7 @@ async fn grpc_unauth_authorize_rejected() {
                 redirect_uris: vec![REDIRECT_URI.to_string()],
                 client_secret: None,
                 require_consent: false,
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
                 grant_types: vec!["authorization_code".to_string()],
                 ..Default::default()
             },

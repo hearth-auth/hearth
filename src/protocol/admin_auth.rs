@@ -461,6 +461,33 @@ impl JwksRateLimiter {
     }
 }
 
+/// Returns whether an access token may be used against an administrative
+/// surface, judged by the client it was issued to (GA audit B1).
+///
+/// A token that names no client (RFC 9068 `client_id`) is a Hearth
+/// first-party session token and passes. A token issued to a client passes
+/// only while that client exists in `realm_id` and is
+/// [`crate::identity::ClientTrustLevel::FirstParty`]: a third-party app a user
+/// signed in to must never administer the realm on the user's behalf, even
+/// when a claim profile releases the user's admin permissions to it. An
+/// unparseable claim, a deleted client or a storage error fail closed.
+pub(crate) fn token_client_may_administer(
+    identity: &dyn crate::identity::IdentityEngine,
+    realm_id: &RealmId,
+    claims: &crate::identity::TokenClaims,
+) -> bool {
+    let Some(raw) = claims.client_id() else {
+        return true;
+    };
+    let Ok(client_id) = raw.parse::<ClientId>() else {
+        return false;
+    };
+    matches!(
+        identity.get_client(realm_id, &client_id),
+        Ok(Some(client)) if client.trust_level() == crate::identity::ClientTrustLevel::FirstParty
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -249,7 +249,7 @@ pub async fn admin_onboarding_app_get(
         form_app_name: String::new(),
         form_redirect_uri: String::new(),
         form_grant_authorization_code: true,
-        form_grant_refresh_token: false,
+        form_grant_refresh_token: true,
         form_grant_client_credentials: false,
     })
 }

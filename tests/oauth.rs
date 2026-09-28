@@ -179,7 +179,10 @@ async fn device_authorization_full_flow() {
                 client_name: "TV App".to_string(),
                 redirect_uris: vec![],
                 client_secret: None,
-                grant_types: vec!["urn:ietf:params:oauth:grant-type:device_code".to_string()],
+                grant_types: vec![
+                    "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -266,7 +269,10 @@ async fn refresh_token_rotation_e2e() {
                 client_name: "Rotation Test App".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -429,7 +435,10 @@ async fn auth_code_flow_iss_matches_discovery_issuer() {
                 client_name: "HEA-2110 Issuer App".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -541,7 +550,10 @@ async fn conformance_rfc7662_introspection_response() {
                 client_name: "RFC 7662 Test".to_string(),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -704,7 +716,10 @@ async fn conformance_rfc8628_device_authorization() {
                 client_name: "RFC 8628 Conformance".to_string(),
                 redirect_uris: vec![],
                 client_secret: None,
-                grant_types: vec!["urn:ietf:params:oauth:grant-type:device_code".to_string()],
+                grant_types: vec![
+                    "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -854,7 +869,10 @@ async fn archived_client_blocks_and_restore_allows_authorize() {
                 client_name: "Archive Test App".to_string(),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: false,
                 client_logo_url: None,
                 ..Default::default()
@@ -1303,7 +1321,10 @@ async fn device_grant_refresh_token_carries_fid() {
                 client_name: "Device Grant Fid".to_string(),
                 redirect_uris: vec![],
                 client_secret: None,
-                grant_types: vec!["urn:ietf:params:oauth:grant-type:device_code".to_string()],
+                grant_types: vec![
+                    "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()

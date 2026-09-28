@@ -2345,7 +2345,7 @@ async fn post_device(rig: &LoginRig, cookies: &str, user_code: &str) -> Response
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, cookies)
                 .body(Body::from(format!(
-                    "user_code={user_code}&csrf_token={CSRF}"
+                    "user_code={user_code}&decision=approve&csrf_token={CSRF}"
                 )))
                 .expect("build device POST"),
         )

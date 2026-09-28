@@ -61,7 +61,10 @@ async fn setup_oidc_env() -> (
                 client_name: "OIDC Conformance App".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()

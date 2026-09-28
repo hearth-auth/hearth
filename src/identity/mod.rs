@@ -729,6 +729,25 @@ pub trait IdentityEngine: Send + Sync {
         request: &AuthorizationRequest,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
+    /// [`Self::authorize`] for a surface that cannot show a consent screen —
+    /// JSON `POST /authorize`, `POST /realms/{realm}/authorize` and gRPC
+    /// `Authorize`, which mint a code from a bearer token alone.
+    ///
+    /// Issues only when the client does not require consent or a recorded
+    /// consent covers every requested scope — the browser consent gate's
+    /// rule — and otherwise fails with [`IdentityError::ConsentRequired`]
+    /// (GA audit B2). For a client or role that demands a second factor,
+    /// `session_id` — the session behind the caller's bearer token — must
+    /// have proved one, or the call fails with [`IdentityError::MfaRequired`]
+    /// (the browser MFA-use gate's rule, GA audit B5). [`Self::authorize`] is
+    /// for callers that have already run those gates interactively.
+    fn authorize_non_interactive(
+        &self,
+        realm_id: &RealmId,
+        request: &AuthorizationRequest,
+        session_id: &SessionId,
+    ) -> Result<AuthorizationResponse, IdentityError>;
+
     /// Exchanges an authorization code for access, ID, and refresh tokens.
     ///
     /// Validates the code (exists, not expired, not used, correct client and
@@ -876,6 +895,29 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Transitions the device code status from `Pending` to `Approved`.
     fn approve_device(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+        user_id: &UserId,
+    ) -> Result<(), IdentityError>;
+
+    /// Returns the pending device authorization a user code names — the
+    /// client that started it and the scope it requested — so the approval
+    /// page can show them before the user decides (GA audit B3).
+    ///
+    /// `Ok(None)` when no device code carries `user_code`;
+    /// [`IdentityError::DeviceCodeExpired`] when it has expired;
+    /// [`IdentityError::InvalidAuthorizationCode`] when it was already
+    /// approved or denied.
+    fn pending_device_authorization(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+    ) -> Result<Option<oidc::PendingDeviceAuthorization>, IdentityError>;
+
+    /// Denies a pending device authorization by user code, so the polling
+    /// device receives `access_denied` (RFC 8628 §3.5).
+    fn deny_device(
         &self,
         realm_id: &RealmId,
         user_code: &str,
