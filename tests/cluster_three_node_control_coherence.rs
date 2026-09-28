@@ -109,6 +109,18 @@ struct ThreeNodeCluster {
     _tempdir: TempDir,
 }
 
+/// A cluster whose leader has its application stack and whose followers do
+/// not yet: the first phase of [`ThreeNodeCluster::build_inner`], for a test
+/// that must seed the leader before the followers' engines exist.
+struct LeaderOnly {
+    engines: Vec<Arc<ClusterEngine>>,
+    handles: Vec<tokio::task::JoinHandle<()>>,
+    leader_id: u64,
+    leader_idx: usize,
+    leader: Node,
+    tempdir: TempDir,
+}
+
 /// Builds the RBAC + identity stack over one node's Raft engine, exactly as
 /// `main.rs` does (including the `ReplicatedWriteObserver` wiring).
 type AppStack = (Arc<EmbeddedRbacEngine>, Arc<EmbeddedIdentityEngine>);
@@ -183,6 +195,44 @@ impl ThreeNodeCluster {
     }
 
     async fn build_inner(clock: &Arc<FakeClock>, wrap: &StorageWrap, seed: Option<&Path>) -> Self {
+        LeaderOnly::start(clock, wrap, seed)
+            .await
+            .attach_followers(clock, wrap)
+    }
+
+    fn leader(&self) -> &Node {
+        self.nodes
+            .iter()
+            .find(|n| n.id() == self.leader_id)
+            .unwrap()
+    }
+
+    fn followers(&self) -> Vec<&Node> {
+        self.nodes
+            .iter()
+            .filter(|n| n.id() != self.leader_id)
+            .collect()
+    }
+
+    /// Blocks until every node has applied everything the leader has.
+    async fn converge(&self) {
+        let engines: Vec<Arc<ClusterEngine>> =
+            self.nodes.iter().map(|n| Arc::clone(&n.cluster)).collect();
+        wait_converged(&engines, Duration::from_secs(20)).await;
+    }
+
+    fn shutdown(self) {
+        for h in self.handles {
+            h.abort();
+        }
+    }
+}
+
+impl LeaderOnly {
+    /// Starts the three Raft nodes, elects a leader and builds the leader's
+    /// application stack; the followers' stacks wait for
+    /// [`Self::attach_followers`].
+    async fn start(clock: &Arc<FakeClock>, wrap: &StorageWrap, seed: Option<&Path>) -> Self {
         let tempdir = tempfile::tempdir().unwrap();
         let (ca_path, leaf_certs) = generate_cluster_certs(tempdir.path(), 3);
         let ports = pick_free_loopback_ports(3);
@@ -258,14 +308,48 @@ impl ThreeNodeCluster {
         // constructors read it.
         wait_converged(&engines, Duration::from_secs(20)).await;
 
+        let leader = Node {
+            cluster: Arc::clone(&engines[leader_idx]),
+            rbac: leader_rbac,
+            identity: leader_identity,
+        };
+        Self {
+            engines,
+            handles,
+            leader_id,
+            leader_idx,
+            leader,
+            tempdir,
+        }
+    }
+
+    fn leader(&self) -> &Node {
+        &self.leader
+    }
+
+    /// Blocks until every node has applied everything the leader has.
+    async fn converge(&self) {
+        wait_converged(&self.engines, Duration::from_secs(20)).await;
+    }
+
+    /// Builds the followers' application stacks. Each constructor loads the
+    /// control caches from what its node has applied, so a follower attached
+    /// after [`Self::converge`] starts with every control asserted so far and
+    /// no reload outstanding.
+    fn attach_followers(self, clock: &Arc<FakeClock>, wrap: &StorageWrap) -> ThreeNodeCluster {
+        let Self {
+            engines,
+            handles,
+            leader_id,
+            leader_idx,
+            leader,
+            tempdir,
+        } = self;
+        let mut leader = Some(leader);
         let mut nodes = Vec::with_capacity(3);
         for (idx, engine) in engines.iter().enumerate() {
             if idx == leader_idx {
-                nodes.push(Node {
-                    cluster: Arc::clone(engine),
-                    rbac: Arc::clone(&leader_rbac),
-                    identity: Arc::clone(&leader_identity),
-                });
+                nodes.push(leader.take().unwrap());
             } else {
                 let (rbac, identity) = app_stack_over_wrapped(engine, clock, wrap);
                 nodes.push(Node {
@@ -276,38 +360,11 @@ impl ThreeNodeCluster {
             }
         }
 
-        Self {
+        ThreeNodeCluster {
             nodes,
             handles,
             leader_id,
             _tempdir: tempdir,
-        }
-    }
-
-    fn leader(&self) -> &Node {
-        self.nodes
-            .iter()
-            .find(|n| n.id() == self.leader_id)
-            .unwrap()
-    }
-
-    fn followers(&self) -> Vec<&Node> {
-        self.nodes
-            .iter()
-            .filter(|n| n.id() != self.leader_id)
-            .collect()
-    }
-
-    /// Blocks until every node has applied everything the leader has.
-    async fn converge(&self) {
-        let engines: Vec<Arc<ClusterEngine>> =
-            self.nodes.iter().map(|n| Arc::clone(&n.cluster)).collect();
-        wait_converged(&engines, Duration::from_secs(20)).await;
-    }
-
-    fn shutdown(self) {
-        for h in self.handles {
-            h.abort();
         }
     }
 }
@@ -596,7 +653,13 @@ async fn seed_realm_user_and_token(
     clock: &Arc<FakeClock>,
     realm_name: &str,
 ) -> SeededRealm {
-    let leader = cluster.leader();
+    let seeded = seed_on_leader(cluster.leader(), clock, realm_name);
+    cluster.converge().await;
+    seeded
+}
+
+/// Creates that realm on `leader`; the caller waits for replication.
+fn seed_on_leader(leader: &Node, clock: &Arc<FakeClock>, realm_name: &str) -> SeededRealm {
     let realm = leader
         .identity
         .create_realm(&CreateRealmRequest {
@@ -628,7 +691,6 @@ async fn seed_realm_user_and_token(
         .unwrap();
     let access_token = pair.access_token().to_string();
     clock.advance(1_000_000);
-    cluster.converge().await;
     SeededRealm {
         realm_id,
         user_id: user.id().clone(),
@@ -1117,10 +1179,20 @@ async fn a_follower_persists_and_clears_its_own_rate_limit_tracker_rows() {
 
 /// A node's cluster storage handle whose `increment_u64` — the control-epoch
 /// bump — can be made to fail, standing in for a bump lost between the
-/// control row's Raft proposal and its own. Every other call passes through.
+/// control row's Raft proposal and its own, and which counts the bumps that
+/// succeed. Every other call passes through.
 struct IncrementFault {
     inner: Arc<dyn StorageEngine>,
-    fail: Arc<std::sync::atomic::AtomicBool>,
+    probe: Arc<IncrementProbe>,
+}
+
+/// The test's side of one node's [`IncrementFault`].
+#[derive(Default)]
+struct IncrementProbe {
+    /// While set, every `increment_u64` fails.
+    fail: std::sync::atomic::AtomicBool,
+    /// How many `increment_u64` calls succeeded.
+    made: std::sync::atomic::AtomicU64,
 }
 
 impl StorageEngine for IncrementFault {
@@ -1163,12 +1235,16 @@ impl StorageEngine for IncrementFault {
         self.inner.put_if_absent(r, k, v)
     }
     fn increment_u64(&self, r: &RealmId, k: &[u8]) -> Result<u64, StorageError> {
-        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.probe.fail.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(StorageError::Io(std::io::Error::other(
                 "injected: the control-epoch bump was lost",
             )));
         }
-        self.inner.increment_u64(r, k)
+        let next = self.inner.increment_u64(r, k)?;
+        self.probe
+            .made
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(next)
     }
     fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
         self.inner.list_realms()
@@ -1209,19 +1285,50 @@ async fn a_control_whose_bump_failed_binds_everywhere_after_a_leader_change() {
     let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
         1_700_000_000_000_000,
     )));
-    let faults: Arc<std::sync::Mutex<BTreeMap<u64, Arc<std::sync::atomic::AtomicBool>>>> =
-        Arc::default();
-    let registry = Arc::clone(&faults);
+    let probes: Arc<std::sync::Mutex<BTreeMap<u64, Arc<IncrementProbe>>>> = Arc::default();
+    let registry = Arc::clone(&probes);
     let wrap = move |id: u64, storage: Arc<dyn StorageEngine>| -> Arc<dyn StorageEngine> {
-        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        registry.lock().unwrap().insert(id, Arc::clone(&fail));
+        let probe = Arc::new(IncrementProbe::default());
+        registry.lock().unwrap().insert(id, Arc::clone(&probe));
         Arc::new(IncrementFault {
             inner: storage,
-            fail,
+            probe,
         })
     };
-    let cluster = ThreeNodeCluster::build_with(&clock, &wrap).await;
-    let seeded = seed_realm_user_and_token(&cluster, &clock, "owed-bump-leader-change").await;
+
+    // No follower may be due a control reload when the suspension lands. A
+    // reload reads the latest rows, whatever epoch asked for it, so one
+    // still pending then — for the leader's election bump, which its bump
+    // thread makes on its own schedule and can land after a follower
+    // exists, or for `create_realm`'s bump, held back up to
+    // `RELOAD_MIN_SPACING` (real time) behind that one — either scans the
+    // suspended realm row (`RealmSuspended`) or drops the session cache
+    // warmed below, after which the follower reads the session the
+    // suspension revoked (`InvalidToken`). That is correct behaviour, but
+    // it made the precondition below a wall-clock race. So the leader
+    // makes its election bump and seeds the realm first, and the followers'
+    // engines are built afterwards: each constructor loads every control
+    // there is, no reload is outstanding anywhere, and only an epoch bump
+    // can tell a follower about the suspension.
+    let partial = LeaderOnly::start(&clock, &wrap, None).await;
+    let old_leader_id = partial.leader_id;
+    let probe = Arc::clone(&probes.lock().unwrap()[&old_leader_id]);
+    let deadline = Instant::now() + RELOAD_DEADLINE;
+    while probe.made.load(std::sync::atomic::Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        // AUDIT: justified-sleep: poll interval of a deadline-bounded condition loop; the leader's election bump is made on its own thread, which exposes no completion signal
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        probe.made.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "precondition: the leader made its election bump"
+    );
+    let seeded = seed_on_leader(partial.leader(), &clock, "owed-bump-leader-change");
+    partial.converge().await;
+    let bumps_before_followers = probe.made.load(std::sync::atomic::Ordering::SeqCst);
+    let cluster = partial.attach_followers(&clock, &wrap);
+    // Also warms each follower's session cache, which is what keeps a
+    // follower accepting the token once the suspension has revoked the
+    // session in storage.
     for node in &cluster.nodes {
         node.identity
             .validate_token(&seeded.realm_id, &seeded.access_token)
@@ -1229,8 +1336,7 @@ async fn a_control_whose_bump_failed_binds_everywhere_after_a_leader_change() {
     }
 
     // The leader suspends the realm; the row commits, its epoch bump is lost.
-    let old_leader_id = cluster.leader_id;
-    let fail = Arc::clone(&faults.lock().unwrap()[&old_leader_id]);
+    let fail = &probe.fail;
     fail.store(true, std::sync::atomic::Ordering::SeqCst);
     cluster
         .leader()
@@ -1246,6 +1352,11 @@ async fn a_control_whose_bump_failed_binds_everywhere_after_a_leader_change() {
         .unwrap();
     cluster.converge().await;
     assert!(owed_gauge() >= 1.0, "precondition: the lost bump is owed");
+    assert_eq!(
+        probe.made.load(std::sync::atomic::Ordering::SeqCst),
+        bumps_before_followers,
+        "precondition: no control epoch bump since the followers were built"
+    );
     clock.advance(1_000_000);
     for node in cluster.followers() {
         node.identity
