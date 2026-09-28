@@ -26585,7 +26585,6 @@ mod tests {
 
     #[test]
     fn token_exchange_rejects_revoked_agent_in_act_chain() {
-        use crate::core::ClientId;
         use crate::identity::tokens::{decode_claims_unverified, ActClaim};
         use crate::identity::{
             AgentOwner, CreateAgentRequest, Rfc8693Request, SessionContext, TokenIssuanceContext,
@@ -26644,7 +26643,26 @@ mod tests {
             .issue_token(&claims)
             .expect("re-sign subject token with act chain");
 
-        let client_id = ClientId::new(uuid::Uuid::new_v4());
+        // GA audit M8: the exchanging client must be a registered,
+        // confidential client holding the token-exchange grant.
+        let client_id =
+            engine
+                .register_client(
+                    &realm,
+                    &crate::identity::RegisterClientRequest {
+                        client_name: "act-chain-exchanger".to_string(),
+                        redirect_uris: vec!["https://client.example.com/cb".to_string()],
+                        client_secret: Some("act-chain-exchanger-secret!".to_string()),
+                        grant_types: vec![
+                            "urn:ietf:params:oauth:grant-type:token-exchange".to_string()
+                        ],
+                        require_consent: false,
+                        ..Default::default()
+                    },
+                )
+                .expect("register exchange client")
+                .client_id()
+                .clone();
         let make_req = || Rfc8693Request {
             client_id: client_id.clone(),
             subject_token: subject_token.clone(),
