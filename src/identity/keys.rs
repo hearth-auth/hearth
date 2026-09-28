@@ -2487,6 +2487,14 @@ pub(crate) fn encode_consumed_device_decision(device_code_hash: &str) -> Vec<u8>
     encode_consumed("device-decision", device_code_hash)
 }
 
+/// Decision marker for an organization invitation: whichever of accept or
+/// revoke claims it first decides the invitation.
+///
+/// Format: `consumed:invitation:{invitation_uuid}`
+pub(crate) fn encode_consumed_invitation(invitation_id: &InvitationId) -> Vec<u8> {
+    encode_consumed("invitation", &invitation_id.as_uuid().to_string())
+}
+
 /// Prefix of the guess slots of one guess budget (`kind` names the budget,
 /// `id` its subject). Slot `n` is `{prefix}{n}`.
 ///

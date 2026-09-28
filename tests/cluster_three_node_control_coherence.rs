@@ -2271,3 +2271,177 @@ async fn a_consent_revocation_is_not_undone_by_a_rotation_across_a_leader_change
 
     cluster.shutdown();
 }
+
+/// An organization with an owner, and a pending invitation for a new address;
+/// returns the org, the invitee's address, the invitation's id and its token.
+fn pending_invitation(
+    node: &Node,
+    seeded: &SeededRealm,
+    slug: &str,
+) -> (
+    hearth::core::OrganizationId,
+    String,
+    hearth::core::InvitationId,
+    String,
+) {
+    use hearth::identity::{CreateInvitationRequest, CreateOrganizationRequest, OrganizationRole};
+    let org = node
+        .identity
+        .create_organization(
+            &seeded.realm_id,
+            &CreateOrganizationRequest {
+                name: slug.to_string(),
+                slug: slug.to_string(),
+                description: None,
+                config: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    node.identity
+        .add_member(
+            &seeded.realm_id,
+            org.id(),
+            &seeded.user_id,
+            OrganizationRole::Owner,
+        )
+        .unwrap();
+    let invitee = format!("invitee@{slug}.test");
+    let (invitation, token) = node
+        .identity
+        .create_invitation(
+            &seeded.realm_id,
+            &CreateInvitationRequest {
+                org_id: org.id().clone(),
+                email: invitee.clone(),
+                role: OrganizationRole::Member,
+                invited_by: seeded.user_id.clone(),
+            },
+        )
+        .unwrap();
+    (org.id().clone(), invitee, invitation.id().clone(), token)
+}
+
+/// Whether `email` is a member of `org` on `node`.
+fn is_member(
+    node: &Node,
+    realm: &RealmId,
+    org: &hearth::core::OrganizationId,
+    email: &str,
+) -> bool {
+    node.identity
+        .get_user_by_email(realm, email)
+        .unwrap()
+        .is_some_and(|u| {
+            node.identity
+                .get_membership(realm, org, u.id())
+                .unwrap()
+                .is_some()
+        })
+}
+
+/// A revoked invitation stays revoked: an acceptance that read it while still
+/// pending, and resumes after leadership moved to its own node, must not
+/// admit the invitee.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_revoked_invitation_is_not_accepted_across_a_leader_change() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let (cluster, gates) = gated_cluster(&clock).await;
+    let seeded = seed_realm_user_and_token(&cluster, &clock, "inv-revoke").await;
+    let (org, invitee, invitation_id, token) =
+        pending_invitation(cluster.leader(), &seeded, "inv-revoke");
+    cluster.converge().await;
+
+    let realm = seeded.realm_id.clone();
+    let accept: Racer<bool> = Arc::new(move |identity: &EmbeddedIdentityEngine| {
+        identity.accept_invitation(&realm, &token).is_ok()
+    });
+    let (new_leader_id, accepted) = raced_against_the_leader_across_a_leader_change(
+        &cluster,
+        &gates,
+        b"orgi:id:",
+        &accept,
+        |identity| {
+            identity
+                .revoke_invitation(&seeded.realm_id, &invitation_id)
+                .unwrap();
+        },
+    )
+    .await;
+    cluster.converge().await;
+
+    let admitted = accepted.iter().filter(|a| **a).count();
+    assert_eq!(
+        admitted, 0,
+        "an acceptance that read the invitation before its revocation admitted \
+         the invitee {admitted} time(s)"
+    );
+    assert!(
+        !is_member(
+            node_by_id(&cluster, new_leader_id),
+            &seeded.realm_id,
+            &org,
+            &invitee
+        ),
+        "the revoked invitation's invitee is a member"
+    );
+
+    cluster.shutdown();
+}
+
+/// An invitation admits once: after it was accepted and the member removed,
+/// an acceptance that read it while still pending must not re-admit them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn an_invitation_is_accepted_once_across_a_leader_change() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let (cluster, gates) = gated_cluster(&clock).await;
+    let seeded = seed_realm_user_and_token(&cluster, &clock, "inv-once").await;
+    let (org, invitee, _, token) = pending_invitation(cluster.leader(), &seeded, "inv-once");
+    cluster.converge().await;
+
+    let realm = seeded.realm_id.clone();
+    let racer_token = token.clone();
+    let accept: Racer<bool> = Arc::new(move |identity: &EmbeddedIdentityEngine| {
+        identity.accept_invitation(&realm, &racer_token).is_ok()
+    });
+    let (new_leader_id, accepted) = raced_against_the_leader_across_a_leader_change(
+        &cluster,
+        &gates,
+        b"orgi:id:",
+        &accept,
+        |identity| {
+            let membership = identity
+                .accept_invitation(&seeded.realm_id, &token)
+                .expect("precondition: the leader accepts a pending invitation");
+            identity
+                .remove_member(&seeded.realm_id, &org, membership.user_id())
+                .unwrap();
+        },
+    )
+    .await;
+    cluster.converge().await;
+
+    let readmitted = accepted.iter().filter(|a| **a).count();
+    assert_eq!(
+        readmitted, 0,
+        "an acceptance that read the invitation before it was spent admitted \
+         the invitee again {readmitted} time(s)"
+    );
+    assert!(
+        !is_member(
+            node_by_id(&cluster, new_leader_id),
+            &seeded.realm_id,
+            &org,
+            &invitee
+        ),
+        "a removed member was re-admitted by a spent invitation"
+    );
+
+    cluster.shutdown();
+}

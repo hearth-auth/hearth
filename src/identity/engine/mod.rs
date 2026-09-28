@@ -14714,6 +14714,38 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvitationInvalid);
         }
 
+        // A refusal `add_member` would give must come before the claim below,
+        // which spends the invitation for good.
+        let org = self
+            .get_organization(realm_id, invitation.org_id())?
+            .ok_or(IdentityError::OrganizationNotFound)?;
+        if org.status() != OrganizationStatus::Active {
+            return Err(IdentityError::OrganizationSuspended);
+        }
+        if let Some(existing) = self.get_user_by_email(realm_id, invitation.email())? {
+            if self
+                .get_membership(realm_id, invitation.org_id(), existing.id())?
+                .is_some()
+            {
+                return Err(IdentityError::AlreadyMember);
+            }
+        }
+
+        // Claim the invitation's decision before the first write (G6). The
+        // status check above is a local read and the lock is node-local: an
+        // acceptance that read the invitation before another node accepted or
+        // revoked it, and wrote after leadership moved to its own node,
+        // admitted the invitee anyway — re-adding a member an admin had just
+        // removed, or accepting a revoked invitation. Accept and revoke claim
+        // the same replicated marker, so exactly one decides.
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_invitation(&invitation_id),
+            invitation.expires_at(),
+        )? {
+            return Err(IdentityError::InvitationInvalid);
+        }
+
         // Find or create user by email
         let existing_user = self.get_user_by_email(realm_id, invitation.email())?;
         let user_created = existing_user.is_none();
@@ -14794,6 +14826,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             })?;
 
         if invitation.status() != InvitationStatus::Pending {
+            return Err(IdentityError::InvitationInvalid);
+        }
+        // The decision marker `accept_invitation` claims (G6): a revocation
+        // that loses it was preceded by an acceptance on some node, and must
+        // not overwrite it.
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_invitation(invitation_id),
+            invitation.expires_at(),
+        )? {
             return Err(IdentityError::InvitationInvalid);
         }
 
