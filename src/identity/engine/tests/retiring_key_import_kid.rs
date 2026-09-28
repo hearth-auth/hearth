@@ -37,9 +37,10 @@ fn a_purged_signing_key_is_refused_under_any_archive_label() {
         pkcs8: leaked.clone(),
     };
     assert!(
-        engine
-            .import_retiring_signing_key(&realm, &genuine, false)
-            .is_err(),
+        matches!(
+            engine.import_retiring_signing_key(&realm, &genuine, false),
+            Err(IdentityError::InvalidInput { .. })
+        ),
         "precondition: the purged key under its own kid is refused"
     );
 
@@ -49,7 +50,7 @@ fn a_purged_signing_key_is_refused_under_any_archive_label() {
     };
     let outcome = engine.import_retiring_signing_key(&realm, &relabelled, false);
     assert!(
-        outcome.is_err(),
+        matches!(outcome, Err(IdentityError::InvalidInput { .. })),
         "the purged key's material under another archive label was reinstated ({outcome:?})"
     );
 }
@@ -67,7 +68,7 @@ fn a_retiring_key_whose_label_does_not_match_its_material_is_refused() {
     };
     let outcome = engine.import_retiring_signing_key(&realm, &mislabelled, false);
     assert!(
-        outcome.is_err(),
+        matches!(outcome, Err(IdentityError::InvalidInput { .. })),
         "a retiring key stored under a kid its material does not produce can never verify \
          the tokens it is restored for ({outcome:?})"
     );

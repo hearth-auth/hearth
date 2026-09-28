@@ -3204,8 +3204,8 @@ async fn export_releases_the_write_barrier_before_writing_the_archive() {
     first_byte_rx
         .recv_timeout(Duration::from_secs(60))
         .expect("the export never started writing the archive");
-    // AUDIT: justified-sleep: lets the export fill the pipe and stall in its
-    // archive write; the assertion below does not depend on its length.
+    // Lets the export fill the pipe and stall in its archive write.
+    // AUDIT: justified-sleep: the assertion below does not depend on its length
     std::thread::sleep(Duration::from_millis(300));
 
     let (wrote_tx, wrote_rx) = mpsc::channel();
@@ -3311,8 +3311,14 @@ async fn restore_keeps_revoked_jtis_and_blocked_dpop_keys() {
     src.identity()
         .block_dpop_jkt(&realm, JKT)
         .expect("block jkt");
-    assert!(src.identity().validate_token(&realm, &revoked).is_err());
-    assert!(src.identity().validate_token(&realm, &key_bound).is_err());
+    assert!(matches!(
+        src.identity().validate_token(&realm, &revoked),
+        Err(IdentityError::InvalidToken)
+    ));
+    assert!(matches!(
+        src.identity().validate_token(&realm, &key_bound),
+        Err(IdentityError::DPopJktBlocked)
+    ));
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
@@ -3331,7 +3337,7 @@ async fn restore_keeps_revoked_jtis_and_blocked_dpop_keys() {
         .expect("an unrevoked sessionless token survives the restore");
     let after = dst.identity().validate_token(&realm, &revoked);
     assert!(
-        after.is_err(),
+        matches!(after, Err(IdentityError::InvalidToken)),
         "a client_credentials token revoked before the backup validates again after the \
          restore ({after:?})"
     );

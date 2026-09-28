@@ -4921,7 +4921,7 @@ mod tests {
              list without it, and the deleted value came back"
         );
         assert!(
-            rotation.is_err(),
+            matches!(rotation, Err(StorageError::Io(_))),
             "a rotation flush that cannot reopen every SST must fail, so the WAL segment is \
              not truncated"
         );
