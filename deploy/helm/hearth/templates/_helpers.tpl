@@ -79,3 +79,77 @@ True when any Secret value is non-empty.
 {{- true }}
 {{- end }}
 {{- end }}
+
+{{/*
+Name of the Secret the TLS certificate and key are mounted from, or "" when
+the chart mounts no certificate. `tls.existingSecret` (a kubernetes.io/tls
+Secret, e.g. one cert-manager maintains) wins over the inline
+`secret.tlsCert` / `secret.tlsKey` pair, which lands in the chart's own Secret.
+*/}}
+{{- define "hearth.tlsSecretName" -}}
+{{- if and .Values.tls.enabled .Values.tls.existingSecret }}
+{{- .Values.tls.existingSecret }}
+{{- else if and .Values.secret.tlsCert .Values.secret.tlsKey }}
+{{- include "hearth.fullname" . }}
+{{- end }}
+{{- end }}
+
+{{/*
+True when the Hearth listener speaks TLS: the chart mounts a certificate, or
+the operator set config.server.tls_cert_path by hand. The liveness and
+readiness probes follow this, so they never speak plaintext to a TLS port.
+*/}}
+{{- define "hearth.tlsEnabled" -}}
+{{- $server := .Values.config.server | default dict }}
+{{- if or (include "hearth.tlsSecretName" .) $server.tls_cert_path }}
+{{- true }}
+{{- end }}
+{{- end }}
+
+{{/*
+The Hearth config rendered into the ConfigMap. When the chart mounts a
+certificate it also points server.tls_cert_path / tls_key_path at it, unless
+the operator already set those paths explicitly.
+*/}}
+{{- define "hearth.config" -}}
+{{- $config := deepCopy .Values.config }}
+{{- if include "hearth.tlsSecretName" . }}
+{{- $server := $config.server | default dict }}
+{{- if not $server.tls_cert_path }}
+{{- $_ := set $server "tls_cert_path" "/etc/hearth/tls/tls.crt" }}
+{{- end }}
+{{- if not $server.tls_key_path }}
+{{- $_ := set $server "tls_key_path" "/etc/hearth/tls/tls.key" }}
+{{- end }}
+{{- $_ := set $config "server" $server }}
+{{- end }}
+{{- toYaml $config }}
+{{- end }}
+
+{{/*
+A probe with its httpGet.scheme following the TLS setting. An explicit
+`scheme` in the values wins. Kubernetes does not verify the certificate of an
+HTTPS httpGet probe, so a self-signed or internal-CA certificate works.
+Call with (dict "probe" .Values.livenessProbe "root" $).
+*/}}
+{{- define "hearth.probe" -}}
+{{- $probe := deepCopy .probe }}
+{{- if and $probe.httpGet (not $probe.httpGet.scheme) }}
+{{- $_ := set $probe.httpGet "scheme" (ternary "HTTPS" "HTTP" (eq (include "hearth.tlsEnabled" .root) "true")) }}
+{{- end }}
+{{- toYaml $probe }}
+{{- end }}
+
+{{/*
+Names of every environment variable the operator already supplies through
+`env`, `secret.env` or `extraEnv`, as a dict. The encryption-key injection
+skips a name that is already present, so an install that passes
+HEARTH_MASTER_KEY through `secret.env` keeps working unchanged.
+*/}}
+{{- define "hearth.operatorEnvNames" -}}
+{{- $names := dict }}
+{{- range $k, $_ := .Values.env }}{{ $_ := set $names $k true }}{{ end }}
+{{- range $k, $_ := .Values.secret.env }}{{ $_ := set $names $k true }}{{ end }}
+{{- range .Values.extraEnv }}{{ $_ := set $names .name true }}{{ end }}
+{{- toJson $names }}
+{{- end }}

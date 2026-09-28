@@ -1,6 +1,22 @@
 # Hearth Helm chart — default values.
 # Override with: helm install hearth ./deploy/helm/hearth -f my-values.yaml
 # or:            helm install hearth ./deploy/helm/hearth --set image.tag=v1.0.0
+#
+# The chart always runs `hearth serve` in PRODUCTION mode (there is no --dev
+# in a cluster). Production start-up refuses to run until ALL of these hold:
+#
+#   1. HEARTH_MASTER_KEY and HEARTH_KEK are available. The chart reads both
+#      from the Secret named by `encryptionKeys` below; create it first. Until
+#      it exists the pod sits in CreateContainerConfigError.
+#   2. An HTTPS posture is chosen: direct TLS (`tls` below) OR
+#      config.server.trust_forwarded_proto: true with a non-empty
+#      config.server.trusted_proxies (individual IPs, no CIDR). The defaults
+#      here choose neither, so the server refuses to start until you pick one.
+#      values-prod.yaml shows a complete ingress-terminated setup.
+#   3. config.oidc.issuer is set to the public HTTPS URL (commented out below).
+#   4. Every ${VAR} referenced in `config` resolves to a non-empty value.
+#
+# `hearth config validate <file>` checks a config the same way start-up does.
 
 # -- Image ----------------------------------------------------------------------
 image:
@@ -90,8 +106,20 @@ config:
   server:
     bind_address: "0.0.0.0"
     port: 8420
-    # tls_cert_path: "/etc/hearth/tls/tls.crt"
-    # tls_key_path: "/etc/hearth/tls/tls.key"
+    # HTTPS posture — production requires exactly one of:
+    #
+    #  (a) Direct TLS inside the pod: set `tls.enabled: true` below. The chart
+    #      mounts the certificate and fills in tls_cert_path / tls_key_path
+    #      (/etc/hearth/tls/tls.crt, /etc/hearth/tls/tls.key) for you. Note:
+    #      Hearth also opens a plaintext HTTP→HTTPS redirect listener on
+    #      `port - 1` (8419 here), which the Service does not expose.
+    #
+    #  (b) TLS terminated by a reverse proxy / Ingress in front of the pod:
+    # trust_forwarded_proto: true
+    # trusted_proxies:
+    #   - "REPLACE_WITH_PROXY_IP"   # individual IPs only; CIDR is refused
+    #
+    # See values-prod.yaml for (b) spelled out with its caveats.
 
   storage:
     data_dir: "/var/lib/hearth"
@@ -111,26 +139,70 @@ config:
     queue_depth: 4096
 
   email:
+    # EVALUATION ONLY. `log` delivers nothing: password-reset, verification
+    # and magic-link emails are written to the log and dropped. Production
+    # refuses `transport: log` unless allow_log_transport_in_production is
+    # true, and this default opts in so the chart's out-of-the-box config
+    # states that choice instead of hiding it. For real use, switch to a real
+    # transport and set allow_log_transport_in_production back to false —
+    # values-prod.yaml does both.
     transport: log
+    allow_log_transport_in_production: true
     # transport: smtp
     # from: "Hearth <hearth@example.com>"
     # smtp:
     #   host: "smtp.example.com"
     #   port: 587
     #   encryption: starttls
-    #   username: "${SMTP_USERNAME}"
-    #   password: "${SMTP_PASSWORD}"
+    #   username: "hearth@example.com"
+    #   password: "${SMTP_PASSWORD}"   # from a Secret via extraEnv below
 
   # oidc:
   #   issuer: "https://auth.example.com"
+
+# -- Encryption keys (required in production) -----------------------------------
+# HEARTH_MASTER_KEY encrypts the storage host key; HEARTH_KEK encrypts realm
+# signing keys. Both are 64 hex chars (32 random bytes). The chart injects
+# them from an existing Secret and NEVER generates them: a new master key
+# makes every byte already on the PVC unreadable. Back both up outside the
+# cluster. Create the Secret before installing:
+#
+#   kubectl -n hearth create secret generic hearth-keys \
+#     --from-literal=HEARTH_MASTER_KEY="$(openssl rand -hex 32)" \
+#     --from-literal=HEARTH_KEK="$(openssl rand -hex 32)"
+#
+# (or source it from Vault / a cloud secret manager via External Secrets.)
+# A HEARTH_MASTER_KEY or HEARTH_KEK already set through `env`, `secret.env`
+# or `extraEnv` takes precedence and is not injected twice.
+encryptionKeys:
+  enabled: true
+  # Secret name. Empty → "<release fullname>-keys" (e.g. "hearth-keys").
+  existingSecret: ""
+  # Keys inside that Secret.
+  masterKeySecretKey: HEARTH_MASTER_KEY
+  kekSecretKey: HEARTH_KEK
+
+# -- Direct TLS inside the pod ---------------------------------------------------
+# When enabled, the chart mounts the certificate at /etc/hearth/tls/, sets
+# config.server.tls_cert_path / tls_key_path, and switches the liveness and
+# readiness probes to HTTPS. If an Ingress sits in front, tell it the backend
+# speaks HTTPS (ingress-nginx: nginx.ingress.kubernetes.io/backend-protocol:
+# "HTTPS").
+tls:
+  enabled: false
+  # A kubernetes.io/tls Secret (keys tls.crt / tls.key), e.g. one cert-manager
+  # maintains. Empty → use secret.tlsCert / secret.tlsKey below.
+  existingSecret: ""
 
 # -- Secret values --------------------------------------------------------------
 # These are stored in a Kubernetes Secret, not the ConfigMap.
 # Leave all values empty ("") to skip creating the Secret.
 secret:
-  # TLS certificate and key (PEM). If set, the chart mounts them at
-  # /etc/hearth/tls/ and sets config.server.tls_cert_path / tls_key_path.
-  # In production, prefer cert-manager + ingress TLS termination instead.
+  # Inline TLS certificate and key (PEM). If both are set, the chart mounts
+  # them at /etc/hearth/tls/ and sets config.server.tls_cert_path /
+  # tls_key_path, even with tls.enabled false (kept for compatibility).
+  # Prefer tls.existingSecret: PEM in a values file ends up in Helm's release
+  # history.
   tlsCert: ""
   tlsKey: ""
 
@@ -153,8 +225,21 @@ secret:
     # HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET: ""
 
 # -- Extra environment variables (non-secret) -----------------------------------
+# RUST_LOG takes priority over config.observability.log_level for ordinary
+# targets. Keep production at "info"; debug logging is for troubleshooting.
 env:
-  RUST_LOG: "info,hearth=debug"
+  RUST_LOG: "info"
+
+# -- Extra environment variables (full EnvVar objects) --------------------------
+# Use this to pull values from Secrets you manage yourself, then reference
+# them from `config` with ${VAR} substitution. Example:
+#   extraEnv:
+#     - name: SMTP_PASSWORD
+#       valueFrom:
+#         secretKeyRef:
+#           name: hearth-smtp
+#           key: password
+extraEnv: []
 
 # -- Liveness / readiness probes ------------------------------------------------
 # Deliberate split:
@@ -165,6 +250,8 @@ env:
 #   readiness → /readyz  (genuine storage probe; fails until WAL + memtable are
 #                          ready.  Kubernetes removes the pod from the endpoints
 #                          list so traffic is not routed to an unready pod.)
+# httpGet.scheme is filled in by the chart: HTTPS when the pod terminates TLS
+# (see `tls`), HTTP otherwise. Set it here only to override that.
 livenessProbe:
   httpGet:
     path: /health
@@ -196,9 +283,16 @@ tolerations: []
 affinity: {}
 
 # -- Pod disruption budget ------------------------------------------------------
+# Hearth runs one replica, so no PDB can keep it available through a node
+# drain — the pod is evicted and restarted elsewhere (brief downtime) either
+# way. `maxUnavailable: 1` lets drains proceed; it exists for clusters whose
+# policy requires every workload to carry a PDB. `minAvailable` is still
+# accepted, but the chart refuses to render a value >= replicaCount, because
+# that blocks `kubectl drain` forever.
 podDisruptionBudget:
   enabled: false
-  minAvailable: 1
+  maxUnavailable: 1
+  # minAvailable: 0
 
 # Autoscaling (HPA) is intentionally removed.
 # Hearth uses an embedded storage engine with an exclusive data_dir lock:
@@ -208,7 +302,8 @@ podDisruptionBudget:
 # in Hearth 1.x. Known defects include: follower RBAC cache staleness (C-5),
 # immutable cluster membership (C-6, no online node add/remove), and HTTP 500
 # on writes to follower nodes (H-3). The supported production topology is
-# replicaCount=1 with a ReadWriteOnce PVC and a PodDisruptionBudget.
+# replicaCount=1 with a ReadWriteOnce PVC.
 #
-# Use strategy.type=Recreate (set in deployment.yaml) and a PodDisruptionBudget
-# for controlled rollouts.
+# Rollouts use strategy.type=Recreate (set in deployment.yaml): the old pod
+# stops before the new one starts, so every upgrade or config change has a
+# short outage. A PodDisruptionBudget does not change that.

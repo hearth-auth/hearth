@@ -1,17 +1,34 @@
-# Hearth — local development stack.
+# Hearth — single-host / staging stack.
 #
-# Quick start (hearth only — email captured by mailcatcher, UI at /dev/mail):
-#   cp hearth.example.yaml hearth.yaml      # edit to taste
+# The container runs `hearth serve` in PRODUCTION mode. `--dev` is not an
+# option here: dev mode refuses to listen on anything but loopback, and a
+# published container port needs the server on 0.0.0.0. For local development
+# without Docker, use `make dev` instead (mailcatcher UI at /dev/mail).
+#
+# Production start-up refuses to run until:
+#   1. deploy/hearth.env sets HEARTH_MASTER_KEY and HEARTH_KEK (see
+#      deploy/hearth.env.example). The file is required; `up` fails without it.
+#   2. hearth.yaml picks an HTTPS posture: server.tls_cert_path +
+#      tls_key_path, OR server.trust_forwarded_proto: true with
+#      server.trusted_proxies listing your reverse proxy's IP(s) (individual
+#      IPs, no CIDR).
+#   3. hearth.yaml sets oidc.issuer and a real email.transport (or
+#      email.allow_log_transport_in_production: true to evaluate with email
+#      dropped to the log).
+# `docker compose run --rm hearth config validate /etc/hearth/hearth.yaml`
+# reports every problem in one pass.
+#
+# Quick start:
+#   cp hearth.example.yaml hearth.yaml                 # then edit, see above
+#   cp deploy/hearth.env.example deploy/hearth.env     # then set the keys
 #   docker compose -f deploy/docker-compose.yml up -d
 #
-# Optional environment overrides (gitignored, and NOT the repo-root .env):
-#   cp deploy/hearth.env.example deploy/hearth.env
-#
-# With external mailpit SMTP sink (web UI at http://localhost:8025):
+# With external mailpit SMTP sink (web UI at http://localhost:8025; point
+# email.smtp.host at mailpit, port 1025):
 #   docker compose -f deploy/docker-compose.yml --profile mail up -d
 #
 # Services:
-#   hearth   — http://localhost:8420  (health at /health)
+#   hearth   — localhost:8420 (http, or https with direct TLS; readiness at /readyz)
 #   mailpit  — http://localhost:8025  (--profile mail only; SMTP capture UI)
 #
 # To wipe all data:  docker compose -f deploy/docker-compose.yml down -v
@@ -33,31 +50,42 @@ services:
       # Bind-mount your local hearth.yaml (from the project root) read-only.
       # Adjust the path if your config lives elsewhere.
       - ../hearth.yaml:/etc/hearth/hearth.yaml:ro
-    # Optional per-deployment overrides, scoped to Hearth.
+    # Inside Docker the server must listen on all interfaces (the port mapping
+    # above decides which HOST interfaces reach it). `--bind` overrides
+    # server.bind_address from hearth.yaml, whose example value is 127.0.0.1 —
+    # unreachable through a port mapping. There is no HEARTH_BIND_ADDRESS
+    # variable; the server never read one.
+    command: ["serve", "-c", "/etc/hearth/hearth.yaml", "--bind", "0.0.0.0"]
+    # Per-deployment secrets and settings, scoped to Hearth.
     #
     # Audit 2026-08-28 §4.8#17: this used to read `../.env` — the repository
     # root .env, a gitignored developer-local file with no schema anywhere in
     # this repo. Compose injects EVERY key of an env_file into the container, so
     # any unrelated credential kept there was handed to the server process and
-    # readable via `docker inspect`. Worse, Hearth reads HEARTH_* variables as
-    # configuration, so a stray key silently overrode the hearth.yaml mounted
-    # above and the server did not run the config the operator was reading.
+    # readable via `docker inspect`. Worse, Hearth reads some HEARTH_*
+    # variables (HEARTH_MASTER_KEY, HEARTH_KEK, …) plus any ${VAR} that
+    # hearth.yaml references, so a stray key could change what the server ran.
     #
     # deploy/hearth.env is gitignored and scoped: see hearth.env.example for the
     # keys that belong in it. Guard: scripts/check-compose-env-scope.sh.
+    # Required: production mode cannot start without HEARTH_MASTER_KEY and
+    # HEARTH_KEK, so a missing file fails `up` instead of crash-looping.
     env_file:
       - path: ./hearth.env
-        required: false
+        required: true
     environment:
-      RUST_LOG: "info,hearth=debug"
-      # Inside Docker the server must bind all interfaces (the port mapping
-      # above constrains which host interfaces are reachable).
-      HEARTH_BIND_ADDRESS: "0.0.0.0"
+      RUST_LOG: "info"
     restart: unless-stopped
     healthcheck:
       # /readyz performs a genuine storage probe; /health is always-200 (process alive only).
       # Using /readyz means depends_on: condition: service_healthy waits for storage to be ready.
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8420/readyz"]
+      # The URL comes from HEARTH_HEALTHCHECK_URL (image default
+      # http://127.0.0.1:8420/readyz). With direct TLS, set
+      # HEARTH_HEALTHCHECK_URL=https://127.0.0.1:8420/readyz in hearth.env;
+      # certificate verification is skipped for this loopback probe.
+      test:
+        - "CMD-SHELL"
+        - 'wget -q -O /dev/null --no-check-certificate --no-hsts "$${HEARTH_HEALTHCHECK_URL:-http://127.0.0.1:8420/readyz}" || exit 1'
       interval: 10s
       timeout: 3s
       retries: 5

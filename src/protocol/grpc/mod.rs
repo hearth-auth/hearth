@@ -31,11 +31,14 @@ pub mod audit;
 pub mod auth;
 pub mod convert;
 pub mod identity;
+pub(crate) mod incoming;
 pub mod oauth;
 pub mod rbac_admin;
 pub mod server;
 
-pub use server::{build_router, resolve_grpc_reflection, serve, GrpcReflectionError, GrpcState};
+pub use server::{
+    build_router, resolve_grpc_reflection, serve, serve_on, GrpcReflectionError, GrpcState,
+};
 
 /// Precompiled file-descriptor set bytes, used by `tonic-reflection` so
 /// grpcurl / Postman can enumerate services at runtime without source access.

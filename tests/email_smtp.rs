@@ -147,9 +147,13 @@ email:
     assert!(display.contains("email.smtp.username"), "got: {display}");
 }
 
+/// `log` is still the default transport, but production accepts it only with
+/// the explicit `allow_log_transport_in_production` opt-in (GA audit M15).
 #[test]
-fn log_transport_accepts_minimal_config() {
-    let yaml = r#"
+fn log_transport_is_the_default_and_needs_the_production_opt_in() {
+    let yaml = |email: &str| {
+        format!(
+            r#"
 storage:
   data_dir: "/tmp/hearth"
 oidc:
@@ -159,8 +163,16 @@ server:
   trusted_proxies: ["127.0.0.1"]
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
-"#;
-    let config = Config::from_yaml_str(yaml).expect("default config should parse");
+{email}"#
+        )
+    };
+    let err = Config::from_yaml_str(&yaml(""))
+        .expect_err("the default log transport must be refused in production");
+    assert!(format!("{err}").contains("email.transport"), "got: {err}");
+
+    let config =
+        Config::from_yaml_str(&yaml("email:\n  allow_log_transport_in_production: true\n"))
+            .expect("the opt-in must make the minimal config valid");
     assert_eq!(config.email.transport, EmailTransport::Log);
     assert!(config.email.smtp.is_none());
 }

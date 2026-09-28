@@ -157,6 +157,14 @@ server:
   # tls_client_ca_path: "./tls/clients-ca.crt"
   # tls_require_client_cert: false
 
+  # gRPC management API (off unless grpc_port is set). With tls_cert_path set
+  # it serves TLS with the SAME certificate. Without one it is plaintext, and a
+  # non-loopback gRPC bind is refused outside --dev unless grpc_allow_plaintext
+  # is true (only when a proxy/mesh terminates TLS for gRPC).
+  # grpc_port: 9090
+  # grpc_bind_address: "127.0.0.1"   # default: bind_address
+  # grpc_allow_plaintext: false
+
 storage:
   data_dir: "./data"                      # WAL + SST files live here
   wal_max_size_bytes: 268435456           # 256 MiB — WAL rotation threshold
@@ -206,9 +214,15 @@ observability:
 
 operational:
   request_timeout_secs: 30
-  shutdown_timeout_secs: 10
+  shutdown_timeout_secs: 10       # one shared drain deadline for every listener
   max_connections: 1024
   queue_depth: 4096
+  # Slow-client / slot-exhaustion limits (defaults shown):
+  # max_connections_per_ip: 64          # per IPv4 address or IPv6 /64; 0 = off;
+  #                                     # server.trusted_proxies are exempt
+  # header_read_timeout_secs: 10        # first bytes + each HTTP/1 header block
+  # tls_handshake_timeout_secs: 10
+  # http2_keepalive_interval_secs: 30   # 0 = no keep-alive pings
 
 # --- Branding (global) ------------------------------------------------------
 # Controls the product name and logo shown across the UI and email templates.
@@ -241,6 +255,10 @@ email:
   #   transport: mailcatcher  # captures emails in-process; UI at /dev/mail
   #                           # only works with --dev mode; auto-enabled by default
   transport: log                    # default: log (no network I/O)
+  # `log` DELIVERS NOTHING (password resets — including the admin console's —
+  # magic links and invitations are all dropped). Outside --dev it is refused
+  # unless you opt in explicitly; configure a real transport below instead.
+  # allow_log_transport_in_production: false
 
   # Sender address (From: header). Required for all transports except `log`.
   # from: "Hearth <hearth@example.com>"

@@ -27,11 +27,14 @@ pub struct SecurityConfig {
     /// Emit HSTS on a plaintext request that a trusted proxy has attested
     /// arrived over HTTPS (`X-Forwarded-Proto: https`).
     ///
-    /// Set from `server.trust_forwarded_proto`, which production validation
-    /// only accepts alongside a non-empty `server.trusted_proxies` — so when
-    /// this is `true` the forwarded value came through a proxy the operator
-    /// named. When it is `false` the header is ignored entirely, and no client
-    /// can talk Hearth into pinning a domain to HTTPS it cannot serve.
+    /// Set from `server.trust_forwarded_proto`. This layer does not check who
+    /// sent the header: `protocol::http::router_with` strips
+    /// `X-Forwarded-Proto` from every request whose TCP peer is not listed in
+    /// `server.trusted_proxies` before the request reaches it (GA audit
+    /// 2026-09-28 L4 — previously any peer's header was honoured). A caller
+    /// that serves `web::router` on its own gets no such stripping. When this
+    /// is `false` the header is ignored entirely, and no client can talk Hearth
+    /// into pinning a domain to HTTPS it cannot serve.
     ///
     /// Without this, the modal deployment — TLS terminated at nginx/Envoy/an
     /// ALB, plaintext on the hop to Hearth — never emitted HSTS at all, while
@@ -111,8 +114,9 @@ where
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
         // Decide HSTS before the request is consumed. `hsts_enabled` covers
         // Hearth-terminated TLS; the forwarded-proto arm covers the modal
-        // proxy-terminated deployment, and is only consulted when the operator
-        // configured a trusted proxy (21.9 / §4.23#8).
+        // proxy-terminated deployment (21.9 / §4.23#8). The header can only
+        // still be present if a trusted proxy sent it: `router_with` strips it
+        // from every other peer (L4).
         let hsts_enabled = self.config.hsts_enabled
             || (self.config.hsts_on_forwarded_proto && forwarded_proto_is_https(req.headers()));
         let coop_coep_enabled = self.config.coop_coep_enabled;
@@ -193,8 +197,9 @@ where
 
 /// Returns `true` when the request carries `X-Forwarded-Proto: https`.
 ///
-/// Callers MUST gate this on [`SecurityConfig::hsts_on_forwarded_proto`], which
-/// is only set when the operator configured a trusted proxy. A comma-separated
+/// Callers MUST gate this on [`SecurityConfig::hsts_on_forwarded_proto`]. That
+/// the header came from a trusted proxy is guaranteed by the stripping layer in
+/// `protocol::http::router_with`, not by this function. A comma-separated
 /// value (proxy chain) is read left-to-right, RFC 7239 style: the first element
 /// is the scheme the original client used.
 fn forwarded_proto_is_https(headers: &axum::http::HeaderMap) -> bool {
