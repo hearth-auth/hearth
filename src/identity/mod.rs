@@ -495,6 +495,27 @@ pub trait IdentityEngine: Send + Sync {
         new_password: &CleartextPassword,
     ) -> Result<(), IdentityError>;
 
+    /// Completes the `UPDATE_PASSWORD` required action once per
+    /// required-action session token.
+    ///
+    /// Claims the single use of `ra_session_token` cluster-wide before
+    /// writing, then changes the password (proving `current_password`), or
+    /// sets it when the user has no password credential yet. A submission the
+    /// engine refuses — wrong current password, password policy, reuse —
+    /// releases the claim, so the user can correct it and resubmit with the
+    /// same session. Returns `Err(InvalidToken)` when the token was already
+    /// spent. `ra_expires_at` is the token's expiry; the claim marker lives
+    /// until then.
+    fn complete_required_password_update(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        ra_session_token: &str,
+        ra_expires_at: Timestamp,
+        current_password: &CleartextPassword,
+        new_password: &CleartextPassword,
+    ) -> Result<(), IdentityError>;
+
     // ===== Session management =====
 
     /// Creates a new session bound to the given user.

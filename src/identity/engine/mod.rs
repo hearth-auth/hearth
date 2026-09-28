@@ -8300,6 +8300,44 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(())
     }
 
+    fn complete_required_password_update(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        ra_session_token: &str,
+        ra_expires_at: Timestamp,
+        current_password: &CleartextPassword,
+        new_password: &CleartextPassword,
+    ) -> Result<(), IdentityError> {
+        use sha2::Digest as _;
+        let token_hash = hex::encode(sha2::Sha256::digest(ra_session_token.as_bytes()));
+        let marker = keys::encode_consumed_ra_password(&token_hash);
+        // Same-node submissions queue here; across a cluster the replicated
+        // put-if-absent inside `claim_single_use` decides (G4).
+        let lock = self.token_redemption_lock(&format!("ra-password:{token_hash}"));
+        let _guard = lock.lock().expect("token_redemption_lock poisoned");
+        if !self.claim_single_use(realm_id, &marker, ra_expires_at)? {
+            return Err(IdentityError::InvalidToken);
+        }
+        let result = match self.change_password(realm_id, user_id, current_password, new_password) {
+            // A user with no password credential at all (federated or
+            // passkey-only, forced to set one) has no current password to
+            // prove: set it.
+            Err(IdentityError::CredentialNotFound) => {
+                self.set_password(realm_id, user_id, new_password)
+            }
+            other => other,
+        };
+        if result.is_err() {
+            // Nothing was written: release the claim so the user can correct
+            // the submission and resubmit with the same session.
+            if let Err(e) = self.storage.delete(realm_id, &marker) {
+                tracing::warn!(error = %e, "failed to release a refused UPDATE_PASSWORD claim");
+            }
+        }
+        result
+    }
+
     #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn create_session(
         &self,

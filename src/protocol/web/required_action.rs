@@ -1369,23 +1369,31 @@ pub async fn update_password_submit(
     // credential and applies the new one; both are Argon2id operations, so the
     // pair runs through the shared KDF admission gate rather than inline on the
     // async worker.
+    //
+    // The RA session cookie is single-use for this action: the engine claims
+    // it cluster-wide before writing, so a replay within its 900 s life can
+    // neither set the password again nor resume the flow again. A refused
+    // submission (wrong current password, policy, reuse) releases the claim.
+    // A user with no password credential yet (federated or passkey-only,
+    // forced to set one) has no current password to prove; the engine sets
+    // the password directly in that case.
     let current = CleartextPassword::new(form.current_password.as_bytes().to_vec());
     let new_pw = CleartextPassword::new(form.new_password.as_bytes().to_vec());
     let identity = state.identity.clone();
     let realm_for_kdf = realm.clone();
     let user_for_kdf = user_id.clone();
+    let ra_session_token = token.clone();
+    let ra_expires_at = Timestamp::from_micros(claims.exp.saturating_mul(1_000_000));
     let change_result = match crate::identity::gate()
         .run(move || {
-            match identity.change_password(&realm_for_kdf, &user_for_kdf, &current, &new_pw) {
-                // A user with no password credential at all (federated or
-                // passkey-only, forced to set one) has no "current password"
-                // to prove. There is nothing to bypass in that case, so fall
-                // through to a plain set.
-                Err(IdentityError::CredentialNotFound) => {
-                    identity.set_password(&realm_for_kdf, &user_for_kdf, &new_pw)
-                }
-                other => other,
-            }
+            identity.complete_required_password_update(
+                &realm_for_kdf,
+                &user_for_kdf,
+                &ra_session_token,
+                ra_expires_at,
+                &current,
+                &new_pw,
+            )
         })
         .await
     {
@@ -1412,6 +1420,11 @@ pub async fn update_password_submit(
 
     match change_result {
         Ok(()) => {}
+        Err(IdentityError::InvalidToken) => {
+            return handlers_common::bad_request(
+                "This required-action session was already used. Sign in again.",
+            );
+        }
         Err(IdentityError::InvalidCredential { .. }) => {
             return render_update_password_form(
                 &state,
