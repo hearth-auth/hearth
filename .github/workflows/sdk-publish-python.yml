@@ -125,7 +125,13 @@ jobs:
       - name: Validate distributions
         run: twine check sdks/python/dist/*
 
+      # v1.14.0 (cef22109) bundled twine 6.1.0 + packaging 25.0, which reject
+      # the Metadata-Version 2.5 that current hatchling writes: sdk-python-v1.6.11
+      # failed inside this action with "InvalidDistribution: Invalid
+      # distribution metadata: '2.5' is not a valid metadata version", after the
+      # step above (twine 7.0.0) had accepted the same files. v1.14.2 bundles
+      # twine 7.0.0 + packaging 26.2 (GA audit).
       - name: Publish (live — PyPI trusted publisher)
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: sdks/python/dist/

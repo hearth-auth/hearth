@@ -487,18 +487,28 @@ as "pass", so a run in which every single `revoke_revalidate` came back
 
 ### Exit code
 
-`make loadtest` / `hearth-loadtest run` exits **non-zero when a journey exceeds
-the 5% error budget**, and zero otherwise. Before the 2026-09-21 audit it
-returned `ExitCode::SUCCESS` unconditionally: it computed `pass`, printed it,
-wrote it to `report.json` — and then threw it away, so
-`.github/workflows/loadtest-smoke.yml` could only ever prove that the binary did
-not crash.
+`hearth-loadtest run` (and so `make loadtest`) exits with:
 
-A **latency** breach deliberately does *not* fail the process. Per the paragraph
-below, the sub-ms budgets are expected to read `pass:false` on an ordinary dev
-box, so gating the exit code on them would make the command fail everywhere and
-mean nothing. Read `report.json`'s `pass` for the latency verdict; read the exit
-code for "were these numbers measured against a working server at all".
+| Code | Meaning |
+|---|---|
+| `0` | `report.json` says `"pass": true` — or it says `false` only because of a latency breach and `--latency-advisory` is set |
+| `1` | A journey exceeded the 5% error budget (the run measured the reject path, not the hot path), or the run itself failed — **regardless of `--latency-advisory`** |
+| `3` | Every journey was healthy, but `report.json` says `"pass": false`: a journey breached its HTTP p99 budget (or, in ramp mode, the saturation knee was reached) |
+
+History: before the 2026-09-21 audit the harness returned `ExitCode::SUCCESS`
+unconditionally; that audit made an erroring journey fail the run but kept
+latency advisory, so `report.json` could say `"pass": false` while the process
+exited 0 and no gate could act on the verdict (GA audit 2026-09-28, M20). The
+exit code now never contradicts the report unless the caller opts out.
+
+**`--latency-advisory`** (env `HEARTH_LOADTEST_LATENCY_ADVISORY=true`) keeps the
+old behaviour for latency only. `make loadtest-smoke` — the CI gate — sets it:
+15 s of load on a shared GitHub runner cannot hold the sub-ms HTTP budgets (a
+workstation smoke measured `validate` p99 = 2 ms against the 1.5 ms budget), and
+a gate that flaps on runner noise gets ignored. The smoke still fails on any
+erroring journey. `make loadtest` does not set it: per the paragraph below,
+expect exit `3` on an ordinary dev box, and read `report.json` for which budget
+was missed.
 
 **Expect `pass:false` for the sub-ms journeys on a normal dev machine.** Goose
 records response times in whole milliseconds, so the smallest non-zero p99 it

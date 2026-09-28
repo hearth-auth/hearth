@@ -97,7 +97,10 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "20"
+          # semantic-release 25 / @semantic-release/npm 13 require
+          # Node ^22.14 (the 23/12 lines they replace pulled in npm 10 with
+          # unfixed advisories; GA audit supply-chain fix). Node 20 is EOL.
+          node-version: "22"
 
       # Install release tooling (semantic-release + plugins) declared in the
       # root package.json.  --ignore-scripts prevents the reflex-search
@@ -142,7 +145,10 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "20"
+          # semantic-release 25 / @semantic-release/npm 13 require
+          # Node ^22.14 (the 23/12 lines they replace pulled in npm 10 with
+          # unfixed advisories; GA audit supply-chain fix). Node 20 is EOL.
+          node-version: "22"
 
       - name: Install release tooling
         run: npm install --ignore-scripts

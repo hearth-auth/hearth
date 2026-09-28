@@ -11,7 +11,9 @@ are not aspirational, and they are not deferred to a future GA milestone.
 Two consequences follow, and they bind every PR:
 
 - On-disk format changes must **not** silently corrupt data. If a format is incompatible, Hearth
-  must fail at startup with a clear error.
+  must fail at startup with a clear error. (Not yet met for a *rollback* to an older binary: record
+  encodings carry no version, so an older binary fails when it reads an unknown record rather than
+  at startup — see [On-disk storage format](#on-disk-storage-format-wal-sst).)
 - A change that is breaking under the definitions below requires a **major version bump**. It may
   not ship in a 1.x minor or patch release merely because it carries a `**Breaking:**` CHANGELOG
   entry. A CHANGELOG entry documents a break; it does not authorize one.
@@ -90,7 +92,14 @@ Config structs carry `#[serde(deny_unknown_fields)]` from the 1.7 release onward
 
 - A Hearth binary must be able to read storage formats (WAL, SST files) written by the immediately preceding minor version.
 - Format version bumps are announced as `**Breaking:**` entries in CHANGELOG and are always one-directional: a newer binary reads old data; an older binary refuses new data with a clear error.
-- In-place binary rollback between patch releases (same minor version) is always safe — the WAL format version has not changed within any shipped 1.x minor release.
+- **In-place binary rollback is NOT guaranteed safe, even between patch releases.** The WAL and SST
+  *headers* are versioned and have stayed at version `1` throughout 1.x, but the records inside them
+  are `postcard`-encoded (`src/codec.rs`) with no per-record version, and the stored types change
+  between releases (for example `AuditAction` gained three invitation variants after v1.6.11; postcard
+  stores the variant index). An older binary cannot decode such a record, and nothing refuses to start
+  first. **Known gap against the startup-detection rule above:** until records carry a schema version
+  and the data directory carries a minimum-reader marker checked at open, the supported rollback is
+  restoring the pre-upgrade backup ([upgrading guide](docs/guides/upgrading.md#rollback-procedure)).
 
 ### SDK public API
 

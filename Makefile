@@ -141,9 +141,17 @@ loadtest-check:
 ## Small corpus (500 users total), 20 concurrent Goose users, 15 s — enough to
 ## prove the harness is alive without taking CI minutes. Corpus knobs keep
 ## build+seed time short; USERS_PER_REALM=50 keeps the token pool small.
+##
+## Exit code (GA audit M20): the harness now exits non-zero whenever
+## report.json says "pass": false. The smoke sets
+## HEARTH_LOADTEST_LATENCY_ADVISORY=true (the `--latency-advisory` flag), so it
+## FAILS on an erroring journey (exit 1) but only REPORTS a latency-budget
+## breach: 15 s on a shared CI runner cannot hold the sub-ms HTTP budgets, and
+## a gate that flaps on runner noise gets ignored. `make loadtest` does not set
+## it — there a pass:false report exits 3.
 loadtest-smoke:
 ifeq ($(strip $(ARGS)),)
-	PROTOC=$(PROTOC) USERS=20 RUN_TIME=15s \
+	PROTOC=$(PROTOC) USERS=20 RUN_TIME=15s HEARTH_LOADTEST_LATENCY_ADVISORY=true \
 	  CORPUS_ACME=200 CORPUS_GLOBEX=150 CORPUS_INITECH=100 CORPUS_UMBRELLA=50 \
 	  USERS_PER_REALM=50 SEED_WAIT=120 \
 	  loadtest/scripts/run-loadtest.sh
@@ -394,6 +402,14 @@ required-summary-check: ## Assert every CI job can fail the required check
 	@bash scripts/check-required-summary-coverage.sh
 	@bash scripts/tests/check-required-summary-coverage.test.sh
 
+## Guard: ci.yml's docs-only routing must mean "every changed file is
+## documentation", not "any changed file is" — the any-match form skipped the
+## security job on every PR that touched a .md file (GA audit M19). Runs in
+## ci.yml's filter job.
+docs-only-filter-check: ## Assert docs-only skips the scanners only on documentation-only PRs
+	@bash scripts/check-docs-only-filter.sh
+	@bash scripts/tests/check-docs-only-filter.test.sh
+
 ## Guard: a script that boots `serve --dev` must control which config the
 ## server reads (audit 2026-08-28 §4.12#13). Runs in ci.yml's filter job.
 dev-config-isolation-check: ## Assert every serve --dev launch is config-isolated
@@ -546,7 +562,9 @@ ci-fast: fmt clippy proto-lint css-check test-quality abuse-check security-gate
 ##
 ## validate_token gates (HEA-739):
 ##   validate_token latency    p99 ≤ 1 ms  (1×runner headroom over 500 µs production target)
-##   validate_token allocs     ≤ 64 allocs/call (regression ceiling)
+##   validate_token allocs     = 0 allocs/call (zero-alloc proof; MAX_ALLOCS_PER_CALL
+##                             in benches/validate_token.rs — the gate fails on any
+##                             allocation, not above a ceiling)
 bench-gate:
 	PROTOC=$(PROTOC) cargo bench --bench rbac_check $(CARGO_FLAGS)
 	PROTOC=$(PROTOC) cargo bench --bench session_lookup $(CARGO_FLAGS)

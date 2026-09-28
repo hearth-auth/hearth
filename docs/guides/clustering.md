@@ -1,10 +1,22 @@
 # Clustering Guide
 
-> **⚠ EXPERIMENTAL — and, as of 2026-09-21, a multi-node cluster does not start.** See [G-1](#g-1--a-cold-cluster-cannot-be-bootstrapped) below: every node exits fatally during start-up, before the bootstrap endpoint can be called. The rest of this guide documents the intended API and the known defects of a *running* cluster; none of it is reachable today. **The supported deployment model for Hearth 1.x is single-node.** Clustering improvements are tracked in Wave 5 of the production-readiness roadmap.
+> **⚠ EXPERIMENTAL — multi-node is NOT supported for production.** Single-node is the only
+> supported deployment for Hearth 1.x. **Do not** use a multi-node cluster:
+>
+> - for **load-balanced traffic** — followers do not forward writes to the leader ([H-3](#h-3--writes-to-a-follower-fail)), so every write *and every login* (a login writes a session) that lands on a follower fails;
+> - for **writes or logins on followers**, for the same reason;
+> - as **HA failover** — membership is fixed at bootstrap ([C-6](#c-6--cluster-membership-is-immutable-after-bootstrap)), there is no leader redirect, and per-node state (below) does not survive a node switch.
+>
+> A cold cluster *does* start as of task 26.46 ([G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed), fixed). Starting is not the same as being fit for production: the defects below still apply to a running cluster. (An earlier revision of this banner said a cluster could not start at all; that described the pre-fix state.)
 
-Hearth includes a partial Raft consensus implementation (`src/cluster/` via `openraft`). The clustering code path exists, but several critical components are either unimplemented or incorrect. This guide documents the current state accurately so operators can make informed decisions.
+Hearth includes a partial Raft consensus implementation (`src/cluster/` via `openraft`). The clustering code path exists, but several components are unimplemented or incomplete. This guide documents the current state so operators can make informed decisions.
 
 **Single-node mode is the default and only production-supported configuration.** Omit the `cluster:` YAML section entirely. There is zero overhead — no extra port, no Raft log, no election timers.
+
+**State that is per node, not replicated** (GA audit 2026-09-28): the session-cookie secret and
+the DPoP nonce secret are generated per process when not configured, rate limiters and the KDF
+admission gate count per node, and MFA / IP attempt counters are node-local. Peer mTLS accepts any
+certificate issued by the cluster CA, with no pinning of which node ID a certificate may claim.
 
 ---
 
@@ -55,11 +67,27 @@ bootstrap node. Verified on three nodes on 2026-09-21; the transcript is in
 * A `cluster:` section with an empty `peers` list does **not** self-initialise;
   there is nothing to replicate to. Use the endpoint.
 
-### C-5 — Followers do not invalidate RBAC or session caches
+### C-5 — Follower cache invalidation is partial (was: "followers never invalidate")
 
-When a permission is revoked or a session is terminated on the leader, that change propagates to followers via Raft log replication. However, `src/cluster/state_machine.rs` contains no cache-invalidation logic, and `RaftCommand` has no invalidation variant.
+Earlier revisions of this section said followers contain no cache-invalidation logic at all. That
+is no longer what the code does. Every node's identity engine is registered as the Raft state
+machine's replicated-write observer (`impl ReplicatedWriteObserver for EmbeddedIdentityEngine`,
+`src/identity/engine/mod.rs`), and on every replicated put **and** delete it forwards:
 
-**Consequence:** A permission revoked on the leader continues to be honoured on followers indefinitely. A user whose access is revoked can still authenticate successfully against a follower node.
+- the row to the **RBAC engine**, which bumps the realm's decision-cache generation for role,
+  permission and assignment rows (task 23.16) — so a role unassignment or permission revocation on
+  the leader stops resolving on followers;
+- the row to the **audit engine**, which drops its cached signed chain head (task 26.47);
+- **revoked-token (JTI) rows** into the node's revocation cache;
+- the replicated **control epoch**, which makes the node reload its control caches.
+
+`tests/cluster_three_node_control_coherence.rs` covers a control asserted on the leader binding on
+both followers and a token revocation on the leader binding promptly on both followers.
+
+**What is still not established:** this is an allow-list of forwarded row types, not a general
+cache-coherence protocol, and no test proves coherence for every cached type (for example
+session-lookup caches). Treat any read served by a follower as potentially stale, and do not rely
+on a follower for an access decision that must reflect the latest revocation.
 
 ### C-6 — Cluster membership is immutable after bootstrap
 
@@ -67,11 +95,15 @@ When a permission is revoked or a session is terminated on the leader, that chan
 
 **Consequence:** Nodes cannot be added or removed from a running cluster. Replacing a failed node requires a full-cluster restart with updated YAML. Online membership changes are not possible in Hearth 1.x.
 
-### H-3 — Writes to a follower return HTTP 500
+### H-3 — Writes to a follower fail
 
-In cluster mode, mutation requests (user creation, token issuance, session writes) that arrive on a follower return HTTP 500. The caller receives no leader-address hint to retry against.
+Cluster storage does not forward a follower's write to the leader (`src/cluster/engine.rs`,
+`is_not_leader`): the write is refused with a storage error (`raft: not the leader`), which reaches
+the caller as an HTTP 500 with no leader-address hint to retry against. Mutation requests (user
+creation, token issuance, session writes) therefore fail on a follower — **and so do logins**,
+because a successful login writes a session.
 
-**Consequence:** A load balancer that distributes write traffic across all nodes will cause approximately `(n-1)/n` of write requests to fail in an n-node cluster. Writes must be routed exclusively to the leader node.
+**Consequence:** A load balancer that distributes traffic across all nodes will cause approximately `(n-1)/n` of writes and logins to fail in an n-node cluster. Writes and logins must be routed exclusively to the leader node, which is why multi-node must not be used for load-balanced traffic.
 
 ### Exclusive `data_dir` lock
 
@@ -86,7 +118,7 @@ This lock is process-scoped and cannot be shared across nodes. Each node in a cl
 ## When Clustering Will Be Production-Ready
 
 The Wave 5 roadmap items covering clustering are:
-- **HEA-2177 (W5-1)** — RBAC/claims cache invalidation on followers (C-5)
+- **HEA-2177 (W5-1)** — RBAC/claims cache invalidation on followers (C-5; partially addressed — RBAC, audit, revoked-token and control-epoch rows are now forwarded, see C-5)
 - **HEA-2178 (W5-2)** — Online membership changes via `add_learner` / `change_membership` (C-6)
 - **HEA-2173 (W3-3)** — Follower-write 307 redirect to leader instead of HTTP 500 (H-3)
 
@@ -276,7 +308,7 @@ curl -s -X POST http://10.0.0.1:8420/admin/cluster/bootstrap \
 
 **All writes must go to the leader.** Due to H-3, writes to a follower return HTTP 500. Your load balancer must route write traffic exclusively to the leader node. There is no automatic redirect.
 
-Reads from followers may be stale due to C-5 (no cache invalidation). For consistent reads, route all traffic to the leader.
+Reads from followers may be stale: follower cache invalidation covers only the row types listed under C-5. For consistent reads, route all traffic to the leader.
 
 ---
 
@@ -386,4 +418,4 @@ Take backups from a **follower** to avoid adding I/O load to the leader.
 
 See the [Backup and Restore Guide](./backup.md) for the full procedure.
 
-> **Note on followers and stale RBAC state (C-5):** Because followers do not invalidate caches on permission changes, a backup taken from a follower may reflect the storage state correctly but should not be used to audit access-control decisions — the follower may have served stale permissions since the last leader write.
+> **Note on followers and stale state (C-5):** Follower cache invalidation is partial (see C-5), so a backup taken from a follower may reflect the storage state correctly but should not be used to audit access-control decisions — the follower may have served stale data for a cached type that is not forwarded.

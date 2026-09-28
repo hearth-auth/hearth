@@ -10,6 +10,14 @@ kotlin {
     jvmToolchain(17)
 }
 
+// Maven Central rejects a deployment without -sources and -javadoc jars
+// (GA audit: the Kotlin SDK has never reached Maven Central). Kotlin sources
+// yield a near-empty javadoc jar, which Central accepts.
+java {
+    withSourcesJar()
+    withJavadocJar()
+}
+
 dependencies {
     // Kotlin coroutines
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")

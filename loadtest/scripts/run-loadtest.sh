@@ -48,6 +48,11 @@
 #   SEED              [1]      determinism seed
 #   SETTLE            [0]      seconds to wait after seeding before the run
 #   EXTRA_RUN_ARGS    []       extra flags appended to the `run` subcommand
+#   HEARTH_LOADTEST_LATENCY_ADVISORY [false]  read by the harness itself: when
+#                             true, a report.json "pass": false caused only by a
+#                             latency-budget breach exits 0 instead of 3. An
+#                             erroring journey exits 1 either way. The script
+#                             exits with the harness's code (set -e).
 #   SERVER_LOG_OUT    [loadtest/reports/server.log]  where the server log is
 #                             copied on exit (the temp workdir is deleted), so a
 #                             failed request in the report can be explained

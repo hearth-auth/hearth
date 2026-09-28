@@ -65,7 +65,7 @@ jobs:
 
   publish:
     needs: [gate]
-    name: gradle publish io.hearth:hearth-core
+    name: gradle publish io.hearth:hearth-{core,ktor,spring}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -130,8 +130,41 @@ jobs:
           fi
           echo "OK: publishing credentials present."
 
-      # Live publish on sdk-kotlin-v* tags: sign and push to Maven Central via OSSRH.
-      - name: Publish (live — Maven Central via OSSRH)
+      # Task 26.53: prove the publish WILL reach a repository, before it runs.
+      #
+      # `gradle publish` with no configured repository is a no-op that exits 0.
+      # The task graph is the evidence: every module whose
+      # `publishMavenPublicationToOssrhRepository` is missing would ship nothing,
+      # whatever the exit code says. GA audit: this used to accept ANY module's
+      # task, so hearth-ktor and hearth-spring (which had no repository block)
+      # stayed silent no-ops; and `gradle … | tee | grep -q` under pipefail can
+      # fail on tee's SIGPIPE even when the task is present. The graph is now
+      # captured to a file, and all three modules are required.
+      - name: Verify every module targets the OSSRH repository
+        if: startsWith(github.ref, 'refs/tags/sdk-kotlin-v')
+        working-directory: sdks/kotlin
+        run: |
+          set -euo pipefail
+          gradle publish --dry-run > /tmp/publish-tasks.txt 2>&1
+          missing=""
+          for module in hearth-core hearth-ktor hearth-spring; do
+            grep -q ":${module}:publishMavenPublicationToOssrhRepository" /tmp/publish-tasks.txt \
+              || missing="$missing $module"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::gradle publish has NO OSSRH repository target for:$missing — \
+          those modules would publish nothing. See publishing.repositories in each build.gradle.kts."
+            cat /tmp/publish-tasks.txt
+            exit 1
+          fi
+          echo "OK: all three modules target the OSSRH repository."
+        env:
+          ORG_GRADLE_PROJECT_ossrhUsername: ${{ secrets.OSSRH_USERNAME }}
+          ORG_GRADLE_PROJECT_ossrhPassword: ${{ secrets.OSSRH_PASSWORD }}
+
+      # Live publish on sdk-kotlin-v* tags: sign and upload to the Central
+      # Publisher Portal's OSSRH Staging API.
+      - name: Publish (live — Maven Central via OSSRH Staging API)
         if: startsWith(github.ref, 'refs/tags/sdk-kotlin-v')
         working-directory: sdks/kotlin
         run: gradle publish
@@ -141,24 +174,30 @@ jobs:
           ORG_GRADLE_PROJECT_ossrhUsername: ${{ secrets.OSSRH_USERNAME }}
           ORG_GRADLE_PROJECT_ossrhPassword: ${{ secrets.OSSRH_PASSWORD }}
 
-      # Task 26.53: prove the publish actually reached a repository.
-      #
-      # `gradle publish` with no configured repository is a no-op that exits 0.
-      # The task graph is the evidence: if `publishMavenPublicationToOssrhRepository`
-      # did not run, nothing left the machine, whatever the exit code said.
-      - name: Verify an artifact was actually published
+      # GA audit: an upload through the OSSRH Staging API with plain
+      # `maven-publish` stops in staging — it never reaches the Central
+      # Publisher Portal, so nothing is ever released. Sonatype's documented
+      # fix is one POST to /manual/upload/defaultRepository/<namespace>, with a
+      # Bearer token of base64("<token user>:<token password>")
+      # (https://central.sonatype.org/publish/publish-portal-ossrh-staging-api/).
+      # `automatic` releases the deployment once Central validation passes;
+      # the tag already waited for a green required-summary (gate job).
+      # The namespace (`io.hearth`, the Gradle group) must be verified for the
+      # token's account in the Central Portal — an owner action.
+      - name: Transfer the staged deployment to the Central Publisher Portal
         if: startsWith(github.ref, 'refs/tags/sdk-kotlin-v')
-        working-directory: sdks/kotlin
+        env:
+          OSSRH_USERNAME: ${{ secrets.OSSRH_USERNAME }}
+          OSSRH_PASSWORD: ${{ secrets.OSSRH_PASSWORD }}
         run: |
           set -euo pipefail
-          if ! gradle publish --dry-run 2>&1 | tee /tmp/publish-tasks.txt \
-               | grep -q 'publishMavenPublicationToOssrhRepository'; then
-            echo "::error::gradle publish has NO OSSRH repository target — this build \
-          published nothing. See publishing.repositories in hearth-core/build.gradle.kts."
-            cat /tmp/publish-tasks.txt
+          token="$(printf '%s:%s' "$OSSRH_USERNAME" "$OSSRH_PASSWORD" | base64 -w0)"
+          status="$(curl -sS -o /tmp/portal-upload.txt -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${token}" \
+            "https://ossrh-staging-api.central.sonatype.com/manual/upload/defaultRepository/io.hearth?publishing_type=automatic")"
+          if [ "${status}" -lt 200 ] || [ "${status}" -ge 300 ]; then
+            echo "::error::Central Portal transfer failed (HTTP ${status}); the deployment is still in staging."
+            cat /tmp/portal-upload.txt
             exit 1
           fi
-          echo "OK: the publish task graph targets the OSSRH repository."
-        env:
-          ORG_GRADLE_PROJECT_ossrhUsername: ${{ secrets.OSSRH_USERNAME }}
-          ORG_GRADLE_PROJECT_ossrhPassword: ${{ secrets.OSSRH_PASSWORD }}
+          echo "OK: staged deployment transferred to the Central Publisher Portal (HTTP ${status})."

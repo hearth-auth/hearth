@@ -13,6 +13,11 @@ Every other identity provider is an application sitting on top of a generic data
 Token validation, session lookup, and permission checks run in-process against lock-free in-memory structures (epoch-reclaimed `HashMap` snapshots) — no network hop, no cache round-trip, no database query on the hot path. Deploy as a single binary with one config file and a data directory. No Postgres to provision, no Redis to invalidate, no policy service to operate.
 
 > **Stable 1.6.10:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
+>
+> **1.6.10 predates the fixes merged to `main` in PR #358** (heap corruption under the
+> `arc-swap` 1.9.2 primitive, MFA bypasses, token-introspection and backup fixes). No
+> installable server release contains them yet. If you run 1.6.10, track `main` or build
+> from source until the next release is cut; do not treat 1.6.10 as carrying those fixes.
 
 ---
 
@@ -254,13 +259,20 @@ Do not place engine figures beside competitor HTTP figures — that is a categor
 
 All engine-plane figures were measured on `dev-ryzen-7840hs` as of 2026-07-29; full methodology, raw artifacts, and per-figure notes: [`docs/perf/PUBLISHED_FIGURES.md`](docs/perf/PUBLISHED_FIGURES.md). Published values are conservative: where re-verification measured better than the prior report, the older lower figure is used. A re-verification pass against a current HEAD SHA is pending.
 
-| Operation | p50 latency | Throughput | Plane |
+> **Two caveats on this table.** (1) The token-validation and session-lookup time figures
+> are **per-core mean time per operation derived from throughput** (1 ÷ ops per core-second
+> in `c7-saturation-v2-raw.json`), not measured medians — the column previously labelled
+> them p50. (2) Every hot-path figure here predates PR #358, which replaced the
+> `arc-swap` primitive on the read path; none has been re-measured since. Criterion reports
+> means, not p99, so this table does not measure the "sub-millisecond p99" headline either.
+
+| Operation | Time per op | Throughput | Plane |
 |---|---|---|---|
-| Token validation (`validate_token`, hot tier) | **1.31 µs** | **760,877 /core/s** · 9,409,220 /s @16T | engine |
-| Session lookup (hot tier) | **0.118 µs** | — | engine |
-| Token introspection (RFC 7662) | **44.0 µs** | — | engine |
+| Token validation (`validate_token`, hot tier) | **1.31 µs** (per-core mean, from throughput) | **760,877 /core/s** · 9,409,220 /s @16T | engine |
+| Session lookup (hot tier) | **0.118 µs** (per-core mean, from throughput) | — | engine |
+| Token introspection (RFC 7662) | **44.0 µs** p50 | — | engine |
 | Permission check | — | **5,987,782 /core/s** · 52,048,086 /s @16T | engine |
-| Password login (Argon2id `m=19,456 KiB t=2 p=1`) | **16.4 ms** | — | engine |
+| Password login (Argon2id `m=19,456 KiB t=2 p=1`) | **16.4 ms** p50 | — | engine |
 | Durable session creation (**fsync-before-ack, `W=1.000`**) | — | **484 /s** @T=1 (floor) | engine |
 
 `W=1.000` at T=1 means one WAL `fsync` per durable write — the theoretical floor. No write is acknowledged before it is on stable storage. `SyncMode::Async` was evaluated as a default and rejected; every write figure above carries full durability.
@@ -305,14 +317,14 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 4. **Fuzz** — `cargo-fuzz` against wire parsers (CBOR, protobuf, JWT, authenticator data).
 5. **Crash-recovery simulation** — real-thread tests against real temp directories with oracle-checked invariants and a `FaultFs` I/O fault hook: [`realm_crash`](simulation/src/tests/realm_crash.rs), [`audit_crash`](simulation/src/tests/audit_crash.rs), [`realm_concurrent_io`](simulation/src/tests/realm_concurrent_io.rs), [`rbac_concurrent_assignments`](simulation/src/tests/rbac_concurrent_assignments.rs).
 6. **Adversarial** — timing attacks, brute-force lockout, enumeration resistance, TLS downgrade, privilege escalation.
-7. **Conformance** — in-repo suites for OIDC Core 1.0, Discovery 1.0, Dynamic Client Registration, FAPI 2.0, RFC 8693/8707/9728, and the WebAuthn Level 2 ceremony. These are Hearth's own tests read against the specs; **no certifying body's suite has been run against Hearth, and Hearth is not certified.**
+7. **Conformance** — in-repo suites for OIDC Core 1.0, Discovery 1.0, Dynamic Client Registration, FAPI 2.0, RFC 8693/8707/9728, and the WebAuthn Level 2 ceremony. These are Hearth's own tests read against the specs. The OpenID Foundation conformance suite (`v5.3.1`, Config OP profile) was run locally on 2026-09-21 and **failed**: 38 conditions passed, 1 failed (a Discovery 1.0 §3 deviation), 1 warned; the authorization-flow profiles were not run ([`reports/conformance-suite-run-2026-09-21.md`](reports/conformance-suite-run-2026-09-21.md)). **Hearth is not certified** against any standard.
 8. **Benchmarks** — `criterion`, with regression gating in CI.
 
 **Crash-survival is part of the spec.** The storage engine must survive `kill -9` at any point and recover to a consistent state. Every WAL invariant has a crash-recovery scenario that exercises it.
 
 **CI tiers:** Fast (every commit) · Standard (merge) · Extended (nightly) · Full (weekly).
 
-**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (134/135 scenarios). **5,387 Rust tests — 2,593 unit (`hearth` lib + bin) · 2,715 integration (`tests/`) · 79 crash-recovery simulation (`hearth-simulation`).** 14 of those carry `#[ignore]` (live-LDAP cases and one manual measurement) and do not run by default. Counted with `cargo nextest list --workspace` at `333c74e6` — reproduce it yourself rather than taking the number on faith.
+**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (134/135 scenarios). **The full Rust suite (`make test`, `hearth` lib + bin, `tests/` and the `hearth-simulation` crash-recovery crate) ran 6,056 tests at `060d4541`, plus 14 `#[ignore]` tests that do not run by default** (live-LDAP cases, two waiting on an abuse facade, two on external attestation, a manual WAL measurement, a slow restore baseline and the unfinished tenant-enumeration acceptance test). The count moves with every PR — reproduce it with `cargo nextest list --workspace --features hearth/dev-endpoints` rather than taking the number on faith.
 
 The Rust suite, the seven SDK suites and the SDK conformance check are all in the `needs:` list of the `required-summary` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), so a red suite blocks merge. This README does not assert a green result for any particular commit: look at the CI badge above, or at the `validation-summary.txt` asset on a given release.
 
@@ -997,7 +1009,22 @@ Per-realm variants of the core OAuth/OIDC endpoints are available at `/realms/{r
 
 ## Client SDKs
 
-Two first-party SDKs live under [`sdks/`](sdks):
+Seven first-party SDKs live under [`sdks/`](sdks): TypeScript, Node.js, Go, Python, Rust,
+PHP and Kotlin. Registry status, checked 2026-09-28 — not every SDK is installable from its
+registry yet, and the published versions lag the source tree:
+
+| SDK | Package | Registry status |
+|---|---|---|
+| TypeScript | `@hearth-auth/sdk` | npm, **1.6.2** |
+| Node.js | `@hearth-auth/node` | npm, **1.6.2** |
+| Go | `github.com/hearth-auth/hearth/sdks/go` | Go module proxy, **v1.6.11** |
+| Python | `hearth-sdk` | PyPI, **1.6.8** |
+| Rust | `hearth-sdk` | crates.io, **1.6.11** |
+| PHP | `hearth-auth/php-sdk` | Packagist, **`dev-main` only** (no tagged release) |
+| Kotlin / JVM | `io.hearth:hearth-core` (+ `hearth-ktor`, `hearth-spring`) | **not published** — build from source |
+
+See [docs/guides/sdks/overview.md](docs/guides/sdks/overview.md) for per-SDK install notes.
+Two examples:
 
 **TypeScript** — [`sdks/typescript/`](sdks/typescript) (package `@hearth-auth/sdk`)
 
@@ -1013,7 +1040,7 @@ import "github.com/hearth-auth/hearth/sdks/go/hearth"
 client := hearth.NewClient("https://auth.example.com", realmID)
 ```
 
-Each SDK has a README with full API docs: [`sdks/typescript/README.md`](sdks/typescript/README.md) and [`sdks/go/README.md`](sdks/go/README.md).
+Each SDK has a README with full API docs under `sdks/<language>/README.md`, for example [`sdks/typescript/README.md`](sdks/typescript/README.md) and [`sdks/go/README.md`](sdks/go/README.md).
 
 ---
 
