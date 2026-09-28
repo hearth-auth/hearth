@@ -469,10 +469,40 @@ pub struct OAuthClient {
     /// required-action intercept when no factor is found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mfa_required: Option<bool>,
+    /// Whether `grant_types` is authoritative for the refresh-token grant.
+    ///
+    /// Until GA audit M7 no grant but `client_credentials` and jwt-bearer read
+    /// `grant_types`, and every client received refresh tokens whatever it
+    /// listed. A record written before then deserializes with `false` and
+    /// keeps those refresh tokens; every record written since — and any
+    /// client whose grant types are edited — carries `true`, and refresh
+    /// tokens then follow `grant_types` exactly.
+    #[serde(default)]
+    grant_types_enforced: bool,
 }
 
 fn default_require_consent() -> bool {
     true
+}
+
+/// The `authorization_code` grant (RFC 6749 §4.1).
+pub const GRANT_AUTHORIZATION_CODE: &str = "authorization_code";
+/// The `refresh_token` grant (RFC 6749 §6).
+pub const GRANT_REFRESH_TOKEN: &str = "refresh_token";
+/// The device authorization grant (RFC 8628 §3.4).
+pub const GRANT_DEVICE_CODE: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
+/// Grant types given to a client registered without naming any:
+/// `authorization_code` plus `refresh_token`.
+///
+/// `refresh_token` is included because every client received refresh tokens
+/// before `grant_types` was enforced for that grant (GA audit M7); a client
+/// that names its grant types gets exactly those.
+pub fn default_grant_types() -> Vec<String> {
+    vec![
+        GRANT_AUTHORIZATION_CODE.to_string(),
+        GRANT_REFRESH_TOKEN.to_string(),
+    ]
 }
 
 impl OAuthClient {
@@ -509,6 +539,7 @@ impl OAuthClient {
             id_token_signed_response_alg: Some(IdTokenSigningAlg::EdDsa),
             profile: ClientProfile::Standard,
             mfa_required: None,
+            grant_types_enforced: true,
         }
     }
 
@@ -547,6 +578,7 @@ impl OAuthClient {
             id_token_signed_response_alg: Some(IdTokenSigningAlg::EdDsa),
             profile: ClientProfile::Standard,
             mfa_required: None,
+            grant_types_enforced: true,
         }
     }
 
@@ -594,9 +626,26 @@ impl OAuthClient {
         &self.grant_types
     }
 
-    /// Sets the grant types for this client.
+    /// Sets the grant types for this client. From then on `grant_types`
+    /// decides the refresh-token grant too (see [`Self::allows_grant_type`]).
     pub(crate) fn set_grant_types(&mut self, grant_types: Vec<String>) {
         self.grant_types = grant_types;
+        self.grant_types_enforced = true;
+    }
+
+    /// Returns whether this client may use `grant_type` (GA audit M7).
+    ///
+    /// `grant_types` decides, with one compatibility exception: a record
+    /// written before grant types were enforced keeps the refresh-token grant
+    /// every client used to receive, until its grant types are next set.
+    pub fn allows_grant_type(&self, grant_type: &str) -> bool {
+        self.grant_types.iter().any(|g| g == grant_type)
+            || (grant_type == GRANT_REFRESH_TOKEN && !self.grant_types_enforced)
+    }
+
+    /// Returns whether this client may receive and redeem refresh tokens.
+    pub fn allows_refresh_token(&self) -> bool {
+        self.allows_grant_type(GRANT_REFRESH_TOKEN)
     }
 
     /// Sets the client name. Used internally during updates.
@@ -1756,6 +1805,16 @@ impl ClientCredentialsResponse {
 
 // ===== Device Authorization (RFC 8628) =====
 
+/// A device authorization awaiting the user's decision, as the approval page
+/// shows it: which client is asking, and for which scope (GA audit B3).
+#[derive(Debug, Clone)]
+pub struct PendingDeviceAuthorization {
+    /// The client that started the device flow.
+    pub client_id: ClientId,
+    /// The scope the device requested (space-delimited), if any.
+    pub scope: Option<String>,
+}
+
 /// Request for the Device Authorization Grant (RFC 8628).
 #[derive(Debug, Clone)]
 pub struct DeviceAuthorizationRequest {
@@ -2198,6 +2257,50 @@ mod tests {
         );
     }
 
+    /// GA audit M7: refresh tokens follow `grant_types` for every record
+    /// written from now on, while a record written before enforcement keeps
+    /// the refresh tokens every client used to receive.
+    #[test]
+    fn refresh_grant_follows_grant_types_except_on_pre_enforcement_records() {
+        let mut client = OAuthClient::new(
+            ClientId::generate(),
+            "Code only".to_string(),
+            vec!["https://app.example.com/cb".to_string()],
+            Timestamp::from_micros(1_000_000),
+        );
+        client.set_grant_types(vec![GRANT_AUTHORIZATION_CODE.to_string()]);
+        assert!(
+            !client.allows_refresh_token(),
+            "declared without refresh_token"
+        );
+        assert!(client.allows_grant_type(GRANT_AUTHORIZATION_CODE));
+        assert!(!client.allows_grant_type(GRANT_DEVICE_CODE));
+
+        let mut json = serde_json::to_value(&client).expect("serialize");
+        assert_eq!(
+            json["grant_types_enforced"], true,
+            "new records carry the marker"
+        );
+        json.as_object_mut()
+            .expect("object")
+            .remove("grant_types_enforced");
+        let mut legacy: OAuthClient = serde_json::from_value(json).expect("deserialize");
+        assert!(
+            legacy.allows_refresh_token(),
+            "a pre-enforcement record keeps its refresh tokens"
+        );
+        assert!(
+            !legacy.allows_grant_type(GRANT_DEVICE_CODE),
+            "the exception covers the refresh grant only"
+        );
+
+        legacy.set_grant_types(vec![GRANT_AUTHORIZATION_CODE.to_string()]);
+        assert!(
+            !legacy.allows_refresh_token(),
+            "editing the grant types makes them authoritative"
+        );
+    }
+
     #[test]
     fn client_alg_round_trips_through_storage_json() {
         let mut client = OAuthClient::new(
@@ -2347,7 +2450,7 @@ mod tests {
 /// Identifies the end-user by email address. The client_id is used for
 /// per-client rate limiting only; no client authentication is required for
 /// public clients.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct PasswordGrantRequest {
     /// The user's email address.
     pub email: String,
@@ -2365,6 +2468,19 @@ pub struct PasswordGrantRequest {
     ///
     /// When `None`, adaptive MFA uses an empty string for the UA component.
     pub user_agent: Option<String>,
+}
+
+/// Redacts the password (GA audit L20).
+impl std::fmt::Debug for PasswordGrantRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasswordGrantRequest")
+            .field("email", &self.email)
+            .field("password", &"<redacted>")
+            .field("scope", &self.scope)
+            .field("client_ip", &self.client_ip)
+            .field("user_agent", &self.user_agent)
+            .finish()
+    }
 }
 
 /// Response from a successful ROPC grant — mirrors `OidcTokenResponse`.
@@ -2397,7 +2513,6 @@ impl PasswordGrantResponse {
 /// Used with `grant_type = urn:hearth:params:grant-type:step-up-mfa`.
 /// The caller re-supplies the password and adds an `mfa_code`; both are
 /// verified before tokens are issued and the device fingerprint is recorded.
-#[derive(Debug)]
 pub struct StepUpMfaGrantRequest {
     /// The user's email address.
     pub email: String,
@@ -2411,4 +2526,18 @@ pub struct StepUpMfaGrantRequest {
     pub client_ip: Option<String>,
     /// Raw `User-Agent` header value — used to record the trusted device fingerprint.
     pub user_agent: Option<String>,
+}
+
+/// Redacts the password and the MFA code (GA audit L20).
+impl std::fmt::Debug for StepUpMfaGrantRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StepUpMfaGrantRequest")
+            .field("email", &self.email)
+            .field("password", &"<redacted>")
+            .field("mfa_code", &"<redacted>")
+            .field("scope", &self.scope)
+            .field("client_ip", &self.client_ip)
+            .field("user_agent", &self.user_agent)
+            .finish()
+    }
 }

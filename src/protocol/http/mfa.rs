@@ -570,7 +570,26 @@ fn deliver_magic_link(
         form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>(),
     );
     let recipient = email.to_string();
+    // A-4 + A-50: the per-realm outbound budget and the cross-realm
+    // per-recipient cap, exactly as the forgot-password and registration
+    // forms apply them (GA audit L17). Checked inside the off-request-path
+    // job, so a refused send costs the caller what an allowed one does.
+    let guards = Arc::clone(&state.abuse_guards);
+    let realm_key = realm_id.as_uuid().to_string();
     let job = move || {
+        match guards.check_outbound_email(&realm_key, &recipient) {
+            crate::abuse::runtime::OutboundVerdict::Deny { reason } => {
+                tracing::warn!(
+                    guard = reason,
+                    "magic_link: outbound cap reached; link not sent"
+                );
+                return;
+            }
+            crate::abuse::runtime::OutboundVerdict::Warn { reason } => {
+                tracing::warn!(guard = reason, "magic_link: outbound soft cap reached");
+            }
+            crate::abuse::runtime::OutboundVerdict::Allow => {}
+        }
         if let Err(e) = email_service.send_magic_link_email(
             &recipient,
             &url,
@@ -578,7 +597,10 @@ fn deliver_magic_link(
             stored.as_ref(),
             None,
         ) {
-            tracing::warn!(error = %e, "magic_link: delivery failed");
+            tracing::warn!(
+                error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
+                "magic_link: delivery failed"
+            );
         }
     };
     match tokio::runtime::Handle::try_current() {
@@ -586,6 +608,40 @@ fn deliver_magic_link(
             handle.spawn_blocking(job);
         }
         Err(_) => job(),
+    }
+}
+
+/// Whether a magic link for `email` could sign anyone in: the address has an
+/// account, or the realm's registration policy would let the link create one
+/// (`open`, or `domain_restricted` to a listed domain). A lookup error answers
+/// `false` — nothing is sent.
+fn magic_link_can_sign_in(
+    state: &Arc<AppState>,
+    realm_id: &crate::core::RealmId,
+    email: &str,
+) -> bool {
+    match state.identity.get_user_by_email(realm_id, email) {
+        Ok(Some(_)) => return true,
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "magic_link: account lookup failed; nothing sent");
+            return false;
+        }
+    }
+    let Ok(Some(realm)) = state.identity.get_realm(realm_id) else {
+        return false;
+    };
+    match realm
+        .config()
+        .registration_policy
+        .clone()
+        .unwrap_or_default()
+    {
+        crate::identity::RegistrationPolicy::Open => true,
+        crate::identity::RegistrationPolicy::DomainRestricted(allowed) => email
+            .rsplit_once('@')
+            .is_some_and(|(_, domain)| allowed.iter().any(|d| d.eq_ignore_ascii_case(domain))),
+        _ => false,
     }
 }
 
@@ -622,6 +678,28 @@ async fn magic_link_request(
             .identity
             .ip_login_retry_after_secs(&realm_id, &client_ip);
         return make_ip_rate_limit_response(retry_after as u32);
+    }
+
+    // Every request counts against the caller's IP (GA audit L17). The
+    // endpoint used to check the limiter and never record to it, so the
+    // limiter never tripped and the endpoint mailed without end.
+    state
+        .identity
+        .record_ip_login_attempt(&realm_id, &client_ip);
+
+    // Only an address that can sign in with the link gets one: an existing
+    // account, or — where the realm lets a magic link create the account —
+    // an address its registration policy admits. Anything else would make
+    // this an unauthenticated relay to arbitrary addresses (GA audit L17).
+    // The answer is the same 202 either way.
+    if !magic_link_can_sign_in(&state, &realm_id, &body.email) {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "message": "If an account exists, a magic link has been sent"
+            })),
+        )
+            .into_response();
     }
 
     // Request magic link; ignore per-email RateLimited to prevent enumeration.

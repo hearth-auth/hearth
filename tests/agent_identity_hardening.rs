@@ -462,6 +462,54 @@ async fn reactivate_agent_is_frozen_on_an_archived_realm() {
 // 26.18 / A-8 — token exchange refuses a Suspended agent, not just a Revoked one
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Stores a confidential, token-exchange-capable OAuth client under the given
+/// UUID. The API mints client ids itself, so the record of a freshly
+/// registered client is copied to the new key with its id rewritten.
+fn register_exchange_client_at(
+    harness: &common::TestHarness,
+    realm_id: &RealmId,
+    uuid: uuid::Uuid,
+) {
+    let registered = harness
+        .identity()
+        .register_client(
+            realm_id,
+            &hearth::identity::RegisterClientRequest {
+                client_name: format!("agent-client-{uuid}"),
+                client_secret: Some("agent-client-secret!".to_string()),
+                redirect_uris: vec!["https://client.example.com/cb".to_string()],
+                grant_types: vec!["urn:ietf:params:oauth:grant-type:token-exchange".to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register exchange client");
+    let old_uuid = registered.client_id().as_uuid().to_string();
+    let old_key = format!("oauth:client:{old_uuid}").into_bytes();
+    let bytes = harness
+        .storage()
+        .get(realm_id, &old_key)
+        .expect("read client")
+        .expect("client record");
+    let rewritten = String::from_utf8(bytes)
+        .expect("client record is JSON")
+        .replace(&old_uuid, &uuid.to_string());
+    harness
+        .storage()
+        .put(
+            realm_id,
+            format!("oauth:client:{uuid}").as_bytes(),
+            rewritten.as_bytes(),
+        )
+        .expect("write client under the agent's uuid");
+    let stored = harness
+        .identity()
+        .get_client(realm_id, &ClientId::new(uuid))
+        .expect("get client")
+        .expect("client stored under the agent's uuid");
+    assert_eq!(stored.client_id().as_uuid(), &uuid);
+}
+
 /// With no `actor_token`, the exchange's actor subject is the request's
 /// `client_id`. Registering an agent under that same UUID makes the agent the
 /// actor, which is exactly the shape the status gate was written for.
@@ -475,6 +523,10 @@ async fn token_exchange_refuses_a_suspended_agent_actor() {
     let owner = make_user(identity, &realm);
     let agent = make_agent(identity, &realm, &owner);
     let subject = make_user(identity, &realm);
+    // GA audit M8: the exchanging client must be a registered confidential
+    // client holding the token-exchange grant, so the agent's UUID must also
+    // name such a client for the agent to be the actor.
+    register_exchange_client_at(&harness, &realm, *agent.as_uuid());
 
     let make_req = || Rfc8693Request {
         client_id: ClientId::new(*agent.as_uuid()),

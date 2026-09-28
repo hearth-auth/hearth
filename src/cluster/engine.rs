@@ -413,6 +413,20 @@ impl ClusterEngine {
         self.raft.as_ref().map(|r| r.metrics().borrow().clone())
     }
 
+    /// Stops the Raft core (heartbeats, elections, replication). A no-op in
+    /// single-node mode.
+    ///
+    /// Called once on graceful shutdown, after every listener has drained
+    /// (GA audit 2026-09-28 L24: the Raft side was never shut down). A failure
+    /// is logged, not returned: nothing is left to recover at that point.
+    pub async fn shutdown(&self) {
+        if let Some(raft) = &self.raft {
+            if let Err(e) = raft.shutdown().await {
+                warn!(error = %e, "Raft core did not shut down cleanly");
+            }
+        }
+    }
+
     /// Configured replication-lag threshold in milliseconds.
     pub fn read_lag_threshold_ms(&self) -> u64 {
         self.read_lag_threshold_ms

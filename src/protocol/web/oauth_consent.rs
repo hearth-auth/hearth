@@ -232,6 +232,12 @@ async fn authorize_get_impl(
         Ok(p) => p,
         Err(resp) => return resp,
     };
+    // A client or role that demands a second factor needs a session that
+    // PROVED one (GA audit B5). Fresh entry only: the interstitial resumes
+    // continue a request this check already admitted.
+    if let Some(refusal) = super::authorize_gate::mfa_use_gate(state, realm, session, &params) {
+        return refusal;
+    }
     // Every branch — plain, JAR, PAR — runs the same gates in the same order:
     // required actions, SMS MFA, consent / `prompt`, then issuance. The
     // interstitials resume into the same sequence after their own gate.

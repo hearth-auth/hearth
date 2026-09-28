@@ -39,6 +39,11 @@
 #   SKIP_BUILD         [0]
 set -euo pipefail
 
+# A sweep measures latency past the budgets on purpose. Since GA audit M20 the
+# harness exits 3 on a `pass:false` report, which would abort the sweep under
+# `set -e`; keep latency advisory here (an erroring journey still exits 1).
+export HEARTH_LOADTEST_LATENCY_ADVISORY="${HEARTH_LOADTEST_LATENCY_ADVISORY:-true}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOADTEST_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${LOADTEST_DIR}/.." && pwd)"

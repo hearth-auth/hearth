@@ -18,7 +18,6 @@ use std::sync::Arc;
 use crate::core::{RealmId, SessionId, UserId};
 use crate::identity::error::IdentityError;
 use crate::identity::keys;
-use crate::identity::types::session::SessionStorageRecord;
 use crate::identity::types::{Page, Session};
 use crate::storage::StorageEngine;
 
@@ -110,7 +109,7 @@ impl SessionStore for EmbeddedSessionStore {
         let key = keys::encode_session_id(session_id);
         match self.storage.get(realm_id, &key) {
             Ok(Some(data)) => {
-                let session = crate::codec::decode::<SessionStorageRecord>(&data)
+                let session = crate::identity::types::session::decode_session_record(&data)
                     .map(Session::from_storage_record)
                     .map_err(|reason| IdentityError::Serialization { reason })?;
                 Ok(Some(session))
@@ -177,9 +176,10 @@ impl SessionStore for EmbeddedSessionStore {
                 .get(realm_id, &session_key)
                 .map_err(|e| IdentityError::Storage(Box::new(e)))?
             {
-                let session: Session = crate::codec::decode::<SessionStorageRecord>(&data)
-                    .map(Session::from_storage_record)
-                    .map_err(|reason| IdentityError::Serialization { reason })?;
+                let session: Session =
+                    crate::identity::types::session::decode_session_record(&data)
+                        .map(Session::from_storage_record)
+                        .map_err(|reason| IdentityError::Serialization { reason })?;
                 items.push(session);
             }
         }
@@ -232,9 +232,10 @@ impl SessionStore for EmbeddedSessionStore {
             if items.len() > limit {
                 break;
             }
-            let session: Session = crate::codec::decode::<SessionStorageRecord>(&entry.value)
-                .map(Session::from_storage_record)
-                .map_err(|reason| IdentityError::Serialization { reason })?;
+            let session: Session =
+                crate::identity::types::session::decode_session_record(&entry.value)
+                    .map(Session::from_storage_record)
+                    .map_err(|reason| IdentityError::Serialization { reason })?;
             items.push(session);
         }
 

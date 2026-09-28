@@ -17,7 +17,7 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tower_http::trace::{DefaultOnResponse, MakeSpan, TraceLayer};
 use tracing::Level;
 
 use crate::abuse::shaper::ShaperOutcome;
@@ -29,6 +29,7 @@ mod advanced;
 mod agents;
 mod approval;
 mod auth;
+pub(crate) mod conn_guard;
 mod health;
 pub mod limits;
 mod mfa;
@@ -694,12 +695,12 @@ pub fn router_with(state: Arc<AppState>, extra: Router) -> Router {
             http_rate_limit,
         ))
         .layer(
+            // GA audit 2026-09-28 M16: `DefaultMakeSpan` recorded the full URI,
+            // so every `?token=` (setup, reset, magic link, invitation, email
+            // verification) and the federation callback's `code`/`state` went
+            // to the log and to OTLP with the span.
             TraceLayer::new_for_http()
-                .make_span_with(
-                    DefaultMakeSpan::new()
-                        .level(Level::INFO)
-                        .include_headers(false),
-                )
+                .make_span_with(RedactedMakeSpan)
                 .on_response(DefaultOnResponse::new().level(Level::DEBUG)),
         )
         .layer(DefaultBodyLimit::max(BODY_LIMIT_DEFAULT))
@@ -707,14 +708,106 @@ pub fn router_with(state: Arc<AppState>, extra: Router) -> Router {
         .layer(axum::middleware::from_fn(strip_server_header))
         // HEA-SEC-33: minimal security headers on every REST API response.
         .layer(axum::middleware::from_fn(minimal_security_headers))
-        // A-40: Host header allowlist — outermost layer so it runs before route
-        // dispatch. Uses from_fn_with_state so the middleware can read
-        // state.allowed_hosts without a separate Arc capture.
+        // A-40: Host header allowlist — runs before route dispatch. Uses
+        // from_fn_with_state so the middleware can read state.allowed_hosts
+        // without a separate Arc capture.
         .layer(axum::middleware::from_fn_with_state(
-            state,
+            Arc::clone(&state),
             enforce_host_allowlist,
         ))
+        // GA audit 2026-09-28 L4 — outermost, so nothing below can read an
+        // `X-Forwarded-Proto` that a trusted proxy did not send.
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            strip_untrusted_forwarded_proto,
+        ))
 }
+
+/// Removes `X-Forwarded-Proto` from any request whose TCP peer is not listed
+/// in `server.trusted_proxies`.
+///
+/// `server.trust_forwarded_proto` makes that header decide whether a request
+/// is treated as HTTPS: the `Secure` cookie attribute, HSTS, and the login
+/// Origin check. It used to be read from **any** peer, so a client that
+/// reached the listener directly, bypassing the proxy, chose the answer for
+/// itself (GA audit 2026-09-28 L4). A request with no known peer (an embedder
+/// serving the router without `ConnectInfo`) is treated as untrusted.
+async fn strip_untrusted_forwarded_proto(
+    State(state): State<Arc<AppState>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    const XFP: &str = "x-forwarded-proto";
+    if req.headers().contains_key(XFP) {
+        let from_trusted_proxy = req
+            .extensions()
+            .get::<ConnectInfo<std::net::SocketAddr>>()
+            .is_some_and(|ConnectInfo(peer)| {
+                let peer = peer.ip().to_canonical();
+                state
+                    .trusted_proxies
+                    .iter()
+                    .any(|proxy| proxy.to_canonical() == peer)
+            });
+        if !from_trusted_proxy {
+            req.headers_mut().remove(XFP);
+        }
+    }
+    next.run(req).await
+}
+
+/// Builds the per-request span with the query *values* removed.
+///
+/// Records the same fields as tower-http's `DefaultMakeSpan` at `INFO` without
+/// headers — `method`, `uri`, `version` — except that `uri` is
+/// [`redacted_uri`]: the path plus the query parameter names.
+#[derive(Clone, Copy, Debug)]
+struct RedactedMakeSpan;
+
+impl<B> MakeSpan<B> for RedactedMakeSpan {
+    fn make_span(&mut self, request: &axum::http::Request<B>) -> tracing::Span {
+        tracing::info_span!(
+            "request",
+            method = %request.method(),
+            uri = %redacted_uri(request.uri()),
+            version = ?request.version(),
+        )
+    }
+}
+
+/// Renders `uri` as its path plus the names of its query parameters, with every
+/// value dropped: `/reset?token=abc&next=/x` becomes `/reset?token=&next=`.
+///
+/// Query values in this server are routinely one-time credentials, so no value
+/// is logged, whatever its name.
+fn redacted_uri(uri: &axum::http::Uri) -> String {
+    let path = uri.path();
+    let Some(query) = uri.query() else {
+        return path.to_string();
+    };
+    let mut out = String::with_capacity(path.len() + query.len());
+    out.push_str(path);
+    out.push('?');
+    for (i, pair) in query.split('&').enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        // A bare entry (`?abc123`) is a value with no name, and an over-long
+        // "name" is more likely a credential than a parameter: redact both.
+        match pair.split_once('=') {
+            Some((name, _value)) if name.len() <= MAX_LOGGED_QUERY_NAME_LEN => {
+                out.push_str(name);
+                out.push('=');
+            }
+            _ if pair.is_empty() => {}
+            _ => out.push_str("<redacted>"),
+        }
+    }
+    out
+}
+
+/// Longest query parameter name [`redacted_uri`] records verbatim.
+const MAX_LOGGED_QUERY_NAME_LEN: usize = 32;
 
 /// Baseline `Content-Security-Policy` for browser-facing HTML served by the
 /// API router (`GET /docs`, the `GET /end_session` front-channel logout page).

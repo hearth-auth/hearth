@@ -433,6 +433,14 @@ pub(crate) enum WalDurabilityHandle {
     Pending { am_leader: bool, ticket: u64 },
 }
 
+/// Most batches one group-commit leader commits before it hands leadership to
+/// a waiting writer (audit GA 2026-09-28 M4).
+///
+/// Bounds the leader's own request at this many fsyncs under sustained load.
+/// A hand-off costs one thread wake-up, so this keeps that cost to one per
+/// sixteen batches rather than one per batch (HEA-1955).
+const MAX_LEADER_BATCHES: usize = 16;
+
 /// Shared group-commit queue and leader flag.
 struct GroupState {
     /// Writers waiting for the current leader to commit their entries.
@@ -471,6 +479,9 @@ struct CommitSignal {
     /// set, every ticket at or above `.0` failed. Writers below it committed
     /// before the fault and keep their successful acknowledgement.
     failed_from: Option<(u64, String)>,
+    /// Set by a leader that stepped down with writers still queued; the
+    /// first waiter to see it claims leadership (audit GA 2026-09-28 M4).
+    leader_vacant: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -756,7 +767,8 @@ fn refuse_if_survivors(
 }
 
 /// Scans the record region of a WAL segment, stopping at the first record that
-/// is torn, CRC-invalid, or undecodable.
+/// is torn or CRC-invalid. A record that authenticates but does not decode is
+/// an error, never a stopping point (audit GA 2026-09-28 L22).
 ///
 /// Both replay ([`Wal::read_all`]) and recovery ([`Wal::open_with_fs`]) go
 /// through this function so the "last valid record" boundary they compute can
@@ -840,9 +852,23 @@ fn scan_records(region: &[u8], dek: &DataEncryptionKey) -> Result<RecordScan, St
         let aad = record_num.to_le_bytes();
         let plaintext = encryption::decrypt_section(ciphertext, dek, &nonce, &aad)?;
 
+        // The record authenticated, so this key's owner wrote it whole: a
+        // decode failure is a format mismatch (a binary older than the one
+        // that wrote it), never a torn tail. Truncating here would destroy it
+        // and every acknowledged record after it (audit GA 2026-09-28 L22),
+        // so refuse the open and leave the segment intact.
         match WalEntry::deserialize(&plaintext) {
             Ok(entry) => entries.push(entry),
-            Err(_) => break, // Deserialization failure — stop
+            Err(e) => {
+                return Err(StorageError::DeserializationFailed {
+                    reason: format!(
+                        "WAL record {record_num} at offset {} authenticated but does not \
+                         decode ({e}); refusing to open rather than discard it and every \
+                         record after it — was this segment written by a newer binary?",
+                        V1_RECORD_OFFSET + record_start as u64
+                    ),
+                });
+            }
         }
 
         record_num += 1;
@@ -1224,12 +1250,18 @@ impl Wal {
     /// `pre_rotate` is **dropped without being called** here — pass a fresh
     /// instance to [`Self::await_entry_durable`] where it may be needed by
     /// the group-commit leader.
-    pub(crate) fn enqueue_entry<F>(
+    ///
+    /// `apply` runs exactly once, at the moment the record takes its place in
+    /// the WAL order — see [`Self::append_applying`]. When it fails nothing is
+    /// queued and its error is returned.
+    pub(crate) fn enqueue_entry<A, F>(
         &self,
         entry: &WalEntry,
+        apply: A,
         pre_rotate: F,
     ) -> Result<WalDurabilityHandle, StorageError>
     where
+        A: FnOnce() -> Result<(), StorageError>,
         F: FnOnce() -> Result<(), StorageError>,
     {
         if self.fenced.load(Ordering::Acquire) {
@@ -1242,7 +1274,7 @@ impl Wal {
 
         if self.config.sync_mode != SyncMode::EveryWrite {
             return self
-                .write_entry_no_sync(plaintext, pre_rotate)
+                .write_entry_no_sync(plaintext, apply, pre_rotate)
                 .map(|()| WalDurabilityHandle::Immediate);
         }
 
@@ -1251,20 +1283,33 @@ impl Wal {
         // `|| self.trigger_flush()` to both enqueue_entry and await_entry_durable).
         drop(pre_rotate);
 
-        let (am_leader, ticket) = {
-            let mut gs = self
-                .group
-                .lock()
-                .map_err(|_| StorageError::Io(std::io::Error::other("WAL group mutex poisoned")))?;
-            let ticket = gs.next_ticket;
-            gs.next_ticket += 1;
-            gs.pending.push_back(GroupSlot { plaintext, ticket });
-            let am_leader = !gs.leader_active;
-            gs.leader_active = true;
-            (am_leader, ticket)
-        };
-
+        let (am_leader, ticket) = self.enqueue_slot(plaintext, apply)?;
         Ok(WalDurabilityHandle::Pending { am_leader, ticket })
+    }
+
+    /// Runs `apply`, then queues `plaintext` for group commit, in one critical
+    /// section of the group mutex, and reports whether the caller must lead.
+    ///
+    /// Tickets are issued, and batches drained, under this same mutex, so
+    /// the order in which callers' `apply` closures run is exactly the order
+    /// of their records in the WAL, and no leader can drain — let alone make
+    /// durable, rotate past, or truncate — a record whose `apply` has not
+    /// finished (audit GA 2026-09-28 M1, M2).
+    fn enqueue_slot<A>(&self, plaintext: Vec<u8>, apply: A) -> Result<(bool, u64), StorageError>
+    where
+        A: FnOnce() -> Result<(), StorageError>,
+    {
+        let mut gs = self
+            .group
+            .lock()
+            .map_err(|_| StorageError::Io(std::io::Error::other("WAL group mutex poisoned")))?;
+        apply()?;
+        let ticket = gs.next_ticket;
+        gs.next_ticket += 1;
+        gs.pending.push_back(GroupSlot { plaintext, ticket });
+        let am_leader = !gs.leader_active;
+        gs.leader_active = true;
+        Ok((am_leader, ticket))
     }
 
     /// Block until the WAL entry represented by `handle` is durable.
@@ -1300,13 +1345,14 @@ impl Wal {
             b.wait();
         }
 
+        let mut pre_rotate = Some(pre_rotate);
         if am_leader {
-            self.lead_group_commit(pre_rotate)?;
+            self.lead_group_commit(pre_rotate.take())?;
         }
-        // Follower: the looping leader handles this slot; pre_rotate is dropped.
 
-        // Wait for the commit watermark to reach this writer's ticket.
-        self.await_ticket(ticket)
+        // Wait for the commit watermark to reach this writer's ticket, taking
+        // over leadership if the leader hands it off first.
+        self.await_ticket_or_lead(ticket, &mut pre_rotate)
     }
 
     // ── Original combined-phase append (unchanged) ────────────────────────────
@@ -1320,7 +1366,9 @@ impl Wal {
     /// first finds the queue empty — drains the queue, writes all entries, and
     /// calls `sync_data` once.  It then loops immediately: if new entries arrived
     /// during the fsync they are committed in the next iteration without any
-    /// thread handoff.  The leader exits only when it finds the queue empty.
+    /// thread handoff.  The leader exits when it finds the queue empty, or
+    /// after [`MAX_LEADER_BATCHES`] batches, handing leadership to a waiting
+    /// writer.
     ///
     /// Durability guarantee: no writer returns `Ok` until a `sync_data` that
     /// covered its bytes has completed.  Rotation, which changes metadata
@@ -1339,6 +1387,39 @@ impl Wal {
     where
         F: FnOnce() -> Result<(), StorageError>,
     {
+        self.append_applying(entry, || Ok(()), pre_rotate)
+    }
+
+    /// [`Self::append_with_pre_rotate`], running `apply` at the moment the
+    /// record takes its place in the WAL order.
+    ///
+    /// The storage engine applies the record to its memtable in `apply`. Two
+    /// properties follow, and both are required:
+    ///
+    /// - **Memtable order equals WAL order.** `apply` runs inside the critical
+    ///   section that assigns the record its position (the group mutex under
+    ///   `SyncMode::EveryWrite`, the file mutex otherwise). Two concurrent
+    ///   writers to one key therefore reach the memtable in the order replay
+    ///   will use after a crash; before, they could reach the memtable in one
+    ///   order and the WAL in the other, and a restart swapped the surviving
+    ///   value — undoing a revocation (audit GA 2026-09-28 M1).
+    /// - **A durable record is never missing from the memtable.** `apply` has
+    ///   finished before any leader can drain the record, so a rotation that
+    ///   flushes the memtable and truncates the segment always flushes it
+    ///   (audit 2026-08-28 §3 B4; GA 2026-09-28 M2).
+    ///
+    /// When `apply` fails nothing is written and its error is returned. The
+    /// write is acknowledged only when this returns `Ok`.
+    pub(crate) fn append_applying<A, F>(
+        &self,
+        entry: &WalEntry,
+        apply: A,
+        pre_rotate: F,
+    ) -> Result<(), StorageError>
+    where
+        A: FnOnce() -> Result<(), StorageError>,
+        F: FnOnce() -> Result<(), StorageError>,
+    {
         // A write fault inside commit_batch fences the WAL: bytes written after
         // a torn record are dropped by scan_records on recovery, so subsequent
         // appends must not be acked as durable.
@@ -1352,26 +1433,16 @@ impl Wal {
 
         // ── Fast path: SyncMode::None (dev / test only) ───────────────────
         if self.config.sync_mode != SyncMode::EveryWrite {
-            return self.write_entry_no_sync(plaintext, pre_rotate);
+            return self.write_entry_no_sync(plaintext, apply, pre_rotate);
         }
 
         // ── Group-commit path (SyncMode::EveryWrite) ──────────────────────
         //
-        // Push a slot to the shared queue.  The first writer to find the queue
-        // empty becomes the leader and runs the commit loop; all others wait on
-        // the shared commit watermark until it covers their ticket.
-        let (am_leader, ticket) = {
-            let mut gs = self
-                .group
-                .lock()
-                .map_err(|_| StorageError::Io(std::io::Error::other("WAL group mutex poisoned")))?;
-            let ticket = gs.next_ticket;
-            gs.next_ticket += 1;
-            gs.pending.push_back(GroupSlot { plaintext, ticket });
-            let am_leader = !gs.leader_active;
-            gs.leader_active = true;
-            (am_leader, ticket)
-        };
+        // Apply, then push a slot to the shared queue, in one critical section
+        // (see `enqueue_slot`).  The first writer to find no leader active
+        // becomes the leader and runs the commit loop; all others wait on the
+        // shared commit watermark until it covers their ticket.
+        let (am_leader, ticket) = self.enqueue_slot(plaintext, apply)?;
 
         // Test hook: rendezvous all concurrent writers before the leader
         // drains the queue.  This makes batch membership deterministic
@@ -1382,43 +1453,83 @@ impl Wal {
             b.wait();
         }
 
+        let mut pre_rotate = Some(pre_rotate);
         if am_leader {
-            // Leader: run the commit loop.  The looping leader drains every
-            // pending batch itself rather than handing off to a follower
-            // (HEA-1955).  Per-entry I/O errors travel through slot.state.error.
-            self.lead_group_commit(pre_rotate)?;
+            // Leader: run the commit loop.  The looping leader drains pending
+            // batches itself rather than handing off after each one
+            // (HEA-1955), up to `MAX_LEADER_BATCHES`.
+            self.lead_group_commit(pre_rotate.take())?;
         }
-        // Follower: the looping leader handles this slot; pre_rotate is dropped.
 
         // Wait for the commit watermark to reach this writer's ticket.  The
         // looping leader publishes the watermark for every batch it commits
         // before returning, so this is typically a no-op for the leader thread
-        // (its own ticket was in the first batch).
-        self.await_ticket(ticket)
+        // (its own ticket was in the first batch).  A follower whose ticket is
+        // still queued when a leader hands off takes over leadership here.
+        self.await_ticket_or_lead(ticket, &mut pre_rotate)
     }
 
     /// Blocks until the commit watermark covers `ticket`, then reports its
-    /// outcome.
+    /// outcome, leading the group commit meanwhile if leadership falls vacant.
     ///
     /// Waking is edge-free: `completed` is a monotone watermark rather than a
     /// per-writer flag, so a wakeup can never be "missed" — a writer that
     /// checks late simply observes an already-satisfied condition and returns
     /// without waiting at all.
-    fn await_ticket(&self, ticket: u64) -> Result<(), StorageError> {
+    ///
+    /// A leader that reaches [`MAX_LEADER_BATCHES`] with writers still queued
+    /// steps down and announces the vacancy (see [`Self::lead_group_commit`]).
+    /// A waiter whose ticket is still uncommitted then claims leadership — the
+    /// first to take the group mutex wins — and runs the commit loop itself,
+    /// with `pre_rotate` if it still has it. A writer that enqueues while the
+    /// post is vacant claims it at enqueue instead; either way exactly one
+    /// leader is active and every queued ticket is committed.
+    fn await_ticket_or_lead<F>(
+        &self,
+        ticket: u64,
+        pre_rotate: &mut Option<F>,
+    ) -> Result<(), StorageError>
+    where
+        F: FnOnce() -> Result<(), StorageError>,
+    {
         let (lock, cv) = &self.commit_signal;
-        let mut sig = lock
-            .lock()
-            .map_err(|_| StorageError::Io(std::io::Error::other("WAL commit mutex poisoned")))?;
-        while sig.completed < ticket {
-            sig = cv.wait(sig).map_err(|_| {
-                StorageError::Io(std::io::Error::other("WAL commit condvar poisoned"))
-            })?;
-        }
-        match &sig.failed_from {
-            Some((from, msg)) if ticket >= *from => {
-                Err(StorageError::Io(std::io::Error::other(msg.clone())))
+        loop {
+            {
+                let mut sig = lock.lock().map_err(|_| {
+                    StorageError::Io(std::io::Error::other("WAL commit mutex poisoned"))
+                })?;
+                while sig.completed < ticket && !sig.leader_vacant {
+                    sig = cv.wait(sig).map_err(|_| {
+                        StorageError::Io(std::io::Error::other("WAL commit condvar poisoned"))
+                    })?;
+                }
+                if sig.completed >= ticket {
+                    return match &sig.failed_from {
+                        Some((from, msg)) if ticket >= *from => {
+                            Err(StorageError::Io(std::io::Error::other(msg.clone())))
+                        }
+                        _ => Ok(()),
+                    };
+                }
+                // Consume the announcement. If the claim below loses to an
+                // enqueuer, that enqueuer is the leader, and its own step-down
+                // announces again.
+                sig.leader_vacant = false;
             }
-            _ => Ok(()),
+            let claimed = {
+                let mut gs = self.group.lock().map_err(|_| {
+                    StorageError::Io(std::io::Error::other("WAL group mutex poisoned"))
+                })?;
+                if gs.leader_active || gs.pending.is_empty() {
+                    false
+                } else {
+                    gs.leader_active = true;
+                    true
+                }
+            };
+            if claimed {
+                self.lead_group_commit(pre_rotate.take())?;
+            }
         }
     }
 
@@ -1439,8 +1550,18 @@ impl Wal {
     /// had before the attempt, then release the record number.  If the
     /// truncation itself fails the file length is unknown, so the WAL fences
     /// exactly as [`Self::commit_batch`] does after a torn write.
-    fn write_entry_no_sync<F>(&self, plaintext: Vec<u8>, pre_rotate: F) -> Result<(), StorageError>
+    ///
+    /// `apply` runs under the file mutex after any rotation and before the
+    /// record number is reserved, so the order of `apply` calls is the order
+    /// of the records in the segment (audit GA 2026-09-28 M1).
+    fn write_entry_no_sync<A, F>(
+        &self,
+        plaintext: Vec<u8>,
+        apply: A,
+        pre_rotate: F,
+    ) -> Result<(), StorageError>
     where
+        A: FnOnce() -> Result<(), StorageError>,
         F: FnOnce() -> Result<(), StorageError>,
     {
         let mut file = self
@@ -1467,6 +1588,8 @@ impl Wal {
         } else {
             file_size
         };
+
+        apply()?;
 
         // INVARIANT: every mutation of `rotation.record_counter` — here, in
         // `commit_batch`, and in `rotate_locked` — happens while this same file
@@ -1552,10 +1675,19 @@ impl Wal {
     /// round-trip.  `leader_active` stays `true` throughout so late-arriving
     /// writers never race to elect a parallel leader.
     ///
+    /// The loop is bounded: after [`MAX_LEADER_BATCHES`] batches with writers
+    /// still queued, the leader steps down and announces the vacancy, and a
+    /// waiting writer takes over (see [`Self::await_ticket_or_lead`]). An
+    /// unbounded loop never returned under sustained writes, so the leader's
+    /// own request — durable since its first batch — hung for the whole busy
+    /// period while its caller held the backup barrier's read side
+    /// (audit GA 2026-09-28 M4). One hand-off per `MAX_LEADER_BATCHES`
+    /// fsyncs keeps the HEA-1955 coalescing win.
+    ///
     /// Panic safety: the RAII `LeaderGuard` holds `in_flight` throughout each
     /// batch.  If `commit_batch` panics, `Drop` signals every in-flight slot
     /// with an error and clears `leader_active`, so no writer hangs forever.
-    fn lead_group_commit<F>(&self, pre_rotate: F) -> Result<(), StorageError>
+    fn lead_group_commit<F>(&self, pre_rotate: Option<F>) -> Result<(), StorageError>
     where
         F: FnOnce() -> Result<(), StorageError>,
     {
@@ -1569,23 +1701,34 @@ impl Wal {
             disarmed: false,
         };
 
-        // Wrap in Option so the FnOnce can be consumed on the first rotation-
+        // An Option so the FnOnce can be consumed on the first rotation-
         // triggering batch and passed as None to subsequent batches.
-        let mut pre_rotate_opt = Some(pre_rotate);
+        let mut pre_rotate_opt = pre_rotate;
         let mut batch: Vec<GroupSlot>;
+        let mut committed: usize = 0;
 
         loop {
-            // Drain atomically.  Exit when the queue is empty.
+            // Drain atomically.  Exit when the queue is empty, or hand over
+            // once this leader has committed its share.
             {
                 let mut gs = self.group.lock().map_err(|_| {
                     StorageError::Io(std::io::Error::other("WAL group mutex poisoned"))
                 })?;
-                batch = gs.pending.drain(..).collect();
-                if batch.is_empty() {
+                if gs.pending.is_empty() {
                     gs.leader_active = false;
                     guard.disarmed = true;
                     return Ok(());
                 }
+                if committed >= MAX_LEADER_BATCHES {
+                    // Every queued writer is waiting in (or about to reach)
+                    // `await_ticket_or_lead`, which claims the vacancy.
+                    gs.leader_active = false;
+                    guard.disarmed = true;
+                    drop(gs);
+                    self.announce_leader_vacancy();
+                    return Ok(());
+                }
+                batch = gs.pending.drain(..).collect();
                 // Record the batch's first ticket in the guard before
                 // commit_batch so Drop can fail these writers on a panic
                 // (HEA-1924 / HEA-1925).
@@ -1597,10 +1740,21 @@ impl Wal {
             // Clear so Drop does not re-fail committed writers on a later
             // error in this same call (R1 ghost-write fix).
             guard.in_flight_from = None;
+            committed += 1;
 
             // Loop immediately: drain the next batch without waking a
             // follower.  This is the HEA-1955 efficiency improvement.
         }
+    }
+
+    /// Tells waiting writers that no leader is active while tickets are still
+    /// queued, so one of them claims leadership.
+    fn announce_leader_vacancy(&self) {
+        let (lock, cv) = &self.commit_signal;
+        lock.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .leader_vacant = true;
+        cv.notify_all();
     }
 
     /// Writes every slot in `batch` to the WAL file and calls `sync_data` once.
@@ -1851,6 +2005,17 @@ impl Wal {
         f: impl Fn() -> Result<(), StorageError> + Send + Sync + 'static,
     ) {
         self.pre_rotate_fn = Some(Arc::new(f));
+    }
+
+    /// Runs the registered pre-rotate callback on its own, exactly as
+    /// `rotate_locked` would before truncating, so a test can observe its
+    /// outcome without driving a real rotation.
+    #[cfg(test)]
+    pub(crate) fn run_pre_rotate_fn(&self) -> Result<(), StorageError> {
+        match self.pre_rotate_fn {
+            Some(ref flush) => flush(),
+            None => Ok(()),
+        }
     }
 
     /// Rotates the WAL file by truncating and writing a fresh version + encryption header.
@@ -2602,6 +2767,62 @@ mod tests {
         assert_eq!(after, data, "a refused open must not rewrite the segment");
     }
 
+    /// Audit GA 2026-09-28 L22: a record that passes CRC *and* AEAD but does
+    /// not decode was treated as a torn tail. Recovery then rewrote the
+    /// segment without it — and without every acknowledged record after it.
+    /// An authenticated record was written whole by this key's owner, so a
+    /// decode failure is a format mismatch (for example a binary downgrade
+    /// across a new op code), never a crash artefact: the open must refuse and
+    /// leave the file byte-for-byte intact.
+    #[test]
+    fn open_refuses_an_authenticated_record_that_does_not_decode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("test.wal");
+        let config = WalConfig {
+            max_size: 0,
+            sync_mode: SyncMode::None,
+        };
+
+        {
+            let wal = open_test_wal(&wal_path, config.clone());
+            wal.append(&make_entry(b"before", b"v", WalOperation::Put))
+                .expect("append");
+            // A well-formed frame, encrypted under the segment key, whose
+            // plaintext carries an op code this binary does not know.
+            let mut undecodable = make_entry(b"future", b"v", WalOperation::Put).serialize();
+            undecodable[24] = 0x7F;
+            assert!(WalEntry::deserialize(&undecodable).is_err());
+            wal.write_entry_no_sync(undecodable, || Ok(()), || Ok(()))
+                .expect("write the undecodable record");
+            // Acknowledged after it: these must not be destroyed.
+            wal.append(&make_entry(b"after-1", b"v", WalOperation::Put))
+                .expect("append");
+            wal.append(&make_entry(b"after-2", b"v", WalOperation::Put))
+                .expect("append");
+        }
+        let before = std::fs::read(&wal_path).expect("read wal");
+
+        let (kek, kek_id) = test_kek();
+        let result = Wal::open_with_fs(&wal_path, config, Arc::new(RealFs), &kek, kek_id);
+        match result {
+            Err(StorageError::DeserializationFailed { reason }) => {
+                assert!(
+                    reason.contains("record 1"),
+                    "the error must name the undecodable record: {reason}"
+                );
+            }
+            Err(other) => panic!("expected DeserializationFailed, got: {other}"),
+            Ok(wal) => panic!(
+                "open must refuse an authenticated record that does not decode; it replayed {} \
+                 record(s) and truncated the rest",
+                wal.read_all().map(|e| e.len()).unwrap_or_default()
+            ),
+        }
+
+        let after = std::fs::read(&wal_path).expect("read wal after refused open");
+        assert_eq!(after, before, "a refused open must not rewrite the segment");
+    }
+
     // --- P1 fast ---
 
     #[test]
@@ -3073,5 +3294,189 @@ mod tests {
                 "ticket {t} at or after the fault must report failure"
             );
         }
+    }
+
+    /// Wraps [`RealFs`]; the first `sync_data` signals and blocks until the
+    /// gate opens, and every later one takes `delay` — long enough for woken
+    /// writers to queue again during each fsync.
+    struct PacedSyncFs {
+        gate: Arc<(Mutex<bool>, Condvar)>,
+        entered: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
+        delay: std::time::Duration,
+    }
+
+    struct PacedSyncFile {
+        inner: Box<dyn FsFile>,
+        gate: Arc<(Mutex<bool>, Condvar)>,
+        entered: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
+        delay: std::time::Duration,
+    }
+
+    impl FsFile for PacedSyncFile {
+        fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+            self.inner.write_all(buf)
+        }
+        fn read_to_end(&mut self, buf: &mut Vec<u8>) -> std::io::Result<usize> {
+            self.inner.read_to_end(buf)
+        }
+        fn sync_all(&self) -> std::io::Result<()> {
+            self.inner.sync_all()
+        }
+        fn sync_data(&self) -> std::io::Result<()> {
+            if let Some(tx) = self.entered.lock().expect("entered").take() {
+                let _ = tx.send(());
+                let (lock, cv) = &*self.gate;
+                let mut closed = lock.lock().expect("gate");
+                while *closed {
+                    closed = cv.wait(closed).expect("gate wait");
+                }
+            } else {
+                // AUDIT: justified-sleep: paces commits so the queue never
+                // drains while the writers loop; correctness does not depend
+                // on its length.
+                std::thread::sleep(self.delay);
+            }
+            self.inner.sync_data()
+        }
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+        fn set_len(&self, size: u64) -> std::io::Result<()> {
+            self.inner.set_len(size)
+        }
+    }
+
+    impl Fs for PacedSyncFs {
+        fn open_append(&self, path: &Path) -> std::io::Result<Box<dyn FsFile>> {
+            Ok(Box::new(PacedSyncFile {
+                inner: RealFs.open_append(path)?,
+                gate: Arc::clone(&self.gate),
+                entered: Arc::clone(&self.entered),
+                delay: self.delay,
+            }))
+        }
+        fn create(&self, path: &Path) -> std::io::Result<Box<dyn FsFile>> {
+            Ok(Box::new(PacedSyncFile {
+                inner: RealFs.create(path)?,
+                gate: Arc::clone(&self.gate),
+                entered: Arc::clone(&self.entered),
+                delay: self.delay,
+            }))
+        }
+        fn open_read(&self, path: &Path) -> std::io::Result<Box<dyn FsFile>> {
+            RealFs.open_read(path)
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            RealFs.read(path)
+        }
+        fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            RealFs.write(path, data)
+        }
+        fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+            RealFs.create_dir_all(path)
+        }
+        fn read_dir(&self, path: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            RealFs.read_dir(path)
+        }
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            RealFs.remove_file(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            RealFs.rename(from, to)
+        }
+        fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+            RealFs.sync_dir(dir)
+        }
+    }
+
+    /// Audit GA 2026-09-28 M4: the group-commit leader returned only when a
+    /// drain found the queue empty. Under sustained writes it never does, so
+    /// the leader's own request — already durable in the first batch — never
+    /// returned, and it kept holding whatever its caller held (the backup
+    /// barrier's read side). The leader must hand over after a bounded number
+    /// of batches, and every follower must still be committed.
+    #[test]
+    fn a_group_commit_leader_returns_while_writers_keep_the_queue_busy() {
+        /// Generous upper bound on the batches a leader may commit.
+        const LEADER_BOUND: u64 = 32;
+        /// Where the writers give up if the leader never returns.
+        const GIVE_UP_AT: u64 = 400;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let gate = Arc::new((Mutex::new(true), Condvar::new()));
+        let fs = Arc::new(PacedSyncFs {
+            gate: Arc::clone(&gate),
+            entered: Arc::new(Mutex::new(Some(entered_tx))),
+            delay: std::time::Duration::from_millis(2),
+        });
+        let (kek, kek_id) = test_kek();
+        let wal = Arc::new(
+            Wal::open_with_fs(
+                &dir.path().join("test.wal"),
+                WalConfig::default(),
+                fs,
+                &kek,
+                kek_id,
+            )
+            .expect("open wal"),
+        );
+
+        // The probe becomes the leader and parks inside its first fsync.
+        let probe = {
+            let wal = Arc::clone(&wal);
+            std::thread::spawn(move || {
+                wal.append(&make_entry(b"probe", b"v", WalOperation::Put))
+                    .expect("probe append");
+                wal.commit_profile().batches
+            })
+        };
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the probe never reached its fsync");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writers: Vec<_> = (0..8)
+            .map(|w| {
+                let wal = Arc::clone(&wal);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    let mut n = 0u64;
+                    while !stop.load(Ordering::SeqCst) && wal.commit_profile().batches < GIVE_UP_AT
+                    {
+                        wal.append(&make_entry(
+                            format!("w{w}-{n}").as_bytes(),
+                            b"v",
+                            WalOperation::Put,
+                        ))
+                        .expect("writer append");
+                        n += 1;
+                    }
+                    n
+                })
+            })
+            .collect();
+
+        {
+            let (lock, cv) = &*gate;
+            *lock.lock().expect("gate") = false;
+            cv.notify_all();
+        }
+        let batches_when_probe_returned = probe.join().expect("probe");
+        stop.store(true, Ordering::SeqCst);
+        let written: u64 = writers.into_iter().map(|w| w.join().expect("writer")).sum();
+
+        assert!(
+            batches_when_probe_returned <= LEADER_BOUND,
+            "the leader's own write returned only after {batches_when_probe_returned} batches: \
+             it kept leading while other writers kept the queue non-empty"
+        );
+        // Every acknowledged record is in the segment.
+        let replayed = wal.read_all().expect("read back").len() as u64;
+        assert_eq!(
+            replayed,
+            written + 1,
+            "every acknowledged append is in the WAL"
+        );
     }
 }

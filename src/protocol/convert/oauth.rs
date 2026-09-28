@@ -69,7 +69,7 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             client_secret: r.client_secret,
             generated_client_secret: None,
             grant_types: if r.grant_types.is_empty() {
-                vec!["authorization_code".to_string()]
+                crate::identity::oidc::default_grant_types()
             } else {
                 r.grant_types
             },
@@ -461,7 +461,10 @@ mod tests {
         let domain = domain::RegisterClientRequest::from(proto);
         assert_eq!(domain.client_name, "My App");
         assert_eq!(domain.client_secret.as_deref(), Some("secret123"));
-        assert_eq!(domain.grant_types, vec!["authorization_code"]);
+        assert_eq!(
+            domain.grant_types,
+            vec!["authorization_code", "refresh_token"]
+        );
         assert_eq!(
             domain.id_token_signed_response_alg.as_deref(),
             Some("RS256"),

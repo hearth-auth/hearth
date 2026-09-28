@@ -1,0 +1,32 @@
+# Trivy ignore file for .github/workflows/security.yml's filesystem scan
+# (passed via the action's `trivyignores` input).
+#
+# Policy: every entry is scoped to an exact rule ID AND path, with a statement
+# a reviewer can check. Never ignore a vulnerability ID here to make the scan
+# pass — upgrade the dependency instead (see osv-scanner.toml for the same
+# policy on advisories).
+
+secrets:
+  # A deliberately public Ed25519 test key: the `openssl_style_unversioned_pkcs8_is_accepted`
+  # unit test (inside `#[cfg(test)] mod tests`) parses the PEM `openssl genpkey
+  # -algorithm ed25519` produces and checks the derived public key. It signs
+  # nothing and is never loaded outside the test. Scoped to this one file so a
+  # real key committed anywhere else still fails the scan.
+  - id: private-key
+    paths:
+      - "src/backup/signature.rs"
+    statement: "Public test-fixture Ed25519 key in a #[cfg(test)] unit test; not a credential."
+
+vulnerabilities:
+  # GO-2026-5932: golang.org/x/crypto/openpgp is unmaintained and unsafe by
+  # design. The advisory covers every x/crypto version and has NO fixed
+  # release, so the "upgrade instead" rule above cannot apply. It affects only
+  # code that imports the openpgp packages, and the Go SDK imports none:
+  # `go list -deps -test ./...` in sdks/go lists x/crypto only as acme,
+  # acme/autocert (via labstack/echo), chacha20, chacha20poly1305, hkdf, sha3
+  # and internals. Same assessment as the osv-scanner.toml entry. Scoped to the
+  # Go SDK's go.mod; revisit if any dependency starts importing openpgp.
+  - id: GO-2026-5932
+    paths:
+      - "sdks/go/go.mod"
+    statement: "No openpgp import anywhere in the Go SDK build graph; the advisory has no fixed version."

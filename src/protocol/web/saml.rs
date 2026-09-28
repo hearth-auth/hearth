@@ -113,6 +113,7 @@ pub struct AcsForm {
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn sp_acs(
     State(state): State<Arc<WebState>>,
+    crate::protocol::client_info::PeerAddr(peer_addr): crate::protocol::client_info::PeerAddr,
     AxumPath(realm_name): AxumPath<String>,
     headers: axum::http::HeaderMap,
     Form(form): Form<AcsForm>,
@@ -279,6 +280,7 @@ pub async fn sp_acs(
             let response = super::federation::complete_federation_outcome(
                 &state,
                 &headers,
+                peer_addr,
                 &realm,
                 &realm_name,
                 &bag.idp_id,

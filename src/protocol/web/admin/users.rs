@@ -1074,7 +1074,7 @@ pub async fn admin_user_send_reset(
     let delivery = deliver_password_reset(&state, target.id(), &user_email);
     match &delivery {
         Ok(()) => {
-            tracing::info!(user_id = %uid, admin = %session.user_email, "admin triggered password reset");
+            tracing::info!(user_id = %uid, admin = %crate::identity::email::mask_email_address(&session.user_email), "admin triggered password reset");
         }
         Err(reason) => {
             tracing::warn!(user_id = %uid, reason = %reason, "admin password reset was not delivered");
@@ -1141,7 +1141,7 @@ pub async fn admin_user_disable_mfa(
 
     match state.identity.disable_mfa(target.id(), &uid) {
         Ok(()) => {
-            tracing::info!(user_id = %uid, admin = %session.user_email, "admin disabled MFA");
+            tracing::info!(user_id = %uid, admin = %crate::identity::email::mask_email_address(&session.user_email), "admin disabled MFA");
         }
         Err(e) => {
             tracing::warn!(error = %e, "disable_mfa failed");
@@ -1206,7 +1206,7 @@ pub async fn admin_user_remove_phone(
         Ok(_) => {
             tracing::info!(
                 user_id = %uid,
-                admin = %session.user_email,
+                admin = %crate::identity::email::mask_email_address(&session.user_email),
                 "admin removed phone number"
             );
             Redirect::to(&format!("{redirect_base}?flash=phone_removed")).into_response()
@@ -1270,7 +1270,7 @@ pub async fn admin_user_reset_mfa_codes(
 
     match result {
         Ok(Ok(codes)) => {
-            tracing::info!(user_id = %uid_str, admin = %admin_session.user_email, "admin reset MFA recovery codes");
+            tracing::info!(user_id = %uid_str, admin = %crate::identity::email::mask_email_address(&admin_session.user_email), "admin reset MFA recovery codes");
             let tmpl = AdminMfaCodesResetTemplate {
                 codes,
                 user_id: user_id.clone(),
@@ -1332,7 +1332,7 @@ pub async fn admin_user_revoke_session(
 
     match state.identity.revoke_session(target.id(), &sid) {
         Ok(()) => {
-            tracing::info!(session_id = %session_id, admin = %session.user_email, "admin revoked session");
+            tracing::info!(session_id = %session_id, admin = %crate::identity::email::mask_email_address(&session.user_email), "admin revoked session");
         }
         Err(e) => {
             tracing::warn!(error = %e, "revoke_session failed");
@@ -1373,7 +1373,7 @@ pub async fn admin_user_revoke_webauthn(
         .revoke_webauthn_credential(target.id(), &uid, &cred_id_bytes)
     {
         Ok(()) => {
-            tracing::info!(user_id = %uid, admin = %session.user_email, "admin revoked WebAuthn credential");
+            tracing::info!(user_id = %uid, admin = %crate::identity::email::mask_email_address(&session.user_email), "admin revoked WebAuthn credential");
         }
         Err(e) => {
             tracing::warn!(error = %e, "revoke_webauthn_credential failed");
@@ -3257,7 +3257,11 @@ fn process_csv_import(
                     email_otp_enabled: None,
                 };
                 if let Err(e) = state.identity.update_user(realm_id, user.id(), &req) {
-                    tracing::warn!(error = %e, email = %email, "import update failed");
+                    tracing::warn!(
+                        error = %e,
+                        email = %crate::identity::email::mask_email_address(&email),
+                        "import update failed"
+                    );
                     summary
                         .errors
                         .push(format!("Row {}: update failed — {e}.", line_num + 2));
@@ -3285,7 +3289,11 @@ fn process_csv_import(
                     summary.created += 1;
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, email = %email, "import create_user failed");
+                    tracing::warn!(
+                        error = %e,
+                        email = %crate::identity::email::mask_email_address(&email),
+                        "import create_user failed"
+                    );
                     summary
                         .errors
                         .push(format!("Row {}: create failed — {e}.", line_num + 2));

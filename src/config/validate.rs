@@ -67,6 +67,14 @@ const KEK_REQUIRED_IN_PROD: &str =
      security.key_encryption_key to a random 64-hex-char value (openssl rand -hex 32). \
      Dev mode (--dev) does not require this.";
 
+/// GA audit 2026-09-28 M15: the `log` email transport delivers nothing.
+const EMAIL_LOG_TRANSPORT_IN_PROD: &str =
+    "email.transport = log (the default) delivers no email: every message is dropped, \
+     including the system realm's admin password-reset mail and the mail of every realm \
+     created at runtime. Configure a real transport (smtp, sendgrid, postmark, mailgun or \
+     mailtrap), or set email.allow_log_transport_in_production: true for an evaluation \
+     deployment that knowingly runs without email. Dev mode (--dev) does not require this.";
+
 /// HEA-2166: production requires HTTPS so session cookies carry `Secure`.
 const TLS_REQUIRED_IN_PROD: &str =
     "production mode requires HTTPS — without it, session cookies are issued without the \
@@ -141,6 +149,10 @@ const VALID_GRANT_TYPES: &[&str] = &[
     "client_credentials",
     "refresh_token",
     "urn:ietf:params:oauth:grant-type:device_code",
+    // Both grants are enforced against `grant_types` (GA audit M7), so a
+    // `hearth.yaml` client must be able to declare them.
+    "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    "urn:ietf:params:oauth:grant-type:token-exchange",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -251,6 +263,7 @@ impl Config {
                 default_realm: None,
                 grpc_port: None,
                 grpc_bind_address: None,
+                grpc_allow_plaintext: false,
                 assets_dir: None,
                 trust_forwarded_proto: false,
             },
@@ -403,6 +416,18 @@ impl Config {
             });
         }
 
+        // OPS-11 (GA audit 2026-09-28): the server resolves HEARTH_KEK with
+        // `var`, which cannot read a non-UTF-8 value and now refuses it. Say
+        // so here too, rather than counting it as a present KEK below.
+        if std::env::var_os("HEARTH_KEK").is_some_and(|v| v.to_str().is_none()) {
+            issues.push(ValidationIssue {
+                field: "security.key_encryption_key".to_string(),
+                reason: "HEARTH_KEK is set but is not valid UTF-8; it must be 64 hex \
+                         characters (openssl rand -hex 32)"
+                    .to_string(),
+            });
+        }
+
         // HEA-2166: mirror the fail-closed production gates from `validate`
         // so the admin config-check panel surfaces all three in one pass.
         if !self.dev_mode {
@@ -425,6 +450,34 @@ impl Config {
                     field: "demo.enabled".to_string(),
                     reason: DEMO_FORBIDDEN_IN_PROD.to_string(),
                 });
+            }
+            // GA audit 2026-09-28 M14: gRPC is served over TLS with the HTTPS
+            // certificate when one is configured. Without one it is plaintext,
+            // and the HTTPS gate above says nothing about it.
+            if let Some(port) = self.server.grpc_port {
+                let grpc_bind = self
+                    .server
+                    .grpc_bind_address
+                    .as_deref()
+                    .unwrap_or(self.server.bind_address.as_str());
+                if self.server.tls_cert_path.is_none()
+                    && is_public_listener(grpc_bind)
+                    && !self.server.grpc_allow_plaintext
+                {
+                    issues.push(ValidationIssue {
+                        field: "server.grpc_port".to_string(),
+                        reason: format!(
+                            "the gRPC management API would listen in plaintext on \
+                             {grpc_bind}:{port}: with no server.tls_cert_path there is no \
+                             certificate to serve it with, so admin bearer tokens, OAuth client \
+                             secrets and agent API keys would cross the network in clear text. \
+                             Configure server.tls_cert_path + server.tls_key_path (gRPC then \
+                             uses the same certificate), bind gRPC to loopback with \
+                             server.grpc_bind_address: 127.0.0.1, or — only when a proxy or \
+                             mesh terminates TLS for gRPC — set server.grpc_allow_plaintext: true."
+                        ),
+                    });
+                }
             }
         }
 
@@ -473,6 +526,20 @@ impl Config {
                 reason: "must be greater than 0".to_string(),
             });
         }
+        // B6: a zero budget would close every connection before its first
+        // request, and "no timeout" is exactly the defect being closed.
+        if self.operational.header_read_timeout_secs == 0 {
+            issues.push(ValidationIssue {
+                field: "operational.header_read_timeout_secs".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
+        }
+        if self.operational.tls_handshake_timeout_secs == 0 {
+            issues.push(ValidationIssue {
+                field: "operational.tls_handshake_timeout_secs".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
+        }
 
         validate_oidc_all(&self.oidc, self.dev_mode, &mut issues);
         validate_token_all(&self.token, &mut issues);
@@ -508,7 +575,20 @@ impl Config {
 
         // HSEC-010: Mirror the fail-fast check in validate_all so the admin
         // config-check panel surfaces this error alongside other issues.
-        if !self.dev_mode && self.email.transport == EmailTransport::Log {
+        //
+        // GA audit 2026-09-28 M15: this used to be the only log-transport
+        // check, and it covers only realms declared in YAML. The system realm
+        // (the admin console, which always has password login), the
+        // auto-created default realm and API-created realms were never
+        // checked, so a production config with no `email:` block booted and
+        // silently dropped admin password-reset mail. The per-realm reasons
+        // stay here because they name the feature that needs mail; the
+        // blanket refusal (with its opt-in) is added at the end of this
+        // function.
+        if !self.dev_mode
+            && self.email.transport == EmailTransport::Log
+            && !self.email.allow_log_transport_in_production
+        {
             validate_email_transport_log_prod_all(self.realms.as_ref(), &mut issues);
         }
 
@@ -610,6 +690,18 @@ impl Config {
         // time because only the raw YAML distinguishes an operator-set key from
         // a compiled-in default.
         issues.extend(self.key_liveness_issues.iter().cloned());
+
+        // GA audit 2026-09-28 M15. Last, so that a config with a more specific
+        // problem reports that problem first; see the per-realm check above.
+        if !self.dev_mode
+            && self.email.transport == EmailTransport::Log
+            && !self.email.allow_log_transport_in_production
+        {
+            issues.push(ValidationIssue {
+                field: "email.transport".to_string(),
+                reason: EMAIL_LOG_TRANSPORT_IN_PROD.to_string(),
+            });
+        }
 
         issues
     }
@@ -1071,20 +1163,23 @@ fn validate_argon2_costs_all(
 /// A-32: Validates `server.trusted_proxies` against known dangerous configurations.
 fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIssue>) {
     // 19.12: `trust_forwarded_proto` makes `X-Forwarded-Proto` decide whether a
-    // session cookie carries `Secure`. With an empty `trusted_proxies` the
-    // header is attacker-controlled, so the flag that is supposed to prove
-    // "TLS terminates upstream" proves nothing. Production validation used to
-    // push operators here — it demanded TLS **or** this flag, and this flag
+    // session cookie carries `Secure`. The runtime honours the header only from
+    // a peer listed in `trusted_proxies` (GA audit 2026-09-28 L4 — before that
+    // it was read from any peer, whatever this list said), so with an empty
+    // list the flag would be inert and the operator's "TLS terminates
+    // upstream" would never be recognised. Production validation used to push
+    // operators here — it demanded TLS **or** this flag, and this flag
     // defaulted to trusting every peer (audit 2026-08-28 §4.17#7).
     if server.trust_forwarded_proto && server.trusted_proxies.is_empty() {
         issues.push(ValidationIssue {
             field: "server.trust_forwarded_proto".to_string(),
             reason: "server.trust_forwarded_proto = true requires a non-empty \
-                     server.trusted_proxies. With no proxy list, X-Forwarded-Proto is \
-                     accepted from any peer, so any client can decide whether its own \
-                     session cookie carries the Secure attribute. List the reverse-proxy \
-                     IP(s) in server.trusted_proxies, or configure direct TLS with \
-                     server.tls_cert_path + server.tls_key_path instead."
+                     server.trusted_proxies. X-Forwarded-Proto is honoured only from a \
+                     peer in that list, so with no list the flag has no effect: session \
+                     cookies would never carry the Secure attribute and HSTS would never be \
+                     sent. List the reverse-proxy IP(s) in server.trusted_proxies, or \
+                     configure direct TLS with server.tls_cert_path + server.tls_key_path \
+                     instead."
                 .to_string(),
         });
     }
@@ -1124,9 +1219,8 @@ fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIs
         //
         // Refusing here is not pedantry. A list of ranges becomes an EMPTY
         // trusted-proxy list at runtime, which with `trust_forwarded_proto:
-        // true` is precisely the state the check above refuses: the header
-        // accepted from every peer, so any client decides whether its own
-        // session cookie carries `Secure`.
+        // true` is precisely the state the check above refuses: no peer's
+        // header is honoured, and the proxy's real client IPs are ignored.
         if entry.parse::<std::net::IpAddr>().is_err() {
             let looks_like_cidr = entry.contains('/');
             issues.push(ValidationIssue {
@@ -1136,9 +1230,9 @@ fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIs
                         "'{entry}' is CIDR notation, which is not supported here. The server \
                          parses each entry as a single IP address and silently DISCARDS \
                          anything else, so this entry would leave the trusted-proxy list \
-                         empty at runtime — and with server.trust_forwarded_proto = true that \
-                         means X-Forwarded-Proto is accepted from any peer. List the \
-                         reverse-proxy IP addresses individually."
+                         empty at runtime — X-Forwarded-For and X-Forwarded-Proto would then \
+                         be ignored from every peer. List the reverse-proxy IP addresses \
+                         individually."
                     )
                 } else {
                     format!(
@@ -3812,5 +3906,172 @@ realms:
             msg.contains("sp_certificate_pem"),
             "the error must name the offending key: {msg}"
         );
+    }
+
+    // ── GA audit 2026-09-28 B6: connection budgets ──────────────────────────
+
+    #[test]
+    fn zero_connection_budgets_are_refused() {
+        let mut config = Config::dev();
+        config.operational.header_read_timeout_secs = 0;
+        config.operational.tls_handshake_timeout_secs = 0;
+        let fields: Vec<String> = config.validate_all().into_iter().map(|i| i.field).collect();
+        for field in [
+            "operational.header_read_timeout_secs",
+            "operational.tls_handshake_timeout_secs",
+        ] {
+            assert!(
+                fields.iter().any(|f| f == field),
+                "{field} = 0 must be refused; issues: {fields:?}"
+            );
+        }
+    }
+
+    // ── GA audit 2026-09-28 OPS-11: non-UTF-8 HEARTH_KEK ────────────────────
+
+    /// `var_os` saw the variable as present, so validation passed, while the
+    /// server's `var` saw it as absent. It must be refused here instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_hearth_kek_is_refused_by_validation() {
+        use std::os::unix::ffi::OsStrExt;
+        std::env::set_var(
+            "HEARTH_KEK",
+            std::ffi::OsStr::from_bytes(&[0xff, 0xfe, 0x41]),
+        );
+        let issues = Config::from_yaml_str_unchecked("{}")
+            .expect("parse")
+            .validate_all();
+        std::env::remove_var("HEARTH_KEK");
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field == "security.key_encryption_key" && i.reason.contains("UTF-8")),
+            "a HEARTH_KEK that is not valid UTF-8 must be reported; got {issues:?}"
+        );
+    }
+
+    // ── GA audit 2026-09-28 M14: plaintext gRPC in production ───────────────
+
+    fn grpc_issues(yaml: &str) -> Vec<ValidationIssue> {
+        Config::from_yaml_str_unchecked(yaml)
+            .expect("parse")
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field.starts_with("server.grpc"))
+            .collect()
+    }
+
+    /// Without an HTTPS certificate there is no TLS to serve gRPC with, so a
+    /// gRPC listener reachable off-host would carry admin tokens in clear text.
+    #[test]
+    fn a_public_plaintext_grpc_listener_is_refused_in_production() {
+        let issues = grpc_issues(
+            "server:\n  bind_address: 0.0.0.0\n  trust_forwarded_proto: true\n  grpc_port: 9090\n",
+        );
+        assert!(
+            issues.iter().any(|i| i.field == "server.grpc_port"),
+            "a non-loopback gRPC bind with no TLS must be refused; got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn plaintext_grpc_is_allowed_on_loopback_with_tls_or_with_the_opt_in() {
+        for yaml in [
+            // Loopback gRPC bind, public HTTP bind.
+            "server:\n  bind_address: 0.0.0.0\n  grpc_port: 9090\n  grpc_bind_address: 127.0.0.1\n",
+            // gRPC served with the HTTPS certificate.
+            "server:\n  bind_address: 0.0.0.0\n  grpc_port: 9090\n  tls_cert_path: /c.pem\n  tls_key_path: /k.pem\n",
+            // TLS terminated by a proxy in front of gRPC too.
+            "server:\n  bind_address: 0.0.0.0\n  grpc_port: 9090\n  grpc_allow_plaintext: true\n",
+            // No gRPC listener at all.
+            "server:\n  bind_address: 0.0.0.0\n",
+        ] {
+            let issues = grpc_issues(yaml);
+            assert!(issues.is_empty(), "{yaml}\nmust be accepted; got {issues:?}");
+        }
+    }
+
+    #[test]
+    fn plaintext_grpc_stays_allowed_in_dev_mode() {
+        let mut config = Config::dev();
+        config.server.grpc_port = Some(9090);
+        config.server.grpc_bind_address = Some("0.0.0.0".to_string());
+        let issues: Vec<_> = config
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field.starts_with("server.grpc"))
+            .collect();
+        assert!(issues.is_empty(), "got {issues:?}");
+    }
+
+    // ── GA audit 2026-09-28 M15: `email.transport: log` in production ───────
+
+    fn email_transport_issues(config: &Config) -> Vec<ValidationIssue> {
+        config
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field == "email.transport")
+            .collect()
+    }
+
+    /// The system realm always has password login, so its reset mail is
+    /// load-bearing even when no realm is declared in YAML. The check used to
+    /// return early when `realms` was absent.
+    #[test]
+    fn log_transport_is_refused_in_production_with_no_realms_declared() {
+        let config = Config::from_yaml_str_unchecked("{}").expect("parse");
+        assert!(!config.dev_mode);
+        let issues = email_transport_issues(&config);
+        assert!(
+            issues.iter().any(|i| i.reason.contains("system realm")),
+            "the default `log` transport must be refused in production even with no \
+             realms declared — admin password-reset mail is silently dropped; got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn the_explicit_opt_in_allows_log_transport_in_production() {
+        let config = Config::from_yaml_str_unchecked(
+            "email:\n  transport: log\n  allow_log_transport_in_production: true\n",
+        )
+        .expect("the opt-in key must parse");
+        let issues = email_transport_issues(&config);
+        assert!(
+            issues.is_empty(),
+            "the opt-in must lift the refusal; got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn log_transport_stays_allowed_in_dev_mode() {
+        let config = Config::dev();
+        let issues = email_transport_issues(&config);
+        assert!(
+            issues.is_empty(),
+            "dev mode keeps the log transport; got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn a_real_transport_needs_no_opt_in() {
+        let config = Config::from_yaml_str_unchecked(
+            "email:\n  transport: smtp\n  from: auth@example.com\n  smtp:\n    host: mail.example.com\n    port: 587\n",
+        )
+        .expect("parse");
+        let issues = email_transport_issues(&config);
+        assert!(
+            issues.is_empty(),
+            "smtp must not trip the log-transport rule; got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn the_connection_budgets_have_safe_defaults() {
+        let config = Config::from_yaml_str_unchecked("{}").expect("empty config parses");
+        assert_eq!(config.operational.header_read_timeout_secs, 10);
+        assert_eq!(config.operational.tls_handshake_timeout_secs, 10);
+        assert_eq!(config.operational.max_connections_per_ip, 64);
+        assert_eq!(config.operational.http2_keepalive_interval_secs, 30);
     }
 }

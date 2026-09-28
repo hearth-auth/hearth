@@ -12,6 +12,7 @@ mod common;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hearth::audit::{AuditAction, AuditQuery};
+use hearth::identity::device_fp::DeviceFingerprintOutcome;
 use hearth::identity::{
     AdaptiveMfaConfig, CleartextPassword, CreateRealmRequest, CreateUserRequest, IdentityError,
     PasswordGrantRequest, RealmConfig, RequiredAction, StepUpMfaGrantRequest,
@@ -573,14 +574,29 @@ async fn step_up_completion_issues_token_and_records_device() {
         "access token must be non-empty"
     );
 
-    // Subsequent login from the same device must be recognised without step-up.
-    let second_login = h.identity().password_grant_token(
-        realm.id(),
-        &ropc(user.email(), "10.20.30.40", "Chrome/125.0"),
+    // The step-up recorded the device: it is now recognised.
+    let outcome = h
+        .identity()
+        .check_device_fingerprint(realm.id(), user.id(), "10.20.30.40", "Chrome/125.0")
+        .expect("fingerprint check");
+    assert_eq!(
+        outcome,
+        DeviceFingerprintOutcome::Recognised,
+        "device must be recognised after step-up completion"
     );
+
+    // A recognised device is still not a second factor (GA audit B4/B5): the
+    // user holds TOTP, so a password-only grant is sent back to step-up.
+    let second_login = h
+        .identity()
+        .password_grant_token(
+            realm.id(),
+            &ropc(user.email(), "10.20.30.40", "Chrome/125.0"),
+        )
+        .expect_err("a user holding TOTP must prove it on every password grant");
     assert!(
-        second_login.is_ok(),
-        "device must be recognised after step-up completion; got: {second_login:?}"
+        matches!(second_login, IdentityError::StepUpChallengeRequired),
+        "expected StepUpChallengeRequired, got: {second_login:?}"
     );
 }
 
@@ -721,14 +737,20 @@ async fn minor_ua_update_does_not_retrigger_step_up() {
         )
         .expect("step-up completion must record Chrome/125 fingerprint");
 
-    // Second login with a minor version bump — same major, should still be recognised.
-    let second = h.identity().password_grant_token(
-        realm.id(),
-        &ropc(user.email(), "10.0.0.1", "Mozilla/5.0 Chrome/125.0.9999.0"),
-    );
-    assert!(
-        second.is_ok(),
-        "minor UA update must NOT trigger step-up (same major version); got: {second:?}"
+    // A minor version bump — same major — is still the recognised device.
+    let second = h
+        .identity()
+        .check_device_fingerprint(
+            realm.id(),
+            user.id(),
+            "10.0.0.1",
+            "Mozilla/5.0 Chrome/125.0.9999.0",
+        )
+        .expect("fingerprint check");
+    assert_eq!(
+        second,
+        DeviceFingerprintOutcome::Recognised,
+        "minor UA update must NOT trigger step-up (same major version)"
     );
 }
 
@@ -803,13 +825,19 @@ async fn major_ua_update_triggers_step_up() {
         .expect("step-up completion with Chrome/125 must succeed");
 
     // Confirm same major is recognised.
-    let same_major = h.identity().password_grant_token(
-        realm.id(),
-        &ropc(user.email(), "10.0.0.5", "Mozilla/5.0 Chrome/125.0.9999.0"),
-    );
-    assert!(
-        same_major.is_ok(),
-        "same major version must be recognised; got: {same_major:?}"
+    let same_major = h
+        .identity()
+        .check_device_fingerprint(
+            realm.id(),
+            user.id(),
+            "10.0.0.5",
+            "Mozilla/5.0 Chrome/125.0.9999.0",
+        )
+        .expect("fingerprint check");
+    assert_eq!(
+        same_major,
+        DeviceFingerprintOutcome::Recognised,
+        "same major version must be recognised"
     );
 
     // Login with Chrome/126 (major bump) — must trigger step-up again.

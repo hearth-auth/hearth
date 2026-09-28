@@ -11,7 +11,7 @@
 #   - fuzz/Cargo.lock         — fuzz harness depends on production crates
 #   - sdks/go/go.mod          — Go SDK shipped to integrators
 #   - sdks/{node,php,rust,typescript}/* lockfiles
-#   - pnpm-lock.yaml          — UI tooling (real CVEs must be fixed)
+#   - package-lock.json       — root release tooling (semantic-release); real CVEs must be fixed
 #   - docs-site/package-lock.json
 #
 # Excluded (not listed in security.yml scan-args):
@@ -44,25 +44,24 @@
 id = "RUSTSEC-2023-0071"
 reason = "Marvin Attack timing side-channel in the rsa crate. Scope correction (audit 2026-08-28 §4.12#15): the server does not link rsa at all — it is absent from the root Cargo.lock. rsa reaches exactly one scanned tree, sdks/rust/Cargo.lock, as a transitive dependency of jsonwebtoken. The advisory's only affected code path is PKCS#1 v1.5 decryption; the Rust SDK performs no RSA decryption, and Hearth signs Ed25519 only (CLAUDE.md: no HS256, no alg:none). No patched version of rsa is available; revisit when rsa 0.10+ lands in the jsonwebtoken dependency tree. Tracked in HEA-116."
 
-# guard: package=google.golang.org/protobuf lockfile=sdks/go/go.mod
+# guard: package=golang.org/x/crypto lockfile=sdks/go/go.mod
 [[IgnoredVulns]]
-id = "CVE-2026-42507"
-reason = "In google.golang.org/protobuf (Go SDK transitive dep). The Hearth Go SDK is a thin client library that makes outbound HTTP/gRPC calls only — it never parses untrusted protobuf payloads in a server capacity. The advisory requires server-side parsing of attacker-controlled messages to trigger. Revisit when a patched google.golang.org/protobuf version is available (HEA-1528)."
+id = "GO-2026-5932"
+reason = "golang.org/x/crypto/openpgp is unmaintained and unsafe by design. The advisory covers every x/crypto version (introduced 0, no fix) but only code that imports the openpgp packages. The Go SDK never does: `go list -deps -test ./...` in sdks/go shows x/crypto only as acme, acme/autocert (via labstack/echo), chacha20, chacha20poly1305, hkdf, sha3 and internals — no openpgp path (checked 2026-09-28, x/crypto v0.56.0). Revisit if any SDK dependency starts importing golang.org/x/crypto/openpgp; `go list -deps -test ./... | grep openpgp` must stay empty."
 
-# guard: package=google.golang.org/protobuf lockfile=sdks/go/go.mod
-[[IgnoredVulns]]
-id = "CVE-2026-42504"
-reason = "In google.golang.org/protobuf (Go SDK transitive dep). Same rationale as CVE-2026-42507: client-library-only usage with no server-side protobuf parsing. Revisit when a patched version is available (HEA-1528)."
-
-# guard: package=google.golang.org/genproto/googleapis/api lockfile=sdks/go/go.mod
-[[IgnoredVulns]]
-id = "CVE-2026-27145"
-reason = "In google.golang.org/genproto/googleapis/api (Go SDK transitive dep). The genproto package provides generated gRPC type definitions for outbound calls to the Hearth server. The SDK never opens a listening socket or acts as a gRPC server, so the attack surface described in the advisory (server-side processing of malformed RPC messages) does not apply. Revisit when a patched upstream version is available (HEA-1528)."
+# CVE-2026-42507, CVE-2026-42504 and CVE-2026-27145 were removed on 2026-09-28
+# (GA audit supply-chain fix). Their reasons blamed google.golang.org/protobuf
+# and genproto, but osv.dev aliases them to GO-2026-5039 (net/textproto),
+# GO-2026-5038 (mime) and GO-2026-5037 (crypto/x509) — Go STANDARD LIBRARY
+# advisories matched against sdks/go/go.mod's `go 1.26.3` directive, fixed in
+# go1.26.4. The rationale described the wrong package, so it assessed nothing.
+# sdks/go/go.mod now pins `toolchain go1.26.6`, the advisories no longer
+# match, and osv-scanner reported the three ignores as unused.
 
 # GHSA-g7r4-m6w7-qqqr (esbuild dev-server file read on Windows) was removed on
 # 2026-09-08 by audit 2026-08-28 §4.12#15. Its reason called esbuild an
 # "sdks/node devDependency"; esbuild is not installed in sdks/node,
-# pnpm-lock.yaml or docs-site/package-lock.json. It appears only as an OPTIONAL
+# the then-scanned pnpm-lock.yaml or docs-site/package-lock.json. It appears only as an OPTIONAL
 # peer dependency of vite, which npm does not install. The suppression could
 # never match, so it was dead configuration claiming a decision had been made.
 # If a future vite bump does install esbuild, the advisory fires and is

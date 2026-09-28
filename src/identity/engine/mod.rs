@@ -204,6 +204,12 @@ const PROMPT_NONE_MAX_PROBES: u32 = 50;
 /// opening a meaningful replay window.
 const CLOCK_SKEW_SECS: i64 = 60;
 
+/// Revoked-JTI projection id prefix for a client-wide `client_credentials`
+/// cutoff (GA audit L5). The entry `{realm}:client-cutoff:{client_uuid}` holds
+/// the latest `exp` any sessionless token issued to that client before it was
+/// archived or deleted can carry. Real `jti`s are UUIDs, so it cannot collide.
+const CLIENT_TOKEN_CUTOFF_PREFIX: &str = "client-cutoff:";
+
 /// How long the token-validation hot path may reuse its last epoch
 /// reconciliation before reading the rows again.
 ///
@@ -222,6 +228,23 @@ const CLOCK_SKEW_SECS: i64 = 60;
 /// Not configurable on purpose: an operator has no way to choose it well, and
 /// the cache-miss path reconciles unconditionally regardless.
 const EPOCH_SYNC_INTERVAL_MICROS: i64 = 200_000;
+
+/// Number of per-realm signing-key debounce windows (a power of two).
+///
+/// Realms are spread over the windows by a hash of their id; two realms that
+/// share a window share its debounce, exactly as every realm used to share
+/// one. 1,024 windows make that rare for any realistic realm count, and the
+/// replicated-write observer reconciles a rotation directly in cluster mode.
+const REALM_EPOCH_WINDOWS: usize = 1024;
+
+/// The debounce window of `realm_id`'s signing-key epoch: an allocation-free
+/// hash of the (random) UUID, masked to the table size.
+fn realm_epoch_window(realm_id: &RealmId) -> usize {
+    let (hi, lo) = realm_id.as_uuid().as_u64_pair();
+    #[allow(clippy::cast_possible_truncation)] // masked to the table size below
+    let hash = (hi ^ lo) as usize;
+    hash & (REALM_EPOCH_WINDOWS - 1)
+}
 
 /// Maximum entries in the in-process session cache (S12-F1).
 const SESSION_CACHE_MAX: usize = 4096;
@@ -308,8 +331,8 @@ use crate::identity::types::{
     ListAgentsQuery, Organization, OrganizationInvitation, OrganizationMembership,
     OrganizationRole, OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey,
     ProtectedResource, Realm, RealmStatus, RegisterProtectedResourceRequest, RegisterUserRequest,
-    RegisterUserResponse, RegistrationPolicy, RetiringSigningKeyExport, Rfc8693Request,
-    Rfc8693Response, ScimMappingExport, ScimMappingKind, Session, SessionContext,
+    RegisterUserResponse, RegistrationPolicy, RetiringSigningKeyExport, RevocationExport,
+    Rfc8693Request, Rfc8693Response, ScimMappingExport, ScimMappingKind, Session, SessionContext,
     SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
     UpdateProtectedResourceRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
     Webhook,
@@ -482,6 +505,35 @@ impl Default for IdentityConfig {
     }
 }
 
+/// The second factors a user holds that their realm can challenge.
+///
+/// One read of every factor store, so the login-path gate in
+/// `create_session` and `IdentityEngine::has_second_factor` cannot disagree
+/// about what counts (GA audit B4/B5).
+#[derive(Debug, Clone, Copy, Default)]
+struct HeldSecondFactors {
+    /// An enabled TOTP enrolment.
+    totp: bool,
+    /// A verified phone number on a realm that offers `sms`.
+    sms: bool,
+    /// An email-OTP enrolment on a realm that offers `email_otp`.
+    email_otp: bool,
+    /// A registered passkey on a realm that offers `webauthn`.
+    webauthn: bool,
+}
+
+impl HeldSecondFactors {
+    /// Whether the user holds any second factor at all.
+    fn any(self) -> bool {
+        self.totp || self.sms || self.email_otp || self.webauthn
+    }
+
+    /// Whether the user holds a factor other than a passkey.
+    fn any_besides_webauthn(self) -> bool {
+        self.totp || self.sms || self.email_otp
+    }
+}
+
 /// Tracks failed credential verification attempts for a single user.
 #[derive(Debug, Clone)]
 struct AttemptTracker {
@@ -641,12 +693,22 @@ pub struct EmbeddedIdentityEngine {
     /// The background reloader and bump threads, joined when the engine drops so no thread
     /// outlives the storage handle it reads.
     control_worker: Vec<std::thread::JoinHandle<()>>,
-    /// Micros timestamp before which the hot path skips epoch reconciliation.
+    /// Micros timestamp before which the hot path skips control-epoch
+    /// reconciliation.
     ///
-    /// Reconciling both epochs costs two storage reads, and the validation hot
-    /// path may perform none. This bounds how often it pays for them. See
-    /// [`Self::sync_epochs_debounced`] and [`EPOCH_SYNC_INTERVAL_MICROS`].
+    /// Reconciling an epoch costs a storage read, and the validation hot path
+    /// may perform none. This bounds how often it pays for the (global)
+    /// control epoch. See [`Self::sync_epochs_debounced`] and
+    /// [`EPOCH_SYNC_INTERVAL_MICROS`].
     epoch_sync_after: AtomicI64,
+    /// Per-realm debounce windows for the signing-key epoch, indexed by
+    /// [`realm_epoch_window`] (audit GA 2026-09-28 M5).
+    ///
+    /// The key epoch is per realm, and sharing `epoch_sync_after` meant only
+    /// the realm of the request that won the window was reconciled: a busy
+    /// realm starved a quiet one whose key another node had revoked. Fixed
+    /// size and allocated once, so the hot path allocates nothing to use it.
+    realm_epoch_due: Box<[AtomicI64]>,
     /// Lock-free realm status cache for the `validate_token` hot path.
     ///
     /// Populated at startup and updated on every realm CRUD operation.
@@ -895,6 +957,15 @@ pub struct EmbeddedIdentityEngine {
     // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
     // INVARIANT: inner (per-code) guard held only across the sync load + validate + delete window; no .await in scope.
     code_exchange_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-`(realm, session)` advisory lock serialising every
+    /// read-modify-write of a session row (audit GA 2026-09-28 B7).
+    ///
+    /// `refresh_session` and `revoke_session` each load the row, change it and
+    /// write it back. Unserialised, a refresh that loaded the live row before
+    /// a revocation wrote it back un-revoked afterwards. Held only across the
+    /// synchronous load → modify → persist (cache update included); never
+    /// across an `.await`, and never while taking a grant-family lock.
+    session_row_locks: advisory_lock::AdvisoryLockMap,
     /// Per-`(realm, fid)` advisory lock serializing grant-family rotation.
     ///
     /// Without it, `rotate_grant_family` is an unsynchronised read-modify-write:
@@ -969,6 +1040,18 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
                 Err(err) => tracing::warn!(error = %err, "replicated control epoch is corrupted"),
             }
             return;
+        }
+        // A signing-key rotation on another node. Without this arm a follower
+        // learned of it only from the debounced read on the validation path
+        // (audit GA 2026-09-28 M5). In-memory invalidation only; on the node
+        // that rotated, the local epoch already matches and this is a no-op.
+        if keys::is_system_realm(realm_id) {
+            if let Some(rotated) = keys::parse_realm_key_epoch_realm(key) {
+                if let Ok(epoch) = <[u8; 8]>::try_from(value).map(u64::from_le_bytes) {
+                    self.observe_realm_key_epoch(&rotated, epoch);
+                }
+                return;
+            }
         }
         let prefix = keys::revoked_jti_scan_prefix();
         if let Some(jti_bytes) = key.strip_prefix(prefix.as_slice()) {
@@ -1340,6 +1423,9 @@ impl EmbeddedIdentityEngine {
             control: Arc::clone(&control),
             control_worker: Vec::new(),
             epoch_sync_after: AtomicI64::new(0),
+            realm_epoch_due: (0..REALM_EPOCH_WINDOWS)
+                .map(|_| AtomicI64::new(0))
+                .collect(),
             realm_status_cache: Arc::clone(&caches.realm_status),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -1371,6 +1457,7 @@ impl EmbeddedIdentityEngine {
             txn_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
             code_exchange_locks: Mutex::new(HashMap::new()),
+            session_row_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
             grant_family_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside otp_redemption_lock() before returning the inner Arc.
@@ -1768,6 +1855,9 @@ impl EmbeddedIdentityEngine {
             control: Arc::clone(&control),
             control_worker: Vec::new(),
             epoch_sync_after: AtomicI64::new(0),
+            realm_epoch_due: (0..REALM_EPOCH_WINDOWS)
+                .map(|_| AtomicI64::new(0))
+                .collect(),
             realm_status_cache: Arc::clone(&caches.realm_status),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -1799,6 +1889,7 @@ impl EmbeddedIdentityEngine {
             txn_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
             code_exchange_locks: Mutex::new(HashMap::new()),
+            session_row_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
             grant_family_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside otp_redemption_lock() before returning the inner Arc.
@@ -2501,6 +2592,163 @@ impl EmbeddedIdentityEngine {
             .get("at_micros")
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(0))
+    }
+
+    /// Counts one OTP issuance against the resend window stored at
+    /// `resend_key`, or refuses with `limit_err` once the window is full.
+    ///
+    /// The window and limit are the SMS ones (`StoredResendCount`): five
+    /// sends per fifteen minutes per recipient.
+    fn count_otp_resend(
+        &self,
+        realm_id: &RealmId,
+        resend_key: &[u8],
+        now_unix_ts: u64,
+        limit_err: IdentityError,
+    ) -> Result<(), IdentityError> {
+        use crate::identity::sms::otp::StoredResendCount;
+
+        let current = match self
+            .storage
+            .get(realm_id, resend_key)
+            .map_err(Self::storage_err)?
+        {
+            None => None,
+            Some(bytes) => Some(serde_json::from_slice::<StoredResendCount>(&bytes).map_err(
+                |e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                },
+            )?),
+        };
+        let next = match current {
+            Some(resend) if !resend.is_window_expired(now_unix_ts) => {
+                if resend.is_limit_reached() {
+                    return Err(limit_err);
+                }
+                let mut updated = resend;
+                updated.count = updated.count.saturating_add(1);
+                updated
+            }
+            _ => StoredResendCount::new(now_unix_ts),
+        };
+        let bytes = serde_json::to_vec(&next).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, resend_key, &bytes)
+            .map_err(Self::storage_err)
+    }
+
+    /// Refuses a password the realm's HIBP breach check reports as
+    /// compromised (AC-1); fails open, audited, when HIBP is unreachable
+    /// (AC-3). A realm with `breach_check` off checks nothing.
+    ///
+    /// `subject` names the credential in the audit event: the user id, or
+    /// `registration` before an account exists.
+    fn refuse_breached_password(
+        &self,
+        realm_id: &RealmId,
+        password: &CleartextPassword,
+        subject: &str,
+    ) -> Result<(), IdentityError> {
+        let Some(realm) = self.get_realm(realm_id)? else {
+            return Ok(());
+        };
+        let bc = &realm.config().breach_check;
+        if !bc.enabled {
+            return Ok(());
+        }
+        let api_key = if bc.hibp_api_key.expose_secret().is_empty() {
+            None
+        } else {
+            Some(bc.hibp_api_key.expose_secret().as_str())
+        };
+        match self.hibp.is_pwned(password.as_bytes(), api_key) {
+            Ok(true) => {
+                // Compromised — reject and audit (AC-1).
+                //
+                // DISCARD-OK: the next line returns `Err`, so the operation
+                // the `FailOperation` policy would abort is already aborted.
+                // Propagating the audit error instead would replace
+                // `PasswordCompromised` with a storage error and tell the
+                // caller the wrong thing about why their password was refused
+                // (task 24.1).
+                let _ = self.record_audit(
+                    realm_id,
+                    None,
+                    crate::audit::AuditAction::PasswordCompromisedRejected,
+                    "credential",
+                    subject,
+                );
+                Err(IdentityError::PasswordCompromised)
+            }
+            Ok(false) => Ok(()),
+            Err(e) => {
+                // HIBP unavailable — fail-open and audit (AC-3).
+                tracing::warn!(
+                    subject = %subject,
+                    reason = %e,
+                    "HIBP breach-check unavailable; accepting password (fail-open)"
+                );
+                let _ = self.record_audit(
+                    realm_id,
+                    None,
+                    crate::audit::AuditAction::BreachCheckUnavailable,
+                    "credential",
+                    subject,
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Reads which second factors `user_id` holds that the realm can
+    /// challenge.
+    ///
+    /// A method counts only when the realm offers it: an ABSENT `mfa_methods`
+    /// offers every method (the rule `require_mfa_method` enforces), a present
+    /// list offers what it names. An enabled TOTP enrolment always counts — it
+    /// predates `mfa_methods` becoming a restriction and the login paths
+    /// challenge it regardless. A passkey counts as a second factor (GA audit
+    /// B5): before, a user whose only factor was a passkey was treated as
+    /// holding nothing, so a stolen password alone opened the account and an
+    /// `mfa_required` realm pushed the password holder into enrolling a TOTP
+    /// of their own.
+    fn held_second_factors(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<HeldSecondFactors, IdentityError> {
+        let totp = self.mfa_enabled(realm_id, user_id)?;
+        let Some(realm) = self.get_realm(realm_id)? else {
+            return Ok(HeldSecondFactors {
+                totp,
+                ..HeldSecondFactors::default()
+            });
+        };
+        let methods = realm.config().mfa_methods.clone();
+        let offers = |name: &str| methods.as_ref().is_none_or(|m| m.iter().any(|x| x == name));
+        let Some(user) = self.get_user(realm_id, user_id)? else {
+            return Ok(HeldSecondFactors {
+                totp,
+                ..HeldSecondFactors::default()
+            });
+        };
+        let webauthn = offers("webauthn") && {
+            let prefix = keys::encode_webauthn_credentials_prefix(user_id);
+            let end = keys::prefix_end(&prefix);
+            !self
+                .storage
+                .scan(realm_id, &prefix, &end)
+                .map_err(Self::storage_err)?
+                .is_empty()
+        };
+        Ok(HeldSecondFactors {
+            totp,
+            sms: offers("sms") && user.phone_verified(),
+            email_otp: offers("email_otp") && user.email_otp_enabled(),
+            webauthn,
+        })
     }
 
     /// Builds an MFA tracker key from realm and user IDs.
@@ -3388,7 +3636,7 @@ impl EmbeddedIdentityEngine {
 
     /// Deserializes a session from binary bytes (postcard via [`SessionStorageRecord`]).
     fn deserialize_session(bytes: &[u8]) -> Result<Session, IdentityError> {
-        crate::codec::decode::<crate::identity::types::session::SessionStorageRecord>(bytes)
+        crate::identity::types::session::decode_session_record(bytes)
             .map(Session::from_storage_record)
             .map_err(|reason| IdentityError::Serialization { reason })
     }
@@ -3492,6 +3740,15 @@ impl EmbeddedIdentityEngine {
             let Some(client) = self.get_client(realm_id, client_id)? else {
                 return Err(IdentityError::TokenRevoked);
             };
+            // B9: an archived client's families are revoked on archival; this
+            // gate also covers a family written while archival was running.
+            Self::refuse_inactive_client(&client)?;
+            // The client must hold the refresh-token grant (GA audit M7), so
+            // withdrawing it — the console's refresh toggle — takes effect on
+            // refresh tokens already issued.
+            if !client.allows_refresh_token() {
+                return Err(IdentityError::UnsupportedGrantType);
+            }
             let realm_fapi = self
                 .get_realm(realm_id)?
                 .ok_or(IdentityError::RealmNotFound)?
@@ -3517,11 +3774,16 @@ impl EmbeddedIdentityEngine {
             // are already constrained by rotation + DPoP binding. A secretless
             // client with an assertion key or a JWKS is not public: it binds
             // like a secret holder (it authenticates with `private_key_jwt`).
+            let authenticated = bind_ctx.and_then(|c| c.authenticated_client_id.as_ref());
             if !client.is_public() {
-                let authenticated = bind_ctx.and_then(|c| c.authenticated_client_id.as_ref());
                 if authenticated != Some(client_id) {
                     return Err(IdentityError::InvalidClient);
                 }
+            } else if authenticated.is_some_and(|presented| presented != client_id) {
+                // GA audit L10: a public client proves nothing, but a request
+                // that NAMES a client must name the family's own. Otherwise
+                // one public client could redeem another's refresh token.
+                return Err(IdentityError::InvalidClient);
             }
         }
 
@@ -3686,11 +3948,6 @@ impl EmbeddedIdentityEngine {
                     reason: format!("rbac resolve failed: {e}"),
                 },
             })?;
-        let perm_strs: Vec<String> = resolved
-            .permissions
-            .iter()
-            .map(|p| p.as_str().to_string())
-            .collect();
 
         let resolved_client = if let Some(ref cid) = family.client_id {
             self.get_client(realm_id, cid)?
@@ -3744,18 +4001,19 @@ impl EmbeddedIdentityEngine {
             &permissions,
             &custom,
         )?;
-        let custom = crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+        let mut custom =
+            crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+        if let Some(ref cid) = family.client_id {
+            crate::identity::tokens::TokenClaims::insert_client_id(&mut custom, cid);
+        }
 
         let embedded = authz_mode == AccessTokenAuthorization::Embedded;
-        let effective_perms: Vec<String> = if embedded {
-            if permissions.is_empty() {
-                perm_strs
-            } else {
-                permissions
-            }
-        } else {
-            Vec::new()
-        };
+        // The claim profile's output is final: an empty list means the profile
+        // released no permissions to this client (a third-party client under
+        // the default `first_party_only` gate). Falling back to the resolved
+        // set here handed every third-party client the user's full authority
+        // on its first refresh (GA audit B1).
+        let effective_perms: Vec<String> = if embedded { permissions } else { Vec::new() };
         let effective_roles = if embedded { roles } else { Vec::new() };
         let effective_groups = if embedded { groups } else { Vec::new() };
 
@@ -3946,7 +4204,9 @@ impl EmbeddedIdentityEngine {
         self.storage
             .put_batch(realm_id, &batch)
             .map_err(Self::storage_err)?;
-        // Update cache after the storage write succeeds.
+        // Update the cache after the storage write succeeds. The insert reads
+        // the row back rather than trusting `session`, so a revocation that
+        // lands in between is never overwritten in the cache.
         if session.is_valid(self.clock.now()) {
             self.session_cache_insert(realm_id, session);
         } else {
@@ -3957,20 +4217,26 @@ impl EmbeddedIdentityEngine {
 
     // ===== Session cache helpers (S12-F1) =====
 
-    /// Inserts or updates a session in the in-process cache.
+    /// Warms the in-process cache for a session its caller has just written.
+    ///
+    /// The session is re-read from storage and inserted through the
+    /// generation-guarded [`Self::session_cache_fill`], never inserted as
+    /// passed: a revocation landing between the caller's storage write and
+    /// this insert has already evicted the key, and inserting the caller's
+    /// live copy afterwards resurrected the session in the cache while storage
+    /// said revoked (audit GA 2026-09-28 B7). A row that is no longer valid,
+    /// or that cannot be read, is evicted instead.
     ///
     /// Silently skips at capacity so the storage fallback stays available.
     fn session_cache_insert(&self, realm_id: &RealmId, session: &Session) {
-        if self.session_cache.load().len() >= SESSION_CACHE_MAX {
-            return;
+        let gen_before_read = self.session_cache_gen.load(Ordering::SeqCst);
+        let now = self.clock.now();
+        match self.load_session_raw(realm_id, session.id()) {
+            Ok(Some(stored)) if stored.is_valid(now) && !stored.is_policy_expired(now) => {
+                self.session_cache_fill(realm_id, &Arc::new(stored), gen_before_read);
+            }
+            _ => self.session_cache_invalidate(realm_id, session.id()),
         }
-        let key = (realm_id.clone(), session.id().clone());
-        let val = Arc::new(session.clone());
-        self.session_cache.rcu(|map| {
-            let mut m = HashMap::clone(map);
-            m.insert(key.clone(), Arc::clone(&val));
-            m
-        });
     }
 
     /// Cache-miss fill of a session read from storage, discarded if any
@@ -4161,6 +4427,10 @@ impl EmbeddedIdentityEngine {
 
     /// Evicts a policy-expired session (A-18). Marks revoked, evicts from
     /// cache, bumps SV, and emits `SessionEvicted` audit.
+    ///
+    /// Does not take the session row lock: `refresh_session` calls it while
+    /// holding that lock, and the write it makes is a revocation, which a
+    /// concurrent writer holding the lock can only reinforce.
     fn evict_session_by_policy(
         &self,
         realm_id: &RealmId,
@@ -4913,26 +5183,40 @@ impl EmbeddedIdentityEngine {
     /// unconditionally. It is already paying for an Ed25519 verify, so two
     /// rows cost it nothing worth debouncing, and it means a token this engine
     /// has never seen is always judged against fresh epochs.
+    ///
+    /// The control epoch is global and has one window. The signing-key epoch
+    /// is per realm and has one window per realm (`realm_epoch_due`): with a single shared window only the realm of the
+    /// winning request was reconciled, and a busy realm could keep a quiet
+    /// realm's revoked key trusted indefinitely (audit GA 2026-09-28 M5).
     fn sync_epochs_debounced(&self, realm_id: &RealmId) {
         let now = self.clock.now().as_micros();
-        let due = self.epoch_sync_after.load(Ordering::Acquire);
-        if now < due {
-            return;
+        if Self::claim_window(&self.epoch_sync_after, now) {
+            self.sync_control_epoch();
         }
-        if self
-            .epoch_sync_after
-            .compare_exchange(
-                due,
-                now.saturating_add(EPOCH_SYNC_INTERVAL_MICROS),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return;
+        if self.claim_realm_window(realm_id, now) {
+            self.sync_realm_key_epoch(realm_id);
         }
-        self.sync_control_epoch();
-        self.sync_realm_key_epoch(realm_id);
+    }
+
+    /// Claims the debounce window `due` for this call if it has elapsed.
+    /// Returns `true` for exactly one caller per window.
+    fn claim_window(due_at: &AtomicI64, now: i64) -> bool {
+        let due = due_at.load(Ordering::Acquire);
+        now >= due
+            && due_at
+                .compare_exchange(
+                    due,
+                    now.saturating_add(EPOCH_SYNC_INTERVAL_MICROS),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+    }
+
+    /// Claims `realm_id`'s signing-key debounce window for this call if it
+    /// has elapsed.
+    fn claim_realm_window(&self, realm_id: &RealmId, now: i64) -> bool {
+        Self::claim_window(&self.realm_epoch_due[realm_epoch_window(realm_id)], now)
     }
 
     /// Signals the control-cache reloader when the persisted control epoch is
@@ -5008,6 +5292,14 @@ impl EmbeddedIdentityEngine {
     /// would silently no-op in production.
     fn sync_realm_key_epoch(&self, realm_id: &RealmId) {
         let persisted = self.read_persisted_key_epoch(realm_id);
+        self.observe_realm_key_epoch(realm_id, persisted);
+    }
+
+    /// Invalidates `realm_id`'s signing-key caches when `persisted` — its
+    /// signing-key epoch as storage holds it — is ahead of the one this node
+    /// last acted on. In-memory only, so the Raft observer can call it with a
+    /// replicated row's value (audit GA 2026-09-28 M5).
+    fn observe_realm_key_epoch(&self, realm_id: &RealmId, persisted: u64) {
         let local = self.realm_key_epoch.get(realm_id).unwrap_or(0);
         if persisted <= local {
             return;
@@ -5346,10 +5638,49 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         claims: &TokenClaims,
     ) -> Result<(), IdentityError> {
-        if self.is_token_jti_revoked(realm_id, claims) {
+        if self.is_token_jti_revoked(realm_id, claims) || self.is_client_cut_off(realm_id, claims) {
             return Err(IdentityError::InvalidToken);
         }
         Ok(())
+    }
+
+    /// Returns `true` when a sessionless token was issued to a client that has
+    /// since been archived or deleted (GA audit L5): the revoked-JTI
+    /// projection holds a `client-cutoff:{client}` entry whose value is the
+    /// latest `exp` any pre-cutoff token can carry, and this token's `exp` is
+    /// not after it.
+    ///
+    /// Hot-path safe: the key is formatted into a stack buffer and looked up
+    /// with a single epoch-pinned `load()` — no allocation, lock or syscall.
+    fn is_client_cut_off(&self, realm_id: &RealmId, claims: &TokenClaims) -> bool {
+        use std::fmt::Write as _;
+        let Some(client_uuid) = claims.sub.strip_prefix("client_") else {
+            return false;
+        };
+        let mut key = StackKeyBuf::new();
+        if write!(
+            key,
+            "{}:{CLIENT_TOKEN_CUTOFF_PREFIX}{client_uuid}",
+            realm_id.as_uuid()
+        )
+        .is_ok()
+        {
+            if let Some(k) = key.as_str() {
+                return self
+                    .revoked_jti_cache
+                    .get(k)
+                    .is_some_and(|cutoff| claims.exp <= cutoff);
+            }
+        }
+        // Oversized `sub` (never one Hearth issued to a client): off the warm
+        // path, one allocation keeps the check correct.
+        let heap_key = format!(
+            "{}:{CLIENT_TOKEN_CUTOFF_PREFIX}{client_uuid}",
+            realm_id.as_uuid()
+        );
+        self.revoked_jti_cache
+            .get(heap_key.as_str())
+            .is_some_and(|cutoff| claims.exp <= cutoff)
     }
 
     /// Returns `true` when the token's `jti` appears in the revocation
@@ -5480,6 +5811,19 @@ impl EmbeddedIdentityEngine {
     /// presented (audit 2026-08-28 §4.3#4).
     fn code_exchange_lock(&self, code_hash: &str) -> advisory_lock::AdvisoryLock<'_> {
         advisory_lock::AdvisoryLock::acquire(&self.code_exchange_locks, code_hash)
+    }
+
+    /// Returns the advisory lock serialising read-modify-writes of one
+    /// session row (see the `session_row_locks` field).
+    ///
+    /// Not reentrant. The entry is reclaimed when the last holder drops it.
+    fn session_row_lock(
+        &self,
+        realm_id: &RealmId,
+        session_id: &SessionId,
+    ) -> advisory_lock::AdvisoryLock<'_> {
+        let key = format!("{}:{}", realm_id.as_uuid(), session_id.as_uuid());
+        advisory_lock::AdvisoryLock::acquire(&self.session_row_locks, &key)
     }
 
     /// Returns the per-`(realm_id, fid)` advisory lock serializing grant-family
@@ -6472,7 +6816,7 @@ impl EmbeddedIdentityEngine {
 
         let now = self.clock.now();
         let grant_types = if request.grant_types.is_empty() {
-            vec!["authorization_code".to_string()]
+            crate::identity::oidc::default_grant_types()
         } else {
             request.grant_types.clone()
         };
@@ -7293,8 +7637,29 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         let user_id = Self::parse_user_id_claim(&claims)?;
 
+        // Single use (GA audit L18). The token used to be replayable for its
+        // whole 15-minute life, each replay setting the password again and
+        // minting a new session — and it travels in a URL, so a copy in a
+        // proxy log or a `Referer` header was a login. Its `jti` is spent once
+        // the password is set. The per-`jti` lock serialises concurrent
+        // submissions, so exactly one completes; a completion the password
+        // policy refuses does not spend it, so the user can correct the
+        // password and resubmit.
+        let jti = claims.jti.clone().ok_or(IdentityError::InvalidToken)?;
+        let spent_marker = format!("ra-jti:{jti}");
+        let lock = self.token_redemption_lock(&spent_marker);
+        let _spend_guard = lock.lock().expect("token_redemption_lock poisoned");
+        if self.is_mfa_nonce_burned(realm_id, &spent_marker)? {
+            return Err(IdentityError::InvalidToken);
+        }
+
         // Set the new password (enforces realm policy + Argon2id re-hash).
         self.set_password(realm_id, &user_id, &new_password)?;
+        self.burn_mfa_nonce(
+            realm_id,
+            &spent_marker,
+            u64::try_from(claims.exp).unwrap_or(u64::MAX),
+        )?;
 
         // Remove UPDATE_PASSWORD from the pending actions list.
         let remaining: Vec<RequiredAction> = claims
@@ -7739,52 +8104,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         // HIBP k-anonymity breach check.
         // Only the 5-char SHA-1 prefix is sent to the API; no PII leaves the process (AC-2).
-        if let Some(realm) = self.get_realm(realm_id)? {
-            let bc = &realm.config().breach_check;
-            if bc.enabled {
-                let api_key = if bc.hibp_api_key.expose_secret().is_empty() {
-                    None
-                } else {
-                    Some(bc.hibp_api_key.expose_secret().as_str())
-                };
-                match self.hibp.is_pwned(password.as_bytes(), api_key) {
-                    Ok(true) => {
-                        // Compromised — reject and audit (AC-1).
-                        //
-                        // DISCARD-OK: the next line returns `Err`, so the
-                        // operation the `FailOperation` policy would abort is
-                        // already aborted. Propagating the audit error instead
-                        // would replace `PasswordCompromised` with a storage
-                        // error and tell the caller the wrong thing about why
-                        // their password was refused (task 24.1).
-                        let _ = self.record_audit(
-                            realm_id,
-                            None,
-                            crate::audit::AuditAction::PasswordCompromisedRejected,
-                            "credential",
-                            &user_id.as_uuid().to_string(),
-                        );
-                        return Err(IdentityError::PasswordCompromised);
-                    }
-                    Ok(false) => {}
-                    Err(e) => {
-                        // HIBP unavailable — fail-open and audit (AC-3).
-                        tracing::warn!(
-                            user_id = %user_id.as_uuid(),
-                            reason = %e,
-                            "HIBP breach-check unavailable; accepting password (fail-open)"
-                        );
-                        let _ = self.record_audit(
-                            realm_id,
-                            None,
-                            crate::audit::AuditAction::BreachCheckUnavailable,
-                            "credential",
-                            &user_id.as_uuid().to_string(),
-                        );
-                    }
-                }
-            }
-        }
+        self.refuse_breached_password(realm_id, password, &user_id.as_uuid().to_string())?;
 
         // Resolve history depth from the realm's password policy.
         let history_depth = policy.as_ref().and_then(|p| p.history_depth).unwrap_or(0);
@@ -7881,6 +8201,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         Ok(())
+    }
+
+    fn dummy_verify_password_for_realm(&self, realm_id: &RealmId, password: &CleartextPassword) {
+        self.dummy_verify_for_realm(realm_id, password);
     }
 
     fn dummy_verify_password(&self, password: &CleartextPassword) {
@@ -8056,6 +8380,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<Session, IdentityError> {
         self.require_active_realm(realm_id)?;
 
+        // The realm's `cidr_policy` binds every path that ends in a session,
+        // not only the web password form that used to be its one reader
+        // (GA audit M13): the step-up grant, magic links, passkeys,
+        // federation and SAML all authenticate too.
+        self.check_realm_network_policy(realm_id, context.ip_address.as_deref())?;
+
         // A-24: enforce per-realm total session quota before writing.
         if let Ok(Some(realm)) = self.get_realm(realm_id) {
             if let Some(quotas) = &realm.config().quotas {
@@ -8117,6 +8447,35 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             UserStatus::Active => {}
             UserStatus::PendingVerification => return Err(IdentityError::UserNotVerified),
             UserStatus::Disabled => return Err(IdentityError::Unauthorized),
+        }
+
+        // A second factor the USER holds binds on every login path, whatever
+        // the realm's policy (GA audit B4/B5). The gates above read realm
+        // policy only, so a magic link, a federated login or a password
+        // login that never challenged an enrolled TOTP, OTP or passkey opened
+        // a full session: the factor existed to stop exactly that. Every path
+        // that proves a factor says so in `mfa_proof`; a path that proved
+        // nothing is refused for a user who holds one, and must send the user
+        // to the factor's challenge instead.
+        match context.mfa_proof {
+            crate::identity::MfaProof::Proved
+            | crate::identity::MfaProof::ProvedWebAuthn
+            | crate::identity::MfaProof::Inherited => {}
+            crate::identity::MfaProof::None => {
+                if self.held_second_factors(realm_id, user_id)?.any() {
+                    return Err(IdentityError::MfaRequired);
+                }
+            }
+            // A UV-less passkey used the passkey the account holds; it still
+            // owes any other factor the user enrolled.
+            crate::identity::MfaProof::PasskeyPossession => {
+                if self
+                    .held_second_factors(realm_id, user_id)?
+                    .any_besides_webauthn()
+                {
+                    return Err(IdentityError::MfaRequired);
+                }
+            }
         }
 
         // Enforce per-realm concurrent session limit when configured.
@@ -8406,12 +8765,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
-        let mut session = self
-            .load_session_raw(realm_id, session_id)?
-            .ok_or(IdentityError::SessionNotFound)?;
-
-        session.revoke();
-        self.persist_session(realm_id, &session)?;
+        let session = {
+            // Serialise the row's read-modify-write against a racing refresh
+            // (audit GA 2026-09-28 B7). Released before the grant-family
+            // cascade below, which takes the family locks a refresh holds
+            // while it waits for this one.
+            let row_lock = self.session_row_lock(realm_id, session_id);
+            // INVARIANT: guard held only across the sync load + revoke + persist; no .await in scope.
+            let _row = row_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut session = self
+                .load_session_raw(realm_id, session_id)?
+                .ok_or(IdentityError::SessionNotFound)?;
+            session.revoke();
+            self.persist_session(realm_id, &session)?;
+            session
+        };
 
         // Cascade: revoke all refresh-token grant families issued under this session.
         //
@@ -8493,6 +8863,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         session_id: &SessionId,
     ) -> Result<Session, IdentityError> {
+        // Serialise the row's read-modify-write against a racing revocation:
+        // a refresh that loaded the live row used to write it back un-revoked
+        // after the revocation's write (audit GA 2026-09-28 B7).
+        let row_lock = self.session_row_lock(realm_id, session_id);
+        // INVARIANT: guard held only across the sync load + check + persist; no .await in scope.
+        let row = row_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut session = self
             .load_session_raw(realm_id, session_id)?
             .ok_or(IdentityError::SessionNotFound)?;
@@ -8508,6 +8886,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         session.refresh(now, self.config.session.ttl_micros);
         self.persist_session(realm_id, &session)?;
+        drop(row);
 
         self.record_audit(
             realm_id,
@@ -8743,17 +9122,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     reason: format!("rbac resolve failed: {e}"),
                 },
             })?;
-        let perm_strs: Vec<String> = resolved
-            .permissions
-            .iter()
-            .map(|p| p.as_str().to_string())
-            .collect();
 
         // Resolve the OAuth client: use the caller-supplied client_id when
         // present, otherwise fall back to the first-party sentinel used by
         // the legacy session-token path.
+        // A named client that does not exist is refused rather than replaced
+        // by the first-party sentinel, which would release the user's
+        // permissions to whoever holds the token (GA audit B1).
         let resolved_client = if let Some(ref cid) = ctx.client_id {
-            self.get_client(realm_id, cid)?
+            Some(
+                self.get_client(realm_id, cid)?
+                    .ok_or(IdentityError::InvalidClient)?,
+            )
         } else {
             None
         };
@@ -8857,7 +9237,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             &permissions,
             &custom,
         )?;
-        let custom = crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+        let mut custom =
+            crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+        if let Some(ref cid) = ctx.client_id {
+            crate::identity::tokens::TokenClaims::insert_client_id(&mut custom, cid);
+        }
 
         let token_audit_ctx = AuditContext {
             actor: Actor::User(user_id.clone()),
@@ -8881,12 +9265,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             ..self.config.token.clone()
         };
         let realm_issuer = self.realm_issuer_url(realm_id);
+        // The claim profile's output is final — see `rotate_grant_family`: an
+        // empty list is the profile withholding permissions from this client,
+        // not a gap to fill from the resolved set (GA audit B1).
         let effective_perms = if authz_mode == AccessTokenAuthorization::Embedded {
-            if permissions.is_empty() {
-                &perm_strs
-            } else {
-                &permissions
-            }
+            &permissions
         } else {
             &empty_perm_strs
         };
@@ -9359,7 +9742,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &AuthorizationRequest,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        self.authorize_inner(realm_id, request)
+        self.authorize_inner(realm_id, request, None)
+    }
+
+    fn authorize_non_interactive(
+        &self,
+        realm_id: &RealmId,
+        request: &AuthorizationRequest,
+        session_id: &SessionId,
+    ) -> Result<AuthorizationResponse, IdentityError> {
+        self.authorize_inner(realm_id, request, Some(session_id))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -9489,6 +9881,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
     ) -> Result<(), IdentityError> {
         self.approve_device_inner(realm_id, user_code, user_id)
+    }
+
+    fn pending_device_authorization(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+    ) -> Result<Option<crate::identity::oidc::PendingDeviceAuthorization>, IdentityError> {
+        self.pending_device_authorization_inner(realm_id, user_code)
+    }
+
+    fn deny_device(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+        user_id: &UserId,
+    ) -> Result<(), IdentityError> {
+        self.deny_device_inner(realm_id, user_code, user_id)
     }
 
     fn poll_device_token(
@@ -9858,29 +10267,50 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         user_id: &UserId,
     ) -> Result<bool, IdentityError> {
-        if self.mfa_enabled(realm_id, user_id)? {
-            return Ok(true);
-        }
-        // SMS and email OTP are only usable as a factor when the realm offers
-        // the method, because the challenge is what makes them a factor
-        // (audit 2026-08-28 §4.18#3).
+        Ok(self.held_second_factors(realm_id, user_id)?.any())
+    }
+
+    fn has_passkey_factor(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<bool, IdentityError> {
+        Ok(self.held_second_factors(realm_id, user_id)?.webauthn)
+    }
+
+    fn check_second_factor_budget(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<(), IdentityError> {
+        self.check_mfa_rate_limit(realm_id, user_id)
+    }
+
+    fn record_second_factor_failure(&self, realm_id: &RealmId, user_id: &UserId) {
+        self.record_mfa_failed_attempt(realm_id, user_id);
+    }
+
+    fn clear_second_factor_failures(&self, realm_id: &RealmId, user_id: &UserId) {
+        self.clear_mfa_attempts(realm_id, user_id);
+    }
+
+    fn check_realm_network_policy(
+        &self,
+        realm_id: &RealmId,
+        client_ip: Option<&str>,
+    ) -> Result<(), IdentityError> {
+        let Some(ip) = client_ip.and_then(|s| s.parse::<std::net::IpAddr>().ok()) else {
+            return Ok(());
+        };
         let Some(realm) = self.get_realm(realm_id)? else {
-            return Ok(false);
+            return Ok(());
         };
-        let methods = realm.config().mfa_methods.clone().unwrap_or_default();
-        if methods.is_empty() {
-            return Ok(false);
+        match realm.config().cidr_policy.as_ref() {
+            Some(policy) if crate::abuse::runtime::cidr_policy_denies(policy, ip) => {
+                Err(IdentityError::Unauthorized)
+            }
+            _ => Ok(()),
         }
-        let Some(user) = self.get_user(realm_id, user_id)? else {
-            return Ok(false);
-        };
-        if methods.iter().any(|m| m == "sms") && user.phone_verified() {
-            return Ok(true);
-        }
-        if methods.iter().any(|m| m == "email_otp") && user.email_otp_enabled() {
-            return Ok(true);
-        }
-        Ok(false)
     }
 
     fn burn_mfa_nonce(
@@ -10692,6 +11122,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // both count so brute-force enumeration is capped.
         self.record_registration_attempt(realm_id, &email, request.client_ip.as_deref());
 
+        // 5a. The breach check runs BEFORE either arm below (GA audit L15).
+        // It used to run inside `set_password`, after the fresh arm had
+        // already created the account: a breached password left a
+        // PendingVerification account squatting the address, and the two arms
+        // answered differently — the duplicate arm's fake success against the
+        // fresh arm's refusal — so the refusal told a caller whether the
+        // address was registered.
+        self.refuse_breached_password(realm_id, &request.password, "registration")?;
+
         // 6. SECURITY: enumeration resistance. If the email is already
         // registered, return a plausible-looking response with an unusable
         // token rather than `DuplicateEmail`. A legitimate user retrying
@@ -10735,8 +11174,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             None,
         )?;
 
-        // 8. Store the password.
-        self.set_password(realm_id, user.id(), &request.password)?;
+        // 8. Store the password. Should it still be refused (the breach
+        // check can answer differently on a second call), the account just
+        // created is removed rather than left squatting the address.
+        if let Err(e) = self.set_password(realm_id, user.id(), &request.password) {
+            if let Err(cleanup) = self.delete_user(realm_id, user.id()) {
+                tracing::warn!(
+                    error = %cleanup,
+                    "register_user: could not remove the account after a refused password"
+                );
+            }
+            return Err(e);
+        }
 
         // 9. Issue a verification token.
         let verification_token = self.issue_email_verification_token(realm_id, user.id())?;
@@ -13355,6 +13804,103 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         })
     }
 
+    fn export_revocations(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<RevocationExport>, IdentityError> {
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        let mut out = Vec::new();
+        let scan = |prefix: Vec<u8>| -> Result<Vec<(String, Vec<u8>)>, IdentityError> {
+            let end = keys::prefix_end(&prefix);
+            Ok(self
+                .storage
+                .scan(realm_id, &prefix, &end)
+                .map_err(Self::storage_err)?
+                .into_iter()
+                .map(|e| {
+                    let id = String::from_utf8_lossy(e.key.get(prefix.len()..).unwrap_or(&[]))
+                        .into_owned();
+                    (id, e.value)
+                })
+                .collect())
+        };
+        for (jti, value) in scan(keys::revoked_jti_scan_prefix())? {
+            let exp = control::decode_revoked_jti_expiry(&value);
+            if exp != i64::MAX && now_secs >= exp {
+                continue;
+            }
+            out.push(RevocationExport::Jti {
+                jti,
+                exp: (exp != i64::MAX).then_some(exp),
+            });
+        }
+        for (jkt, _) in scan(keys::blocked_dpop_jkt_scan_prefix())? {
+            out.push(RevocationExport::DpopJkt { jkt });
+        }
+        for (jti, _) in scan(keys::aat_revoked_jti_scan_prefix())? {
+            out.push(RevocationExport::AatJti { jti });
+        }
+        Ok(out)
+    }
+
+    fn import_revocation(
+        &self,
+        realm_id: &RealmId,
+        revocation: &RevocationExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        /// A JTI or thumbprint longer than this is not one Hearth wrote.
+        const MAX_ID_LEN: usize = 512;
+        let (key, id) = match revocation {
+            RevocationExport::Jti { jti, .. } => (keys::encode_revoked_jti(jti), jti),
+            RevocationExport::DpopJkt { jkt } => (keys::encode_blocked_dpop_jkt(jkt), jkt),
+            RevocationExport::AatJti { jti } => (keys::encode_aat_revoked_jti(jti), jti),
+        };
+        if id.is_empty() || id.len() > MAX_ID_LEN {
+            return Err(IdentityError::InvalidInput {
+                reason: "revocation identifier is empty or too long".to_string(),
+            });
+        }
+        if let RevocationExport::Jti { exp: Some(exp), .. } = revocation {
+            if self.clock.now().as_micros() / 1_000_000 >= *exp {
+                // The token it names has expired; the row would be swept.
+                return Ok(ImportOutcome::Skipped);
+            }
+        }
+        let exists = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        // Each arm writes the row exactly as the live revocation path does and
+        // applies it to this node's control caches (and, through the control
+        // epoch, every other node's).
+        match revocation {
+            RevocationExport::Jti { jti, exp } => {
+                let value = exp.map_or_else(|| b"1".to_vec(), |e| e.to_le_bytes().to_vec());
+                self.storage
+                    .put(realm_id, &key, &value)
+                    .map_err(Self::storage_err)?;
+                self.insert_revoked_jti_cache(realm_id, jti, exp.unwrap_or(i64::MAX));
+            }
+            RevocationExport::DpopJkt { jkt } => self.block_dpop_jkt_inner(realm_id, jkt)?,
+            RevocationExport::AatJti { .. } => {
+                // AAT revocations are read from storage at validation time.
+                self.storage
+                    .put(realm_id, &key, b"1")
+                    .map_err(Self::storage_err)?;
+            }
+        }
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
     fn export_retiring_signing_keys(
         &self,
         realm_id: &RealmId,
@@ -13410,12 +13956,21 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
         // Refuse material that does not load, rather than storing a blob that
         // `load_realm_retiring_keys` will silently drop at validation time.
-        let _usable = SigningKey::from_pkcs8(&key.pkcs8)?;
+        let usable = SigningKey::from_pkcs8(&key.pkcs8)?;
+        // The archive's `key_id` is only a label. Checked against the kid the
+        // material produces, a purged key cannot be smuggled back in under
+        // another label, and a key is never stored under a kid its tokens do
+        // not carry (PR #358 follow-up).
+        if usable.key_id() != key.key_id {
+            return Err(IdentityError::InvalidInput {
+                reason: "retiring signing key's key_id does not match its key material".to_string(),
+            });
+        }
         // A key this realm recorded retired and that no longer has a retiring
         // row was purged — by a revoking rotation, the remedy for a leaked
         // key. An archive made inside its grace window still carries it;
         // reinstating it would let it verify tokens again.
-        self.refuse_purged_retiring_key(realm_id, KeyFamily::Ed25519, &key.key_id)?;
+        self.refuse_purged_retiring_key(realm_id, KeyFamily::Ed25519, usable.key_id())?;
         let sys_realm = keys::system_realm_id();
         let storage_key = keys::encode_realm_retiring_key(realm_id, key.deadline_secs, &key.key_id);
         let exists = self
@@ -16491,7 +17046,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         sender: &dyn crate::identity::sms::SmsSender,
         now_unix_ts: u64,
     ) -> Result<String, IdentityError> {
-        use crate::identity::sms::otp::{self as otp_mod, StoredResendCount};
+        use crate::identity::sms::otp as otp_mod;
 
         // 0. The realm must offer SMS as a factor (audit 2026-08-28 §4.18#10).
         self.require_mfa_method(realm_id, "sms")?;
@@ -16499,48 +17054,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // 1. Per-phone resend throttle check.
         let resend_suffix = otp_mod::phone_resend_key_suffix(phone);
         let resend_key = keys::encode_sms_resend_count(&resend_suffix);
-        let resend_raw = self
-            .storage
-            .get(realm_id, &resend_key)
-            .map_err(Self::storage_err)?;
-
-        let should_reset_window = match resend_raw {
-            None => true,
-            Some(ref bytes) => {
-                let resend: StoredResendCount =
-                    serde_json::from_slice(bytes).map_err(|e| IdentityError::Serialization {
-                        reason: e.to_string(),
-                    })?;
-                if resend.is_window_expired(now_unix_ts) {
-                    true
-                } else if resend.is_limit_reached() {
-                    return Err(IdentityError::SmsResendLimitExceeded);
-                } else {
-                    // Increment within current window.
-                    let mut updated = resend;
-                    updated.count = updated.count.saturating_add(1);
-                    let updated_bytes =
-                        serde_json::to_vec(&updated).map_err(|e| IdentityError::Serialization {
-                            reason: e.to_string(),
-                        })?;
-                    self.storage
-                        .put(realm_id, &resend_key, &updated_bytes)
-                        .map_err(Self::storage_err)?;
-                    false
-                }
-            }
-        };
-
-        if should_reset_window {
-            let fresh = StoredResendCount::new(now_unix_ts);
-            let fresh_bytes =
-                serde_json::to_vec(&fresh).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            self.storage
-                .put(realm_id, &resend_key, &fresh_bytes)
-                .map_err(Self::storage_err)?;
-        }
+        self.count_otp_resend(
+            realm_id,
+            &resend_key,
+            now_unix_ts,
+            IdentityError::SmsResendLimitExceeded,
+        )?;
 
         // 2. Look up per-realm OTP config, falling back to module defaults.
         use crate::identity::sms::otp::{OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS};
@@ -16662,6 +17181,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // The realm must offer email OTP (audit 2026-08-28 §4.18#10).
         self.require_mfa_method(realm_id, "email_otp")?;
 
+        // Per-address resend throttle, mirroring the per-phone SMS one
+        // (GA audit M12). Without it every render of the login challenge
+        // mailed a fresh code, each good for five guesses: an unbounded
+        // guessing budget, and a flood of the victim's inbox.
+        let resend_suffix = otp_mod::phone_resend_key_suffix(&email.to_ascii_lowercase());
+        self.count_otp_resend(
+            realm_id,
+            &keys::encode_email_resend_count(&resend_suffix),
+            now_unix_ts,
+            IdentityError::RateLimited,
+        )?;
+
         let (expiry_secs, max_attempts) = match self.get_realm(realm_id) {
             Ok(Some(realm)) => {
                 let cfg = realm.config();
@@ -16694,8 +17225,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         email_service
             .send_otp_email(email, digits.as_str(), realm_branding)
+            // An SMTP rejection names the recipient; the reason is logged, so
+            // the address is masked in it (GA audit L21).
             .map_err(|e| IdentityError::Internal {
-                reason: format!("email OTP delivery failed: {e}"),
+                reason: format!(
+                    "email OTP delivery failed: {}",
+                    e.to_string()
+                        .replace(email, &crate::identity::email::mask_email_address(email))
+                ),
             })?;
 
         Ok(nonce)
@@ -17143,6 +17680,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // suspension control that reaches it (audit 2026-08-28 §4.19#6).
         self.require_active_realm(realm_id)?;
 
+        // 0. Per-client exchange policy (GA audit M8, B9). The protocol layer
+        //    authenticated `client_id`; this decides whether that client may
+        //    exchange at all: it must be a registered Active client, hold the
+        //    token-exchange grant, and be confidential — a public client's
+        //    `client_id` is public, so "authenticating" it proves nothing.
+        self.require_token_exchange_client(realm_id, &request.client_id)?;
+
         let now_micros = self.clock.now().as_micros();
         let now_secs = now_micros / 1_000_000;
 
@@ -17327,7 +17871,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             act: subject_claims.act.clone().map(Box::new),
         };
 
-        // 8. Audience.
+        // 8. Audience. A requested `resource` or `audience` must either be an
+        //    audience the subject token already carries (narrowing) or name a
+        //    protected resource registered in this realm (GA audit M8): taken
+        //    verbatim, it let the holder of a token for one resource server
+        //    mint a token another would accept.
+        for target in [request.resource.as_deref(), request.audience.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if !subject_claims.aud.contains(target) {
+                self.require_registered_exchange_target(realm_id, target)?;
+            }
+        }
         let aud = if let Some(ref resource_uri) = request.resource {
             crate::identity::tokens::Audience::Multi(vec![
                 subject_claims.aud.base().to_string(),
@@ -17450,17 +18006,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         exp_secs: i64,
     ) -> Result<(), IdentityError> {
         let key = keys::encode_actor_jti(jti);
-        if self
+        // One atomic step (GA audit L9): the old read-then-write let
+        // concurrent exchanges presenting one actor token all pass.
+        // `put_if_absent` is atomic here and Raft-routed in cluster mode.
+        let fresh = self
             .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
+            .put_if_absent(realm_id, &key, &exp_secs.to_le_bytes())
+            .map_err(Self::storage_err)?;
+        if !fresh {
             return Err(IdentityError::ActorTokenReplayed);
         }
-        self.storage
-            .put(realm_id, &key, &exp_secs.to_le_bytes())
-            .map_err(Self::storage_err)?;
         Ok(())
     }
 
@@ -17833,8 +18388,14 @@ impl EmbeddedIdentityEngine {
                 to: phone.to_string(),
                 body: format!("Your verification code is: {}", digits.as_str()),
             })
+            // The transport's text can name the recipient; the reason is
+            // logged, so the number is masked in it (GA audit L21).
             .map_err(|e| IdentityError::Internal {
-                reason: format!("SMS delivery failed: {e}"),
+                reason: format!(
+                    "SMS delivery failed: {}",
+                    e.to_string()
+                        .replace(phone, &crate::identity::sms::mask_phone(phone))
+                ),
             })?;
 
         Ok(nonce)
@@ -17942,8 +18503,15 @@ mod tests {
     mod control_reload;
     /// A FAPI 2.0 client is never public and always holds verifiable keys.
     mod fapi2_client_keys;
+    /// Login abuse resistance: realm-cost dummy verify, breach check before
+    /// registration writes, single-use required-action tokens (GA audit).
+    mod ga_login_hardening;
     /// An RS256 client's realm key is checked before an overwrite deletes it.
     mod import_client_rs256_key;
+    /// A PAR `request_uri` is consumed exactly once under concurrency.
+    mod par_consume_race;
+    /// A retiring key is checked by the kid its material produces, not its label.
+    mod retiring_key_import_kid;
     /// Concurrent revocations survive a racing control-cache reload.
     mod revocation_reload_races;
     /// A signing-key rotation lands in one atomic storage batch.
@@ -17952,6 +18520,8 @@ mod tests {
     mod secret_compare;
     /// A session-cache fill never resurrects a session revoked while it ran.
     mod session_fill_race;
+    /// A session revocation is never undone by a racing refresh or create.
+    mod session_rmw_race;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.
@@ -20743,7 +21313,10 @@ mod tests {
                     client_name: "Test App".to_string(),
                     redirect_uris: vec!["https://app.example.com/callback".to_string()],
                     client_secret: None,
-                    grant_types: vec!["authorization_code".to_string()],
+                    grant_types: vec![
+                        "authorization_code".to_string(),
+                        "refresh_token".to_string(),
+                    ],
                     require_consent: true,
                     client_logo_url: None,
                     ..Default::default()
@@ -26513,7 +27086,6 @@ mod tests {
 
     #[test]
     fn token_exchange_rejects_revoked_agent_in_act_chain() {
-        use crate::core::ClientId;
         use crate::identity::tokens::{decode_claims_unverified, ActClaim};
         use crate::identity::{
             AgentOwner, CreateAgentRequest, Rfc8693Request, SessionContext, TokenIssuanceContext,
@@ -26572,7 +27144,26 @@ mod tests {
             .issue_token(&claims)
             .expect("re-sign subject token with act chain");
 
-        let client_id = ClientId::new(uuid::Uuid::new_v4());
+        // GA audit M8: the exchanging client must be a registered,
+        // confidential client holding the token-exchange grant.
+        let client_id =
+            engine
+                .register_client(
+                    &realm,
+                    &crate::identity::RegisterClientRequest {
+                        client_name: "act-chain-exchanger".to_string(),
+                        redirect_uris: vec!["https://client.example.com/cb".to_string()],
+                        client_secret: Some("act-chain-exchanger-secret!".to_string()),
+                        grant_types: vec![
+                            "urn:ietf:params:oauth:grant-type:token-exchange".to_string()
+                        ],
+                        require_consent: false,
+                        ..Default::default()
+                    },
+                )
+                .expect("register exchange client")
+                .client_id()
+                .clone();
         let make_req = || Rfc8693Request {
             client_id: client_id.clone(),
             subject_token: subject_token.clone(),

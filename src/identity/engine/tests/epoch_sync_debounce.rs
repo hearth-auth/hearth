@@ -282,3 +282,95 @@ fn a_control_asserted_on_another_node_binds_within_one_debounce_window() {
          another node suspended"
     );
 }
+
+/// Sets up two "nodes" over one storage and clock, two realms with a warm
+/// token each, and a revoking rotation of realm B's signing key made on the
+/// other node. Returns the validator, the clock and both (realm, token) pairs.
+#[allow(clippy::type_complexity)]
+fn two_realms_and_a_rotation_elsewhere() -> (
+    tempfile::TempDir,
+    EmbeddedIdentityEngine,
+    Arc<FakeClock>,
+    (RealmId, String),
+    (RealmId, String),
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(
+        EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf())).expect("open"),
+    ) as Arc<dyn StorageEngine>;
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let validator = engine_over(&storage, &clock);
+    let other_node = engine_over(&storage, &clock);
+
+    let busy = seed_token(&validator);
+    // Two realms hashed into one debounce window share it by design; pick a
+    // quiet realm with a window of its own so the test is deterministic.
+    let quiet = std::iter::repeat_with(|| seed_token(&validator))
+        .take(16)
+        .find(|q| realm_epoch_window(&q.0) != realm_epoch_window(&busy.0))
+        .expect("a realm in a different debounce window");
+    validator.validate_token(&busy.0, &busy.1).expect("warm A");
+    validator
+        .validate_token(&quiet.0, &quiet.1)
+        .expect("warm B");
+
+    // A revoking rotation (no grace) of the quiet realm's key, elsewhere: the
+    // remedy for a leaked key. Every token B signed before it must die.
+    other_node
+        .rotate_realm_signing_key(&quiet.0, 0)
+        .expect("rotate B's key on the other node");
+    (dir, validator, clock, busy, quiet)
+}
+
+/// Audit GA 2026-09-28 M5: one global debounce slot reconciled only the realm
+/// of the request that won it. While realm A's traffic kept winning the slot,
+/// a quiet realm B whose key another node had revoked stayed trusted from the
+/// warm claims cache indefinitely — not for one window. Each realm must get
+/// its own window.
+#[test]
+fn a_busy_realm_does_not_starve_a_quiet_realms_key_epoch_reconciliation() {
+    let (_dir, validator, clock, busy, quiet) = two_realms_and_a_rotation_elsewhere();
+
+    clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
+    // Realm A's request arrives first and claims the window.
+    validator
+        .validate_token(&busy.0, &busy.1)
+        .expect("A is unaffected by B's rotation");
+
+    let after = validator.validate_token(&quiet.0, &quiet.1);
+    assert!(
+        matches!(after, Err(IdentityError::InvalidToken)),
+        "past the debounce window a token signed by realm B's revoked key was still \
+         accepted, because realm A's request had claimed the only reconciliation slot \
+         (error: {:?})",
+        after.as_ref().err()
+    );
+}
+
+/// Audit GA 2026-09-28 M5, cluster half: the signing-key epoch had no
+/// replicated-write observer, so a follower learned of a rotation only from
+/// the debounced read. The replicated `realm:keygen:` row must invalidate the
+/// realm's keys directly, inside the window.
+#[test]
+fn a_replicated_key_epoch_row_invalidates_the_realms_keys_at_once() {
+    use crate::cluster::ReplicatedWriteObserver as _;
+
+    let (_dir, validator, _clock, _busy, quiet) = two_realms_and_a_rotation_elsewhere();
+    let sys_realm = keys::system_realm_id();
+    let row = keys::encode_realm_key_epoch(&quiet.0);
+    let value = validator
+        .storage
+        .get(&sys_realm, &row)
+        .expect("read the epoch row")
+        .expect("the rotation wrote the epoch row");
+
+    validator.on_replicated_put(&sys_realm, &row, &value);
+
+    let after = validator.validate_token(&quiet.0, &quiet.1);
+    assert!(
+        matches!(after, Err(IdentityError::InvalidToken)),
+        "inside the debounce window, after the replicated key-epoch row was observed, a \
+         token signed by the revoked key was still accepted (error: {:?})",
+        after.as_ref().err()
+    );
+}

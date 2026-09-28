@@ -43,7 +43,7 @@ impl OAuthService for OAuthSvc {
 
         let realm_id = extract_realm_id(req.metadata())?;
         // HEA-1721: authenticate the caller; their token's `sub` is the authoritative user identity.
-        let authenticated_user_id =
+        let (authenticated_user_id, bearer_session) =
             extract_grpc_user_auth(req.metadata(), &realm_id, self.state.identity.as_ref())?;
         let body = req.into_inner();
 
@@ -86,7 +86,8 @@ impl OAuthService for OAuthSvc {
         let resp = self
             .state
             .identity
-            .authorize(&realm_id, &domain_req)
+            // No consent screen over gRPC (GA audit B2).
+            .authorize_non_interactive(&realm_id, &domain_req, &bearer_session)
             .map_err(identity_to_status)?;
         Ok(Response::new(pb::AuthorizationResponse::from(&resp)))
     }
@@ -106,10 +107,15 @@ impl OAuthService for OAuthSvc {
         // except that a FAPI 2.0 Advanced realm accepts no public client.
         // A client with keys instead of a secret is not public; this RPC
         // carries no assertion, so it is refused (it exchanges over HTTP).
-        if let Ok(Some(client)) = self
+        //
+        // A lookup ERROR fails closed (GA audit L12): matching only `Ok(Some)`
+        // skipped client authentication on a storage error and ran the
+        // exchange unauthenticated.
+        if let Some(client) = self
             .state
             .identity
             .get_client(&realm_id, &domain_req.client_id)
+            .map_err(identity_to_status)?
         {
             if client.is_public() {
                 crate::identity::client_auth::authenticate_client(
@@ -362,6 +368,17 @@ impl OAuthService for OAuthSvc {
             .and_then(|v| v.strip_prefix("Bearer "))
             .ok_or_else(|| Status::unauthenticated("bearer token required"))?
             .to_string();
+        // RFC 9449 §7.2: a `cnf`-bound token cannot prove possession over gRPC
+        // (no DPoP proof channel), so it gets no decision — fail-closed, as
+        // `POST /oauth/authorize` answers a DPoP failure (GA audit B2).
+        if self
+            .state
+            .identity
+            .validate_token(&realm_id, &token)
+            .is_ok_and(|claims| claims.cnf.is_some())
+        {
+            return Ok(Response::new(pb::TokenDecisionResponse { allowed: false }));
+        }
         let body = req.into_inner();
         let domain_req = domain::oidc::DecidePermissionRequest {
             token,

@@ -142,6 +142,9 @@ async fn seed_realm(
     let restore = client.set_dcr_policy("disabled").await;
     let (cc_client_id, cc_client_secret) = cc_result?;
     restore?;
+    // The validate journey introspects users' session tokens with this client,
+    // which only a resource server in introspection mode may do (GA audit L11).
+    client.set_introspection_mode(&cc_client_id).await?;
     println!(
         "    registered confidential client_credentials client {} (issuance plane)",
         &cc_client_id[..8]

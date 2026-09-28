@@ -47,3 +47,12 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+    groups:
+      # GA audit: Dependabot treats github/codeql-action/{init,autobuild,
+      # analyze,upload-sarif} as separate dependencies. PR #333 bumped only
+      # `analyze` to 4.37.8 while `init` stayed on 4.36.2, and every CodeQL job
+      # then failed with "Loaded a configuration file for version '4.36.2', but
+      # running version '4.37.8'". The sub-actions must move together.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"

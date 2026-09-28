@@ -150,6 +150,9 @@ func TestAuthCodeFlow(t *testing.T) {
 	oauthClient, err := srv.client.RegisterClient(ctx, hearth.RegisterClientRequest{
 		ClientName:   "go-test-app",
 		RedirectURIs: []string{"http://localhost:3000/callback"},
+		// First-party: JSON /authorize issues a code only for a client that
+		// needs no consent (or holds a recorded consent).
+		TrustLevel: hearth.TrustLevelFirstParty,
 	}, srv.bootstrap.AccessToken)
 	if err != nil {
 		t.Fatalf("register client: %v", err)
@@ -333,6 +336,9 @@ func TestTransparentRefresh(t *testing.T) {
 	oauthClient, err := srv.client.RegisterClient(ctx, hearth.RegisterClientRequest{
 		ClientName:   "go-refresh-app",
 		RedirectURIs: []string{"http://localhost:3000/callback"},
+		// First-party: JSON /authorize issues a code only for a client that
+		// needs no consent (or holds a recorded consent).
+		TrustLevel: hearth.TrustLevelFirstParty,
 	}, srv.bootstrap.AccessToken)
 	if err != nil {
 		t.Fatalf("register client: %v", err)
@@ -426,6 +432,9 @@ func TestVerifyToken(t *testing.T) {
 	oauthClient, err := srv.client.RegisterClient(ctx, hearth.RegisterClientRequest{
 		ClientName:   "verify-token-test",
 		RedirectURIs: []string{"http://localhost:3000/callback"},
+		// First-party: JSON /authorize issues a code only for a client that
+		// needs no consent (or holds a recorded consent).
+		TrustLevel: hearth.TrustLevelFirstParty,
 	}, srv.bootstrap.AccessToken)
 	if err != nil {
 		t.Fatalf("register client: %v", err)

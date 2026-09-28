@@ -324,17 +324,49 @@ const MAGIC_LINK_GRANT_TYPE: &str = "urn:hearth:grant-type:magic-link";
 /// Single use is enforced by `validate_magic_link`, which marks the record
 /// consumed before returning. The resulting session is a normal browserless
 /// session, so revocation and the session-version feed behave as usual.
+///
+/// The link proves control of the mailbox — one factor — and this grant has
+/// no challenge surface. So it refuses (GA audit B4, M11, M13):
+///
+/// * a user with pending required actions (`required_actions_pending`),
+///   exactly as the password grant does;
+/// * a user who holds a second factor: the engine's session gate answers
+///   `MfaRequired` for a session that proved none, and the link is already
+///   spent, so it cannot be replayed;
+/// * a client address the realm's `cidr_policy` denies, via the same gate.
+///
+/// The tokens are never sender-constrained — `issue_tokens` binds no `cnf` —
+/// so the response always says `Bearer`, whether or not the request carried a
+/// DPoP proof. Answering `DPoP` for an unbound token told the client its token
+/// was bound when a thief could replay it as a plain bearer (GA audit L7).
 fn exchange_magic_link(
     state: &Arc<AppState>,
     realm_id: &crate::core::RealmId,
     token: &str,
-    dpop_jkt: Option<&str>,
+    client_ip: Option<&str>,
+    user_agent: Option<&str>,
 ) -> Result<serde_json::Value, crate::identity::IdentityError> {
+    state
+        .identity
+        .check_realm_network_policy(realm_id, client_ip)?;
     let user_id = state.identity.validate_magic_link(realm_id, token)?;
+    let user = state
+        .identity
+        .get_user(realm_id, &user_id)?
+        .ok_or(crate::identity::IdentityError::MagicLinkTokenInvalid)?;
+    if !user.required_actions().is_empty() {
+        return Err(crate::identity::IdentityError::RequiredActionsBlocking {
+            actions: user.required_actions().to_vec(),
+        });
+    }
     let session = state.identity.create_session(
         realm_id,
         &user_id,
-        &crate::identity::SessionContext::default(),
+        &crate::identity::SessionContext {
+            ip_address: client_ip.map(str::to_string),
+            user_agent_raw: user_agent.map(str::to_string),
+            ..crate::identity::SessionContext::default()
+        },
     )?;
     let tokens = state
         .identity
@@ -346,7 +378,7 @@ fn exchange_magic_link(
     Ok(serde_json::json!({
         "access_token": tokens.access_token(),
         "refresh_token": tokens.refresh_token(),
-        "token_type": if dpop_jkt.is_some() { "DPoP" } else { "Bearer" },
+        "token_type": "Bearer",
         "expires_in": 900,
     }))
 }
@@ -355,7 +387,7 @@ fn exchange_magic_link(
 ///
 /// Uses a flat struct because the proto `TokenExchangeRequest` doesn't cover
 /// the multi-grant-type dispatch (`authorization_code` vs `refresh_token`).
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct HttpTokenRequest {
     /// RFC 6749 §3.2.1: REQUIRED only "if the client is not authenticating
     /// with the authorization server" — a strict `client_secret_basic` client
@@ -416,6 +448,39 @@ struct HttpTokenRequest {
     resource: Option<String>,
     #[serde(default)]
     audience: Option<String>,
+}
+
+/// Prints the grant's shape, never a credential: codes, verifiers, tokens,
+/// secrets, passwords and assertions are redacted (GA audit L20).
+impl std::fmt::Debug for HttpTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |v: &Option<String>| v.as_ref().map(|_| "<redacted>");
+        f.debug_struct("HttpTokenRequest")
+            .field("client_id", &self.client_id)
+            .field("grant_type", &self.grant_type)
+            .field("code", &redact(&self.code))
+            .field("redirect_uri", &self.redirect_uri)
+            .field("code_verifier", &redact(&self.code_verifier))
+            .field("refresh_token", &redact(&self.refresh_token))
+            .field("client_secret", &redact(&self.client_secret))
+            .field("scope", &self.scope)
+            .field("device_code", &redact(&self.device_code))
+            .field("username", &self.username)
+            .field("password", &redact(&self.password))
+            .field("mfa_code", &redact(&self.mfa_code))
+            .field("assertion", &redact(&self.assertion))
+            .field("client_assertion_type", &self.client_assertion_type)
+            .field("client_assertion", &redact(&self.client_assertion))
+            .field("token", &redact(&self.token))
+            .field("subject_token", &redact(&self.subject_token))
+            .field("subject_token_type", &self.subject_token_type)
+            .field("actor_token", &redact(&self.actor_token))
+            .field("actor_token_type", &self.actor_token_type)
+            .field("requested_token_type", &self.requested_token_type)
+            .field("resource", &self.resource)
+            .field("audience", &self.audience)
+            .finish()
+    }
 }
 
 /// HTTP request body for token revocation (RFC 7009).
@@ -1810,6 +1875,33 @@ fn resolve_dcr_id_token_alg(
 /// `dcr_policy` must be `Open` — returns 403 otherwise. The server
 /// generates a random client secret and slug; the client does not
 /// supply these. Returns an RFC 7591-compatible JSON response.
+/// The permission an RFC 7591 §3.1 initial access token must carry under the
+/// `authenticated` DCR policy (GA audit M9), besides `hearth.admin`: the same
+/// authority the admin `POST /clients` API requires. Any valid realm token
+/// used to be enough, so any end user could register clients.
+const DCR_INITIAL_ACCESS_PERMISSION: &str = "hearth.clients.admin";
+
+/// Refuses (`403 insufficient_scope`, RFC 6750 §3.1) a valid bearer token that
+/// is not an initial access token: one without `hearth.clients.admin` or
+/// `hearth.admin` in its `permissions` claim.
+fn require_dcr_initial_access(claims: &crate::identity::TokenClaims) -> Result<(), Response> {
+    if claims
+        .permissions
+        .iter()
+        .any(|p| p == "hearth.admin" || p == DCR_INITIAL_ACCESS_PERMISSION)
+    {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "insufficient_scope",
+            "error_description": "the initial access token must carry the hearth.clients.admin permission"
+        })),
+    )
+        .into_response())
+}
+
 async fn register_client_dynamic(
     State(state): State<Arc<AppState>>,
     method: axum::http::Method,
@@ -1862,16 +1954,14 @@ async fn register_client_dynamic(
             // as a plain Bearer to register clients in this realm (HEA-2039).
             // Global route ⇒ plain `Uri` yields the full request path.
             let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-            if validate_user_token_with_dpop(
+            let Ok(claims) = validate_user_token_with_dpop(
                 &headers,
                 &state,
                 &realm_id,
                 &token,
                 method.as_str(),
                 &htu,
-            )
-            .is_err()
-            {
+            ) else {
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({
@@ -1880,6 +1970,9 @@ async fn register_client_dynamic(
                     })),
                 )
                     .into_response();
+            };
+            if let Err(resp) = require_dcr_initial_access(&claims) {
+                return resp;
             }
         }
     }
@@ -1899,9 +1992,16 @@ async fn register_client_dynamic(
         Err(resp) => return resp,
     };
 
+    // RFC 7591 §2: omitted `grant_types` means `authorization_code` alone —
+    // the realm DCR twin's default. Refresh tokens now follow `grant_types`
+    // (GA audit M7), so a DCR client that wants them registers for them.
+    let grant_types_omitted = body.grant_types.is_empty();
     // Strip any client-supplied secret — the server generates its own.
     // RFC 7591 DCR is anonymous; callers cannot self-grant first-party trust.
     let mut request = crate::identity::RegisterClientRequest::from(body);
+    if grant_types_omitted {
+        request.grant_types = vec![crate::identity::oidc::GRANT_AUTHORIZATION_CODE.to_string()];
+    }
     request.client_secret = None;
     request.trust_level = crate::identity::ClientTrustLevel::ThirdParty;
     request.jwks = extras.jwks.clone();
@@ -2057,11 +2157,18 @@ async fn authorize(
     // user identity.  The body's `user_id` field is ignored to prevent unauthenticated
     // account takeover via caller-supplied user IDs.
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let authenticated_user_id =
-        match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
-            Ok(uid) => uid,
-            Err(e) => return e.into_response(),
-        };
+    // The bearer token's session is kept: the engine judges the factor it
+    // proved (GA audit B2/B5).
+    let (authenticated_user_id, bearer_session) = match super::auth::extract_user_session_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
+        Ok(auth) => auth,
+        Err(e) => return e.into_response(),
+    };
 
     // PAR path: when `request_uri` is present, consume the stored entry to
     // obtain the pre-validated parameters and set `via_par = true`.
@@ -2146,7 +2253,12 @@ async fn authorize(
         }
     };
 
-    match state.identity.authorize(&realm_id, &request) {
+    // No consent screen here: issue only for a client that needs no consent
+    // or one the user already consented to (GA audit B2).
+    match state
+        .identity
+        .authorize_non_interactive(&realm_id, &request, &bearer_session)
+    {
         Ok(response) => (
             StatusCode::OK,
             Json(proto_to_rest_json(&pb::AuthorizationResponse::from(
@@ -3050,7 +3162,16 @@ async fn token_exchange_impl(
                 )
                     .into_response();
             };
-            match exchange_magic_link(&state, &realm_id, &link_token, dpop_jkt.as_deref()) {
+            let user_agent = headers
+                .get(axum::http::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok());
+            match exchange_magic_link(
+                &state,
+                &realm_id,
+                &link_token,
+                Some(client_ip.as_str()),
+                user_agent,
+            ) {
                 Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
@@ -3617,7 +3738,10 @@ async fn realm_authorize_browser_redirect(
 async fn realm_authorize(
     State(state): State<Arc<AppState>>,
     method: axum::http::Method,
-    uri: axum::http::Uri,
+    // `nest("/realms/{realm_name}")` strips the prefix from `Uri`, so the path
+    // the client signed in its DPoP proof survives only in `OriginalUri`
+    // (GA audit L8; the `realm_userinfo` twin was fixed the same way).
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: HeaderMap,
     Path(realm_name): Path<String>,
     Json(body): Json<pb::AuthorizationRequest>,
@@ -3629,11 +3753,18 @@ async fn realm_authorize(
 
     // HEA-1721: authenticate the caller; their token's `sub` is the authoritative user identity.
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let authenticated_user_id =
-        match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
-            Ok(uid) => uid,
-            Err(e) => return e.into_response(),
-        };
+    // The bearer token's session is kept: the engine judges the factor it
+    // proved (GA audit B2/B5).
+    let (authenticated_user_id, bearer_session) = match super::auth::extract_user_session_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
+        Ok(auth) => auth,
+        Err(e) => return e.into_response(),
+    };
 
     let mut request = match proto_authorize_to_domain(body) {
         Ok(r) => r,
@@ -3647,7 +3778,12 @@ async fn realm_authorize(
     };
     // Override body-supplied user_id with the authenticated identity (HEA-1721).
     request.user_id = authenticated_user_id;
-    match state.identity.authorize(&realm_id, &request) {
+    // No consent screen here: issue only for a client that needs no consent
+    // or one the user already consented to (GA audit B2).
+    match state
+        .identity
+        .authorize_non_interactive(&realm_id, &request, &bearer_session)
+    {
         Ok(response) => (
             StatusCode::OK,
             Json(proto_to_rest_json(&pb::AuthorizationResponse::from(
@@ -4216,7 +4352,16 @@ async fn realm_token_exchange(
                 )
                     .into_response();
             };
-            match exchange_magic_link(&state, &realm_id, &link_token, dpop_jkt.as_deref()) {
+            let user_agent = headers
+                .get(axum::http::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok());
+            match exchange_magic_link(
+                &state,
+                &realm_id,
+                &link_token,
+                Some(client_ip.as_str()),
+                user_agent,
+            ) {
                 Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
@@ -4522,16 +4667,14 @@ async fn realm_register_client_dynamic(
             // preserves the `/realms/{name}` prefix so a legitimate proof's
             // `htu` matches the full request path.
             let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-            if validate_user_token_with_dpop(
+            let Ok(claims) = validate_user_token_with_dpop(
                 &headers,
                 &state,
                 &realm_id,
                 &token,
                 method.as_str(),
                 &htu,
-            )
-            .is_err()
-            {
+            ) else {
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({
@@ -4540,6 +4683,9 @@ async fn realm_register_client_dynamic(
                     })),
                 )
                     .into_response();
+            };
+            if let Err(resp) = require_dcr_initial_access(&claims) {
+                return resp;
             }
         }
     }

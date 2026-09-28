@@ -478,6 +478,8 @@ fn cli_config_validate_accepts_valid_file() {
             "oidc:\n  issuer: \"https://auth.example.com\"\n",
             "security:\n  key_encryption_key: \"",
             "1111111111111111111111111111111111111111111111111111111111111111\"\n",
+            "email:\n  transport: smtp\n  from: \"auth@example.com\"\n",
+            "  smtp:\n    host: \"mail.example.com\"\n    port: 587\n",
         ),
     );
     let output = Command::new(hearth_bin())

@@ -686,12 +686,21 @@ impl EmbeddedIdentityEngine {
         if key.deadline_secs <= now_secs {
             return Ok(ImportOutcome::Skipped);
         }
-        let _usable = RsaIdTokenSigningKey::from_pkcs8(&key.pkcs8)?;
+        let usable = RsaIdTokenSigningKey::from_pkcs8(&key.pkcs8)?;
+        // The archive's `key_id` is only a label: check the kid the material
+        // produces, so a purged key cannot come back under another label
+        // (PR #358 follow-up).
+        if usable.key_id() != key.key_id {
+            return Err(IdentityError::InvalidInput {
+                reason: "retiring ID-token signing key's key_id does not match its key material"
+                    .to_string(),
+            });
+        }
         // A retiring key the realm recorded retired and no longer holds was
         // purged — by a revoking rotation, the remedy for a leaked key. An
         // archive made inside its grace window still carries it; reinstating
         // it would let it verify ID tokens again.
-        self.refuse_purged_retiring_key(realm_id, KeyFamily::IdTokenRs256, &key.key_id)?;
+        self.refuse_purged_retiring_key(realm_id, KeyFamily::IdTokenRs256, usable.key_id())?;
         let sys_realm = keys::system_realm_id();
         let storage_key =
             keys::encode_realm_id_token_rsa_retiring_key(realm_id, key.deadline_secs, &key.key_id);

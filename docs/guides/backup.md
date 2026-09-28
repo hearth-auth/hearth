@@ -66,6 +66,7 @@ A `.hearth-backup` file is a zstd-compressed archive. Inside, each realm is stor
 | `realms/<slug>/saml_signing_key.json` | The realm's SAML RSA key and certificate (AES-256-GCM encrypted with the DEK; re-sealed under the destination's KEK on import) |
 | `realms/<slug>/scim_mappings.ndjson` | SCIM `externalId` mappings for users and groups |
 | `realms/<slug>/invitations.ndjson` | Organization invitations, with the token, dedup and listing indexes rebuilt on import |
+| `realms/<slug>/revocations.ndjson` | Token revocations: revoked access-token JTIs (with their expiry), blocked DPoP key thumbprints and revoked AAT JTIs. Re-applied to the restored node's blocklists, so a sessionless (`client_credentials` or agent) token revoked before the backup stays revoked. Expired JTIs are omitted |
 | `realms/<slug>/retiring_signing_keys.json` | Signing keys still inside a rotation grace window (AES-256-GCM encrypted with the DEK; re-sealed under the destination's KEK on import) |
 | `realms/<slug>/signing_key.json` | Realm signing key (AES-256-GCM encrypted with the DEK) |
 | `realms/<slug>/audit.ndjson` | Audit events (**only when `--include-audit` is passed**) |
@@ -83,7 +84,7 @@ the remaining row at the end of a run so it cannot be missed.
 
 | Not carried | What a restore loses |
 |---|---|
-| **Sessions** | Every access and refresh token issued before the backup is dead after the restore, even though the signing key survives. **This one is deliberate and stays that way.** A session is per-node live state carrying a session version and a device binding, and a revocation recorded *after* the backup is not in the archive — so restoring sessions would resurrect exactly the sessions an operator revoked. Treat a restore as a re-authentication event. Note that `--allow-missing-signing-key`'s help text implies the converse; it is wrong. Pre-restore tokens stop validating either way. |
+| **Sessions** | Every session — and so every session-bound access and refresh token and every SSO cookie — issued before the backup is dead after the restore, even though the signing key survives. **This one is deliberate and stays that way.** A session is per-node live state carrying a session version and a device binding, and a revocation recorded *after* the backup is not in the archive — so restoring sessions would resurrect exactly the sessions an operator revoked. Treat a restore as a re-authentication event for users. **It is not one for sessionless tokens:** a `client_credentials` or agent access token carries no session, verifies against the restored signing key, and stays valid until its `exp` (at most the configured access-token TTL). Revocations recorded *before* the backup travel in `revocations.ndjson` and are re-applied; a revocation recorded *after* the backup is not in an older archive, so re-revoke those tokens (or rotate the realm signing key) after restoring one. |
 
 Two things about the closed families are worth knowing before you rely on them.
 
@@ -712,10 +713,14 @@ export holds the barrier, **writes to that node block** until the export's read
 pass for the current realm completes; they are not lost, only delayed. Reads —
 token validation, session and user lookups — are **never** blocked, so
 authentication continues normally during a backup. The blocking window scales
-with realm size (how long it takes to scan and serialise the realm's entities),
-so for very large realms prefer a low-write window. The barrier is released
-between realms, so a multi-realm backup does not hold all writes for the whole
-run.
+with realm size (how long it takes to scan and serialise the realm's entities
+into memory), so for very large realms prefer a low-write window. The barrier
+covers only that read pass: it is released before the realm's sections are
+encrypted, compressed and written to the archive, so a slow or remote backup
+destination does not stall writes. The cost is memory — the exporter holds one
+realm's serialised sections in RAM between the two steps. The barrier is also
+released between realms, so a multi-realm backup does not hold all writes for
+the whole run.
 
 This barrier is **single-node**. Multi-node export consistency is not provided
 (clustering is EXPERIMENTAL — see the clustering guide). The offline CLI

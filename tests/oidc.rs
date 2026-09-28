@@ -57,7 +57,10 @@ async fn oidc_authorization_code_flow_roundtrip() {
                 client_name: "Integration Test App".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -254,7 +257,10 @@ async fn oidc_authorization_code_flow_via_http() {
         .header("Authorization", format!("Bearer {admin_token}"))
         .json(&serde_json::json!({
             "client_name": "HTTP Integration Test App",
-            "redirect_uris": ["https://app.example.com/callback"]
+            "redirect_uris": ["https://app.example.com/callback"],
+            // The JSON /authorize below has no consent screen, so it issues
+            // only for a client that needs no consent (GA audit B2).
+            "trust_level": "CLIENT_TRUST_LEVEL_FIRST_PARTY"
         }))
         .timeout(Duration::from_secs(5))
         .send()
@@ -412,7 +418,10 @@ async fn oidc_pkce_s256_flow() {
                 client_name: "PKCE Test App".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()
@@ -752,7 +761,10 @@ async fn conformance_token_endpoint_rfc6749() {
                 client_name: "RFC 6749 Conformance App".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
                 client_secret: None,
-                grant_types: vec!["authorization_code".to_string()],
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
                 require_consent: true,
                 client_logo_url: None,
                 ..Default::default()

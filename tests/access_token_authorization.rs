@@ -126,6 +126,10 @@ fn register_client(
                 grant_types: vec!["client_credentials".to_string()],
                 client_secret: Some("test-secret-long-enough-32chars!".to_string()),
                 access_token_authorization: mode,
+                // These tests measure the authorization mode. A third-party
+                // client is withheld permissions by the claim profile
+                // regardless of mode (GA audit B1).
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
                 ..Default::default()
             },
         )
@@ -488,6 +492,7 @@ async fn backward_compat_default_is_embedded() {
                 grant_types: vec!["client_credentials".to_string()],
                 client_secret: Some("legacy-secret-long-enough-32chars".to_string()),
                 // access_token_authorization omitted → Default::default() → Embedded
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
                 ..Default::default()
             },
         )

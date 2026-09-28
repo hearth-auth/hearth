@@ -71,6 +71,6 @@ pub use engine::{
 };
 pub use log_store::{HearthLogReader, HearthLogStore};
 pub use network::{HearthNetworkFactory, PeerFaults};
-pub use server::{serve, IncomingRpcDispatch, NoopDispatch, RaftRpcHandler};
+pub use server::{serve, serve_with_shutdown, IncomingRpcDispatch, NoopDispatch, RaftRpcHandler};
 pub use state_machine::HearthStateMachine;
 pub use types::{HearthLogData, HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand};

@@ -1036,6 +1036,7 @@ async fn start_fapi_http_server() -> (
                 client_secret: Some(FAPI_HTTP_CLIENT_SECRET.to_string()),
                 grant_types: vec!["authorization_code".to_string()],
                 require_consent: false,
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
                 ..Default::default()
             },
         )
@@ -1586,6 +1587,7 @@ async fn start_fapi_advanced_http_server() -> FapiAdvancedServer {
                 client_secret: None,
                 grant_types: vec!["authorization_code".to_string()],
                 require_consent: false,
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
                 jwks: Some(jwks),
                 // Required: Advanced realm gate checks authorization_signed_response_alg is set.
                 authorization_signed_response_alg: Some("EdDSA".to_string()),

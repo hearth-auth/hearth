@@ -29,6 +29,7 @@
 //! realms/<realm-slug>/saml_signing_key.json     (AES-256-GCM encrypted)
 //! realms/<realm-slug>/scim_mappings.ndjson
 //! realms/<realm-slug>/invitations.ndjson
+//! realms/<realm-slug>/revocations.ndjson   (revoked JTIs, blocked DPoP keys, revoked AAT JTIs)
 //! realms/<realm-slug>/retiring_signing_keys.json (AES-256-GCM encrypted)
 //! realms/<realm-slug>/signing_key.json   (AES-256-GCM encrypted)
 //! realms/<realm-slug>/id_token_signing_key.json           (RS256 ID-token key; encrypted)
@@ -122,13 +123,20 @@ pub struct UnexportedFamily {
 pub const UNEXPORTED_FAMILIES: &[UnexportedFamily] = &[UnexportedFamily {
     family: "sessions",
     member: "sessions.ndjson",
-    consequence: "every access and refresh token issued before the backup is dead after the \
-                      restore, even though the signing key survives. DELIBERATE, and reaffirmed \
-                      by OpenSpec 26.40: a session is per-node live state carrying a session \
+    consequence: "every session — and so every session-bound access and refresh token and \
+                      every SSO cookie — issued before the backup is dead after the restore, \
+                      even though the signing key survives. DELIBERATE, and reaffirmed by \
+                      OpenSpec 26.40: a session is per-node live state carrying a session \
                       version and a device binding, and a revocation recorded after the backup \
                       is not in the archive — so restoring sessions would resurrect exactly the \
-                      sessions an operator revoked. The right fix is documentation, not export: \
-                      a restore is a re-authentication event.",
+                      sessions an operator revoked. A restore is a re-authentication event for \
+                      users. It is NOT one for sessionless tokens (client_credentials, agent \
+                      tokens): they carry no session, verify against the restored signing key, \
+                      and stay valid until their exp (at most the configured access-token TTL). \
+                      Revocations recorded before the backup (revoked JTIs, blocked DPoP keys, \
+                      revoked AAT JTIs) are in the archive and are restored; one recorded after \
+                      the backup is not, so re-revoke those tokens (or rotate the realm signing \
+                      key) after restoring an older archive.",
 }];
 
 /// Entry point for creating and opening `.hearth-backup` archives.

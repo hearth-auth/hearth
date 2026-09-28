@@ -1,5 +1,6 @@
 # Hearth Helm chart — production profile.
-# Enables TLS termination via cert-manager, nginx Ingress, and persistent storage.
+# TLS is terminated by an nginx Ingress with a cert-manager certificate; Hearth
+# runs in production mode behind it with persistent storage.
 #
 # Usage:
 #   helm install hearth deploy/helm/hearth \
@@ -7,14 +8,24 @@
 #     --namespace hearth \
 #     --create-namespace
 #
-# Before installing, update the host name, OIDC issuer, and any secret values
-# below (or supply them via an external secrets operator / sealed-secrets).
+# Before installing, the operator MUST:
+#
+#   1. Create the encryption-key Secret `hearth-keys` (see `encryptionKeys`).
+#   2. Create the SMTP credential Secret `hearth-smtp` (see `extraEnv`).
+#   3. Replace every REPLACE_WITH_* / example.com placeholder below — in
+#      particular config.server.trusted_proxies. A placeholder left in place
+#      makes the server refuse to start (fail closed); it never starts in an
+#      insecure state.
+#
+# Never commit secret values to this file. Source the Secrets from an external
+# store (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager) via the
+# External Secrets Operator or sealed-secrets.
 
 # -- Image -----------------------------------------------------------------------
 image:
   repository: ghcr.io/hearth-auth/hearth
   pullPolicy: IfNotPresent
-  tag: ""          # defaults to Chart.yaml appVersion; pin to a release tag in production
+  tag: ""          # defaults to v<Chart appVersion>; pin to a release tag in production
 
 # -- Replicas --------------------------------------------------------------------
 # Hearth 1.x is single-node only. Keep replicaCount=1.
@@ -60,20 +71,73 @@ resources:
     memory: 1Gi
 
 # -- Pod disruption budget -------------------------------------------------------
+# With one replica, `maxUnavailable: 1` lets `kubectl drain` evict the pod (a
+# brief outage while it reschedules). `minAvailable: 1` would block every
+# drain forever, and the chart refuses to render it.
 podDisruptionBudget:
   enabled: true
-  minAvailable: 1
+  maxUnavailable: 1
+
+# -- Encryption keys -------------------------------------------------------------
+# Production refuses to start without HEARTH_MASTER_KEY and HEARTH_KEK. Create
+# the Secret once, and back both values up OUTSIDE the cluster — losing the
+# master key loses the data on the PVC:
+#
+#   kubectl -n hearth create secret generic hearth-keys \
+#     --from-literal=HEARTH_MASTER_KEY="$(openssl rand -hex 32)" \
+#     --from-literal=HEARTH_KEK="$(openssl rand -hex 32)"
+encryptionKeys:
+  enabled: true
+  existingSecret: hearth-keys
+  masterKeySecretKey: HEARTH_MASTER_KEY
+  kekSecretKey: HEARTH_KEK
+
+# -- Secret-sourced environment --------------------------------------------------
+# SMTP password for config.email.smtp.password below. Create the Secret:
+#
+#   kubectl -n hearth create secret generic hearth-smtp \
+#     --from-literal=password='<smtp password>'
+#
+# An empty value is a hard start-up error in production (${VAR} must resolve
+# to a non-empty string), so a missing or blank password fails closed.
+extraEnv:
+  - name: SMTP_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: hearth-smtp
+        key: password
 
 # -- Hearth config ---------------------------------------------------------------
 config:
   server:
     bind_address: "0.0.0.0"
     port: 8420
-    # TLS termination is handled by the nginx Ingress + cert-manager above.
-    # Uncomment the lines below only if you need mTLS / direct TLS termination
-    # inside the pod (supply the cert/key via secret.tlsCert / secret.tlsKey).
-    # tls_cert_path: "/etc/hearth/tls/tls.crt"
-    # tls_key_path: "/etc/hearth/tls/tls.key"
+    # HTTPS posture: TLS is terminated by the Ingress above, so Hearth trusts
+    # X-Forwarded-Proto / X-Forwarded-For — but only from the proxies listed
+    # in trusted_proxies.
+    trust_forwarded_proto: true
+    # REQUIRED — replace with the IP address(es) your Ingress controller
+    # connects to the pod FROM (for ingress-nginx, its controller pod IPs:
+    #   kubectl -n ingress-nginx get pods -o wide
+    # or the node IPs when the controller runs with hostNetwork: true).
+    #
+    # Entries must be individual IP addresses. CIDR ranges (10.0.0.0/8) are
+    # refused at start-up, and so is this placeholder.
+    #
+    # Keep the list current: controller pod IPs change when the pods are
+    # rescheduled. A stale list means X-Forwarded-For is ignored, every client
+    # appears to come from the controller's IP, and per-IP rate limits (login
+    # lockout included) then apply to all users at once. Prefer a controller
+    # with stable addresses (hostNetwork, or static pod IPs from your CNI).
+    trusted_proxies:
+      - "REPLACE_WITH_INGRESS_CONTROLLER_IP"
+    #
+    # Alternative — direct TLS inside the pod instead of the settings above:
+    # remove trust_forwarded_proto, set `tls.enabled: true` +
+    # `tls.existingSecret` (a kubernetes.io/tls Secret; the probes switch to
+    # HTTPS automatically), and add the ingress annotation
+    # nginx.ingress.kubernetes.io/backend-protocol: "HTTPS". trusted_proxies
+    # is still needed for correct client IPs behind the Ingress.
 
   storage:
     data_dir: "/var/lib/hearth"
@@ -97,27 +161,19 @@ config:
 
   email:
     transport: smtp
+    # Overrides the chart default (which opts in to the log transport for
+    # evaluation); production mail must actually be delivered.
+    allow_log_transport_in_production: false
     from: "Hearth <noreply@example.com>"
-    # smtp.password is supplied via secret.env below as ${SMTP_PASSWORD}
     smtp:
       host: "smtp.example.com"
       port: 587
       encryption: starttls
       username: "hearth@example.com"
+      # Resolved from the SMTP_PASSWORD env var, injected from the
+      # `hearth-smtp` Secret by extraEnv above.
       password: "${SMTP_PASSWORD}"
-
-# -- Secret values ---------------------------------------------------------------
-# In production, source these from an external secret store (HashiCorp Vault,
-# AWS Secrets Manager, GCP Secret Manager) via the External Secrets Operator or
-# sealed-secrets. Do NOT commit plaintext values to this file.
-secret:
-  # Uncomment to terminate TLS directly inside the pod (PEM format).
-  # tlsCert: ""
-  # tlsKey: ""
-
-  env:
-    SMTP_PASSWORD: ""   # replace with a sealed-secret reference or ESO mapping
 
 # -- Extra non-secret env vars ---------------------------------------------------
 env:
-  RUST_LOG: "info,hearth=info"
+  RUST_LOG: "info"

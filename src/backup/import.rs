@@ -18,8 +18,8 @@ use crate::identity::{
     AccessTokenAuthorization, AgentExport, ApplicationStatus, ClientProfile, ClientTrustLevel,
     ConsentExport, CreateRealmRequest, FederationLinkExport, IdentityEngine, IdentityError,
     ImportClientRequest, ImportUserRequest, MfaFactorExport, Organization, OrganizationInvitation,
-    OrganizationMembership, RawCredential, Realm, RetiringSigningKeyExport, ScimMappingExport,
-    User, Webhook,
+    OrganizationMembership, RawCredential, Realm, RetiringSigningKeyExport, RevocationExport,
+    ScimMappingExport, User, Webhook,
 };
 use crate::rbac::{
     Group, GroupMembershipEdge, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport,
@@ -58,6 +58,7 @@ pub(crate) const RECOGNIZED_MEMBERS: &[&str] = &[
     "saml_signing_key.json",
     "scim_mappings.ndjson",
     "invitations.ndjson",
+    "revocations.ndjson",
     "retiring_signing_keys.json",
     "signing_key.json",
     "id_token_signing_key.json",
@@ -206,6 +207,10 @@ pub struct ImportReport {
     pub scim_mappings: EntityCounts,
     /// Outcome counts for organization invitations (OpenSpec 26.40).
     pub invitations: EntityCounts,
+    /// Outcome counts for token revocations: revoked JTIs, blocked DPoP keys
+    /// and revoked AAT JTIs. `skipped` includes JTIs whose token had already
+    /// expired by the time of the restore (audit GA 2026-09-28 M3).
+    pub revocations: EntityCounts,
     /// Outcome counts for retiring signing keys. `skipped` counts keys whose
     /// grace window had already closed by the time of the restore
     /// (OpenSpec 26.40).
@@ -277,6 +282,12 @@ struct BackupClient {
     redirect_uris: Vec<String>,
     #[serde(default)]
     grant_types: Vec<String>,
+    /// `false` on a record written before `grant_types` governed the
+    /// refresh-token grant (GA audit M7): such a client received refresh
+    /// tokens whatever it listed, and is restored with `refresh_token` added
+    /// so the restore does not silently take them away.
+    #[serde(default)]
+    grant_types_enforced: bool,
     #[serde(default)]
     trust_level: ClientTrustLevel,
     #[serde(default)]
@@ -1100,6 +1111,19 @@ impl BackupImporter {
 
         self.restore_member_ndjson(
             &files,
+            &format!("realms/{realm_slug}/revocations.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.revocations,
+            |this, revocation: &RevocationExport| {
+                this.identity
+                    .import_revocation(&restored_realm_id, revocation, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
             &format!("realms/{realm_slug}/retiring_signing_keys.json"),
             &try_decrypt,
             opts,
@@ -1419,11 +1443,11 @@ impl BackupImporter {
                                     report.users.overwritten += 1;
                                 }
                                 Ok(None) => {
-                                    warn!(email = %req.email, "overwrite: user not found by email after DuplicateEmail");
+                                    warn!(email = %crate::identity::email::mask_email_address(&req.email), "overwrite: user not found by email after DuplicateEmail");
                                     report.users.errored += 1;
                                 }
                                 Err(e) => {
-                                    warn!(email = %req.email, err = %e, "overwrite: could not look up existing user");
+                                    warn!(email = %crate::identity::email::mask_email_address(&req.email), err = %e, "overwrite: could not look up existing user");
                                     report.users.errored += 1;
                                 }
                             }
@@ -1431,7 +1455,7 @@ impl BackupImporter {
                     }
                 }
                 Err(e) => {
-                    warn!(email = %req.email, err = %e, "import_user failed");
+                    warn!(email = %crate::identity::email::mask_email_address(&req.email), err = %e, "import_user failed");
                     report.users.errored += 1;
                 }
             }
@@ -1476,7 +1500,23 @@ impl BackupImporter {
                 // No plaintext exists; the stored hash is restored verbatim.
                 client_secret: None,
                 client_secret_hash: client.client_secret_hash,
-                grant_types: client.grant_types,
+                grant_types: {
+                    let mut grants = client.grant_types;
+                    // Only the grants that ever minted refresh tokens.
+                    let minted_refresh = grants.iter().any(|g| {
+                        g == crate::identity::oidc::GRANT_AUTHORIZATION_CODE
+                            || g == crate::identity::oidc::GRANT_DEVICE_CODE
+                    });
+                    if !client.grant_types_enforced
+                        && minted_refresh
+                        && !grants
+                            .iter()
+                            .any(|g| g == crate::identity::oidc::GRANT_REFRESH_TOKEN)
+                    {
+                        grants.push(crate::identity::oidc::GRANT_REFRESH_TOKEN.to_string());
+                    }
+                    grants
+                },
                 slug: if client.slug.is_empty() {
                     None
                 } else {

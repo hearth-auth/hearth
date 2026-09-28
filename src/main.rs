@@ -190,7 +190,8 @@ enum BackupAction {
         /// `skip` (default) — keep existing records unchanged.
         /// `overwrite` — delete and re-import conflicting records.
         /// `merge` — equivalent to `skip` in this version.
-        #[arg(long, default_value = "skip")]
+        /// Any other value is refused.
+        #[arg(long, default_value = "skip", value_parser = ["skip", "overwrite", "merge"])]
         mode: String,
 
         /// Parse and report without writing any data.
@@ -976,6 +977,65 @@ fn dev_mode_bind_check(dev: bool, http_bind: &str, grpc_bind: Option<&str>) -> D
     }
 }
 
+/// Logged at ERROR on every `--dev` start.
+///
+/// Item (3) used to say the setup token was "printed (truncated)"; dev mode in
+/// fact logs the full setup URL, token included (GA audit 2026-09-28 L6).
+const DEV_MODE_BANNER: &str = "DEV MODE ACTIVE — security reductions in effect: \
+     (1) Argon2 parameters weakened to fast_for_testing (256 KiB / 1 iter); \
+     (2) CSRF cookie enforcement bypassed on pre-auth forms; \
+     (3) the first-run setup URL is logged with its full setup token. \
+     DO NOT expose this server on a non-loopback address.";
+
+/// File a production `serve` leaves in its data directory; `serve --dev`
+/// refuses any directory that holds it (GA audit 2026-09-28 OPS-13).
+const PRODUCTION_DATA_DIR_MARKER: &str = ".hearth-production";
+
+/// Marks `data_dir` as a production store. Idempotent.
+///
+/// # Errors
+///
+/// Returns an error when the marker cannot be written — a production data
+/// directory the server cannot write to is already a startup failure.
+fn mark_production_data_dir(data_dir: &std::path::Path) -> Result<(), String> {
+    let marker = data_dir.join(PRODUCTION_DATA_DIR_MARKER);
+    if marker.exists() {
+        return Ok(());
+    }
+    std::fs::write(
+        &marker,
+        "This data directory is used by a production `hearth serve`.\n\
+         `hearth serve --dev` refuses to open it: dev mode writes without fsync and\n\
+         hashes passwords with test-strength Argon2 parameters.\n",
+    )
+    .map_err(|e| format!("failed to write {}: {e}", marker.display()))
+}
+
+/// Refuses to let `--dev` open a data directory a production server has used.
+///
+/// `--dev` honours `storage.data_dir` from the config file (HEA-1805) and runs
+/// with fsync off and `fast_for_testing` Argon2 costs, so `serve --dev -c
+/// prod.yaml` used to write unsynced records and weakly hashed passwords into
+/// the production store (OPS-13).
+///
+/// # Errors
+///
+/// Returns an error naming the marker when `data_dir` carries it.
+fn refuse_production_data_dir_in_dev(data_dir: &std::path::Path) -> Result<(), String> {
+    let marker = data_dir.join(PRODUCTION_DATA_DIR_MARKER);
+    if marker.exists() {
+        return Err(format!(
+            "refusing to start in --dev mode on {}: it holds {PRODUCTION_DATA_DIR_MARKER}, so a \
+             production server uses it, and dev mode writes without fsync and hashes passwords \
+             with test-strength parameters. Point --dev at a different storage.data_dir (or \
+             HEARTH_DEV_DATA_DIR). To debug production data under --dev, copy the directory and \
+             delete {PRODUCTION_DATA_DIR_MARKER} from the copy.",
+            data_dir.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Resolves the dev-mode on-disk data directory, if one is explicitly
 /// configured (HEA-1805).
 ///
@@ -1108,12 +1168,16 @@ async fn run_serve(
     );
 
     if config.dev_mode {
-        error!(
-            "DEV MODE ACTIVE — security reductions in effect: \
-             (1) Argon2 parameters weakened to fast_for_testing (256 KiB / 1 iter); \
-             (2) CSRF cookie enforcement bypassed on pre-auth forms; \
-             (3) setup token printed (truncated) in startup logs. \
-             DO NOT expose this server on a non-loopback address."
+        error!("{DEV_MODE_BANNER}");
+    }
+    if !config.dev_mode
+        && config.email.transport == hearth::config::EmailTransport::Log
+        && config.email.allow_log_transport_in_production
+    {
+        warn!(
+            "email.transport = log with email.allow_log_transport_in_production: true — \
+             NO email is delivered: password resets (including the admin console's), \
+             magic links, verification and invitation mail are all dropped"
         );
     }
     if let Some(notice) =
@@ -1151,7 +1215,12 @@ async fn run_serve(
         let env_override = std::env::var("HEARTH_DEV_DATA_DIR").ok();
         let data_path =
             match resolve_dev_data_dir(env_override.as_deref(), &config.storage.data_dir) {
-                Some(dir) => dir,
+                Some(dir) => {
+                    // OPS-13: never open a production store with dev's fsync-off
+                    // WAL and test-strength password hashing.
+                    refuse_production_data_dir_in_dev(&dir)?;
+                    dir
+                }
                 None => {
                     let temp_dir = tempfile::tempdir()?;
                     temp_dir.keep()
@@ -1225,6 +1294,8 @@ async fn run_serve(
         storage_config.block_cache_bytes = config.storage.block_cache_bytes;
         storage_config.set_hot_tier_per_realm_metrics(config.storage.hot_tier_per_realm_metrics);
         let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
+        // OPS-13: from now on `serve --dev` refuses this directory.
+        mark_production_data_dir(std::path::Path::new(&config.storage.data_dir))?;
         (engine, storage_config)
     };
 
@@ -1232,6 +1303,17 @@ async fn run_serve(
     // all writes (put / delete / put_batch) go through Raft quorum commit
     // in cluster mode.  In single-node mode ClusterEngine is a zero-overhead
     // passthrough and the peer server is not started.
+    //
+    // L24 (GA audit 2026-09-28): one shutdown signal for every listener. The
+    // sender is armed by the signal task spawned just before serving; each
+    // listener — HTTP(S), redirect, gRPC, the Raft peer server — starts
+    // draining the moment it fires, and all of them share one deadline
+    // measured from the signal. gRPC used to be told only after HTTP had
+    // drained (so shutdown could take twice the timeout), and the Raft peer
+    // server was never told at all.
+    let (shutdown_signal_tx, shutdown_signal_rx) =
+        tokio::sync::watch::channel::<Option<tokio::time::Instant>>(None);
+    let mut raft_server: Option<tokio::task::JoinHandle<()>> = None;
     let cluster_engine: Arc<hearth::cluster::ClusterEngine> =
         if let Some(cluster_cfg) = &config.cluster {
             match hearth::cluster::ClusterEngine::build_clustered(
@@ -1245,11 +1327,15 @@ async fn run_serve(
                     let engine = Arc::new(engine);
                     let serve_cfg = cluster_cfg.clone();
                     let serve_engine = Arc::clone(&engine);
-                    tokio::spawn(async move {
-                        if let Err(e) = hearth::cluster::serve(&serve_cfg, serve_engine).await {
+                    let shutdown = shutdown_requested(shutdown_signal_rx.clone());
+                    raft_server = Some(tokio::spawn(async move {
+                        if let Err(e) =
+                            hearth::cluster::serve_with_shutdown(&serve_cfg, serve_engine, shutdown)
+                                .await
+                        {
                             error!(error = %e, "Raft peer gRPC server terminated");
                         }
-                    });
+                    }));
                     // HEA-2154: multi-node clustering is EXPERIMENTAL in 1.x.
                     // Known defects: followers never invalidate RBAC/session
                     // caches (C-5), membership is immutable after bootstrap
@@ -2665,6 +2751,27 @@ async fn run_serve(
         format!("{scheme}://{host}:{}", config.server.port)
     });
 
+    // Task 20.13 (audit §4.17#9): construct the abuse-prevention guards from
+    // the `security:` block. Nine guards documented "Shipped" in
+    // `docs/specs/ABUSE.md` had no constructor outside their own test modules;
+    // this is the production path. Every guard is fail-open until an operator
+    // enables it, so an existing config sees no behaviour change.
+    let abuse_guards = Arc::new(hearth::abuse::runtime::AbuseGuards::from_security(
+        &config.security,
+    ));
+    abuse_guards.spawn_background_tasks(&config.security);
+    info!(
+        tarpit = config.security.tarpit.threshold.is_some(),
+        distributed_attack_detector = config.security.distributed_attack_detector.enabled,
+        outbound_volume_shield = config.security.outbound_volume_shield.enabled,
+        cross_realm_aggregation_cap = config.security.cross_realm_aggregation_cap.enabled,
+        bot_signal = config.security.providers.bot_signal.enabled,
+        email_reputation = config.security.providers.email_reputation.enabled,
+        ip_reputation = config.security.ip_reputation.enabled,
+        risk_scorer = config.security.risk_scorer.enabled,
+        "abuse-prevention guards installed"
+    );
+
     let app_state = if config.dev_mode {
         Arc::new(
             AppState::new_dev(
@@ -2691,7 +2798,8 @@ async fn run_serve(
             .with_agent_advanced(true)
             .with_email(Some(Arc::clone(&email_service)))
             .with_public_base_url(public_base_url.clone())
-            .with_sms_transport(config.sms.transport),
+            .with_sms_transport(config.sms.transport)
+            .with_abuse_guards(Arc::clone(&abuse_guards)),
         )
     } else {
         Arc::new(
@@ -2716,7 +2824,8 @@ async fn run_serve(
             .with_agent_advanced(config.agent_auth.capabilities.advanced)
             .with_email(Some(Arc::clone(&email_service)))
             .with_public_base_url(public_base_url.clone())
-            .with_sms_transport(config.sms.transport),
+            .with_sms_transport(config.sms.transport)
+            .with_abuse_guards(Arc::clone(&abuse_guards)),
         )
     };
 
@@ -2732,27 +2841,6 @@ async fn run_serve(
     // The email service still receives the original file path — its
     // `resolve_branding()` reads and inlines local SVGs directly.
     let (web_logo_url, custom_logo) = resolve_web_logo(&config);
-
-    // Task 20.13 (audit §4.17#9): construct the abuse-prevention guards from
-    // the `security:` block. Nine guards documented "Shipped" in
-    // `docs/specs/ABUSE.md` had no constructor outside their own test modules;
-    // this is the production path. Every guard is fail-open until an operator
-    // enables it, so an existing config sees no behaviour change.
-    let abuse_guards = Arc::new(hearth::abuse::runtime::AbuseGuards::from_security(
-        &config.security,
-    ));
-    abuse_guards.spawn_background_tasks(&config.security);
-    info!(
-        tarpit = config.security.tarpit.threshold.is_some(),
-        distributed_attack_detector = config.security.distributed_attack_detector.enabled,
-        outbound_volume_shield = config.security.outbound_volume_shield.enabled,
-        cross_realm_aggregation_cap = config.security.cross_realm_aggregation_cap.enabled,
-        bot_signal = config.security.providers.bot_signal.enabled,
-        email_reputation = config.security.providers.email_reputation.enabled,
-        ip_reputation = config.security.ip_reputation.enabled,
-        risk_scorer = config.security.risk_scorer.enabled,
-        "abuse-prevention guards installed"
-    );
 
     let mut web_state = WebState::new(
         Arc::clone(&identity_engine),
@@ -2997,6 +3085,15 @@ async fn run_serve(
         queue_depth: config.operational.queue_depth,
         http2_max_concurrent_streams: config.security.http2.max_concurrent_streams,
         http2_max_pending_reset_streams: config.security.http2.max_pending_reset_streams,
+        // B6 (GA audit 2026-09-28): one client held every connection slot with
+        // unfinished requests. These bound how long a connection may sit
+        // without a complete request, and how many one address may hold.
+        header_read_timeout: Duration::from_secs(config.operational.header_read_timeout_secs),
+        tls_handshake_timeout: Duration::from_secs(config.operational.tls_handshake_timeout_secs),
+        max_connections_per_ip: config.operational.max_connections_per_ip,
+        per_ip_exempt: app_state.trusted_proxies.clone(),
+        http2_keepalive_interval: (config.operational.http2_keepalive_interval_secs > 0)
+            .then(|| Duration::from_secs(config.operational.http2_keepalive_interval_secs)),
     }) {
         warn!("server limits were already installed; the first installation stands");
     }
@@ -3004,6 +3101,9 @@ async fn run_serve(
         request_timeout_secs = config.operational.request_timeout_secs,
         max_connections = config.operational.max_connections,
         queue_depth = config.operational.queue_depth,
+        header_read_timeout_secs = config.operational.header_read_timeout_secs,
+        tls_handshake_timeout_secs = config.operational.tls_handshake_timeout_secs,
+        max_connections_per_ip = config.operational.max_connections_per_ip,
         http2_max_concurrent_streams = config.security.http2.max_concurrent_streams,
         http2_max_pending_reset_streams = config.security.http2.max_pending_reset_streams,
         "operational + HTTP/2 limits installed"
@@ -3039,9 +3139,20 @@ async fn run_serve(
         });
     }
 
+    // M14 (GA audit 2026-09-28): one certificate for HTTPS and gRPC. Built
+    // here, before either listener, so the gRPC listener can terminate TLS
+    // with the same (hot-reloadable) certificate; it used to be plaintext
+    // unconditionally.
+    let tls = match (&config.server.tls_cert_path, &config.server.tls_key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            Some(build_tls_acceptor(&config, cert_path, key_path)?)
+        }
+        _ => None,
+    };
+
     // Spawn the gRPC management API alongside the HTTP server. Both share
     // the `AdminRateLimiter` so rate limits apply across protocols.
-    let grpc_shutdown = if let Some(grpc_port) = config.server.grpc_port {
+    let grpc_server = if let Some(grpc_port) = config.server.grpc_port {
         let bind = config
             .server
             .grpc_bind_address
@@ -3059,19 +3170,31 @@ async fn run_serve(
         // A-2: share the same RequestShaper so HTTP + gRPC per-IP counts
         // accumulate in the same sliding window.
         .with_shaper(Arc::clone(&request_shaper));
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let grpc_tls = tls.as_ref().map(|(_, acceptor)| acceptor.clone());
+        let grpc_tls_enabled = grpc_tls.is_some();
+        let shutdown = shutdown_requested(shutdown_signal_rx.clone());
         let handle = tokio::spawn(async move {
-            let shutdown = async {
-                let _ = shutdown_rx.await;
-            };
-            if let Err(e) =
-                protocol::grpc::serve(grpc_addr, grpc_state, reflection_enabled, shutdown).await
+            if let Err(e) = protocol::grpc::serve(
+                grpc_addr,
+                grpc_state,
+                reflection_enabled,
+                grpc_tls,
+                shutdown,
+            )
+            .await
             {
                 error!(error = %e, "gRPC server exited with error");
             }
         });
-        info!(address = %grpc_addr, "gRPC management API enabled");
-        Some((shutdown_tx, handle))
+        info!(address = %grpc_addr, tls = grpc_tls_enabled, "gRPC management API enabled");
+        if !grpc_tls_enabled && !config.dev_mode {
+            warn!(
+                address = %grpc_addr,
+                "gRPC management API is PLAINTEXT (no server.tls_cert_path): admin tokens and \
+                 client secrets are not encrypted on this listener"
+            );
+        }
+        Some(handle)
     } else {
         None
     };
@@ -3124,16 +3247,28 @@ async fn run_serve(
     // flight. Reported at the very end so every cleanup step still runs.
     let mut drain_incomplete = false;
 
+    // Wire SIGINT + SIGTERM to the one shutdown signal every listener watches
+    // (HEA-2161, L24). The timestamp starts the shared drain deadline exactly
+    // when the signal fires rather than at process startup.
+    let drain_secs = config.operational.shutdown_timeout_secs;
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        info!(
+            drain_deadline_secs = drain_secs,
+            "shutdown signal received, draining in-flight requests on every listener"
+        );
+        let _ = shutdown_signal_tx.send(Some(tokio::time::Instant::now()));
+    });
+
     // Check for TLS configuration
-    if let (Some(cert_path), Some(key_path)) =
-        (&config.server.tls_cert_path, &config.server.tls_key_path)
-    {
+    if let Some((reloadable, acceptor)) = tls {
         let tls_drain_incomplete = run_serve_tls(
             addr,
             &config,
             app_router,
-            cert_path,
-            key_path,
+            reloadable,
+            acceptor,
+            shutdown_signal_rx.clone(),
             Arc::clone(&identity_engine),
             Arc::clone(&rbac_engine),
             Arc::clone(&permission_registry),
@@ -3177,25 +3312,14 @@ async fn run_serve(
             });
         }
 
-        // Wire SIGINT + SIGTERM to the same graceful drain.  The channel lets
-        // the drain-deadline timer start exactly when the signal fires rather
-        // than at process startup.
-        let drain_secs = config.operational.shutdown_timeout_secs;
-        let (drain_start_tx, drain_start_rx) = tokio::sync::oneshot::channel::<()>();
-        let shutdown = async move {
-            wait_for_shutdown_signal().await;
-            info!(
-                drain_deadline_secs = drain_secs,
-                "shutdown signal received, draining in-flight requests"
-            );
-            let _ = drain_start_tx.send(());
-        };
+        let shutdown = shutdown_requested(shutdown_signal_rx.clone());
+        let deadline_rx = shutdown_signal_rx.clone();
         tokio::select! {
             result = http::serve_router(addr, app_router, shutdown) => {
                 result?;
             }
-            _ = async {
-                let _ = drain_start_rx.await;
+            () = async {
+                shutdown_requested(deadline_rx).await;
                 tokio::time::sleep(Duration::from_secs(drain_secs)).await;
             } => {
                 warn!(
@@ -3207,21 +3331,21 @@ async fn run_serve(
         }
     }
 
-    // Signal the gRPC task to shut down and wait for it within the drain deadline.
-    if let Some((tx, handle)) = grpc_shutdown {
-        let _ = tx.send(());
-        let drain_secs = config.operational.shutdown_timeout_secs;
-        match tokio::time::timeout(Duration::from_secs(drain_secs), handle).await {
-            Ok(_) => {}
-            Err(_) => {
-                warn!(
-                    drain_deadline_secs = drain_secs,
-                    "gRPC graceful drain deadline exceeded, forcing shutdown"
-                );
-                drain_incomplete = true;
-            }
+    // gRPC and the Raft peer server began draining at the signal, alongside
+    // HTTP; wait for them only until the SAME deadline (L24).
+    let deadline = shared_drain_deadline(&shutdown_signal_rx, Duration::from_secs(drain_secs));
+    for (listener, handle) in [("gRPC", grpc_server), ("Raft peer", raft_server)] {
+        let Some(handle) = handle else { continue };
+        if tokio::time::timeout_at(deadline, handle).await.is_err() {
+            warn!(
+                listener,
+                drain_deadline_secs = drain_secs,
+                "graceful drain deadline exceeded, forcing shutdown"
+            );
+            drain_incomplete = true;
         }
     }
+    cluster_engine.shutdown().await;
 
     // Signal the webhook dispatcher to stop.
     let _ = wh_shutdown_tx.send(());
@@ -3359,7 +3483,7 @@ fn build_startup_panel(
             ));
         } else {
             lines.push(format!(
-                "  Setup:   {base}/ui/setup  (token redacted in prod — set HEARTH_SETUP_TOKEN)"
+                "  Setup:   {base}/ui/setup  (token redacted in prod — read <data_dir>/.setup_token)"
             ));
         }
     }
@@ -3675,6 +3799,52 @@ async fn wait_for_shutdown_signal() {
         .expect("failed to install SIGINT handler");
 }
 
+/// Resolves once the shared shutdown signal has fired (or its sender is gone).
+///
+/// Every listener awaits one of these, so all of them begin draining at the
+/// same moment (GA audit 2026-09-28 L24).
+async fn shutdown_requested(
+    mut signal: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
+) {
+    let _ = signal.wait_for(Option::is_some).await;
+}
+
+/// The one drain deadline every listener shares: `drain` after the shutdown
+/// signal fired (or after now, if it has not been recorded).
+fn shared_drain_deadline(
+    signal: &tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
+    drain: Duration,
+) -> tokio::time::Instant {
+    let fired_at = *signal.borrow();
+    fired_at.unwrap_or_else(tokio::time::Instant::now) + drain
+}
+
+/// Builds the TLS acceptor shared by the HTTPS and gRPC listeners (M14).
+///
+/// The returned [`ReloadableTlsConfig`] backs the acceptor's certificate
+/// resolver, so a SIGHUP certificate reload reaches both listeners.
+fn build_tls_acceptor(
+    config: &Config,
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<(ReloadableTlsConfig, tokio_rustls::TlsAcceptor), Box<dyn std::error::Error>> {
+    let reloadable = ReloadableTlsConfig::load(cert_path.to_path_buf(), key_path.to_path_buf())
+        .map_err(|e| format!("failed to load TLS certificates: {e}"))?;
+    let params = TlsConfigParams {
+        resolver: Arc::new(reloadable.resolver()),
+        client_ca_path: config.server.tls_client_ca_path.clone(),
+        require_client_cert: config.server.tls_require_client_cert,
+        crl_paths: config.security.tls.crl_paths.clone(),
+        tls13_only: config.security.tls.min_version == TlsMinVersionYaml::Tls13,
+    };
+    let server_config =
+        build_server_config(params).map_err(|e| format!("failed to build TLS config: {e}"))?;
+    Ok((
+        reloadable,
+        tokio_rustls::TlsAcceptor::from(Arc::new(server_config)),
+    ))
+}
+
 /// Runs the HTTPS server with TLS, redirect listener, and SIGHUP cert + config reload.
 ///
 /// Returns `true` when the graceful drain ran out of deadline with requests
@@ -3689,8 +3859,9 @@ async fn run_serve_tls(
     addr: SocketAddr,
     config: &Config,
     app_router: axum::Router,
-    cert_path: &std::path::Path,
-    key_path: &std::path::Path,
+    reloadable: ReloadableTlsConfig,
+    acceptor: tokio_rustls::TlsAcceptor,
+    shutdown_signal: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
     identity_engine: Arc<dyn IdentityEngine>,
     rbac_engine: Arc<dyn RbacEngine>,
     permission_registry: RegistrySwap,
@@ -3698,21 +3869,14 @@ async fn run_serve_tls(
     dev: bool,
     reload_notify: Arc<Notify>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let reloadable = ReloadableTlsConfig::load(cert_path.to_path_buf(), key_path.to_path_buf())
-        .map_err(|e| format!("failed to load TLS certificates: {e}"))?;
-
-    let params = TlsConfigParams {
-        resolver: Arc::new(reloadable.resolver()),
-        client_ca_path: config.server.tls_client_ca_path.clone(),
-        require_client_cert: config.server.tls_require_client_cert,
-        crl_paths: config.security.tls.crl_paths.clone(),
-        tls13_only: config.security.tls.min_version == TlsMinVersionYaml::Tls13,
-    };
-    let server_config =
-        build_server_config(params).map_err(|e| format!("failed to build TLS config: {e}"))?;
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
-
+    // The HTTPS and redirect listeners watch a `watch::Receiver<()>` that
+    // fires when its sender drops; drop it at the shared shutdown signal.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    let signal = shutdown_requested(shutdown_signal);
+    tokio::spawn(async move {
+        signal.await;
+        drop(shutdown_tx);
+    });
 
     // Spawn HTTP→HTTPS redirect listener
     let redirect_port = if config.server.port == 443 {
@@ -3775,24 +3939,11 @@ async fn run_serve_tls(
         });
     }
 
-    // Wire SIGINT + SIGTERM to the same graceful drain (HEA-2161).
-    let drain_secs = config.operational.shutdown_timeout_secs;
-    let (drain_start_tx, drain_start_rx) = tokio::sync::oneshot::channel::<()>();
-    tokio::spawn(async move {
-        wait_for_shutdown_signal().await;
-        info!(
-            drain_deadline_secs = drain_secs,
-            "shutdown signal received, draining in-flight requests"
-        );
-        let _ = drain_start_tx.send(());
-        drop(shutdown_tx);
-    });
-
     // Start the HTTPS server. It owns the drain and its deadline: an outer
     // `select!` here would win the race the instant the accept loop returned,
     // which is exactly how a drain that never happened looked clean
-    // (audit 2026-08-28 §4.11#9). `drain_start_rx` is no longer needed.
-    drop(drain_start_rx);
+    // (audit 2026-08-28 §4.11#9).
+    let drain_secs = config.operational.shutdown_timeout_secs;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let drain_outcome = http::serve_tls_router(
         listener,
@@ -4355,9 +4506,20 @@ fn run_migrate_rotate_pepper(
 fn resolve_storage_kek(
     config_kek: Option<&str>,
 ) -> Result<Option<hearth::identity::key_encryption::StorageKek>, Box<dyn std::error::Error>> {
-    let hex_opt = std::env::var("HEARTH_KEK")
-        .ok()
-        .or_else(|| config_kek.map(str::to_string));
+    // OPS-11 (GA audit 2026-09-28): a set-but-non-UTF-8 value is an error,
+    // matching validation. `var().ok()` treated it as unset and silently fell
+    // back to the YAML key — or to no KEK at all.
+    let hex_opt = match std::env::var("HEARTH_KEK") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => config_kek.map(str::to_string),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(
+                "HEARTH_KEK is set but is not valid UTF-8 — it must be 64 hex characters \
+                        (openssl rand -hex 32)"
+                    .into(),
+            );
+        }
+    };
     let Some(hex) = hex_opt else {
         return Ok(None);
     };
@@ -4754,10 +4916,18 @@ fn restore_mode(
     replace_system_signing_key: bool,
 ) -> Result<hearth::backup::RestoreMode, Box<dyn std::error::Error>> {
     use hearth::backup::RestoreMode;
+    // OPS-17 (GA audit 2026-09-28): an unknown mode used to fall through to
+    // `Skip`, so `--mode overwirte` quietly kept every conflicting record.
     let mode = match mode_str {
+        "skip" => RestoreMode::Skip,
         "overwrite" => RestoreMode::Overwrite,
         "merge" => RestoreMode::Merge,
-        _ => RestoreMode::Skip,
+        other => {
+            return Err(format!(
+                "unknown restore mode '{other}': expected skip, overwrite or merge"
+            )
+            .into());
+        }
     };
     if replace_system_signing_key && mode != RestoreMode::Overwrite {
         return Err(
@@ -5045,6 +5215,7 @@ fn import_report_had_errors(report: &hearth::backup::ImportReport) -> bool {
         || report.saml_service_providers.errored > 0
         || report.scim_mappings.errored > 0
         || report.invitations.errored > 0
+        || report.revocations.errored > 0
         || report.retiring_signing_keys.errored > 0
         || report.audit_events.errored > 0
 }
@@ -5190,7 +5361,7 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
 /// 23.5). A restore report that hides seven of its eleven entity types is
 /// indistinguishable from a clean one.
 fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
-    let buckets: [(&str, &hearth::backup::EntityCounts); 22] = [
+    let buckets: [(&str, &hearth::backup::EntityCounts); 23] = [
         ("realms", &report.realms),
         ("users", &report.users),
         ("mfa", &report.mfa_factors),
@@ -5211,6 +5382,7 @@ fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
         ("saml sps", &report.saml_service_providers),
         ("scim mappings", &report.scim_mappings),
         ("invitations", &report.invitations),
+        ("revocations", &report.revocations),
         ("retiring keys", &report.retiring_signing_keys),
         ("audit", &report.audit_events),
     ];
@@ -7532,6 +7704,127 @@ mod tests {
         for host in ["127.0.0.1", "::1", "localhost", "0.0.0.0"] {
             assert_eq!(split_bind_override(host), (host.to_string(), None));
         }
+    }
+
+    // ── GA audit 2026-09-28 OPS-17: `backup restore --mode` typos ────────────
+
+    /// Any unrecognised mode — a typo of `overwrite` included — silently became
+    /// `skip`, so an operator who asked for an overwrite restore got a restore
+    /// that kept every conflicting record and reported success.
+    #[test]
+    fn an_unknown_restore_mode_is_an_error_not_skip() {
+        assert!(
+            restore_mode("overwirte", false).is_err(),
+            "a typo of overwrite must be refused, not treated as skip"
+        );
+        for (input, expected) in [
+            ("skip", hearth::backup::RestoreMode::Skip),
+            ("overwrite", hearth::backup::RestoreMode::Overwrite),
+            ("merge", hearth::backup::RestoreMode::Merge),
+        ] {
+            assert!(
+                restore_mode(input, false).is_ok_and(|m| m == expected),
+                "{input} must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cli_rejects_an_unknown_restore_mode() {
+        use clap::Parser as _;
+        let parsed = Cli::try_parse_from([
+            "hearth",
+            "backup",
+            "restore",
+            "--mode",
+            "overwirte",
+            "--input",
+            "/tmp/archive.tar",
+        ]);
+        assert!(
+            parsed.is_err(),
+            "clap must refuse an unknown --mode before anything is restored"
+        );
+        let parsed = Cli::try_parse_from([
+            "hearth",
+            "backup",
+            "restore",
+            "--mode",
+            "overwrite",
+            "--input",
+            "/tmp/archive.tar",
+        ]);
+        assert!(parsed.is_ok(), "a valid --mode must still parse");
+    }
+
+    // ── GA audit 2026-09-28 OPS-11: non-UTF-8 HEARTH_KEK ─────────────────────
+
+    /// Validation saw a non-UTF-8 `HEARTH_KEK` as present (`var_os`), and
+    /// resolution saw it as absent (`var`), falling back to the YAML key or to
+    /// no KEK at all. A value that is set but unreadable must be an error.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_hearth_kek_is_an_error_not_a_missing_key() {
+        use std::os::unix::ffi::OsStrExt;
+        std::env::set_var(
+            "HEARTH_KEK",
+            std::ffi::OsStr::from_bytes(&[0xff, 0xfe, 0x41]),
+        );
+        let config_kek = "11".repeat(32);
+        let result = resolve_storage_kek(Some(&config_kek));
+        let cli_result = resolve_cli_kek(None);
+        std::env::remove_var("HEARTH_KEK");
+
+        // `StorageKek` has no `Debug` (it is key material), so no `expect_err`.
+        let Err(err) = result else {
+            panic!("a non-UTF-8 HEARTH_KEK must not fall back to the YAML key");
+        };
+        assert!(err.to_string().contains("HEARTH_KEK"), "got: {err}");
+        assert!(
+            cli_result.is_err(),
+            "the CLI path must refuse it too, not resolve to no KEK"
+        );
+    }
+
+    // ── GA audit 2026-09-28 L6 / L25: setup-token wording ────────────────────
+
+    /// Dev mode logs the full first-run setup URL, token included
+    /// (`onboarding::log_and_notify_setup_url`). The banner used to say the
+    /// token was "truncated", which told the operator the opposite.
+    #[test]
+    fn dev_mode_banner_says_the_setup_token_is_logged_in_full() {
+        assert!(
+            !DEV_MODE_BANNER.contains("truncated"),
+            "the banner must not claim the setup token is truncated: {DEV_MODE_BANNER}"
+        );
+        assert!(
+            DEV_MODE_BANNER.contains("full"),
+            "the banner must say the setup URL is logged with the full token: {DEV_MODE_BANNER}"
+        );
+    }
+
+    /// The production panel told operators to "set HEARTH_SETUP_TOKEN", which
+    /// no code reads. The token lives in `<data_dir>/.setup_token`.
+    #[test]
+    fn production_panel_points_at_the_setup_token_file() {
+        let addr = "127.0.0.1:8420".parse().expect("valid socket addr");
+        let lines = build_startup_panel(addr, false, Some("tok"), None, &panel_stats_tls(true));
+        let setup = lines
+            .iter()
+            .find(|l| l.contains("/ui/setup"))
+            .expect("the panel must print the setup URL");
+        assert!(
+            !setup.contains("HEARTH_SETUP_TOKEN"),
+            "HEARTH_SETUP_TOKEN is read by nothing: {setup}"
+        );
+        assert!(
+            setup.contains(".setup_token"),
+            "the panel must name the file the token is in: {setup}"
+        );
+        assert!(
+            !setup.contains("tok "),
+            "the token itself must not be printed: {setup}"
+        );
     }
 
     // ── HEA-SEC-10: setup token truncation ───────────────────────────────────

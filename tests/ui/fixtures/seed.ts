@@ -51,7 +51,13 @@ export async function seedTestData(creds: Credentials): Promise<SeedFixtures> {
     {
       client_name: 'test-app',
       redirect_uris: ['https://example.com/callback'],
-      grant_types: ['authorization_code'],
+      // Every grant is enforced against grant_types (GA audit M7): the device
+      // flow spec runs a device grant, and refresh tokens need their grant.
+      grant_types: [
+        'authorization_code',
+        'refresh_token',
+        'urn:ietf:params:oauth:grant-type:device_code',
+      ],
     },
     (body: Record<string, unknown>) => body['client_id'] as string,
   );

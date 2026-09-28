@@ -64,6 +64,7 @@ pub mod openapi;
 pub mod realm_resolver;
 pub mod required_action;
 pub mod saml;
+pub mod second_factor;
 pub mod secret_reveal;
 pub mod security;
 pub mod sms_challenge;
@@ -591,7 +592,9 @@ impl WebState {
     /// Checks (in order):
     /// 1. Direct TLS (`tls_enabled`) — always secure.
     /// 2. `trust_forwarded_proto` + `X-Forwarded-Proto: https` — secure
-    ///    when the proxy signals HTTPS.
+    ///    when the proxy signals HTTPS. `protocol::http::router_with` removes
+    ///    the header from any peer not in `server.trusted_proxies` before the
+    ///    request gets here (GA audit 2026-09-28 L4).
     #[must_use]
     pub fn is_secure_request(&self, headers: &axum::http::HeaderMap) -> bool {
         if self.tls_enabled {
@@ -849,6 +852,9 @@ fn web_civil_from_days(z: i64) -> (i64, i64, i64) {
 /// | `/ui` | GET | Signed-in dashboard (redirects to login when unauthenticated) |
 /// | `/ui/logout` | POST | Revoke session + clear cookies |
 /// | `/ui/mfa-otp-challenge` | GET/POST | SMS / email-OTP second factor after the password step |
+/// | `/ui/mfa-passkey-challenge` | GET | Passkey second factor after a first factor that is not a passkey |
+/// | `/ui/mfa-passkey-challenge/begin` | POST | Passkey second factor: mint a challenge for the pending user |
+/// | `/ui/mfa-passkey-challenge/complete` | POST | Passkey second factor: verify the assertion and sign in |
 /// | `/ui/account` | GET | My-account page (password, MFA status) |
 /// | `/ui/account/password` | POST | Change password |
 /// | `/ui/account/totp` | GET | MFA enrol / disable page |
@@ -908,6 +914,20 @@ pub fn router(state: WebState) -> Router {
             "/mfa-otp-challenge",
             axum::routing::get(handlers::mfa_otp_challenge_form)
                 .post(handlers::mfa_otp_challenge_submit),
+        )
+        .route(
+            // Passkey second factor after a first factor that is not a
+            // passkey — password, magic link, federated login (GA audit B5).
+            "/mfa-passkey-challenge",
+            axum::routing::get(second_factor::mfa_passkey_challenge_form),
+        )
+        .route(
+            "/mfa-passkey-challenge/begin",
+            axum::routing::post(second_factor::mfa_passkey_challenge_begin),
+        )
+        .route(
+            "/mfa-passkey-challenge/complete",
+            axum::routing::post(second_factor::mfa_passkey_challenge_complete),
         )
         .route(
             "/mfa-enroll-required",

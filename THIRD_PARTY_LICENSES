@@ -671,26 +671,16 @@ Used by:
   - windows-strings 0.5.1
   - windows-sys 0.52.0
   - windows-sys 0.59.0
-  - windows-sys 0.60.2
   - windows-sys 0.61.2
   - windows-targets 0.52.6
-  - windows-targets 0.53.5
   - windows_aarch64_gnullvm 0.52.6
-  - windows_aarch64_gnullvm 0.53.1
   - windows_aarch64_msvc 0.52.6
-  - windows_aarch64_msvc 0.53.1
   - windows_i686_gnu 0.52.6
-  - windows_i686_gnu 0.53.1
   - windows_i686_gnullvm 0.52.6
-  - windows_i686_gnullvm 0.53.1
   - windows_i686_msvc 0.52.6
-  - windows_i686_msvc 0.53.1
   - windows_x86_64_gnu 0.52.6
-  - windows_x86_64_gnu 0.53.1
   - windows_x86_64_gnullvm 0.52.6
-  - windows_x86_64_gnullvm 0.53.1
   - windows_x86_64_msvc 0.52.6
-  - windows_x86_64_msvc 0.53.1
 
                                  Apache License
                            Version 2.0, January 2004
@@ -1526,6 +1516,7 @@ Used by:
   - ciborium-ll 0.2.2
   - ciborium 0.2.2
   - email-encoding 0.4.1
+  - opentelemetry-proto 0.32.0
   - redb 2.6.3
   - unarray 0.1.4
   - ureq 3.3.0
@@ -6686,15 +6677,15 @@ Used by:
   - num-conv 0.2.2
   - openraft-macros 0.9.24
   - openraft 0.9.25
-  - opentelemetry-http 0.31.0
-  - opentelemetry-otlp 0.31.1
-  - opentelemetry-proto 0.31.0
-  - opentelemetry-semantic-conventions 0.31.0
-  - opentelemetry 0.31.0
-  - opentelemetry_sdk 0.31.0
+  - opentelemetry-http 0.32.0
+  - opentelemetry-otlp 0.32.0
+  - opentelemetry-semantic-conventions 0.32.1
+  - opentelemetry 0.32.0
+  - opentelemetry_sdk 0.32.1
   - pin-project-internal 1.1.13
   - pin-project-lite 0.2.17
   - pin-project 1.1.13
+  - portable-atomic 1.15.0
   - prettyplease 0.2.37
   - proc-macro2 1.0.106
   - quote 1.0.45
@@ -7757,7 +7748,7 @@ Used by:
   - tracing-core 0.1.36
   - tracing-futures 0.2.5
   - tracing-log 0.2.0
-  - tracing-opentelemetry 0.32.1
+  - tracing-opentelemetry 0.33.0
   - tracing-serde 0.2.0
   - tracing-subscriber 0.3.23
   - tracing 0.1.44
@@ -8015,7 +8006,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 --------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-  - rust_decimal 1.42.0
+  - rust_decimal 1.43.0
 
 MIT License
 

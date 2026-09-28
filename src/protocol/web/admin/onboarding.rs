@@ -249,7 +249,7 @@ pub async fn admin_onboarding_app_get(
         form_app_name: String::new(),
         form_redirect_uri: String::new(),
         form_grant_authorization_code: true,
-        form_grant_refresh_token: false,
+        form_grant_refresh_token: true,
         form_grant_client_credentials: false,
     })
 }
@@ -631,7 +631,7 @@ pub async fn admin_onboarding_invite_post(
         // it (task 23.12; audit §4.14 did not reach this site).
         tracing::warn!(
             reset_url = %crate::protocol::redact::Redact(&reset_url),
-            invited = %email,
+            invited = %crate::identity::email::mask_email_address(&email),
             "onboarding: invitation link issued (configure email.transport to deliver it)"
         );
 
@@ -650,7 +650,10 @@ pub async fn admin_onboarding_invite_post(
                 None,
                 None,
             ) {
-                tracing::warn!(error = %e, "onboarding: invitation email delivery failed");
+                tracing::warn!(
+                    error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
+                    "onboarding: invitation email delivery failed"
+                );
             }
         }
     }

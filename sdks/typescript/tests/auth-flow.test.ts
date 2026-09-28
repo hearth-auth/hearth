@@ -23,6 +23,9 @@ describe("TypeScript SDK: Auth Code Flow", () => {
       {
         clientName: "test-app",
         redirectUris: ["http://localhost:3000/callback"],
+        // First-party: JSON /authorize issues a code only for a client that
+        // needs no consent (or holds a recorded consent).
+        trustLevel: "first_party",
       },
       bootstrap.access_token,
     );

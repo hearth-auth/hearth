@@ -1280,7 +1280,9 @@ async fn authorize_succeeds_without_user_id_in_body_when_bearer_present() {
                 .header("Authorization", format!("Bearer {access_token}"))
                 .header("Content-Type", "application/json")
                 .body(axum::body::Body::from(
-                    r#"{"client_name":"test-app","redirect_uris":["https://example.com/cb"]}"#,
+                    // First-party: JSON /authorize issues without a consent
+                    // screen only for a client that needs none (GA audit B2).
+                    r#"{"client_name":"test-app","redirect_uris":["https://example.com/cb"],"trust_level":"CLIENT_TRUST_LEVEL_FIRST_PARTY"}"#,
                 ))
                 .expect("request"),
         )

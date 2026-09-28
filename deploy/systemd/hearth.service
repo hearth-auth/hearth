@@ -22,6 +22,15 @@ Type=exec
 User=hearth
 Group=hearth
 WorkingDirectory=/var/lib/hearth
+# Production mode requires HEARTH_MASTER_KEY and HEARTH_KEK in the environment
+# (64 hex chars each, `openssl rand -hex 32`), plus any ${VAR} that
+# hearth.yaml references. Put them in this file, one KEY=value per line,
+# owned root:root with mode 0400: systemd reads it as root before dropping to
+# User=hearth, so the service account never needs read access to it.
+#   sudo install -m 0400 -o root -g root /dev/null /etc/hearth/hearth.env
+# The leading "-" lets the unit start without the file; Hearth then refuses to
+# start with a message naming the missing key.
+EnvironmentFile=-/etc/hearth/hearth.env
 ExecStart=/usr/local/bin/hearth serve -c /etc/hearth/hearth.yaml
 
 # Restart policy — restart on any unexpected exit (crashes, OOMs, etc.),
@@ -97,15 +106,22 @@ SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native
 
-# Capabilities — Hearth binds to port 8420 (> 1024), so it needs no
-# CAP_NET_BIND_SERVICE. Drop everything.
-CapabilityBoundingSet=
-AmbientCapabilities=
+# Capabilities — only CAP_NET_BIND_SERVICE, and only so a privileged port can
+# be bound. With the default port 8420 it is unused. With `server.port: 443`
+# and TLS, Hearth binds 443 AND an HTTP→HTTPS redirect listener on port 80;
+# without this capability both binds fail and the service does not start.
+# If you never use a port below 1024, you may empty both lines.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 # --- Resource limits ----------------------------------------------------------
 # Prevent a single instance from monopolising the system. Tune to your hardware.
 LimitNOFILE=65536
-LimitNPROC=512
+# RLIMIT_NPROC counts THREADS of the hearth user, not processes. Tokio's
+# blocking pool alone may grow to 512 threads (Argon2 hashing and file I/O run
+# there), plus one worker per CPU and the runtime's own threads. The former
+# 512 limit could make thread spawns fail under login load.
+LimitNPROC=4096
 
 [Install]
 WantedBy=multi-user.target

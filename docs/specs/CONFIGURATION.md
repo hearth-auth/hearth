@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Hearth is configured via a single YAML file. Every field is optional — an empty file (`{}`) is a valid, production-safe configuration with sensible defaults.
+Hearth is configured via a single YAML file. Every field has a default, so an empty file (`{}`) parses — but it is **not** a valid production configuration: outside `--dev` the server refuses to start until the requirements in [Mandatory in Production](#mandatory-in-production) are met (a key-encryption key, HTTPS, a real email transport, and `HEARTH_MASTER_KEY` in the environment). `{}` is only a complete configuration under `hearth serve --dev`.
 
 ## File Location & Loading
 
@@ -31,7 +31,7 @@ following hold. These are hard startup errors, not warnings.
 | **Key-encryption key** | `HEARTH_KEK` env var (recommended) **or** `security.key_encryption_key`, either one a random 64-lowercase-hex-character value (`openssl rand -hex 32`) | Without it, realm signing keys (Ed25519 private keys) are written to storage **in plaintext**. |
 | **HTTPS** | `server.tls_cert_path` + `server.tls_key_path`, **or** `server.trust_forwarded_proto: true` behind a TLS-terminating proxy | Without it, session cookies are issued without the `Secure` attribute and can be intercepted over plain HTTP. |
 | **No demo seeder** | Omit the `demo:` block, or set `demo.enabled: false` | `demo.enabled: true` mass-seeds accounts that all share a well-known default password. |
-| **A real email transport**, for any realm whose users can hold a password | Set `email.transport` to something other than `"log"` | `log` discards every message. A password-only realm configured this way validates, starts, and silently never delivers a reset email, so an account that forgets its password is unrecoverable. |
+| **A real email transport** | Set `email.transport` to something other than `"log"` (the default), **or** set `email.allow_log_transport_in_production: true` to run knowingly without mail | `log` discards every message. The system realm (the admin console) always has password login, so under `log` an admin who forgets their password cannot reset it — and neither can a user of any realm, whether declared in YAML, auto-created, or created at runtime. Until the GA audit (2026-09-28, M15) only YAML-declared realms were checked. |
 | **No `storage.fsync: false`** | Omit the key (it defaults to `true` outside `--dev`) | WAL durability is not optional. The key was previously accepted and then ignored; it is now a hard error rather than a promise the engine did not keep. |
 | **No empty `${VAR}` substitution** | Set every referenced variable, or write `${VAR:-}` to declare the empty value deliberate | An empty expected credential compares equal to a caller who supplied none — it opens `/metrics` and authenticates a confidential client with `Basic <client_id>:`. |
 | **Argon2id costs at or above the OWASP floor** | Leave `auth.password_memory_cost` / `password_time_cost` unset, or set a pair at least as strong as one documented row | See [Argon2id cost floor](#argon2id-cost-floor). |
@@ -122,9 +122,15 @@ Network binding and TLS configuration.
 | `tls_client_ca_path` | string | — | Path to a CA certificate for client certificate verification (mTLS). |
 | `tls_require_client_cert` | bool | `false` | When `true`, all connections must present a valid client certificate signed by `tls_client_ca_path`. |
 | `trusted_proxies` | list of strings | `[]` | IP addresses of trusted reverse proxies. When non-empty, the real client IP is extracted from `X-Forwarded-For` using the rightmost-non-trusted algorithm. When empty (the default), the peer socket address is used and `X-Forwarded-For` is ignored — the safe default for direct-to-internet deployments. CIDR notation is not yet supported; supply individual IPs. |
-| `trust_forwarded_proto` | bool | `false` | Trust the `X-Forwarded-Proto: https` header when deciding whether session cookies carry `Secure`. **Requires a non-empty `trusted_proxies`** — setting it to `true` with an empty proxy list is refused at start-up and by `hearth config validate`, because the header would then be accepted from any peer and a client could choose whether its own cookie is `Secure`. |
+| `trust_forwarded_proto` | bool | `false` | Trust the `X-Forwarded-Proto: https` header when deciding whether a request arrived over HTTPS (session cookies carry `Secure`, HSTS is sent, the login Origin check). The header is honoured **only when the connection's TCP peer is listed in `trusted_proxies`**; from any other peer it is removed before the request is handled. **Requires a non-empty `trusted_proxies`** — setting it to `true` with an empty proxy list is refused at start-up and by `hearth config validate`, because the flag would then have no effect. |
+
+| `grpc_port` | integer | — (disabled) | TCP port for the gRPC management API. When unset, no gRPC listener is started. |
+| `grpc_bind_address` | string | `bind_address` | IP address for the gRPC listener. `127.0.0.1` keeps the management API host-local. |
+| `grpc_allow_plaintext` | bool | `false` | Outside `--dev`, a gRPC listener on a non-loopback address with no `tls_cert_path` is refused at start-up (it would carry admin bearer tokens, OAuth client secrets and agent API keys in clear text). Set `true` only when a proxy or service mesh terminates TLS for gRPC. Has no effect when `tls_cert_path` is set. |
 
 When TLS is enabled, Hearth also spawns an HTTP → HTTPS redirect listener on `port - 1` (or port 80 when `port: 443`). Send `SIGHUP` to hot-reload the certificate and key without downtime.
+
+When `tls_cert_path` / `tls_key_path` are set, the gRPC listener (`grpc_port`) serves **TLS with the same certificate** (ALPN `h2`), and inherits `tls_client_ca_path` / `tls_require_client_cert` and `security.tls.*`; a SIGHUP certificate reload reaches both listeners. Clients must connect with `https://`. Without a certificate, gRPC is plaintext — see `grpc_allow_plaintext`.
 
 ```yaml
 server:
@@ -180,6 +186,16 @@ following three-level precedence rule:
    startup and removed on process exit. Cold-tier data is **not** persisted
    across restarts in this case, which matches the historical dev-mode
    behaviour.
+
+**A production data directory is never opened in dev mode.** Every production
+(non-`--dev`) start writes a `.hearth-production` marker into its
+`storage.data_dir`, and `--dev` refuses to start on a directory (from either
+of the first two rules) that holds it — dev mode writes without fsync and
+hashes passwords with test-strength Argon2 parameters, so `serve --dev -c
+prod.yaml` must not touch the production store. To inspect production data
+under `--dev`, copy the directory and delete the marker from the copy. A
+directory last used by a release older than this check carries no marker until
+its next production start.
 
 ```bash
 # Option A: env var override (recommended for repeated tier-miss testing)
@@ -340,14 +356,21 @@ Operational limits and timeouts.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `request_timeout_secs` | integer | `30` | Maximum time in seconds for a single HTTP request. |
-| `shutdown_timeout_secs` | integer | `10` | Drain deadline in seconds after a shutdown signal (SIGINT or SIGTERM). In-flight HTTP and gRPC requests are given this long to complete before the process forces exit. **Must be less than `terminationGracePeriodSeconds`** in Kubernetes; the Helm chart default is 60 s, leaving a 30 s buffer above the recommended production value of 30 s. |
-| `max_connections` | integer | `1024` | Maximum concurrent TCP connections. |
-| `queue_depth` | integer | `4096` | Internal work queue depth. |
+| `shutdown_timeout_secs` | integer | `10` | Drain deadline in seconds after a shutdown signal (SIGINT or SIGTERM). Every listener — HTTP(S), the HTTP→HTTPS redirect, gRPC and the Raft peer server — stops accepting and starts draining at the signal, and all of them share this one deadline, so the whole drain takes at most this long. **Must be less than `terminationGracePeriodSeconds`** in Kubernetes; the Helm chart default is 60 s, leaving a 30 s buffer above the recommended production value of 30 s. |
+| `max_connections` | integer | `1024` | Maximum concurrent connections served per listener (the HTTP(S) listener, the redirect listener and the gRPC listener each have their own allowance). |
+| `queue_depth` | integer | `4096` | Connections allowed to wait for one of the `max_connections` slots; past that, new connections are closed immediately. |
+| `max_connections_per_ip` | integer | `64` | Concurrent connections one client may hold — per IPv4 address, or per IPv6 `/64`. Further connections are closed immediately. `0` disables the cap. Peers listed in `server.trusted_proxies` are exempt, because every client behind a proxy shares its address; the cap is on the TCP peer, so `X-Forwarded-For` does not affect it. |
+| `header_read_timeout_secs` | integer | `10` | Seconds a client has to send its first bytes and each complete set of HTTP/1.1 request headers. Also closes an HTTP/1.1 keep-alive connection left idle this long, and a gRPC connection that does not send the HTTP/2 preface in time. Must be greater than 0. |
+| `tls_handshake_timeout_secs` | integer | `10` | Seconds a client has to complete the TLS handshake on the HTTPS and gRPC listeners. Must be greater than 0. |
+| `http2_keepalive_interval_secs` | integer | `30` | Seconds between HTTP/2 keep-alive `PING`s (HTTP and gRPC listeners); a peer that does not acknowledge within 20 s is disconnected. `0` disables pings. |
+
+Together, `max_connections_per_ip`, `header_read_timeout_secs` and `tls_handshake_timeout_secs` stop one client from holding every connection slot with requests it never finishes (GA audit 2026-09-28, B6).
 
 ```yaml
 operational:
   request_timeout_secs: 60
   max_connections: 2048
+  max_connections_per_ip: 128
 ```
 
 ### `branding`
@@ -386,7 +409,8 @@ Outbound email delivery for verification emails, password resets, magic links, a
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `transport` | string | `"log"` | Delivery transport. One of: `log`, `smtp`, `sendgrid`, `postmark`, `mailgun`, `mailtrap`. |
+| `transport` | string | `"log"` | Delivery transport. One of: `log`, `smtp`, `sendgrid`, `postmark`, `mailgun`, `mailtrap`. `log` delivers nothing and is refused outside `--dev` unless `allow_log_transport_in_production` is `true`. |
+| `allow_log_transport_in_production` | bool | `false` | Allow `transport: log` in production. Every message — including the admin console's password-reset mail — is then dropped, and startup logs a warning. For evaluation deployments only. |
 | `from` | string | — | Sender address for the `From:` header. **Required** when transport is not `log`. |
 | `smtp` | object | — | SMTP-specific settings. Required when `transport: smtp`. |
 | `sendgrid` | object | — | SendGrid API settings. Required when `transport: sendgrid`. |
@@ -1473,7 +1497,7 @@ The DCR policy can also be changed at runtime without restarting the server via 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `mode` | string | `"disabled"` | DCR policy: `"disabled"` (only admins may create clients), `"open"` (any caller may register a client — unauthenticated), or `"authenticated"` (requires a valid bearer token per RFC 7591 §3.1 initial access token). |
+| `mode` | string | `"disabled"` | DCR policy: `"disabled"` (only admins may create clients), `"open"` (any caller may register a client — unauthenticated), or `"authenticated"` (requires an RFC 7591 §3.1 initial access token: a bearer token issued by this realm whose `permissions` claim carries `hearth.clients.admin` or `hearth.admin`; any other valid token is refused with `403 insufficient_scope`). |
 
 ```yaml
 realms:
@@ -1485,7 +1509,7 @@ realms:
   production:
     auth:
       dcr:
-        mode: authenticated # bearer token required for self-registration
+        mode: authenticated # initial access token (hearth.clients.admin) required
 ```
 
 > **Security note:** `open` DCR allows any caller to register an OAuth client without authentication — suitable only for developer sandboxes and internal networks. Use `authenticated` when DCR must be available in production, or `disabled` (the default) if all clients are managed by administrators.
@@ -2257,6 +2281,10 @@ Every field's default value at a glance.
 | `operational` | `shutdown_timeout_secs` | `10` |
 | `operational` | `max_connections` | `1024` |
 | `operational` | `queue_depth` | `4096` |
+| `operational` | `max_connections_per_ip` | `64` |
+| `operational` | `header_read_timeout_secs` | `10` |
+| `operational` | `tls_handshake_timeout_secs` | `10` |
+| `operational` | `http2_keepalive_interval_secs` | `30` |
 | `branding` | `product_name` | `"Hearth"` |
 | `branding` | `theme` | `"ember"` |
 | `email` | `transport` | `"log"` |

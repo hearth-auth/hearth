@@ -297,7 +297,7 @@ impl AppNewTemplate {
             form_redirect_uris: String::new(),
             form_grant_authorization_code: true,
             form_grant_client_credentials: false,
-            form_grant_refresh_token: false,
+            form_grant_refresh_token: true,
             form_grant_device_code: false,
             form_trust_level: "third_party".to_string(),
             form_require_consent: true,
@@ -584,7 +584,7 @@ impl AppEditTemplate {
         let grant_client_credentials = app
             .grant_types()
             .contains(&"client_credentials".to_string());
-        let grant_refresh_token = app.grant_types().contains(&"refresh_token".to_string());
+        let grant_refresh_token = app.allows_refresh_token();
         let grant_device_code = app
             .grant_types()
             .contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string());
@@ -776,6 +776,23 @@ pub async fn admin_app_edit_submit(
     }
     if form.grant_device_code == "1" {
         grant_types.push("urn:ietf:params:oauth:grant-type:device_code".to_string());
+    }
+    // Grants this form has no toggle for (jwt-bearer, token-exchange) are
+    // kept: every grant is enforced against `grant_types` (GA audit M7), so
+    // saving the form must not silently withdraw one.
+    if let Some(app) = existing.as_ref() {
+        for grant in app.grant_types() {
+            let managed = matches!(
+                grant.as_str(),
+                "authorization_code"
+                    | "client_credentials"
+                    | "refresh_token"
+                    | "urn:ietf:params:oauth:grant-type:device_code"
+            );
+            if !managed && !grant_types.contains(grant) {
+                grant_types.push(grant.clone());
+            }
+        }
     }
     if grant_types.is_empty() {
         grant_types.push("authorization_code".to_string());

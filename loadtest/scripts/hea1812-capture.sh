@@ -4,6 +4,10 @@
 # each report.json under loadtest/reports/hea1812/. Throwaway helper; deleted
 # after the numbers land in the baseline + README.
 set -euo pipefail
+# Ramp-to-knee ends in a breach by design, and since GA audit M20 a `pass:false`
+# report exits 3 — which `set -e` would turn into an abort before the report is
+# copied. Keep latency advisory for this capture (errors still exit 1).
+export HEARTH_LOADTEST_LATENCY_ADVISORY="${HEARTH_LOADTEST_LATENCY_ADVISORY:-true}"
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 export PROTOC="${PROTOC:-$(command -v protoc)}"
 OUT=loadtest/reports/hea1812

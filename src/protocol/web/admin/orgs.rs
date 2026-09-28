@@ -1569,7 +1569,10 @@ pub async fn admin_org_invite(
                     stored_invitation.as_ref(),
                     None,
                 ) {
-                    tracing::warn!(error = %e, "failed to send invitation email");
+                    tracing::warn!(
+                        error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
+                        "failed to send invitation email"
+                    );
                     delivery = InviteDelivery::TransportFailed;
                 } else {
                     delivery = InviteDelivery::Delivered;
@@ -1579,7 +1582,11 @@ pub async fn admin_org_invite(
             org_redirect_flash(&org_id, target.0.name(), &msg, kind, secure)
         }
         Err(e) => {
-            tracing::warn!(error = %e, email = %form.email, "create_invitation failed");
+            tracing::warn!(
+                error = %e,
+                email = %crate::identity::email::mask_email_address(&form.email),
+                "create_invitation failed"
+            );
             org_redirect_flash(
                 &org_id,
                 target.0.name(),
@@ -1848,7 +1855,10 @@ pub async fn admin_org_resend_invite(
                     stored_invitation.as_ref(),
                     None,
                 ) {
-                    tracing::warn!(error = %e, "failed to send resend invitation email");
+                    tracing::warn!(
+                        error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
+                        "failed to send resend invitation email"
+                    );
                     delivery = InviteDelivery::TransportFailed;
                 } else {
                     delivery = InviteDelivery::Delivered;
@@ -1858,7 +1868,11 @@ pub async fn admin_org_resend_invite(
             org_redirect_flash(&org_id, target.0.name(), &msg, kind, secure)
         }
         Err(e) => {
-            tracing::warn!(error = %e, email = %email, "resend create_invitation failed");
+            tracing::warn!(
+                error = %e,
+                email = %crate::identity::email::mask_email_address(&email),
+                "resend create_invitation failed"
+            );
             org_redirect_flash(
                 &org_id,
                 target.0.name(),
