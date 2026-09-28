@@ -49,4 +49,43 @@ impl EmbeddedIdentityEngine {
             .put_if_absent(realm_id, marker_key, &marker_expires_at.to_le_bytes())
             .map_err(Self::storage_err)
     }
+
+    /// A pending OTP's expiry as a [`Timestamp`], for dating its marker.
+    pub(super) fn otp_expiry(stored: &crate::identity::sms::otp::StoredOtp) -> Timestamp {
+        let secs = i64::try_from(stored.expiry_unix_ts).unwrap_or(i64::MAX / 1_000_000);
+        Timestamp::from_micros(secs.saturating_mul(1_000_000))
+    }
+
+    /// Takes a redeem-once row: reads it, claims its single use under
+    /// `marker_key` (dated by `expires_at`), then deletes it.
+    ///
+    /// For the "get, then delete" tickets and state bags. The delete cannot
+    /// decide the single use across a cluster — deleting an absent key
+    /// succeeds — so a take that read the row before another node took it was
+    /// served too. `missing` is the error for an absent row, and for a row
+    /// another caller already took. The caller still checks expiry.
+    pub(super) fn take_single_use_row<T: serde::de::DeserializeOwned>(
+        &self,
+        realm_id: &RealmId,
+        row_key: &[u8],
+        marker_key: &[u8],
+        missing: fn() -> IdentityError,
+        expires_at: impl FnOnce(&T) -> Timestamp,
+    ) -> Result<T, IdentityError> {
+        let bytes = self
+            .storage
+            .get(realm_id, row_key)
+            .map_err(Self::storage_err)?
+            .ok_or_else(missing)?;
+        let row: T = serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        if !self.claim_single_use(realm_id, marker_key, expires_at(&row))? {
+            return Err(missing());
+        }
+        self.storage
+            .delete(realm_id, row_key)
+            .map_err(Self::storage_err)?;
+        Ok(row)
+    }
 }

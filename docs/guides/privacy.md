@@ -57,7 +57,7 @@ with the owning `RealmId`, except signing keys which live in the **system realm*
 | Refresh token (grant family) | `oauth:family:{family_id}` | JSON | `current_refresh_hash` (SHA-256 of current token) + `session_id`; plaintext refresh token never stored |
 | OAuth consent | `oauth:consent:{user_uuid}:{client_uuid}` | JSON | Granted scopes; no raw credentials |
 | Device code | `oauth:device:{device_code_hash}` | JSON | Hash of device code |
-| Single-use redemption marker | `consumed:{par\|code\|device\|magic\|reset\|verify\|refresh}:{id_or_sha256}` | TTL marker | Records that a PAR `request_uri`, authorization code, device code, magic link, password-reset link, email-verification link or refresh token was redeemed; the key carries the `request_uri` id or the SHA-256 of the token, never a plaintext token. Swept after the artifact's own expiry plus 60 s |
+| Single-use redemption marker | `consumed:{kind}:{id_or_sha256}` | TTL marker | Records that a redeem-once artifact was spent — kinds `par`, `code`, `device`, `magic`, `reset`, `verify`, `refresh`, `saml-state`, `fed-state`, `fed-confirm`, `pending-auth`, `approval`, `txn`, `otp`. The key carries a public id (`request_uri` id, approval-request id, `jti`, OTP nonce) or the SHA-256 of a secret token, never a plaintext token. Swept after the artifact's own expiry plus 60 s |
 | Revoked JTI blocklist | `oauth:revjti:{jti}` | TTL marker | For sessionless client-credentials revocation; no PII in value |
 | In-flight auth request | `oauth:pending_auth:{ticket_uuid}` | JSON | 10-min TTL; contains authorization parameters |
 

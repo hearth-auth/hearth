@@ -1947,7 +1947,20 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<(), IdentityError>;
 
     /// Retrieves and deletes a confirm-to-link ticket (single-use).
+    ///
+    /// The single use is claimed with one replicated put-if-absent, so a
+    /// ticket taken once can never be taken again — not even after it is
+    /// re-put. A caller that only needs to read it uses
+    /// [`Self::get_confirm_link_ticket`].
     fn take_confirm_link_ticket(
+        &self,
+        realm_id: &RealmId,
+        ticket: &str,
+    ) -> Result<federation::ConfirmLinkTicket, IdentityError>;
+
+    /// Reads a confirm-to-link ticket without consuming it. Returns
+    /// `FederationInvalidState` for an unknown or expired ticket.
+    fn get_confirm_link_ticket(
         &self,
         realm_id: &RealmId,
         ticket: &str,

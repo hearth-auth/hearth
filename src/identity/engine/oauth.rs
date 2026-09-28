@@ -4852,21 +4852,15 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         ticket: &str,
     ) -> Result<PendingAuthorizationRequest, IdentityError> {
-        let key = keys::encode_pending_auth_key(ticket);
-        let bytes = self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .ok_or(IdentityError::ConsentTicketNotFound)?;
-        // Single-use: delete before we even validate expiry so callers can
-        // never replay the same ticket twice even on a narrow race.
-        self.storage
-            .delete(realm_id, &key)
-            .map_err(Self::storage_err)?;
-        let pending: PendingAuthorizationRequest =
-            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
+        // Single-use: claimed (G4) and deleted before we even validate expiry
+        // so callers can never replay the same ticket twice, on any node.
+        let pending: PendingAuthorizationRequest = self.take_single_use_row(
+            realm_id,
+            &keys::encode_pending_auth_key(ticket),
+            &keys::encode_consumed_pending_auth(&Self::sha256_hex(ticket.as_bytes())),
+            || IdentityError::ConsentTicketNotFound,
+            |p: &PendingAuthorizationRequest| p.expires_at,
+        )?;
         if self.clock.now().as_micros() >= pending.expires_at.as_micros() {
             return Err(IdentityError::ConsentTicketExpired);
         }

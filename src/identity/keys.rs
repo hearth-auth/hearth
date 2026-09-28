@@ -2377,6 +2377,61 @@ pub(crate) fn encode_consumed_refresh(refresh_hash: &str) -> Vec<u8> {
     encode_consumed("refresh", refresh_hash)
 }
 
+/// Single-use marker for a SAML SP request-state bag (RelayState), keyed by
+/// the state token's SHA-256 hex.
+///
+/// Format: `consumed:saml-state:{sha256_hex}`
+pub(crate) fn encode_consumed_saml_state(token_hash: &str) -> Vec<u8> {
+    encode_consumed("saml-state", token_hash)
+}
+
+/// Single-use marker for an upstream-federation state bag, keyed by the
+/// state token's SHA-256 hex.
+///
+/// Format: `consumed:fed-state:{sha256_hex}`
+pub(crate) fn encode_consumed_federation_state(token_hash: &str) -> Vec<u8> {
+    encode_consumed("fed-state", token_hash)
+}
+
+/// Single-use marker for a federation confirm-link ticket, keyed by the
+/// ticket's SHA-256 hex.
+///
+/// Format: `consumed:fed-confirm:{sha256_hex}`
+pub(crate) fn encode_consumed_confirm_link(ticket_hash: &str) -> Vec<u8> {
+    encode_consumed("fed-confirm", ticket_hash)
+}
+
+/// Single-use marker for a pending (consent) authorization ticket, keyed by
+/// the ticket's SHA-256 hex.
+///
+/// Format: `consumed:pending-auth:{sha256_hex}`
+pub(crate) fn encode_consumed_pending_auth(ticket_hash: &str) -> Vec<u8> {
+    encode_consumed("pending-auth", ticket_hash)
+}
+
+/// Decision marker for an approval request: whichever of approve or deny
+/// claims it first decides the request.
+///
+/// Format: `consumed:approval:{request_id}`
+pub(crate) fn encode_consumed_approval(request_id: &str) -> Vec<u8> {
+    encode_consumed("approval", request_id)
+}
+
+/// Single-use marker for a transaction token, keyed by its `jti`.
+///
+/// Format: `consumed:txn:{jti}`
+pub(crate) fn encode_consumed_txn(jti: &str) -> Vec<u8> {
+    encode_consumed("txn", jti)
+}
+
+/// Single-use marker for a pending SMS or email OTP, keyed by channel and
+/// the OTP's nonce.
+///
+/// Format: `consumed:otp:{channel}:{nonce}`
+pub(crate) fn encode_consumed_otp(channel: &str, nonce: &str) -> Vec<u8> {
+    encode_consumed("otp", &format!("{channel}:{nonce}"))
+}
+
 /// Scan prefix for every single-use redemption marker in a realm.
 pub(crate) fn consumed_marker_scan_prefix() -> Vec<u8> {
     CONSUMED_PREFIX.as_bytes().to_vec()

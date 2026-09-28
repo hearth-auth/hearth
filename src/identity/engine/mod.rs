@@ -6134,6 +6134,17 @@ impl EmbeddedIdentityEngine {
         let lock = self.jwt_bearer_jti_lock(realm_id);
         let _guard = lock.lock().expect("jwt bearer jti lock poisoned");
 
+        // G4: the first use is decided by one replicated put-if-absent, not by
+        // the local read below — across a cluster that read can be stale, and
+        // the lock above is node-local.
+        if self
+            .storage
+            .put_if_absent(realm_id, &jti_key, &assertion_exp.to_be_bytes())
+            .map_err(Self::storage_err)?
+        {
+            return Ok(());
+        }
+        // A marker exists: a replay unless it outlived its assertion.
         if let Some(stored) = self
             .storage
             .get(realm_id, &jti_key)
@@ -7840,26 +7851,34 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Single use (GA audit L18). The token used to be replayable for its
         // whole 15-minute life, each replay setting the password again and
         // minting a new session — and it travels in a URL, so a copy in a
-        // proxy log or a `Referer` header was a login. Its `jti` is spent once
-        // the password is set. The per-`jti` lock serialises concurrent
-        // submissions, so exactly one completes; a completion the password
+        // proxy log or a `Referer` header was a login. Its `jti` is spent by
+        // a replicated claim just before the password is written, so exactly
+        // one submission completes on any node; a completion the password
         // policy refuses does not spend it, so the user can correct the
         // password and resubmit.
         let jti = claims.jti.clone().ok_or(IdentityError::InvalidToken)?;
         let spent_marker = format!("ra-jti:{jti}");
-        let lock = self.token_redemption_lock(&spent_marker);
-        let _spend_guard = lock.lock().expect("token_redemption_lock poisoned");
+        // Fast refusal of an already-spent token; the claim below decides.
+        // (No lock here: `redeem_mfa_nonce` takes the per-`jti` lock itself,
+        // and `std::sync::Mutex` is not reentrant.)
         if self.is_mfa_nonce_burned(realm_id, &spent_marker)? {
             return Err(IdentityError::InvalidToken);
         }
 
-        // Set the new password (enforces realm policy + Argon2id re-hash).
-        self.set_password(realm_id, &user_id, &new_password)?;
-        self.burn_mfa_nonce(
+        // Vet the new password first (realm policy, breach, history), so a
+        // refused one leaves the token unspent. Then spend the `jti` with one
+        // replicated put-if-absent BEFORE the password is written (G4): the
+        // lock and the burned-check above are node-local, so across a cluster
+        // only the claim can decide which submission completes.
+        let history_depth = self.vet_new_password(realm_id, &user_id, &new_password)?;
+        if !self.redeem_mfa_nonce(
             realm_id,
             &spent_marker,
             u64::try_from(claims.exp).unwrap_or(u64::MAX),
-        )?;
+        )? {
+            return Err(IdentityError::InvalidToken);
+        }
+        self.store_vetted_password(realm_id, &user_id, &new_password, history_depth)?;
 
         // Remove UPDATE_PASSWORD from the pending actions list.
         let remaining: Vec<RequiredAction> = claims
@@ -10423,13 +10442,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // under a per-nonce redemption lock so two concurrent MFA-challenge
         // submissions replaying the same pending cookie cannot both pass the
         // check before either persists the burn.
+        //
+        // G4: the lock is node-local and the burned-check is a local read, so
+        // across a cluster the burn itself decides: one replicated
+        // put-if-absent, evaluated by the Raft state machine. The lock stays
+        // so same-node racers queue instead of each proposing a write.
         let lock = self.token_redemption_lock(nonce);
         let _guard = lock.lock().expect("token_redemption_lock poisoned");
-        if self.is_mfa_nonce_burned(realm_id, nonce)? {
-            return Ok(false);
-        }
-        self.burn_mfa_nonce(realm_id, nonce, exp_secs)?;
-        Ok(true)
+        let key = keys::encode_mfa_nonce_key(nonce);
+        self.storage
+            .put_if_absent(realm_id, &key, &exp_secs.to_le_bytes())
+            .map_err(Self::storage_err)
     }
 
     fn load_pending_recovery_codes(
@@ -14998,20 +15021,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         state_token: &str,
     ) -> Result<crate::identity::federation::StateBag, IdentityError> {
-        let key = keys::encode_federation_state_key(state_token);
-        let bytes = self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .ok_or(IdentityError::FederationInvalidState)?;
-        // Single-use: delete before we even validate.
-        self.storage
-            .delete(realm_id, &key)
-            .map_err(Self::storage_err)?;
-        let bag: crate::identity::federation::StateBag =
-            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
+        // Single-use: claimed (G4) and deleted before we even validate.
+        let bag: crate::identity::federation::StateBag = self.take_single_use_row(
+            realm_id,
+            &keys::encode_federation_state_key(state_token),
+            &keys::encode_consumed_federation_state(&Self::sha256_hex(state_token.as_bytes())),
+            || IdentityError::FederationInvalidState,
+            |bag: &crate::identity::federation::StateBag| bag.expires_at,
+        )?;
         if self.clock.now().as_micros() >= bag.expires_at.as_micros() {
             return Err(IdentityError::FederationInvalidState);
         }
@@ -15036,15 +15053,30 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         ticket: &str,
     ) -> Result<crate::identity::federation::ConfirmLinkTicket, IdentityError> {
-        let key = keys::encode_federation_confirm_key(ticket);
+        // Single-use: claimed (G4) and deleted before the expiry check.
+        let t: crate::identity::federation::ConfirmLinkTicket = self.take_single_use_row(
+            realm_id,
+            &keys::encode_federation_confirm_key(ticket),
+            &keys::encode_consumed_confirm_link(&Self::sha256_hex(ticket.as_bytes())),
+            || IdentityError::FederationInvalidState,
+            |t: &crate::identity::federation::ConfirmLinkTicket| t.expires_at,
+        )?;
+        if self.clock.now().as_micros() >= t.expires_at.as_micros() {
+            return Err(IdentityError::FederationInvalidState);
+        }
+        Ok(t)
+    }
+
+    fn get_confirm_link_ticket(
+        &self,
+        realm_id: &RealmId,
+        ticket: &str,
+    ) -> Result<crate::identity::federation::ConfirmLinkTicket, IdentityError> {
         let bytes = self
             .storage
-            .get(realm_id, &key)
+            .get(realm_id, &keys::encode_federation_confirm_key(ticket))
             .map_err(Self::storage_err)?
             .ok_or(IdentityError::FederationInvalidState)?;
-        self.storage
-            .delete(realm_id, &key)
-            .map_err(Self::storage_err)?;
         let t: crate::identity::federation::ConfirmLinkTicket = serde_json::from_slice(&bytes)
             .map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
@@ -16719,19 +16751,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         token: &str,
     ) -> Result<crate::identity::federation::saml::SamlStateBag, IdentityError> {
-        let key = keys::encode_saml_state_key(token);
-        let bytes = self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .ok_or(IdentityError::FederationInvalidState)?;
-        self.storage
-            .delete(realm_id, &key)
-            .map_err(Self::storage_err)?;
-        let bag: crate::identity::federation::saml::SamlStateBag =
-            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
+        // Single-use: claimed (G4) and deleted before the TTL check. The
+        // get-then-delete this replaced took no lock, so even one node could
+        // hand the same RelayState to two concurrent ACS posts.
+        let bag: crate::identity::federation::saml::SamlStateBag = self.take_single_use_row(
+            realm_id,
+            &keys::encode_saml_state_key(token),
+            &keys::encode_consumed_saml_state(&Self::sha256_hex(token.as_bytes())),
+            || IdentityError::FederationInvalidState,
+            |bag: &crate::identity::federation::saml::SamlStateBag| {
+                bag.created_at
+                    .add_micros(crate::identity::federation::saml::SAML_STATE_TTL_SECS * 1_000_000)
+            },
+        )?;
         // TTL — the sweeper deletes anything older, this refuses a straggler.
         let age_secs = (self.clock.now().as_micros() - bag.created_at.as_micros()) / 1_000_000;
         if age_secs > crate::identity::federation::saml::SAML_STATE_TTL_SECS {
@@ -16748,22 +16780,24 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         expires_at_secs: i64,
     ) -> Result<(), IdentityError> {
         let key = keys::encode_saml_assertion_id(idp_id, assertion_id);
-        if self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            return Err(IdentityError::Saml(SamlError::Replay));
-        }
         // 22.11 (audit 2026-08-28 §4.10#9): the sentinel used to be an empty
         // value with no expiry, so the `saml:asn:` key space grew by one row
         // per successful login and never shrank. Record when the guarded
         // assertion stops being replayable so the cleanup sweeper can reclaim
         // it; the format matches the JAR/DPoP JTI sentinels.
-        self.storage
-            .put(realm_id, &key, &expires_at_secs.to_le_bytes())
-            .map_err(Self::storage_err)
+        //
+        // G4: check and record are one replicated put-if-absent. The read
+        // this replaced took no lock at all, and across a cluster it could be
+        // stale, so one captured SAMLResponse could log in twice.
+        if self
+            .storage
+            .put_if_absent(realm_id, &key, &expires_at_secs.to_le_bytes())
+            .map_err(Self::storage_err)?
+        {
+            Ok(())
+        } else {
+            Err(IdentityError::Saml(SamlError::Replay))
+        }
     }
 
     fn record_saml_sp_session(
@@ -17272,7 +17306,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         match result {
             Ok(()) => {
-                // 6a. Delete the record to prevent replay.
+                // 6a. Claim the code's single use, then delete the record.
+                //     The lock above is node-local and the record read is
+                //     local, so across a cluster only the replicated claim
+                //     can refuse the same code at a second node (G4).
+                if !self.claim_single_use(
+                    realm_id,
+                    &keys::encode_consumed_otp("sms", nonce),
+                    Self::otp_expiry(&stored),
+                )? {
+                    return Err(IdentityError::InvalidSmsOtp);
+                }
                 self.storage
                     .delete(realm_id, &otp_key)
                     .map_err(Self::storage_err)?;
@@ -17418,6 +17462,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         match result {
             Ok(()) => {
+                // Claim the code's single use before deleting the record (G4;
+                // see `verify_sms_otp`).
+                if !self.claim_single_use(
+                    realm_id,
+                    &keys::encode_consumed_otp("email", nonce),
+                    Self::otp_expiry(&stored),
+                )? {
+                    return Err(IdentityError::InvalidEmailOtp);
+                }
                 self.storage
                     .delete(realm_id, &otp_key)
                     .map_err(Self::storage_err)?;
@@ -17503,19 +17556,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let lock = self.jwt_bearer_jti_lock(realm_id);
         let _guard = lock.lock().expect("jti lock poisoned");
 
+        // G4: record-and-check in one replicated put-if-absent. A local `get`
+        // can be stale across a cluster and the lock above is node-local, so
+        // a proof replayed to a node that had not applied the first record
+        // was accepted again.
+        let expires_at = now_secs.saturating_add(DPOP_MAX_AGE_SECS);
         if self
             .storage
-            .get(realm_id, &jti_key)
+            .put_if_absent(realm_id, &jti_key, &expires_at.to_le_bytes())
             .map_err(Self::storage_err)?
-            .is_some()
         {
-            return Err(IdentityError::DPopProofReplay);
+            Ok(())
+        } else {
+            Err(IdentityError::DPopProofReplay)
         }
-
-        let expires_at = now_secs.saturating_add(DPOP_MAX_AGE_SECS);
-        self.storage
-            .put(realm_id, &jti_key, &expires_at.to_le_bytes())
-            .map_err(Self::storage_err)
     }
 
     fn get_realm_dpop_nonce_secret(&self, realm_id: &RealmId) -> Result<[u8; 32], IdentityError> {
@@ -18645,6 +18699,7 @@ mod tests {
     mod session_fill_race;
     /// A session revocation is never undone by a racing refresh or create.
     mod session_rmw_race;
+    mod stale_read_single_use;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.
