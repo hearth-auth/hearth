@@ -120,7 +120,7 @@ jobs:
 
       - name: Install cross
         if: matrix.use_cross == true
-        uses: taiki-e/install-action@15413b256f995d819248ea62704771a959284285 # v2
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
         with:
           tool: cross
 
@@ -188,7 +188,7 @@ jobs:
           install-tailwind: "true"
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
           tool: cargo-nextest
 
@@ -378,7 +378,7 @@ jobs:
           key: ubuntu-sbom-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install cargo-cyclonedx
-        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
           tool: cargo-cyclonedx@0.5.9
 
