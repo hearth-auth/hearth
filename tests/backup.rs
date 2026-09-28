@@ -2941,3 +2941,187 @@ async fn restore_keeps_an_rs256_client_of_a_realm_that_turned_fapi_on() {
         );
     }
 }
+
+// ── Retired keys never come back (M1) ─────────────────────────────────────────
+
+/// Every `kid` of type `kty` the realm's JWKS publishes — the keys that verify
+/// its tokens.
+fn jwks_kids(
+    h: &common::TestHarness,
+    realm: &hearth::core::RealmId,
+    kty: &str,
+) -> std::collections::BTreeSet<String> {
+    h.identity()
+        .realm_jwks(realm)
+        .expect("jwks")
+        .keys
+        .into_iter()
+        .filter(|k| k.kty == kty)
+        .map(|k| k.kid)
+        .collect()
+}
+
+/// A tenant realm that revoked its retiring keys (a rotation with no grace
+/// window) does not get them back from an archive made while they were still
+/// inside their window — neither the Ed25519 access-token key nor the RS256
+/// ID-token key — in either mode that restores into a live realm.
+#[tokio::test]
+async fn a_revoked_tenant_retiring_key_is_not_reinstated_by_a_skip_or_merge_restore() {
+    for mode in [RestoreMode::Skip, RestoreMode::Merge] {
+        let h = common::TestHarness::embedded().await.expect("harness");
+        let (realm, _email, _password) = seeded_realm(&h);
+        register_rs256_client(&h, &realm);
+        let revoked_ed = jwks_kids(&h, &realm, "OKP");
+        let revoked_rsa = jwks_kids(&h, &realm, "RSA");
+        assert_eq!(
+            revoked_rsa.len(),
+            1,
+            "precondition: the realm has an RSA key"
+        );
+
+        h.identity()
+            .rotate_realm_signing_key(&realm, 3_600)
+            .expect("rotate with a grace window");
+        let archive = export_realm_to_file(&h, &realm, &ExportOptions::default());
+        h.identity()
+            .rotate_realm_signing_key(&realm, 0)
+            .expect("revoking rotation");
+        assert!(
+            h.identity()
+                .export_retiring_signing_keys(&realm)
+                .expect("retiring")
+                .is_empty()
+                && h.identity()
+                    .export_retiring_id_token_rsa_keys(&realm)
+                    .expect("retiring rsa")
+                    .is_empty(),
+            "precondition: the revoking rotation purged both retiring keys"
+        );
+
+        let reader = BackupArchive::open(archive.path()).expect("open");
+        let report = make_importer(&h)
+            .import_realm(
+                &realm_slug(&h, &realm),
+                &reader,
+                &ImportOptions {
+                    mode: mode.clone(),
+                    ..import_opts_with_passphrase()
+                },
+            )
+            .expect("restore");
+        assert_eq!(
+            (
+                report.retiring_signing_keys.errored,
+                report.retiring_id_token_signing_keys.errored
+            ),
+            (1, 1),
+            "{mode:?}: both revoked keys are refused and reported"
+        );
+        assert!(
+            h.identity()
+                .export_retiring_signing_keys(&realm)
+                .expect("retiring")
+                .is_empty()
+                && h.identity()
+                    .export_retiring_id_token_rsa_keys(&realm)
+                    .expect("retiring rsa")
+                    .is_empty(),
+            "{mode:?}: no revoked key is back in storage"
+        );
+        let ed_now = jwks_kids(&h, &realm, "OKP");
+        let rsa_now = jwks_kids(&h, &realm, "RSA");
+        assert!(
+            ed_now.is_disjoint(&revoked_ed) && rsa_now.is_disjoint(&revoked_rsa),
+            "{mode:?}: a revoked key must not verify tokens again \
+             (JWKS {ed_now:?} / {rsa_now:?}, revoked {revoked_ed:?} / {revoked_rsa:?})"
+        );
+    }
+}
+
+/// A retiring key that is still inside its window at the live realm is left
+/// alone by a restore of an archive that carries it: the record of the
+/// rotation is not a reason to refuse a key the realm still trusts.
+#[tokio::test]
+async fn a_restore_leaves_a_live_retiring_key_alone() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let (realm, _email, _password) = seeded_realm(&h);
+    register_rs256_client(&h, &realm);
+    h.identity()
+        .rotate_realm_signing_key(&realm, 3_600)
+        .expect("rotate with a grace window");
+    let archive = export_realm_to_file(&h, &realm, &ExportOptions::default());
+
+    let reader = BackupArchive::open(archive.path()).expect("open");
+    let report = make_importer(&h)
+        .import_realm(
+            &realm_slug(&h, &realm),
+            &reader,
+            &ImportOptions {
+                mode: RestoreMode::Merge,
+                ..import_opts_with_passphrase()
+            },
+        )
+        .expect("restore");
+    assert_eq!(
+        (
+            report.retiring_signing_keys.skipped,
+            report.retiring_signing_keys.errored,
+            report.retiring_id_token_signing_keys.skipped,
+            report.retiring_id_token_signing_keys.errored,
+        ),
+        (1, 0, 1, 0),
+        "the live retiring keys are already there"
+    );
+}
+
+/// A deleted tenant realm restored from an archive older than a revoking
+/// rotation is refused before anything is written: installing the archived
+/// active key would re-arm every token the holder of that revoked key can
+/// mint. The record of the rotation outlives the realm.
+#[tokio::test]
+async fn a_deleted_realm_is_not_restored_with_a_key_it_revoked() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let (realm, _email, _password) = seeded_realm(&h);
+    register_rs256_client(&h, &realm);
+    let archive = export_realm_to_file(&h, &realm, &ExportOptions::default());
+    let slug = realm_slug(&h, &realm);
+    h.identity()
+        .rotate_realm_signing_key(&realm, 0)
+        .expect("revoking rotation");
+    h.identity()
+        .update_realm(
+            &realm,
+            &hearth::identity::UpdateRealmRequest {
+                status: Some(hearth::identity::RealmStatus::Archived),
+                ..Default::default()
+            },
+        )
+        .expect("archive realm");
+    h.identity().delete_realm(&realm).expect("delete realm");
+    assert!(
+        h.identity().get_realm(&realm).expect("get").is_none(),
+        "precondition: the realm is gone"
+    );
+
+    let reader = BackupArchive::open(archive.path()).expect("open");
+    for dry_run in [true, false] {
+        let err = make_importer(&h)
+            .import_realm(
+                &slug,
+                &reader,
+                &ImportOptions {
+                    dry_run,
+                    ..import_opts_with_passphrase()
+                },
+            )
+            .expect_err("a revoked key must not be restored as the realm's key");
+        assert!(
+            err.to_string().contains("rotated away"),
+            "dry_run {dry_run}: the refusal says why: {err}"
+        );
+        assert!(
+            h.identity().get_realm(&realm).expect("get").is_none(),
+            "dry_run {dry_run}: nothing is written"
+        );
+    }
+}

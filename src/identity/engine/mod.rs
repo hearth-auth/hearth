@@ -331,6 +331,7 @@ pub(crate) mod client_jwks;
 mod control;
 mod id_token_keys;
 pub(super) mod oauth;
+mod retired_keys;
 mod sharded_cache;
 // Phase D engine modules
 pub(super) mod aat;
@@ -338,6 +339,7 @@ pub(super) mod cross_realm;
 pub(super) mod spiffe;
 pub(super) mod txn;
 
+use retired_keys::KeyFamily;
 use sharded_cache::ShardedEpochMap;
 
 /// Context supplied to [`IdentityEngine::issue_tokens_with_context`] to
@@ -4345,34 +4347,43 @@ impl EmbeddedIdentityEngine {
             .unwrap_or_else(|_| Arc::clone(&self.signing_key))
     }
 
-    /// Makes a change to a realm's stored key material visible: bumps the
-    /// persisted key epoch and evicts every key cache plus the memoized
-    /// token claims. Caller MUST hold `realm_ops_lock`.
-    fn publish_realm_key_change_locked(&self, realm_id: &RealmId) -> Result<(), IdentityError> {
-        let sys_realm = keys::system_realm_id();
-        // Bump the rotation epoch *before* clearing the cache so a concurrent
-        // cache-miss fill that snapshotted the old epoch and read the outgoing
-        // key sees the change and discards its stale insert instead of
-        // resurrecting it past the `remove()` below (HEA-2096). Serialised by
-        // `realm_ops_lock`, so the read-then-write bump cannot lose an update.
-        //
-        // The epoch is also *persisted*, so it replicates with the key
-        // material and every other node can tell that its own cached key is
-        // stale. Read the stored value rather than the local one: on a node
-        // that has never rotated this realm the local counter is 0 and would
-        // hand back an epoch another node has already used (§4.15#6).
+    /// The batch entry that bumps `realm_id`'s persisted key epoch, and the
+    /// epoch it writes. A change to a realm's stored key material puts this
+    /// entry in the same atomic batch as the key rows, then calls
+    /// [`Self::evict_realm_key_caches_locked`]. Caller MUST hold
+    /// `realm_ops_lock`, which serialises the read-then-write bump so it
+    /// cannot lose an update.
+    ///
+    /// The epoch is *persisted*, so it replicates with the key material and
+    /// every other node can tell that its own cached key is stale. Read the
+    /// stored value rather than the local one: on a node that has never
+    /// rotated this realm the local counter is 0 and would hand back an epoch
+    /// another node has already used (§4.15#6).
+    fn realm_key_epoch_bump_locked(&self, realm_id: &RealmId) -> (u64, (Vec<u8>, Vec<u8>)) {
         let next_epoch = self
             .read_persisted_key_epoch(realm_id)
             .max(self.realm_key_epoch.get(realm_id).unwrap_or(0))
             .wrapping_add(1);
-        self.storage
-            .put(
-                &sys_realm,
-                &keys::encode_realm_key_epoch(realm_id),
-                &next_epoch.to_le_bytes(),
-            )
-            .map_err(Self::storage_err)?;
-        self.realm_key_epoch.insert(realm_id.clone(), next_epoch);
+        (
+            next_epoch,
+            (
+                keys::encode_realm_key_epoch(realm_id),
+                next_epoch.to_le_bytes().to_vec(),
+            ),
+        )
+    }
+
+    /// Makes a written change to a realm's key material visible on this node:
+    /// records the new `epoch` (already persisted by the change's batch, see
+    /// [`Self::realm_key_epoch_bump_locked`]) and evicts every key cache plus
+    /// the memoized token claims. Caller MUST hold `realm_ops_lock`.
+    ///
+    /// The epoch is bumped *before* the caches are cleared so a concurrent
+    /// cache-miss fill that snapshotted the old epoch and read the outgoing
+    /// key sees the change and discards its stale insert instead of
+    /// resurrecting it past the `remove()` below (HEA-2096).
+    fn evict_realm_key_caches_locked(&self, realm_id: &RealmId, epoch: u64) {
+        self.realm_key_epoch.insert(realm_id.clone(), epoch);
 
         // Invalidate the active key cache so realm_jwks / token issuance pick up the new key.
         self.realm_signing_keys.remove(realm_id);
@@ -4387,7 +4398,6 @@ impl EmbeddedIdentityEngine {
         // (grace 0) actually cuts it off instead of letting a warm cache entry
         // carry it to its own `exp` (HEA-2093).
         self.flush_token_claims_cache();
-        Ok(())
     }
 
     /// Whether the reserved system realm holds at least one user record.
@@ -4640,89 +4650,6 @@ impl EmbeddedIdentityEngine {
         out
     }
 
-    /// Deletes retiring signing-key blobs for a realm from system-realm storage.
-    ///
-    /// `cutoff_secs` selects what goes:
-    /// - `Some(now)` — only keys whose grace deadline has already elapsed
-    ///   (`deadline <= now`), the routine purge performed on each rotation.
-    /// - `None` — every retiring key, used when the realm itself is deleted.
-    ///
-    /// Takes `storage` by argument rather than `&self` so the `delete_realm`
-    /// background cascade — which owns only a cloned storage handle — can reuse
-    /// it. Best-effort: a failure here must never abort a rotation or delete, so
-    /// errors are logged and the count of removed blobs is returned.
-    /// Records, for the system realm, that a rotation retired `old_key_id` —
-    /// and, for a revoking rotation, every retiring key it is about to purge —
-    /// so a backup restore can never reinstall one of them
-    /// ([`keys::encode_system_retired_signing_kid`]). Written before the new
-    /// key, so a rotation that fails later leaves at worst a record for a key
-    /// that is still active, which the restore check never consults (an
-    /// archive carrying the active key is a no-op).
-    fn record_system_keys_retired(
-        &self,
-        old_key_id: &str,
-        revoking: bool,
-        now_secs: u64,
-    ) -> Result<(), IdentityError> {
-        let sys_realm = keys::system_realm_id();
-        let mut kids = vec![old_key_id.to_string()];
-        if revoking {
-            let prefix = keys::realm_retiring_key_scan_prefix(&sys_realm);
-            let end = keys::prefix_end(&prefix);
-            for entry in self
-                .storage
-                .scan(&sys_realm, &prefix, &end)
-                .map_err(Self::storage_err)?
-            {
-                if let Some(kid) = keys::parse_retiring_key_id(&entry.key) {
-                    kids.push(kid);
-                }
-            }
-        }
-        let stamp = now_secs.to_string();
-        for kid in kids {
-            self.storage
-                .put(
-                    &sys_realm,
-                    &keys::encode_system_retired_signing_kid(&kid),
-                    stamp.as_bytes(),
-                )
-                .map_err(Self::storage_err)?;
-        }
-        Ok(())
-    }
-
-    /// Whether the system realm has rotated away from the signing key `key_id`:
-    /// a rotation recorded it ([`Self::record_system_keys_retired`]), or it is
-    /// one of the system realm's retiring keys (a rotation made before the
-    /// record existed, still inside its grace window).
-    fn system_rotated_away_from(&self, key_id: &str) -> Result<bool, IdentityError> {
-        let sys_realm = keys::system_realm_id();
-        if self
-            .storage
-            .get(&sys_realm, &keys::encode_system_retired_signing_kid(key_id))
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            return Ok(true);
-        }
-        self.system_retiring_key_is_live(key_id)
-    }
-
-    /// Whether the system realm currently holds a retiring-key row for
-    /// `key_id` (any deadline).
-    fn system_retiring_key_is_live(&self, key_id: &str) -> Result<bool, IdentityError> {
-        let sys_realm = keys::system_realm_id();
-        let prefix = keys::realm_retiring_key_scan_prefix(&sys_realm);
-        let end = keys::prefix_end(&prefix);
-        Ok(self
-            .storage
-            .scan(&sys_realm, &prefix, &end)
-            .map_err(Self::storage_err)?
-            .iter()
-            .any(|e| keys::parse_retiring_key_id(&e.key).as_deref() == Some(key_id)))
-    }
-
     /// Decides what installing `archived` as the system realm's signing key
     /// does, reading only: [`ImportOutcome::Skipped`] when it is already the
     /// active key, or when the system realm holds operator accounts and
@@ -4749,16 +4676,11 @@ impl EmbeddedIdentityEngine {
         // instance one retired after a compromise. An archive older than the
         // rotation still carries it, and installing it would re-arm every
         // token its holder can mint.
-        if self.system_rotated_away_from(archived.key_id())? {
-            return Err(IdentityError::InvalidInput {
-                reason: format!(
-                    "the archived system signing key {} is one this system realm rotated away \
-                     from; a restore never reinstalls a retired key (restore a backup made \
-                     after the rotation)",
-                    archived.key_id()
-                ),
-            });
-        }
+        self.refuse_rotated_away_active_key(
+            &keys::system_realm_id(),
+            KeyFamily::Ed25519,
+            archived.key_id(),
+        )?;
         Ok(if pristine {
             ImportOutcome::Created
         } else {
@@ -4766,6 +4688,21 @@ impl EmbeddedIdentityEngine {
         })
     }
 
+    /// Deletes retiring signing-key blobs for a realm from system-realm storage.
+    ///
+    /// `cutoff_secs` selects what goes:
+    /// - `Some(now)` — only keys whose grace deadline has already elapsed
+    ///   (`deadline <= now`).
+    /// - `None` — every retiring key, used when the realm itself is deleted.
+    ///
+    /// A rotation does not come through here: it removes its retiring rows in
+    /// the same atomic batch that installs the new key and records the retired
+    /// kids ([`Self::retiring_rows_to_purge`]).
+    ///
+    /// Takes `storage` by argument rather than `&self` so the `delete_realm`
+    /// background cascade — which owns only a cloned storage handle — can reuse
+    /// it. Best-effort: a failure here must never abort a delete, so errors are
+    /// logged and the count of removed blobs is returned.
     fn purge_realm_retiring_keys(
         storage: &Arc<dyn StorageEngine>,
         realm_id: &RealmId,
@@ -7487,7 +7424,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             None
         };
 
-        // Generate and store the new active signing key.
+        // Generate the new active signing key.
         let new_key = SigningKey::generate()?;
         let new_pkcs8 = Zeroizing::new(new_key.pkcs8_bytes().to_vec());
         let kek = self
@@ -7495,11 +7432,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .key_encryption_key
             .as_ref()
             .map(|k| k.as_bytes());
-        let key_storage_key = keys::encode_realm_signing_key(realm_id);
         let new_stored = crate::identity::key_encryption::wrap_key(&new_pkcs8, kek)?;
-        self.storage
-            .put(&sys_realm, &key_storage_key, &new_stored)
-            .map_err(Self::storage_err)?;
+
+        // Every write of the rotation lands in ONE atomic batch: the new key,
+        // the old key's retiring row, the purge of closed (or, revoking, all)
+        // retiring rows, the record of every kid the rotation retires, the RSA
+        // half, and the key-epoch bump. A crash can leave the realm before the
+        // rotation or after it, never with a new key whose predecessor is not
+        // recorded retired — the record a restore consults to refuse archived
+        // key material the realm rotated away from.
+        let mut puts: Vec<(Vec<u8>, Vec<u8>)> =
+            vec![(keys::encode_realm_signing_key(realm_id), new_stored)];
+        let mut deletes: Vec<Vec<u8>> = Vec::new();
 
         // Reap retiring keys whose grace window has already closed. They can
         // never verify anything again, but they are wrapped (plaintext without
@@ -7516,10 +7460,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
         let revoking = grace_period_secs == 0;
         let cutoff = if revoking { None } else { Some(now_secs) };
-        if keys::is_system_realm(realm_id) {
-            self.record_system_keys_retired(&old_key_id, revoking, now_secs)?;
-        }
-        let purged = Self::purge_realm_retiring_keys(&self.storage, realm_id, cutoff);
+        let purge = self.retiring_rows_to_purge(realm_id, KeyFamily::Ed25519, cutoff)?;
+        let purged = purge.rows.len();
+        deletes.extend(purge.rows);
+        let mut retired = purge.kids;
+        retired.push(old_key_id.clone());
+        puts.extend(Self::retired_record_puts(
+            realm_id,
+            KeyFamily::Ed25519,
+            &retired,
+            now_secs,
+        ));
 
         // Store the old key as a retiring key with its expiry deadline. A
         // revoking rotation stores nothing: a deadline of `now` can never
@@ -7527,26 +7478,32 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // in storage until some later rotation reaped it.
         let deadline_secs = now_secs.saturating_add(grace_period_secs);
         if !revoking {
-            let retiring_key_storage =
-                keys::encode_realm_retiring_key(realm_id, deadline_secs, &old_key_id);
             let old_stored = crate::identity::key_encryption::wrap_key(&old_pkcs8, kek)?;
-            self.storage
-                .put(&sys_realm, &retiring_key_storage, &old_stored)
-                .map_err(Self::storage_err)?;
+            puts.push((
+                keys::encode_realm_retiring_key(realm_id, deadline_secs, &old_key_id),
+                old_stored,
+            ));
         }
 
-        // RS256 ID-token key: same grace, same purge rules, written before the
-        // single epoch bump below so every node evicts both families together.
-        let rsa_rotation = self.rotate_realm_id_token_rsa_key_locked(
+        // RS256 ID-token key: same grace, same purge rules, same batch, so
+        // the single epoch bump evicts both families on every node.
+        let rsa_rotation = self.plan_realm_id_token_rsa_rotation(
             realm_id,
             old_rsa.as_deref(),
             new_rsa.as_ref(),
             now_secs,
             deadline_secs,
             revoking,
+            &mut puts,
+            &mut deletes,
         )?;
 
-        self.publish_realm_key_change_locked(realm_id)?;
+        let (epoch, epoch_entry) = self.realm_key_epoch_bump_locked(realm_id);
+        puts.push(epoch_entry);
+        self.storage
+            .write_batch(&sys_realm, &puts, &deletes)
+            .map_err(Self::storage_err)?;
+        self.evict_realm_key_caches_locked(realm_id, epoch);
 
         let (rsa_old_kid, rsa_new_kid) = match &rsa_rotation {
             Some((old, new)) => (old.clone().unwrap_or_default(), new.clone()),
@@ -11893,6 +11850,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             Some(bytes) => SigningKey::from_pkcs8(bytes)?,
             None => SigningKey::generate()?,
         };
+        // Never restore a realm with a key it rotated away from. The record
+        // outlives the realm, so a deleted realm restored from an archive
+        // older than a revoking rotation does not get the revoked key back.
+        self.refuse_rotated_away_active_key(
+            &realm_id,
+            KeyFamily::Ed25519,
+            realm_signing_key.key_id(),
+        )?;
 
         let realm = Realm::new(
             realm_id.clone(),
@@ -12009,14 +11974,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map(|k| k.as_bytes());
         let plaintext = Zeroizing::new(archived.pkcs8_bytes().to_vec());
         let stored = crate::identity::key_encryption::wrap_key(&plaintext, kek)?;
+        // The key this install displaces is retired exactly as a rotation
+        // retires one — recorded in the same batch — so a later restore of an
+        // archive that still carries it never reinstalls it.
+        let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
+        let mut puts = vec![(keys::encode_realm_signing_key(&sys_realm), stored)];
+        puts.extend(Self::retired_record_puts(
+            &sys_realm,
+            KeyFamily::Ed25519,
+            &[current.key_id().to_string()],
+            now_secs,
+        ));
+        let (epoch, epoch_entry) = self.realm_key_epoch_bump_locked(&sys_realm);
+        puts.push(epoch_entry);
         self.storage
-            .put(
-                &sys_realm,
-                &keys::encode_realm_signing_key(&sys_realm),
-                &stored,
-            )
+            .put_batch(&sys_realm, &puts)
             .map_err(Self::storage_err)?;
-        self.publish_realm_key_change_locked(&sys_realm)?;
+        self.evict_realm_key_caches_locked(&sys_realm, epoch);
         tracing::warn!(
             new_kid = %archived.key_id(),
             replaced_kid = %current.key_id(),
@@ -12034,6 +12008,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let archived = SigningKey::from_pkcs8(pkcs8)?;
         let current = self.get_or_load_realm_signing_key(&keys::system_realm_id())?;
         self.plan_system_key_import(&current, &archived, overwrite)
+    }
+
+    fn check_archived_realm_keys(
+        &self,
+        realm_id: &RealmId,
+        signing_key_pkcs8: Option<&[u8]>,
+        id_token_rsa_pkcs8: Option<&[u8]>,
+    ) -> Result<(), IdentityError> {
+        if let Some(pkcs8) = signing_key_pkcs8 {
+            let key = SigningKey::from_pkcs8(pkcs8)?;
+            self.refuse_rotated_away_active_key(realm_id, KeyFamily::Ed25519, key.key_id())?;
+        }
+        if let Some(pkcs8) = id_token_rsa_pkcs8 {
+            let key = tokens::RsaIdTokenSigningKey::from_pkcs8(pkcs8)?;
+            self.refuse_rotated_away_active_key(realm_id, KeyFamily::IdTokenRs256, key.key_id())?;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -13404,28 +13395,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Refuse material that does not load, rather than storing a blob that
         // `load_realm_retiring_keys` will silently drop at validation time.
         let _usable = SigningKey::from_pkcs8(&key.pkcs8)?;
-        // A system-realm key that a rotation retired and that no longer has a
-        // retiring row was purged — by a revoking rotation, the remedy for a
-        // leaked key. An archive made inside its grace window still carries
-        // it; reinstating it would let it verify tokens again.
-        if keys::is_system_realm(realm_id)
-            && self
-                .storage
-                .get(
-                    &keys::system_realm_id(),
-                    &keys::encode_system_retired_signing_kid(&key.key_id),
-                )
-                .map_err(Self::storage_err)?
-                .is_some()
-            && !self.system_retiring_key_is_live(&key.key_id)?
-        {
-            return Err(IdentityError::InvalidInput {
-                reason: format!(
-                    "retiring system signing key {} was revoked by a rotation; a restore never                      reinstates it",
-                    key.key_id
-                ),
-            });
-        }
+        // A key this realm recorded retired and that no longer has a retiring
+        // row was purged — by a revoking rotation, the remedy for a leaked
+        // key. An archive made inside its grace window still carries it;
+        // reinstating it would let it verify tokens again.
+        self.refuse_purged_retiring_key(realm_id, KeyFamily::Ed25519, &key.key_id)?;
         let sys_realm = keys::system_realm_id();
         let storage_key = keys::encode_realm_retiring_key(realm_id, key.deadline_secs, &key.key_id);
         let exists = self
@@ -17956,6 +17930,8 @@ mod tests {
     mod import_client_rs256_key;
     /// Concurrent revocations survive a racing control-cache reload.
     mod revocation_reload_races;
+    /// A signing-key rotation lands in one atomic storage batch.
+    mod rotation_atomicity;
     /// PKCE challenge and refresh-token hash compare in constant time.
     mod secret_compare;
     /// A session-cache fill never resurrects a session revoked while it ran.

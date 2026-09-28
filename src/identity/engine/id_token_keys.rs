@@ -18,7 +18,7 @@
 //!   rotation discards its stale insert (HEA-2096).
 //! - **Rotation** — `rotate_realm_signing_key` rotates the RSA key alongside
 //!   the Ed25519 key, with the same grace semantics; see
-//!   [`EmbeddedIdentityEngine::rotate_realm_id_token_rsa_key_locked`].
+//!   [`EmbeddedIdentityEngine::plan_realm_id_token_rsa_rotation`].
 //!
 //! Scope, restated because it is the point: this key signs ID tokens and
 //! nothing else, and no validation path for access, refresh, logout or
@@ -37,6 +37,7 @@ use crate::identity::types::RetiringSigningKeyExport;
 use crate::identity::IdentityEngine as _;
 use crate::storage::StorageEngine;
 
+use super::retired_keys::KeyFamily;
 use super::EmbeddedIdentityEngine;
 
 /// A retiring RSA ID-token key still inside its rotation grace period.
@@ -377,13 +378,15 @@ impl EmbeddedIdentityEngine {
         purged
     }
 
-    /// Rotates the realm's RSA ID-token key, if it has one, with the same grace
-    /// semantics as the Ed25519 rotation it runs inside.
+    /// Plans the rotation of the realm's RSA ID-token key, if it has one, with
+    /// the same grace semantics as the Ed25519 rotation it runs inside: appends
+    /// its writes to the rotation's `puts` / `deletes`, which the caller
+    /// applies in ONE atomic batch together with the Ed25519 half and the
+    /// single key-epoch bump that evicts both families on every node.
     ///
-    /// MUST be called with `realm_ops_lock` held, after the Ed25519 writes and
-    /// before the rotation epoch is bumped, so the single epoch bump evicts
-    /// both key families on every node. The caller generates `new_key` before
-    /// any write, so a key-generation failure leaves nothing rotated.
+    /// MUST be called with `realm_ops_lock` held. The caller generates
+    /// `new_key` before anything is planned, so a key-generation failure
+    /// leaves nothing rotated.
     ///
     /// - `new_key: None` — the realm has no RSA key and is left without one:
     ///   rotation never provisions RS256 for a realm no client asked it of. A
@@ -393,10 +396,12 @@ impl EmbeddedIdentityEngine {
     ///   verify with it anyway.
     ///
     /// A revoking rotation (`revoking`, i.e. grace 0) retires nothing and
-    /// purges every RSA retiring key, exactly as the Ed25519 half does.
+    /// purges every RSA retiring key, exactly as the Ed25519 half does. Every
+    /// kid the rotation retires or purges is recorded retired, so a restore
+    /// never reinstalls it.
     ///
-    /// Returns `(old_kid, new_kid)` when a key was rotated.
-    pub(super) fn rotate_realm_id_token_rsa_key_locked(
+    /// Returns `(old_kid, new_kid)` when a key is rotated.
+    pub(super) fn plan_realm_id_token_rsa_rotation(
         &self,
         realm_id: &RealmId,
         old_key: Option<&RsaIdTokenSigningKey>,
@@ -404,42 +409,51 @@ impl EmbeddedIdentityEngine {
         now_secs: u64,
         deadline_secs: u64,
         revoking: bool,
+        puts: &mut Vec<(Vec<u8>, Vec<u8>)>,
+        deletes: &mut Vec<Vec<u8>>,
     ) -> Result<Option<(Option<String>, String)>, IdentityError> {
         let cutoff = if revoking { None } else { Some(now_secs) };
+        if new_key.is_none() && !revoking {
+            return Ok(None);
+        }
+        let purge = self.retiring_rows_to_purge(realm_id, KeyFamily::IdTokenRs256, cutoff)?;
+        deletes.extend(purge.rows);
+        let mut retired = purge.kids;
         let Some(new_key) = new_key else {
-            if revoking {
-                Self::purge_realm_id_token_rsa_retiring_keys(&self.storage, realm_id, None);
-            }
+            puts.extend(Self::retired_record_puts(
+                realm_id,
+                KeyFamily::IdTokenRs256,
+                &retired,
+                now_secs,
+            ));
             return Ok(None);
         };
-        let sys_realm = keys::system_realm_id();
-        let new_stored =
-            crate::identity::key_encryption::wrap_key(new_key.pkcs8_bytes(), self.id_token_kek())?;
-        self.storage
-            .put(
-                &sys_realm,
-                &keys::encode_realm_id_token_rsa_key(realm_id),
-                &new_stored,
-            )
-            .map_err(Self::storage_err)?;
-        Self::purge_realm_id_token_rsa_retiring_keys(&self.storage, realm_id, cutoff);
-        if let (Some(old_key), false) = (old_key, revoking) {
-            let old_stored = crate::identity::key_encryption::wrap_key(
-                old_key.pkcs8_bytes(),
-                self.id_token_kek(),
-            )?;
-            self.storage
-                .put(
-                    &sys_realm,
-                    &keys::encode_realm_id_token_rsa_retiring_key(
+        puts.push((
+            keys::encode_realm_id_token_rsa_key(realm_id),
+            crate::identity::key_encryption::wrap_key(new_key.pkcs8_bytes(), self.id_token_kek())?,
+        ));
+        if let Some(old_key) = old_key {
+            retired.push(old_key.key_id().to_string());
+            if !revoking {
+                puts.push((
+                    keys::encode_realm_id_token_rsa_retiring_key(
                         realm_id,
                         deadline_secs,
                         old_key.key_id(),
                     ),
-                    &old_stored,
-                )
-                .map_err(Self::storage_err)?;
+                    crate::identity::key_encryption::wrap_key(
+                        old_key.pkcs8_bytes(),
+                        self.id_token_kek(),
+                    )?,
+                ));
+            }
         }
+        puts.extend(Self::retired_record_puts(
+            realm_id,
+            KeyFamily::IdTokenRs256,
+            &retired,
+            now_secs,
+        ));
         Ok(Some((
             old_key.map(|k| k.key_id().to_string()),
             new_key.key_id().to_string(),
@@ -579,7 +593,7 @@ impl EmbeddedIdentityEngine {
                 operation: "import_id_token_rsa_key",
             });
         }
-        let _usable = RsaIdTokenSigningKey::from_pkcs8(pkcs8)?;
+        let archived = RsaIdTokenSigningKey::from_pkcs8(pkcs8)?;
         let sys_realm = keys::system_realm_id();
         let storage_key = keys::encode_realm_id_token_rsa_key(realm_id);
         let exists = self
@@ -590,9 +604,29 @@ impl EmbeddedIdentityEngine {
         if exists && !overwrite {
             return Ok(ImportOutcome::Skipped);
         }
+        // Never install a key this realm rotated away from: an archive older
+        // than a (revoking) rotation still carries it.
+        self.refuse_rotated_away_active_key(realm_id, KeyFamily::IdTokenRs256, archived.key_id())?;
         let body = crate::identity::key_encryption::wrap_key(pkcs8, self.id_token_kek())?;
+        let mut puts = vec![(storage_key, body)];
+        // A key this install displaces is retired exactly as a rotation
+        // retires one, in the same batch, so a later restore cannot bring it
+        // back either.
+        if exists {
+            if let Ok(Some(current)) = self.load_realm_id_token_rsa_key(realm_id) {
+                if current.key_id() != archived.key_id() {
+                    let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
+                    puts.extend(Self::retired_record_puts(
+                        realm_id,
+                        KeyFamily::IdTokenRs256,
+                        &[current.key_id().to_string()],
+                        now_secs,
+                    ));
+                }
+            }
+        }
         self.storage
-            .put(&sys_realm, &storage_key, &body)
+            .put_batch(&sys_realm, &puts)
             .map_err(Self::storage_err)?;
         self.realm_id_token_rsa_keys.remove(realm_id);
         Ok(if exists {
@@ -653,6 +687,11 @@ impl EmbeddedIdentityEngine {
             return Ok(ImportOutcome::Skipped);
         }
         let _usable = RsaIdTokenSigningKey::from_pkcs8(&key.pkcs8)?;
+        // A retiring key the realm recorded retired and no longer holds was
+        // purged — by a revoking rotation, the remedy for a leaked key. An
+        // archive made inside its grace window still carries it; reinstating
+        // it would let it verify ID tokens again.
+        self.refuse_purged_retiring_key(realm_id, KeyFamily::IdTokenRs256, &key.key_id)?;
         let sys_realm = keys::system_realm_id();
         let storage_key =
             keys::encode_realm_id_token_rsa_retiring_key(realm_id, key.deadline_secs, &key.key_id);

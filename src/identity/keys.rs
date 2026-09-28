@@ -665,21 +665,30 @@ pub(crate) fn encode_control_epoch() -> Vec<u8> {
     b"sys:control:epoch".to_vec()
 }
 
-/// Storage key for the KEK enrolment marker.
+/// Records that `realm_id` rotated away from the Ed25519 signing key `key_id`.
 ///
-/// Records that the system realm rotated away from the signing key `key_id`.
-///
-/// Format: `sys:signing_key:retired:{key_id}` — value: the rotation time in
-/// Unix seconds (decimal). Stored under the system realm. Written by every
-/// rotation of the system realm's key, for the key it retires and for every
-/// retiring key a revoking rotation purges; never deleted. It holds no key
-/// material — only the identifier a backup restore checks so that an archive
-/// older than a rotation (for instance one made before a key compromise)
-/// cannot reinstall the retired key.
-pub(crate) fn encode_system_retired_signing_kid(key_id: &str) -> Vec<u8> {
-    format!("sys:signing_key:retired:{key_id}").into_bytes()
+/// Format: `realm:retired:{realm_uuid}:ed25519:{key_id}` — value: the time the
+/// key was retired, in Unix seconds (decimal). Stored under the system realm.
+/// Written in the same atomic batch as every rotation of the realm's key — for
+/// the key it retires and for every retiring key it purges — and by a restore
+/// that displaces a live key; never deleted, not even with the realm. It holds
+/// no key material — only the identifier a backup restore checks so that an
+/// archive older than a rotation (for instance one made before a key
+/// compromise) cannot reinstall the retired key.
+pub(crate) fn encode_realm_retired_signing_kid(realm_id: &RealmId, key_id: &str) -> Vec<u8> {
+    format!("realm:retired:{}:ed25519:{key_id}", realm_id.as_uuid()).into_bytes()
 }
 
+/// Records that `realm_id` rotated away from the RS256 ID-token key `key_id`.
+///
+/// Format: `realm:retired:{realm_uuid}:rs256:{key_id}`; the RSA twin of
+/// [`encode_realm_retired_signing_kid`], written and read the same way.
+pub(crate) fn encode_realm_retired_id_token_rsa_kid(realm_id: &RealmId, key_id: &str) -> Vec<u8> {
+    format!("realm:retired:{}:rs256:{key_id}", realm_id.as_uuid()).into_bytes()
+}
+
+/// Storage key for the KEK enrolment marker.
+///
 /// Written once, the first time a KEK-configured process opens a store. Its
 /// presence means every signing key in the store has been through the HKEY
 /// envelope, so an unenveloped signing key read afterwards is a downgrade and

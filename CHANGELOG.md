@@ -25,6 +25,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   included), before writing anything. `--mode overwrite` alone no longer replaces a live system
   key: it takes the new `hearth backup restore --replace-system-signing-key`, and the HTTP restore
   never replaces it.
+- **A restore never reinstates a revoked tenant signing key** — a `skip` or `merge` restore into a
+  live tenant realm reinstalled every retiring key the archive carried, so after a revoking rotation
+  (`grace_period_secs=0`, the remedy for a leaked key) restoring an archive made inside the earlier
+  grace window put the revoked key back, verifying tokens again until its original deadline —
+  reachable over HTTP by a tenant caller with `hearth.export`. The same held for the RS256 ID-token
+  key. Every rotation, in every realm and for both key families, now records the keys it retires
+  and purges in the same atomic write as the rotation (a crash can no longer leave a new key whose
+  predecessor is unrecorded); a restore that replaces a live key records the displaced one. A
+  restore refuses an archived retiring key so recorded (reported as an error on that key), and
+  refuses a realm restored as new — including one deleted since the archive was made — whose
+  archived active key is recorded, before writing anything.
 
 - **Heap corruption on the hot path fixed** — token validation, session lookup and storage reads no
   longer use `arc-swap` 1.9.2, which corrupted the heap under concurrent `load` + `rcu` (3 crashes in

@@ -103,6 +103,22 @@ window has already closed by the time you restore is skipped, because the origin
 would no longer accept it either; the restore report counts it under
 `retiring keys … skipped`.
 
+**A key a realm rotated away from never comes back.** Every signing-key
+rotation — of any realm, the system realm included, and of both the Ed25519
+key and the RS256 ID-token key — records every key it retires and every
+retiring key it purges (a revoking rotation, `grace_period_secs=0`, purges them
+all), in the same atomic write as the rotation itself. A restore that replaces
+a live key records the key it displaces the same way. A restore refuses an
+archived retiring key that record names once the target no longer holds it
+(reported as an error on that key, in `skip` and `merge` alike), and refuses a
+realm restored as new — absent from the target, or deleted since the archive
+was made — whose archived active key the record names, before writing
+anything. The record carries no key material and outlives the realm, so an
+archive made before you rotated a compromised key cannot put that key back into
+this data directory, even after the realm is deleted; restore a backup made
+after the rotation. A restore into a fresh, empty data directory has nothing to
+compare against, so restore the newest archive there.
+
 **Archives taken before these members existed do not contain them.** An older
 archive restores exactly as it did before: the members are simply absent, and
 absent means "there were none of these".
@@ -167,11 +183,12 @@ fresh signing key and no users, in every data directory):
 | `--dry-run` | Counted, nothing written | Reports what the real run would do — installed, kept, replaced or refused — and writes nothing |
 
 **A retired system key is never reinstalled.** Every rotation of the system
-realm's signing key records the key it retires (and a revoking rotation, every
-retiring key it purges). A restore refuses an archived system key that record
-names — or that is still one of the target's retiring keys — in every mode and
-even with `--replace-system-signing-key`, and refuses to reinstate an archived
-retiring key a revoking rotation purged. An archive made before you rotated a
+realm's signing key records the key it retires (and every retiring key it
+purges), and so does a `--replace-system-signing-key` restore for the key it
+displaces. A restore refuses an archived system key that record names — or
+that is still one of the target's retiring keys — in every mode and even with
+`--replace-system-signing-key`, and refuses to reinstate an archived retiring
+key a revoking rotation purged. An archive made before you rotated a
 compromised key therefore cannot bring that key back into a live instance;
 restore a backup made after the rotation. The record lives in the data
 directory: a restore into a fresh, empty directory has nothing to compare

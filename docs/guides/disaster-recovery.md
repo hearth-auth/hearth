@@ -611,6 +611,12 @@ tokens fail. Never use a window after a compromise.
    The response reports `"grace_period_secs":0` — the retired key is
    revoked. This is the correct call for an incident.
 
+   The rotation also records, in the same atomic write, every key it
+   retires or revokes. A later backup restore — even of an archive made
+   before the rotation, and even after the realm is deleted — refuses to
+   reinstall any of them, so restoring an old backup cannot undo the
+   revocation.
+
    For a **planned** rotation, ask for a window explicitly:
 
    ```bash

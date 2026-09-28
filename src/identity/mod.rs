@@ -2048,6 +2048,28 @@ pub trait IdentityEngine: Send + Sync {
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError>;
 
+    /// Refuses, without writing anything, archived key material that a restore
+    /// would install as `realm_id`'s ACTIVE keys when the realm rotated away
+    /// from it: its kid is recorded retired (by a rotation, a revoking
+    /// rotation, or a restore that displaced it — the record outlives the
+    /// realm), or it is one of the realm's retiring keys. `signing_key_pkcs8`
+    /// is the Ed25519 key, `id_token_rsa_pkcs8` the RS256 ID-token key.
+    ///
+    /// A restore runs this before its first write, so a refusal leaves the
+    /// target untouched; the installing calls ([`import_realm`](Self::import_realm),
+    /// [`import_realm_id_token_rsa_key`](Self::import_realm_id_token_rsa_key))
+    /// refuse the same keys themselves.
+    ///
+    /// # Errors
+    /// [`IdentityError::InvalidInput`] for a rotated-away key; a decode error
+    /// for material that does not load.
+    fn check_archived_realm_keys(
+        &self,
+        realm_id: &RealmId,
+        signing_key_pkcs8: Option<&[u8]>,
+        id_token_rsa_pkcs8: Option<&[u8]>,
+    ) -> Result<(), IdentityError>;
+
     /// Imports an OAuth 2.0 client: from an external system, a Hearth
     /// backup, or `hearth.yaml` reconciliation.
     ///

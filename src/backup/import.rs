@@ -599,6 +599,31 @@ impl BackupImporter {
             }
         }
 
+        // ── Keys the realm rotated away from (before any write) ─────────────
+        //
+        // A realm restored as new (absent here, or deleted since the archive
+        // was made) takes the archive's active keys. The target may have
+        // rotated away from them — above all by a revoking rotation after a
+        // leak — and its record of that outlives the realm, so a refusal here
+        // leaves the target untouched instead of failing half-way through.
+        // A realm that exists keeps its own active keys (skip/merge) or is
+        // refused (overwrite); the retiring-key importers below check theirs.
+        if !realm.id().as_uuid().is_nil()
+            && self
+                .identity
+                .get_realm(realm.id())
+                .map_err(identity_to_backup_err)?
+                .is_none()
+        {
+            self.identity
+                .check_archived_realm_keys(
+                    realm.id(),
+                    signing_key_pkcs8.as_ref().map(|z| z.as_slice()),
+                    id_token_rsa_pkcs8.as_ref().map(|z| z.as_slice()),
+                )
+                .map_err(identity_to_backup_err)?;
+        }
+
         // ── System realm signing key (before any other write) ───────────────
         //
         // The system realm (operator-console accounts) exists in every store —

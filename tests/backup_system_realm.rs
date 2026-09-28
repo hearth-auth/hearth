@@ -557,6 +557,38 @@ async fn a_revoked_system_retiring_key_is_not_reinstated_by_a_restore() {
     }
 }
 
+/// A system key a restore DISPLACED is recorded exactly as a rotated-away one:
+/// a later restore of an archive that still carries it never reinstalls it.
+/// Replacing a live key is a re-key, and the key it replaces may be the very
+/// one the operator restored to get away from.
+#[tokio::test]
+async fn a_system_key_a_restore_displaced_is_never_reinstalled() {
+    let sys = system_realm();
+    let dst = common::TestHarness::embedded().await.expect("dst");
+    seed_operator(&dst, "operator@hearth.test", "Operat0r-Pa55word!");
+    let displaced = system_key(&dst);
+    let old_archive = export(&dst, std::slice::from_ref(&sys));
+
+    let other = common::TestHarness::embedded().await.expect("other");
+    seed_operator(&other, "operator@hearth.test", "Operat0r-Pa55word!");
+    let other_archive = export(&other, std::slice::from_ref(&sys));
+    restore(&dst, &other_archive, &replace_key(RestoreMode::Overwrite))
+        .expect("the explicit opt-in replaces the live key");
+    let installed = system_key(&dst);
+    assert_ne!(
+        installed, displaced,
+        "precondition: the live key was replaced"
+    );
+
+    let err = restore(&dst, &old_archive, &replace_key(RestoreMode::Overwrite))
+        .expect_err("the displaced key must be refused");
+    assert!(
+        err.to_string().contains("rotated away"),
+        "the refusal says why: {err}"
+    );
+    assert_eq!(system_key(&dst), installed, "the displaced key stays out");
+}
+
 // ── Dry run ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
