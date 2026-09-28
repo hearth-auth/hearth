@@ -21,14 +21,15 @@ Required actions are stored on the user record in the `required_actions` array a
 
 ## Action types
 
-Four action types are supported. Values are SCREAMING_SNAKE_CASE strings in the JSON API.
+Five action types are supported. Values are SCREAMING_SNAKE_CASE strings in the JSON API.
 
 | Wire value | When to use | Auto-injected? |
 |---|---|---|
 | `VERIFY_EMAIL` | User must click a verification link sent to their registered email address. | No — assign explicitly. |
 | `UPDATE_PASSWORD` | User must set a new password. Use after an admin-initiated credential reset or a forced rotation policy. | No — assign explicitly. |
-| `ENROLL_MFA` | User must enroll a TOTP or WebAuthn factor. | Yes — injected by the adaptive-MFA engine when login arrives from an unrecognised device and the user has no enrolled factor. |
+| `ENROLL_MFA` | User must enroll a second factor: TOTP, or — in a realm with `webauthn_required` — a passkey. | Yes — injected when a client or role requires MFA and the user has no factor, and when the realm sets `webauthn_required` and the user has no passkey (see [Passkey enrolment during login](#passkey-enrolment-during-login)). |
 | `ENROLL_PHONE_OTP` | User must register and verify a phone number via SMS OTP. | Yes — injected when the realm's `mfa_methods` includes `sms` and the user has no verified phone on record. |
+| `ENROLL_EMAIL_OTP` | User must enable email one-time codes as a second factor. | Yes — injected when the realm's `mfa_methods` includes `email_otp` and the user has not enabled it. |
 
 ---
 
@@ -41,7 +42,8 @@ When a user has multiple pending actions, Hearth presents interstitials in a fix
 | 1 (first) | `VERIFY_EMAIL` |
 | 2 | `UPDATE_PASSWORD` |
 | 3 | `ENROLL_MFA` |
-| 4 (last) | `ENROLL_PHONE_OTP` |
+| 4 | `ENROLL_PHONE_OTP` |
+| 5 (last) | `ENROLL_EMAIL_OTP` |
 
 ---
 
@@ -121,8 +123,22 @@ When a user with pending required actions visits the authorization endpoint:
 | `UPDATE_PASSWORD` | `/required-action/UPDATE_PASSWORD` |
 | `ENROLL_MFA` | `/required-action/enroll-mfa` |
 | `ENROLL_PHONE_OTP` | `/required-action/ENROLL_PHONE_OTP` |
+| `ENROLL_EMAIL_OTP` | `/required-action/ENROLL_EMAIL_OTP` |
 
-These pages are served by the Hearth browser UI. They require the `hearth_ra_session` cookie to be present; direct requests without the cookie are rejected.
+These pages are served by the Hearth browser UI. They require the `hearth_ra_session` cookie to be present; direct requests without the cookie are rejected. Every form on them carries a token bound to that cookie, and a submission without it is refused (`403`).
+
+An enrolment or verification action the user has **already satisfied** when its page is reached — TOTP or a passkey for `ENROLL_MFA`, a verified phone for `ENROLL_PHONE_OTP`, email OTP for `ENROLL_EMAIL_OTP`, a verified address for `VERIFY_EMAIL` — is recorded as completed (`RequiredActionAutoCleared` audit event), removed from the account, and the login continues.
+
+### Passkey enrolment during login
+
+In a realm with `webauthn_required: true`, a user who has no passkey is not locked out: after the password and any second factor they already hold, `/required-action/enroll-mfa` asks them to register a passkey on the spot.
+
+- The registration requires **user verification** (a PIN, fingerprint or face on the authenticator), whatever the realm's `webauthn_user_verification` setting. A security key that proves presence only is refused, because it could never satisfy the realm.
+- The relying-party ID and origin are pinned to Hearth's public origin, exactly as for registration on the account page.
+- The registration challenge is single-use and bound to the required-action session that asked for it.
+- On success the action is recorded as completed and the login continues. A browser login's session records the passkey as the second factor proved (`ProvedWebAuthn`), which is what `webauthn_required` demands.
+- The realm must offer passkeys: if its `mfa_methods` list is set and does not include `webauthn`, the page answers `409` explaining that passkeys must be enabled.
+
 
 ---
 

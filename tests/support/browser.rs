@@ -92,6 +92,32 @@ impl Browser {
         self.jar.iter().any(|c| c.name == name)
     }
 
+    /// The value of the cookie `name` (any path), if the jar holds one.
+    pub fn cookie(&self, name: &str) -> Option<String> {
+        self.jar
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.value.clone())
+    }
+
+    /// POSTs `body` as JSON to `uri` with the extra request `headers`, the
+    /// way a page script's `fetch(…, { credentials: 'same-origin' })` does.
+    pub async fn post_json(
+        &mut self,
+        uri: &str,
+        body: &serde_json::Value,
+        headers: &[(&str, &str)],
+    ) -> Response {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json");
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        self.send(uri, req, Body::from(body.to_string())).await
+    }
+
     /// GETs `uri`, sending and storing cookies like a browser.
     pub async fn get(&mut self, uri: &str) -> Response {
         let req = Request::builder().method("GET").uri(uri);
