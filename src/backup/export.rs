@@ -518,10 +518,7 @@ impl BackupExporter {
         {
             // Unsealed on the way out, resealed under the destination's KEK on
             // the way in. The archive member itself is DEK-encrypted.
-            members.push((
-                format!("{prefix}/saml_signing_key.json"),
-                Zeroizing::new(saml_key.to_vec()),
-            ));
+            members.push((format!("{prefix}/saml_signing_key.json"), saml_key));
         }
 
         // scim_mappings.ndjson — without them the next SCIM sync re-creates
@@ -588,10 +585,7 @@ impl BackupExporter {
             .identity
             .export_realm_signing_key_pkcs8(realm_id)
             .map_err(|e| BackupError::Engine(e.to_string()))?;
-        members.push((
-            format!("{prefix}/signing_key.json"),
-            Zeroizing::new(pkcs8.to_vec()),
-        ));
+        members.push((format!("{prefix}/signing_key.json"), Zeroizing::new(pkcs8)));
 
         // id_token_signing_key.json — the realm's RS256 ID-token key, present
         // once any client in the realm selected RS256 (task 26.55). Without it
@@ -603,10 +597,7 @@ impl BackupExporter {
             .export_realm_id_token_rsa_key(realm_id)
             .map_err(|e| BackupError::Engine(e.to_string()))?
         {
-            members.push((
-                format!("{prefix}/id_token_signing_key.json"),
-                Zeroizing::new(rsa_pkcs8.to_vec()),
-            ));
+            members.push((format!("{prefix}/id_token_signing_key.json"), rsa_pkcs8));
         }
 
         // retiring_id_token_signing_keys.json — the RS256 twin of

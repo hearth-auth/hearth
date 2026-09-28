@@ -26,11 +26,11 @@ use crate::storage::{ScanEntry, StorageDurabilityHandle, StorageError};
 #[derive(Default)]
 struct Arms {
     /// Park after the first `get` of this key has read the row.
-    after_get: Option<Vec<u8>>,
+    get: Option<Vec<u8>>,
     /// Park after the first `put_batch` containing this key has written.
-    after_put_batch: Option<Vec<u8>>,
+    put_batch_key: Option<Vec<u8>>,
     /// Park after the next `await_batch_durable` returns.
-    after_durable: bool,
+    durable: bool,
 }
 
 struct ParkingStorage {
@@ -66,8 +66,8 @@ impl StorageEngine for ParkingStorage {
         let value = self.inner.get(realm_id, key);
         let hit = {
             let mut arms = self.arms.lock().expect("arms");
-            if arms.after_get.as_deref() == Some(key) {
-                arms.after_get = None;
+            if arms.get.as_deref() == Some(key) {
+                arms.get = None;
                 true
             } else {
                 false
@@ -105,11 +105,11 @@ impl StorageEngine for ParkingStorage {
         let hit = {
             let mut arms = self.arms.lock().expect("arms");
             let armed = arms
-                .after_put_batch
+                .put_batch_key
                 .as_ref()
                 .is_some_and(|key| entries.iter().any(|(k, _)| k == key));
             if armed {
-                arms.after_put_batch = None;
+                arms.put_batch_key = None;
             }
             armed
         };
@@ -131,7 +131,7 @@ impl StorageEngine for ParkingStorage {
         let result = self.inner.await_batch_durable(handle);
         let hit = {
             let mut arms = self.arms.lock().expect("arms");
-            std::mem::take(&mut arms.after_durable)
+            std::mem::take(&mut arms.durable)
         };
         if hit {
             self.park();
@@ -294,7 +294,7 @@ fn a_revocation_racing_a_refresh_read_modify_write_is_not_undone() {
 
     // Park the refresh right after it read the live row.
     let (parked, release) = f.storage.arm(Arms {
-        after_get: Some(keys::encode_session_id(session.id())),
+        get: Some(keys::encode_session_id(session.id())),
         ..Arms::default()
     });
     let refresher = {
@@ -326,7 +326,7 @@ fn a_revocation_between_a_refresh_write_and_its_cache_insert_is_not_undone() {
 
     // Park the refresh after its storage write, before its cache update.
     let (parked, release) = f.storage.arm(Arms {
-        after_put_batch: Some(keys::encode_session_id(session.id())),
+        put_batch_key: Some(keys::encode_session_id(session.id())),
         ..Arms::default()
     });
     let refresher = {
@@ -353,7 +353,7 @@ fn a_revocation_between_a_session_create_and_its_cache_insert_is_not_undone() {
 
     // Park the creation after its batch is durable, before its cache insert.
     let (parked, release) = f.storage.arm(Arms {
-        after_durable: true,
+        durable: true,
         ..Arms::default()
     });
     let creator = {
