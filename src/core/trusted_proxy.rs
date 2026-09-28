@@ -90,7 +90,10 @@ impl fmt::Display for TrustedProxyError {
                  2001:db8::7 or 2001:db8:42::/48)",
             ),
             Self::PrefixOutOfRange { max } => {
-                write!(f, "has a prefix length above {max}, the width of its address family")
+                write!(
+                    f,
+                    "has a prefix length above {max}, the width of its address family"
+                )
             }
             Self::HostBitsSet { network, prefix } => write!(
                 f,
@@ -494,7 +497,15 @@ mod tests {
 
     #[test]
     fn catch_alls_are_refused() {
-        for bad in ["0.0.0.0/0", "::/0", "0.0.0.0", "::", "0.0.0.0/8", "::/16", "::/64"] {
+        for bad in [
+            "0.0.0.0/0",
+            "::/0",
+            "0.0.0.0",
+            "::",
+            "0.0.0.0/8",
+            "::/16",
+            "::/64",
+        ] {
             assert_eq!(refused(bad), TrustedProxyError::Unspecified, "'{bad}'");
         }
         // `::ffff:0:0/96` is every IPv4 address, spelled as IPv6.
@@ -520,7 +531,10 @@ mod tests {
         );
         assert_eq!(
             refused("fd00::/15"),
-            TrustedProxyError::TooBroad { prefix: 15, min: 16 }
+            TrustedProxyError::TooBroad {
+                prefix: 15,
+                min: 16
+            }
         );
     }
 

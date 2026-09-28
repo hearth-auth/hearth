@@ -34,7 +34,11 @@ pub struct ServerConfig {
     /// Whether to require a client certificate (mTLS). Requires `tls_client_ca_path`.
     #[serde(default)]
     pub tls_require_client_cert: bool,
-    /// Trusted reverse proxy IP addresses (CIDR notation not yet supported).
+    /// Trusted reverse proxies: single IP addresses and/or CIDR ranges.
+    ///
+    /// Each entry is parsed by [`crate::core::TrustedProxy`] — the same parser
+    /// at validation and at runtime — which refuses host bits set in a range,
+    /// catch-alls and ranges broader than /8 (IPv4) or /16 (IPv6).
     ///
     /// When configured, the server extracts the real client IP from the
     /// `X-Forwarded-For` header using the rightmost-non-trusted algorithm.
@@ -475,8 +479,8 @@ pub struct OperationalConfig {
     #[serde(default = "OperationalConfig::default_tls_handshake_timeout_secs")]
     pub tls_handshake_timeout_secs: u64,
     /// Maximum concurrent connections from one client address (one IPv4
-    /// address, or one IPv6 `/64`). `0` disables the cap. Peers listed in
-    /// `server.trusted_proxies` are exempt, because every client behind a
+    /// address, or one IPv6 `/64`). `0` disables the cap. Peers inside
+    /// `server.trusted_proxies` (an address or CIDR range) are exempt, because every client behind a
     /// reverse proxy shares the proxy's address.
     #[serde(default = "OperationalConfig::default_max_connections_per_ip")]
     pub max_connections_per_ip: u32,

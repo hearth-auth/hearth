@@ -2506,19 +2506,17 @@ async fn run_serve(
         .with_dev_mode(config.dev_mode),
     );
 
-    // Parse trusted proxy IPs early so both AppState (JSON API) and WebState
-    // (browser UI) can use the same list for real client IP extraction.
-    let api_trusted_proxies: Vec<std::net::IpAddr> = config
-        .server
-        .trusted_proxies
-        .iter()
-        .filter_map(|s| {
-            s.parse::<std::net::IpAddr>().ok().or_else(|| {
-                warn!(addr = %s, "ignoring invalid trusted_proxies entry (expected IP address)");
-                None
-            })
-        })
-        .collect();
+    // Parse trusted proxies (addresses and CIDR ranges) early so AppState (JSON
+    // API), WebState (browser UI) and the per-address connection cap all use
+    // the same list. The parser is the one `config validate` runs, so a config
+    // that validated parses here; if one somehow does not, refuse to start
+    // rather than drop the entry — a silently shortened list changes whose
+    // forwarding headers are believed (task 26.24).
+    let api_trusted_proxies = hearth::core::TrustedProxies::parse(&config.server.trusted_proxies)
+        .map_err(|e| {
+        error!(error = %e, "invalid server.trusted_proxies entry; refusing to start");
+        e
+    })?;
 
     // Derive the DPoP nonce HMAC secret from config.
     //

@@ -953,12 +953,6 @@ fn is_loopback_str(addr: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn is_unspecified_str(addr: &str) -> bool {
-    addr.parse::<std::net::IpAddr>()
-        .map(|ip| ip.is_unspecified())
-        .unwrap_or(false)
-}
-
 fn is_public_listener(bind_address: &str) -> bool {
     !is_loopback_str(bind_address)
 }
@@ -1184,68 +1178,30 @@ fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIs
         });
     }
 
+    // One parser for validation and runtime: `main.rs` builds the live list
+    // with `TrustedProxies::parse`, which goes through the same
+    // `TrustedProxy::from_str` as this loop. 26.24 existed because the two
+    // disagreed — the validator accepted a CIDR the runtime then silently
+    // discarded — and sharing the parser makes that impossible. The parser
+    // itself refuses malformed entries, host bits set in a range, catch-alls
+    // (`0.0.0.0/0`, `::/0`, `0.0.0.0`, `::`) and ranges broader than /8 or /16.
     for (i, entry) in server.trusted_proxies.iter().enumerate() {
         let field = format!("server.trusted_proxies[{i}]");
 
-        if entry == "0.0.0.0/0" || entry == "::/0" {
-            issues.push(ValidationIssue {
-                field,
-                reason: format!(
-                    "'{entry}' is a catch-all CIDR that trusts every IP as a proxy; \
-                     this bypasses all IP-based protections. \
-                     List only your actual reverse-proxy IP addresses."
-                ),
-            });
-            continue;
-        }
+        let proxy = match entry.parse::<crate::core::TrustedProxy>() {
+            Ok(proxy) => proxy,
+            Err(reason) => {
+                issues.push(ValidationIssue {
+                    field,
+                    reason: format!("'{entry}' {reason}."),
+                });
+                continue;
+            }
+        };
 
-        if is_unspecified_str(entry) {
-            issues.push(ValidationIssue {
-                field,
-                reason: format!(
-                    "'{entry}' is an unspecified/catch-all address that trusts every \
-                     IP as a proxy; list only your actual reverse-proxy IP addresses."
-                ),
-            });
-            continue;
-        }
-
-        // 26.24: the runtime parses each entry as a bare `IpAddr` and DISCARDS
-        // anything else with a `warn!`, so an entry this validator waves
-        // through is not necessarily an entry the server uses. CIDR is the
-        // case operators actually write; CONFIGURATION.md already says it is
-        // not supported, which made this validator the only thing claiming
-        // otherwise.
-        //
-        // Refusing here is not pedantry. A list of ranges becomes an EMPTY
-        // trusted-proxy list at runtime, which with `trust_forwarded_proto:
-        // true` is precisely the state the check above refuses: no peer's
-        // header is honoured, and the proxy's real client IPs are ignored.
-        if entry.parse::<std::net::IpAddr>().is_err() {
-            let looks_like_cidr = entry.contains('/');
-            issues.push(ValidationIssue {
-                field,
-                reason: if looks_like_cidr {
-                    format!(
-                        "'{entry}' is CIDR notation, which is not supported here. The server \
-                         parses each entry as a single IP address and silently DISCARDS \
-                         anything else, so this entry would leave the trusted-proxy list \
-                         empty at runtime — X-Forwarded-For and X-Forwarded-Proto would then \
-                         be ignored from every peer. List the reverse-proxy IP addresses \
-                         individually."
-                    )
-                } else {
-                    format!(
-                        "'{entry}' is not a valid IP address. The server parses each entry as \
-                         a single IP address and silently DISCARDS anything else, so this \
-                         entry would not be trusted at runtime."
-                    )
-                },
-            });
-            continue;
-        }
-
-        if is_loopback_str(entry) && is_public_listener(&server.bind_address) {
+        // Contextual, so it lives here rather than in the parser: a loopback
+        // proxy is only reachable when the server itself listens on loopback.
+        if proxy.is_loopback() && is_public_listener(&server.bind_address) {
             issues.push(ValidationIssue {
                 field,
                 reason: format!(
@@ -2371,40 +2327,120 @@ mod tests {
         );
     }
 
-    // ===== 26.24: a `trusted_proxies` entry the runtime will discard =====
+    // ===== 26.24 / G3: validation accepts exactly what the runtime uses =====
 
-    /// A CIDR entry must be refused, because the runtime throws it away.
-    ///
-    /// `main.rs` parses each entry as an `IpAddr` and drops anything else with
-    /// a `warn!`. CONFIGURATION.md says so plainly — "CIDR notation is not yet
-    /// supported; supply individual IPs" — but the validator accepted it, so a
-    /// list of ranges passed `hearth config validate`, started cleanly, and ran
-    /// with an EMPTY trusted-proxy list.
-    ///
-    /// That is not merely a dropped setting. With `trust_forwarded_proto: true`
-    /// it produces exactly the state the validator two checks above refuses:
-    /// `X-Forwarded-Proto` accepted from every peer, so any client decides
-    /// whether its own session cookie carries `Secure`.
-    #[test]
-    fn a_cidr_trusted_proxy_is_refused_because_the_runtime_discards_it() {
+    /// `trusted_proxies` issues for a production config with `entries`.
+    fn trusted_proxy_issues(entries: &[&str]) -> Vec<ValidationIssue> {
+        let list = entries
+            .iter()
+            .map(|e| format!("\"{e}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         let yaml = "security:\n  key_encryption_key: \"".to_string()
             + &"ab".repeat(32)
-            + "\"\nserver:\n  trust_forwarded_proto: true\n  trusted_proxies: [\"10.0.0.0/8\"]\n\
-               storage:\n  data_dir: \"/tmp/hea-26-24\"\n";
+            + "\"\nserver:\n  bind_address: \"0.0.0.0\"\n  trust_forwarded_proto: true\n  \
+               trusted_proxies: ["
+            + &list
+            + "]\nstorage:\n  data_dir: \"/tmp/hea-g3\"\n";
         let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
-        let issues = config.validate_all();
-        let hit = issues
-            .iter()
-            .find(|i| i.field == "server.trusted_proxies[0]")
-            .unwrap_or_else(|| {
-                panic!("a CIDR entry the runtime discards must be refused: {issues:?}")
-            });
+        config
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field.starts_with("server.trusted_proxies"))
+            .collect()
+    }
+
+    /// A CIDR entry is accepted — and the runtime now uses it.
+    ///
+    /// 26.24 refused CIDR because `main.rs` parsed each entry as a bare
+    /// `IpAddr` and silently discarded the rest. Both sides now go through
+    /// `core::TrustedProxy`, so a range that validates is a range the XFF walk,
+    /// the X-Forwarded-Proto check and the connection-cap exemption match.
+    #[test]
+    fn cidr_trusted_proxies_are_accepted() {
+        let issues = trusted_proxy_issues(&["10.42.0.0/16", "2001:db8:42::/48", "10.0.0.7"]);
+        assert!(issues.is_empty(), "valid ranges and addresses: {issues:?}");
+    }
+
+    #[test]
+    fn a_malformed_trusted_proxy_is_refused() {
+        for bad in [
+            "proxy.internal",
+            "10.0.0.0/",
+            "10.0.0.0/+8",
+            "10.0.0.0/33",
+            "10.0.0.7:443",
+        ] {
+            let issues = trusted_proxy_issues(&[bad]);
+            assert_eq!(issues.len(), 1, "'{bad}' must be refused: {issues:?}");
+            assert_eq!(issues[0].field, "server.trusted_proxies[0]");
+            assert!(
+                issues[0].reason.contains(bad),
+                "reason names the entry: {issues:?}"
+            );
+        }
+    }
+
+    /// Host bits set: refused, not normalized — `10.0.0.7/8` might mean the
+    /// address or the /8, and those differ by sixteen million hosts.
+    #[test]
+    fn a_trusted_proxy_cidr_with_host_bits_is_refused_and_the_network_named() {
+        let issues = trusted_proxy_issues(&["10.0.0.1", "10.42.1.7/16"]);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].field, "server.trusted_proxies[1]");
         assert!(
-            hit.reason.contains("CIDR"),
-            "the refusal must name what is wrong with the entry; got: {}",
-            hit.reason
+            issues[0].reason.contains("10.42.0.0/16"),
+            "the refusal must name the network form; got: {}",
+            issues[0].reason
         );
-        assert!(config.validate().is_err(), "validate() must refuse it too");
+    }
+
+    #[test]
+    fn catch_all_and_overly_broad_trusted_proxies_are_refused() {
+        for bad in [
+            "0.0.0.0/0",
+            "::/0",
+            "0.0.0.0",
+            "::",
+            "0.0.0.0/8",
+            "8.0.0.0/7",
+            "2000::/3",
+        ] {
+            let issues = trusted_proxy_issues(&[bad]);
+            assert_eq!(issues.len(), 1, "'{bad}' must be refused: {issues:?}");
+        }
+    }
+
+    /// The loopback-on-a-public-listener check covers a loopback range too.
+    #[test]
+    fn a_loopback_cidr_is_refused_on_a_public_listener() {
+        let issues = trusted_proxy_issues(&["127.0.0.0/8"]);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].reason.contains("loopback"), "{issues:?}");
+    }
+
+    /// Validation and runtime share one parser: every entry `validate_all`
+    /// accepts, `TrustedProxies::parse` accepts, and vice versa.
+    #[test]
+    fn validation_agrees_with_the_runtime_parser() {
+        for entry in [
+            "10.0.0.7",
+            "10.42.0.0/16",
+            "2001:db8::/32",
+            "::ffff:10.0.0.7",
+            "10.0.0.7/8",
+            "0.0.0.0/0",
+            "10.0.0.0/08",
+            "junk",
+            " 10.0.0.7",
+        ] {
+            let validated = trusted_proxy_issues(&[entry]).is_empty();
+            let parsed = crate::core::TrustedProxies::parse([entry]).is_ok();
+            assert_eq!(
+                validated, parsed,
+                "'{entry}': validate={validated} runtime={parsed}"
+            );
+        }
     }
 
     /// Control — a bare IP is still accepted.
