@@ -884,26 +884,22 @@ fn web_civil_from_days(z: i64) -> (i64, i64, i64) {
 pub fn router(state: WebState) -> Router {
     let shared = Arc::new(state);
     // GA audit L18: the routes an emailed one-time link lands on move the
-    // token out of the URL on the first GET (see `link_token`).
-    let link_form = axum::middleware::from_fn_with_state(
-        (Arc::clone(&shared), link_token::LinkTokenRoute::Form),
-        link_token::stash,
-    );
-    let link_redeem = axum::middleware::from_fn_with_state(
-        (Arc::clone(&shared), link_token::LinkTokenRoute::RedeemOnGet),
-        link_token::stash,
-    );
+    // token out of the URL on the first GET, and only a POST spends it (see
+    // `link_token`).
+    let link = axum::middleware::from_fn_with_state(Arc::clone(&shared), link_token::stash);
     let ui_routes = Router::new()
         .route(
             "/setup",
             axum::routing::get(handlers::setup_form)
                 .post(handlers::setup_submit)
-                .route_layer(link_form.clone()),
+                .route_layer(link.clone()),
         )
         .route("/setup/sent", axum::routing::get(handlers::setup_sent))
         .route(
             "/verify-email",
-            axum::routing::get(handlers::verify_email).route_layer(link_redeem.clone()),
+            axum::routing::get(handlers::verify_email)
+                .post(handlers::verify_email_submit)
+                .route_layer(link.clone()),
         )
         .route(
             "/login",
@@ -959,7 +955,9 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/accept-invitation",
-            axum::routing::get(handlers::accept_invitation_page).route_layer(link_redeem.clone()),
+            axum::routing::get(handlers::accept_invitation_page)
+                .post(handlers::accept_invitation_submit)
+                .route_layer(link.clone()),
         )
         .route(
             "/forgot-password/sent",
@@ -969,12 +967,14 @@ pub fn router(state: WebState) -> Router {
             "/reset-password",
             axum::routing::get(handlers::reset_password_form)
                 .post(handlers::reset_password_submit)
-                .route_layer(link_form.clone()),
+                .route_layer(link.clone()),
         )
         // Magic-link redemption — the terminal step of the passwordless flow.
         .route(
             "/magic-link",
-            axum::routing::get(handlers::magic_link_redeem).route_layer(link_redeem.clone()),
+            axum::routing::get(handlers::magic_link_page)
+                .post(handlers::magic_link_redeem)
+                .route_layer(link.clone()),
         )
         .route(
             "/register",
@@ -1021,20 +1021,25 @@ pub fn router(state: WebState) -> Router {
             "/realms/{realm}/reset-password",
             axum::routing::get(handlers::reset_password_form_scoped)
                 .post(handlers::reset_password_submit_scoped)
-                .route_layer(link_form.clone()),
+                .route_layer(link.clone()),
         )
         .route(
             "/realms/{realm}/magic-link",
-            axum::routing::get(handlers::magic_link_redeem_scoped).route_layer(link_redeem.clone()),
+            axum::routing::get(handlers::magic_link_page_scoped)
+                .post(handlers::magic_link_redeem_scoped)
+                .route_layer(link.clone()),
         )
         .route(
             "/realms/{realm}/verify-email",
-            axum::routing::get(handlers::verify_email_scoped).route_layer(link_redeem.clone()),
+            axum::routing::get(handlers::verify_email_scoped)
+                .post(handlers::verify_email_submit_scoped)
+                .route_layer(link.clone()),
         )
         .route(
             "/realms/{realm}/accept-invitation",
             axum::routing::get(handlers::accept_invitation_page_scoped)
-                .route_layer(link_redeem.clone()),
+                .post(handlers::accept_invitation_submit_scoped)
+                .route_layer(link.clone()),
         )
         // Admin pre-auth surface. Always resolves to the system realm;
         // does not route through the tenant resolver. See
@@ -1054,7 +1059,9 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/admin/verify-email",
-            axum::routing::get(handlers::admin_verify_email).route_layer(link_redeem.clone()),
+            axum::routing::get(handlers::admin_verify_email)
+                .post(handlers::admin_verify_email_submit)
+                .route_layer(link.clone()),
         )
         .route(
             "/admin/forgot-password",
@@ -1072,7 +1079,7 @@ pub fn router(state: WebState) -> Router {
             "/admin/reset-password",
             axum::routing::get(handlers::admin_reset_password_form)
                 .post(handlers::admin_reset_password_submit)
-                .route_layer(link_form),
+                .route_layer(link.clone()),
         )
         // Convenience alias: /ui/admin is the admin home per R-2 (UI_ROUTING.md).
         // Redirects to the realms list which is the canonical admin landing page.
@@ -1855,7 +1862,9 @@ pub fn router(state: WebState) -> Router {
         // Specific action routes take precedence over the generic {action} wildcard.
         .route(
             "/required-action/VERIFY_EMAIL/confirm",
-            axum::routing::get(required_action::verify_email_confirm).route_layer(link_redeem),
+            axum::routing::get(required_action::verify_email_confirm)
+                .post(required_action::verify_email_confirm_submit)
+                .route_layer(link),
         )
         .route(
             "/required-action/VERIFY_EMAIL",

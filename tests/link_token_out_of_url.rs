@@ -7,7 +7,10 @@
 //! credential into browser history, `Referer` headers and every proxy access
 //! log on the way. Now the first GET moves the token into a short-lived,
 //! HttpOnly, path-scoped cookie and answers `303` to the same path without it;
-//! every later request, and the form, works from the cookie.
+//! every later request, and the form, works from the cookie. No GET spends a
+//! token: verification, magic-link and invitation links render a
+//! confirmation page whose POST (link binding + CSRF) spends it, so a mail
+//! scanner or link preview fetching the URL changes nothing.
 //!
 //! The server-internal `/ui/required-actions/*` flow, which redirected with
 //! `?ra_token=<jwt>`, is removed: nothing outside the identity engine could
@@ -461,10 +464,81 @@ async fn the_old_token_in_the_form_shape_no_longer_resets() {
     );
 }
 
-// ── Magic link and email verification: consumed on the clean GET ───────────
+// ── Redeeming links: GET only confirms, POST spends ─────────────────────────
+//
+// A mail scanner or link preview fetches every URL in a message. A GET that
+// spent the token let it sign the user in, verify the address or join the
+// organization before the user ever clicked. Now the GET (after the stash
+// hop) renders a confirmation page, and only its POST — carrying the link
+// binding and the CSRF double-submit token — spends the token.
+
+/// What a confirmation page hands the browser for its POST.
+struct ConfirmPage {
+    /// `Cookie` header value for the POST: link cookie plus CSRF cookie.
+    cookie: String,
+    /// Form body for the POST.
+    body: String,
+}
+
+/// GETs a confirmation page and checks it spends nothing and shows nothing
+/// secret; returns what the POST needs.
+async fn confirm_page(
+    app: &axum::Router,
+    path: &str,
+    link_cookie: &str,
+    token: &str,
+) -> ConfirmPage {
+    let resp = get(app, path, Some(link_cookie)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "{path}: GET renders the confirmation"
+    );
+    assert_eq!(header_str(resp.headers(), "referrer-policy"), "no-referrer");
+    assert!(
+        !set_cookies(resp.headers())
+            .iter()
+            .any(|c| c.starts_with("hearth_ui_session=")),
+        "{path}: a GET must not sign anyone in"
+    );
+    assert!(
+        link_cookie_line(resp.headers()).is_none(),
+        "{path}: a GET must not clear (spend) the link"
+    );
+    let csrf_pair = set_cookies(resp.headers())
+        .into_iter()
+        .find(|c| c.starts_with("hearth_ui_csrf="))
+        .and_then(|c| c.split(';').next().map(str::to_string))
+        .expect("the confirmation page issues a CSRF cookie");
+    let csrf_value = csrf_pair
+        .strip_prefix("hearth_ui_csrf=")
+        .expect("csrf pair")
+        .to_string();
+    let html = body_text(resp).await;
+    assert!(
+        !html.contains(token),
+        "{path}: the page must not render the token"
+    );
+    assert!(
+        html.contains(&binding(token)),
+        "{path}: the form carries the binding"
+    );
+    assert!(
+        html.contains(&format!("value=\"{csrf_value}\"")),
+        "{path}: the form carries the CSRF token"
+    );
+    assert!(
+        html.contains(&format!("action=\"{path}\"")),
+        "{path}: the form posts back to the route the cookie is scoped to"
+    );
+    ConfirmPage {
+        cookie: format!("{link_cookie}; {csrf_pair}"),
+        body: format!("link_binding={}&_csrf={csrf_value}", binding(token)),
+    }
+}
 
 #[tokio::test]
-async fn magic_link_redeems_from_the_cookie_once() {
+async fn magic_link_get_confirms_and_post_signs_in_once() {
     let rig = build_rig(true);
     make_active_user(&rig, "wanderer@acme.test");
     let minted = rig
@@ -472,10 +546,14 @@ async fn magic_link_redeems_from_the_cookie_once() {
         .request_magic_link(&rig.realm_id, "wanderer@acme.test")
         .expect("mint magic link");
     let path = "/ui/realms/acme/magic-link";
-    let cookie = stash(&rig.app, path, minted.token()).await;
+    let link = stash(&rig.app, path, minted.token()).await;
 
-    let resp = get(&rig.app, path, Some(&cookie)).await;
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER, "redeeming signs in");
+    // A scanner may fetch it any number of times.
+    confirm_page(&rig.app, path, &link, minted.token()).await;
+    let page = confirm_page(&rig.app, path, &link, minted.token()).await;
+
+    let resp = post_form(&rig.app, path, Some(&page.cookie), &page.body).await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER, "the POST signs in");
     let cookies = set_cookies(resp.headers());
     assert!(
         cookies.iter().any(|c| c.starts_with("hearth_ui_session=")),
@@ -488,7 +566,7 @@ async fn magic_link_redeems_from_the_cookie_once() {
         "no redirect carries the token"
     );
 
-    let replay = get(&rig.app, path, Some(&cookie)).await;
+    let replay = post_form(&rig.app, path, Some(&page.cookie), &page.body).await;
     assert_ne!(
         replay.status(),
         StatusCode::SEE_OTHER,
@@ -503,7 +581,7 @@ async fn magic_link_redeems_from_the_cookie_once() {
 }
 
 #[tokio::test]
-async fn verify_email_link_verifies_from_the_cookie_once() {
+async fn verify_email_get_confirms_and_post_verifies_once() {
     let rig = build_rig(true);
     let user = make_active_user(&rig, "verify@acme.test");
     let token = rig
@@ -511,24 +589,165 @@ async fn verify_email_link_verifies_from_the_cookie_once() {
         .issue_email_verification_token(&rig.realm_id, &user)
         .expect("issue verification token");
     let path = "/ui/realms/acme/verify-email";
-    let cookie = stash(&rig.app, path, &token).await;
+    let link = stash(&rig.app, path, &token).await;
 
-    let ok = get(&rig.app, path, Some(&cookie)).await;
-    assert_eq!(
-        ok.status(),
-        StatusCode::OK,
-        "verification succeeds from the cookie"
-    );
-    assert_eq!(header_str(ok.headers(), "referrer-policy"), "no-referrer");
+    confirm_page(&rig.app, path, &link, &token).await;
+    let page = confirm_page(&rig.app, path, &link, &token).await;
+
+    let ok = post_form(&rig.app, path, Some(&page.cookie), &page.body).await;
+    assert_eq!(ok.status(), StatusCode::OK, "verification succeeds on POST");
     assert!(link_cookie_line(ok.headers()).is_some_and(|c| c.contains("Max-Age=0")));
     assert!(!body_text(ok).await.contains(&token));
 
-    let replay = get(&rig.app, path, Some(&cookie)).await;
+    let replay = post_form(&rig.app, path, Some(&page.cookie), &page.body).await;
     assert_eq!(
         replay.status(),
         StatusCode::GONE,
         "the token works only once"
     );
+}
+
+#[tokio::test]
+async fn invitation_get_confirms_and_post_accepts_once() {
+    use hearth::identity::{
+        CreateInvitationRequest, CreateOrganizationRequest, OrganizationConfig, OrganizationRole,
+    };
+    let rig = build_rig(true);
+    let inviter = make_active_user(&rig, "inviter@acme.test");
+    let org = rig
+        .identity
+        .create_organization(
+            &rig.realm_id,
+            &CreateOrganizationRequest {
+                name: "acme-org".to_string(),
+                slug: "acme-org".to_string(),
+                description: None,
+                config: Some(OrganizationConfig { max_members: None }),
+                ..Default::default()
+            },
+        )
+        .expect("create org");
+    let (_invitation, token) = rig
+        .identity
+        .create_invitation(
+            &rig.realm_id,
+            &CreateInvitationRequest {
+                org_id: org.id().clone(),
+                email: "invitee@acme.test".to_string(),
+                role: OrganizationRole::Member,
+                invited_by: inviter,
+            },
+        )
+        .expect("create invitation");
+    let path = "/ui/realms/acme/accept-invitation";
+    let link = stash(&rig.app, path, &token).await;
+
+    confirm_page(&rig.app, path, &link, &token).await;
+    let page = confirm_page(&rig.app, path, &link, &token).await;
+
+    let ok = post_form(&rig.app, path, Some(&page.cookie), &page.body).await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert!(link_cookie_line(ok.headers()).is_some_and(|c| c.contains("Max-Age=0")));
+    let html = body_text(ok).await;
+    assert!(html.contains("joined acme-org"), "the POST accepts: {html}");
+
+    let replay = post_form(&rig.app, path, Some(&page.cookie), &page.body).await;
+    let html = body_text(replay).await;
+    assert!(
+        html.contains("expired or is invalid"),
+        "an invitation is accepted only once: {html}"
+    );
+}
+
+#[tokio::test]
+async fn a_redeem_post_without_binding_or_csrf_is_refused_and_keeps_the_link() {
+    let rig = build_rig(true);
+    make_active_user(&rig, "forged@acme.test");
+    let minted = rig
+        .identity
+        .request_magic_link(&rig.realm_id, "forged@acme.test")
+        .expect("mint magic link");
+    let path = "/ui/realms/acme/magic-link";
+    let link = stash(&rig.app, path, minted.token()).await;
+    let page = confirm_page(&rig.app, path, &link, minted.token()).await;
+
+    // Wrong binding, right CSRF.
+    let csrf_only = page.body.replace(&binding(minted.token()), "forged");
+    let resp = post_form(&rig.app, path, Some(&page.cookie), &csrf_only).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        link_cookie_line(resp.headers()).is_none(),
+        "the link is kept"
+    );
+
+    // Right binding, CSRF field that does not match the cookie.
+    let (binding_part, _) = page.body.split_once("&_csrf=").expect("body shape");
+    let resp = post_form(
+        &rig.app,
+        path,
+        Some(&page.cookie),
+        &format!("{binding_part}&_csrf=forged"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // The link is still live for the real user.
+    let resp = post_form(&rig.app, path, Some(&page.cookie), &page.body).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "the genuine POST still works"
+    );
+}
+
+#[tokio::test]
+async fn setup_and_reset_gets_do_not_spend_their_tokens() {
+    // Reset: two GETs, then the POST still resets.
+    let rig = build_rig(true);
+    make_active_user(&rig, "twice@acme.test");
+    let token = rig
+        .identity
+        .request_password_reset(&rig.realm_id, "twice@acme.test")
+        .expect("request reset")
+        .expect("token");
+    let path = "/ui/realms/acme/reset-password";
+    let link = stash(&rig.app, path, &token).await;
+    for _ in 0..2 {
+        let page = get(&rig.app, path, Some(&link)).await;
+        assert_eq!(page.status(), StatusCode::OK);
+        assert!(
+            link_cookie_line(page.headers()).is_none(),
+            "GET keeps the link"
+        );
+    }
+    let body = format!(
+        "link_binding={}&password={NEW_PASSWORD}&password_confirm={NEW_PASSWORD}",
+        binding(&token)
+    );
+    let done = body_text(post_form(&rig.app, path, Some(&link), &body).await).await;
+    assert!(!done.contains("invalid or has expired"), "{done}");
+
+    // Setup: the page can be loaded repeatedly.
+    let fresh = build_rig(false);
+    let token = hearth::identity::onboarding::ensure_setup_token(
+        fresh.identity.as_ref(),
+        &fresh.data_dir,
+        None,
+        None,
+        None,
+        true,
+    )
+    .expect("setup token")
+    .expect("fresh instance issues one");
+    let link = stash(&fresh.app, "/ui/setup", &token).await;
+    for _ in 0..2 {
+        let page = get(&fresh.app, "/ui/setup", Some(&link)).await;
+        assert_eq!(
+            page.status(),
+            StatusCode::OK,
+            "the setup GET spends nothing"
+        );
+    }
 }
 
 #[tokio::test]

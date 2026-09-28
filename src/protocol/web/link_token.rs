@@ -20,14 +20,20 @@
 //! from a mail client, and browsers treat the redirect chain it starts as
 //! cross-site, so a `Strict` cookie set on the first response would be
 //! withheld on the second. `Lax` still withholds the cookie from every
-//! cross-site `POST`, and the forms that spend a token additionally carry
-//! [`BINDING_FIELD`], an HMAC of the token under the cookie secret, so a
-//! forged `POST` cannot supply it even where `SameSite` is not honoured.
+//! cross-site `POST`, and the forms that spend a token additionally carry a
+//! `link_binding` field — [`link_binding`], an HMAC of the token under the
+//! cookie secret — so a forged `POST` cannot supply it even where `SameSite`
+//! is not honoured.
 //!
-//! Once a handler has spent the token it marks the response with
-//! [`mark_spent`] and the middleware clears the cookie. Routes that spend
-//! the token on `GET` (verification, magic link, invitation) clear it on
-//! every `GET` answer. Every response on these routes carries
+//! No `GET` on these routes spends a token. A mail scanner or link preview
+//! fetches every URL in a message; a `GET` that verified the address, signed
+//! the user in or joined the organization did so before the user clicked.
+//! Verification, magic-link, invitation and required-action confirmation
+//! pages therefore render a confirmation form, and the token is spent by its
+//! `POST`, which must carry the binding and — on `/ui` routes — the CSRF
+//! double-submit token ([`confirmed_token`]). Once a handler has spent the
+//! token it marks the response with [`mark_spent`] and the middleware clears
+//! the cookie. Every response on these routes carries
 //! `Referrer-Policy: no-referrer`.
 
 use std::sync::Arc;
@@ -51,23 +57,9 @@ pub const LINK_TOKEN_COOKIE: &str = "hearth_link_token";
 /// enough that a forgotten tab does not keep a credential around.
 pub const LINK_TOKEN_TTL_SECS: u64 = 900;
 
-/// Hidden form field that binds a token-spending `POST` to the stashed token.
-pub const BINDING_FIELD: &str = "link_binding";
-
 /// Longest value accepted as a token. Every token Hearth mints is far
 /// shorter; the cap only keeps an absurd value out of a `Set-Cookie` header.
 const MAX_TOKEN_LEN: usize = 2048;
-
-/// How a link-token route treats its cookie.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LinkTokenRoute {
-    /// The token is spent by a later form `POST` (setup, reset password).
-    /// The cookie survives the `GET` and is cleared by [`mark_spent`].
-    Form,
-    /// The token is spent by the `GET` itself (verification, magic link,
-    /// invitation). Every `GET` answer clears the cookie.
-    RedeemOnGet,
-}
 
 /// Response marker a handler sets once it has spent (or definitively
 /// rejected) the stashed token, so [`stash`] clears the cookie.
@@ -89,7 +81,7 @@ pub fn read(headers: &HeaderMap) -> Option<FormSecret> {
         .map(|v| FormSecret::new(v.to_string()))
 }
 
-/// The value a token-spending form carries in [`BINDING_FIELD`]: a
+/// The value a token-spending form carries in its `link_binding` field: a
 /// base64url HMAC-SHA256 of `token` under the cookie secret.
 ///
 /// A page served to the holder of the cookie can embed it; a cross-site
@@ -110,12 +102,36 @@ pub fn binding_matches(secret: &CookieSecret, token: &str, submitted: &str) -> b
     ct_eq_secret_str(&link_binding(secret, token), submitted)
 }
 
+/// The stashed token behind a token-spending `POST`, or `None` when the
+/// `POST` must be refused.
+///
+/// Requires the link cookie and a `link_binding` that matches it. With
+/// `check_csrf`, the `_csrf` field must also match the `hearth_ui_csrf`
+/// double-submit cookie; as on the login form, only `--dev` accepts a
+/// request that sent no CSRF cookie at all. A refusal leaves the cookie in
+/// place, so the genuine page still works.
+#[must_use]
+pub fn confirmed_token(
+    state: &WebState,
+    headers: &HeaderMap,
+    link_binding: &str,
+    csrf: &str,
+    check_csrf: bool,
+) -> Option<FormSecret> {
+    if check_csrf {
+        let csrf_ok = match super::auth::csrf_cookie_value_from_headers(headers) {
+            Some(cookie) => super::auth::csrf_token_eq(cookie, csrf),
+            None => state.dev_mode,
+        };
+        if !csrf_ok {
+            return None;
+        }
+    }
+    read(headers).filter(|t| binding_matches(&state.cookie_secret, t, link_binding))
+}
+
 /// Middleware for a route an emailed link lands on. See the module docs.
-pub async fn stash(
-    State((state, route)): State<(Arc<WebState>, LinkTokenRoute)>,
-    req: Request,
-    next: Next,
-) -> Response {
+pub async fn stash(State(state): State<Arc<WebState>>, req: Request, next: Next) -> Response {
     // Nested routers strip their prefix from `req.uri()`; the cookie path and
     // the redirect need the path the browser actually requested.
     let path = req
@@ -123,19 +139,16 @@ pub async fn stash(
         .get::<OriginalUri>()
         .map_or_else(|| req.uri().path().to_string(), |u| u.0.path().to_string());
     let secure = state.is_secure_request(req.headers());
-    let is_get = req.method() == Method::GET;
     let cookie_path_ok = is_cookie_safe_path(&path);
 
-    if is_get && cookie_path_ok {
+    if req.method() == Method::GET && cookie_path_ok {
         if let Some((token, other_params)) = req.uri().query().and_then(split_token) {
             return stash_redirect(&path, &other_params, &token, secure);
         }
     }
 
     let mut resp = next.run(req).await;
-    let spent = resp.extensions().get::<LinkTokenSpent>().is_some()
-        || (is_get && route == LinkTokenRoute::RedeemOnGet);
-    if spent && cookie_path_ok {
+    if resp.extensions().get::<LinkTokenSpent>().is_some() && cookie_path_ok {
         append_header(&mut resp, header::SET_COOKIE, &clear_cookie(&path, secure));
     }
     resp.headers_mut().insert(

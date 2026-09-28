@@ -26,6 +26,18 @@ use hearth::storage::{EmbeddedStorageEngine, StorageConfig};
 use tower::ServiceExt;
 
 const COOKIE_SECRET: [u8; 32] = [9u8; 32];
+
+/// The confirmation page's POST body for the stashed link `token`
+/// (GA audit L18).
+fn link_binding_body(token: &str) -> String {
+    format!(
+        "link_binding={}",
+        hearth::protocol::web::link_token::link_binding(
+            &CookieSecret::from_bytes(COOKIE_SECRET),
+            token
+        )
+    )
+}
 const PASSWORD: &str = "test-password-hearth-ve";
 const PKCE_VERIFIER: &str = "dGVzdC12ZXJpZmllci10aGlzLWlzLTQzLWNoYXJhY3RlcnM";
 
@@ -248,6 +260,43 @@ async fn body_text(resp: axum::response::Response) -> String {
 // Normal flow: VERIFY_EMAIL page renders and confirm completes the action
 // ==========================================================================
 
+/// GETs the VERIFY_EMAIL confirmation page twice and checks it renders the
+/// form without spending the token (GA audit L18).
+async fn assert_confirm_get_spends_nothing(rig: &Rig, ra_token: &str, token: &str) {
+    for _ in 0..2 {
+        let page = rig
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/required-action/VERIFY_EMAIL/confirm")
+                    .header(
+                        header::COOKIE,
+                        format!("hearth_ra_session={ra_token}; hearth_link_token={token}"),
+                    )
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(
+            page.status(),
+            StatusCode::OK,
+            "GET renders the confirmation"
+        );
+        let bytes = axum::body::to_bytes(page.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(!html.contains(token), "the page never renders the token");
+        assert!(
+            html.contains(&link_binding_body(token)["link_binding=".len()..]),
+            "the form carries the binding"
+        );
+    }
+}
+
 #[tokio::test]
 async fn verify_email_page_renders_and_confirm_resumes_oidc() {
     let rig = build_rig();
@@ -312,20 +361,26 @@ async fn verify_email_page_renders_and_confirm_resumes_oidc() {
         .issue_email_verification_token(&rig.realm_id, &user_id)
         .expect("issue token");
 
-    // 4. GET /required-action/VERIFY_EMAIL/confirm with the link cookie → resumes OIDC.
+    // 3b. GA audit L18: the GET a mail scanner or link preview makes renders
+    // a confirmation form and spends nothing — even with the RA session.
+    assert_confirm_get_spends_nothing(&rig, &ra_token, &token).await;
+
+    // 4. POST /required-action/VERIFY_EMAIL/confirm with the link cookie → resumes OIDC.
     let resp3 = rig
         .app
         .clone()
         .oneshot(
             Request::builder()
-                .method("GET")
+                .method("POST")
                 .uri("/required-action/VERIFY_EMAIL/confirm")
-                // GA audit L18: the link's first GET moved the token into this cookie.
+                // GA audit L18: the link's first GET moved the token into this
+                // cookie; only the confirmation page's POST spends it.
                 .header(
                     header::COOKIE,
                     format!("hearth_ra_session={ra_token}; hearth_link_token={token}"),
                 )
-                .body(Body::empty())
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(link_binding_body(&token)))
                 .expect("req"),
         )
         .await
@@ -397,13 +452,16 @@ async fn confirm_with_invalid_token_renders_error_page() {
         .clone()
         .oneshot(
             Request::builder()
-                .method("GET")
+                .method("POST")
                 .uri("/required-action/VERIFY_EMAIL/confirm")
+                // GA audit L18: the link's first GET moved the token into this
+                // cookie; only the confirmation page's POST spends it.
                 .header(
                     header::COOKIE,
                     format!("hearth_ra_session={ra_token}; hearth_link_token=invalid-token-abc123"),
                 )
-                .body(Body::empty())
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(link_binding_body("invalid-token-abc123")))
                 .expect("req"),
         )
         .await
@@ -538,10 +596,11 @@ async fn verify_email_confirm_without_ra_cookie_returns_400() {
         .clone()
         .oneshot(
             Request::builder()
-                .method("GET")
+                .method("POST")
                 .uri("/required-action/VERIFY_EMAIL/confirm")
                 .header(header::COOKIE, "hearth_link_token=some-token")
-                .body(Body::empty())
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(link_binding_body("some-token")))
                 .expect("req"),
         )
         .await

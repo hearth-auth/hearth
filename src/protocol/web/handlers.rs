@@ -1289,27 +1289,137 @@ pub async fn setup_sent(State(state): State<Arc<WebState>>) -> Response {
 }
 
 // ============================================================================
+// Emailed-link confirmation pages (GA audit L18)
+// ============================================================================
+
+/// Page an emailed one-time link lands on. It spends nothing: a mail scanner
+/// or link preview that fetches the URL sees only this form, and the token is
+/// spent by its `POST`.
+#[derive(Template)]
+#[template(path = "ui/link_confirm.html")]
+struct LinkConfirmTemplate {
+    heading: &'static str,
+    message: &'static str,
+    button_label: &'static str,
+    /// Must be the route the link cookie is scoped to.
+    form_action: String,
+    /// [`link_token::link_binding`] of the stashed token.
+    link_binding: String,
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    flash: Option<Flash>,
+    /// CSRF double-submit token, embedded as the form's `_csrf` field.
+    csrf: Option<String>,
+    narrow: bool,
+    product_name: String,
+    logo_url: String,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+/// The wording of a link-confirmation page.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct LinkConfirmCopy {
+    /// Page heading.
+    pub heading: &'static str,
+    /// One-sentence explanation above the button.
+    pub message: &'static str,
+    /// Label of the button that spends the token.
+    pub button_label: &'static str,
+}
+
+/// Form every link-confirmation page posts.
+#[derive(Debug, Deserialize)]
+pub struct LinkConfirmForm {
+    /// [`link_token::link_binding`] of the stashed token, from the page.
+    #[serde(default)]
+    pub link_binding: String,
+    /// CSRF double-submit token (matches the `hearth_ui_csrf` cookie).
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
+}
+
+/// Renders the confirmation page for the stashed `token`.
+///
+/// With `issue_csrf` the form carries the `hearth_ui_csrf` double-submit
+/// token, minting the cookie when the browser has none. That cookie is
+/// scoped to `/ui`, so pages outside it pass `false` and rely on the link
+/// binding alone.
+pub(super) fn render_link_confirm(
+    state: &WebState,
+    headers: &HeaderMap,
+    token: &str,
+    copy: LinkConfirmCopy,
+    form_action: String,
+    realm_theme_url: Option<String>,
+    issue_csrf: bool,
+) -> Response {
+    let (csrf, fresh_cookie) = if issue_csrf {
+        match super::auth::csrf_cookie_value_from_headers(headers) {
+            Some(existing) => (Some(existing.to_string()), None),
+            None => {
+                let (value, cookie) =
+                    super::auth::fresh_csrf_cookie(state.is_secure_request(headers));
+                (Some(value), Some(cookie))
+            }
+        }
+    } else {
+        (None, None)
+    };
+    let mut resp = render(&LinkConfirmTemplate {
+        heading: copy.heading,
+        message: copy.message,
+        button_label: copy.button_label,
+        form_action,
+        link_binding: link_token::link_binding(&state.cookie_secret, token),
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        flash: None,
+        csrf,
+        narrow: true,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        realm_theme_url,
+        inline_theme_css: state.inline_theme_css(),
+    });
+    if let Some(cookie) = fresh_cookie {
+        append_cookie(&mut resp, &cookie);
+    }
+    resp
+}
+
+// ============================================================================
 // Email verification
 // ============================================================================
 
-/// Handles email verification on the bare `/ui/verify-email` URL.
-///
-/// The emailed link's `?token=` is moved into the link-token cookie by the
-/// route's middleware before this runs (GA audit L18).
+const VERIFY_EMAIL_COPY: LinkConfirmCopy = LinkConfirmCopy {
+    heading: "Confirm your email address",
+    message: "Confirm that this address is yours to activate your account.",
+    button_label: "Verify email",
+};
+
+/// `GET /ui/verify-email` — the confirmation page for an emailed
+/// verification link. The link's `?token=` was moved into the link-token
+/// cookie by the route's middleware; nothing is verified until the `POST`
+/// (GA audit L18).
 pub async fn verify_email(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
-    verify_email_impl(state, &headers, RealmSource::Path(None))
+    verify_email_page_impl(&state, &headers, RealmSource::Path(None))
 }
 
-/// Handles email verification on `/ui/realms/<name>/verify-email`.
+/// `GET /ui/realms/<name>/verify-email` — see [`verify_email`].
 pub async fn verify_email_scoped(
     State(state): State<Arc<WebState>>,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    verify_email_impl(state, &headers, RealmSource::Path(Some(realm_name)))
+    verify_email_page_impl(&state, &headers, RealmSource::Path(Some(realm_name)))
 }
 
-/// Handles email verification on `/ui/admin/verify-email`.
+/// `GET /ui/admin/verify-email` — see [`verify_email`].
 ///
 /// This is the link admins receive in their setup confirmation email.
 /// Resolves to the system realm regardless of application realm state.
@@ -1317,57 +1427,122 @@ pub async fn admin_verify_email(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
 ) -> Response {
-    verify_email_impl(state, &headers, RealmSource::Admin)
+    verify_email_page_impl(&state, &headers, RealmSource::Admin)
 }
 
-/// Shared implementation. On success the user transitions
-/// `PendingVerification` → `Active` and can thereafter sign in.
-#[allow(clippy::needless_pass_by_value)]
-fn verify_email_impl(state: Arc<WebState>, headers: &HeaderMap, source: RealmSource) -> Response {
-    let product_name = state.product_name.clone();
-    let logo_url = state.logo_url.clone();
+/// `POST /ui/verify-email` — verifies the stashed token.
+pub async fn verify_email_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<LinkConfirmForm>,
+) -> Response {
+    verify_email_impl(&state, &headers, &form, RealmSource::Path(None))
+}
 
+/// `POST /ui/realms/<name>/verify-email` — see [`verify_email_submit`].
+pub async fn verify_email_submit_scoped(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(realm_name): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<LinkConfirmForm>,
+) -> Response {
+    verify_email_impl(&state, &headers, &form, RealmSource::Path(Some(realm_name)))
+}
+
+/// `POST /ui/admin/verify-email` — see [`verify_email_submit`].
+pub async fn admin_verify_email_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<LinkConfirmForm>,
+) -> Response {
+    verify_email_impl(&state, &headers, &form, RealmSource::Admin)
+}
+
+/// The page every missing, refused or malformed verification link gets.
+fn verify_link_invalid(state: &WebState) -> Response {
+    let tmpl = VerifyInvalidTemplate::new(
+        "Invalid link",
+        "This verification link is missing or malformed.",
+        state.product_name.clone(),
+        state.logo_url.clone(),
+    );
+    render_status(&tmpl, StatusCode::BAD_REQUEST)
+}
+
+fn verify_email_page_impl(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    source: RealmSource,
+) -> Response {
     let Some(token) = link_token::read(headers) else {
-        let tmpl = VerifyInvalidTemplate::new(
-            "Invalid link",
-            "This verification link is missing or malformed.",
-            product_name,
-            logo_url,
-        );
-        return render_status(&tmpl, StatusCode::BAD_REQUEST);
+        return verify_link_invalid(state);
     };
-
-    let (realm, action_prefix) = match resolve_for_source(&state, source, false) {
+    let (realm, action_prefix) = match resolve_for_source(state, source, false) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
         } => (realm, action_prefix),
         PreAuthRealm::Handled(resp) => return resp,
     };
+    render_link_confirm(
+        state,
+        headers,
+        &token,
+        VERIFY_EMAIL_COPY,
+        format!("{action_prefix}/verify-email"),
+        state.realm_theme_url_for(realm.id()),
+        true,
+    )
+}
 
-    match state.identity.verify_email_token(realm.id(), &token) {
-        Ok(_) => {
-            let login_url = format!("{action_prefix}/login");
-            let mut tmpl = VerifyOkTemplate::new(login_url, product_name, logo_url);
-            tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
-            tmpl.inline_theme_css = state.inline_theme_css();
-            render(&tmpl)
-        }
-        Err(IdentityError::VerificationTokenInvalid) => {
-            let tmpl = VerifyInvalidTemplate::new(
+/// Shared `POST` implementation. On success the user transitions
+/// `PendingVerification` → `Active` and can thereafter sign in.
+fn verify_email_impl(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    form: &LinkConfirmForm,
+    source: RealmSource,
+) -> Response {
+    let (realm, action_prefix) = match resolve_for_source(state, source, true) {
+        PreAuthRealm::Ok {
+            realm,
+            action_prefix,
+        } => (realm, action_prefix),
+        PreAuthRealm::Handled(resp) => return resp,
+    };
+    let Some(token) =
+        link_token::confirmed_token(state, headers, &form.link_binding, &form.csrf, true)
+    else {
+        return verify_link_invalid(state);
+    };
+    let product_name = state.product_name.clone();
+    let logo_url = state.logo_url.clone();
+
+    link_token::mark_spent(
+        match state.identity.verify_email_token(realm.id(), &token) {
+            Ok(_) => {
+                let login_url = format!("{action_prefix}/login");
+                let mut tmpl = VerifyOkTemplate::new(login_url, product_name, logo_url);
+                tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
+                tmpl.inline_theme_css = state.inline_theme_css();
+                render(&tmpl)
+            }
+            Err(IdentityError::VerificationTokenInvalid) => {
+                let tmpl = VerifyInvalidTemplate::new(
                 "Link expired or already used",
                 "This verification link is no longer valid. Request a new verification email from \
                 the sign-in page once it becomes available.",
                 product_name,
                 logo_url,
             );
-            render_status(&tmpl, StatusCode::GONE)
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "verify-email: unexpected failure");
-            internal_error_response()
-        }
-    }
+                render_status(&tmpl, StatusCode::GONE)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "verify-email: unexpected failure");
+                internal_error_response()
+            }
+        },
+    )
 }
 
 // ============================================================================
@@ -4429,33 +4604,127 @@ fn reset_password_submit_impl(
 // Magic-link redemption
 // ============================================================================
 
-/// `GET /ui/magic-link` — redeems a magic link and starts a browser session.
+const MAGIC_LINK_COPY: LinkConfirmCopy = LinkConfirmCopy {
+    heading: "Sign in",
+    message: "Continue to sign in with the link from your email.",
+    button_label: "Sign in",
+};
+
+/// `GET /ui/magic-link` — the confirmation page for an emailed sign-in link.
+///
+/// The emailed `?token=` was moved into the link-token cookie by the route's
+/// middleware, and nothing is redeemed here: a mail scanner or link preview
+/// that fetches the URL must not sign the user in (GA audit L18). The page's
+/// `POST` ([`magic_link_redeem`]) redeems.
+pub async fn magic_link_page(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    magic_link_page_impl(&state, &headers, RealmSource::Path(None))
+}
+
+/// `GET /ui/realms/<name>/magic-link` — see [`magic_link_page`].
+pub async fn magic_link_page_scoped(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(realm_name): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    magic_link_page_impl(&state, &headers, RealmSource::Path(Some(realm_name)))
+}
+
+/// `POST /ui/magic-link` — redeems a magic link and starts a browser session.
 ///
 /// Before this existed the flow had no terminal step: a token could be minted
 /// and mailed but never exchanged for anything (audit 2026-08-28 §4.24#6).
-/// The emailed `?token=` is moved into the link-token cookie by the route's
-/// middleware before this runs (GA audit L18).
 pub async fn magic_link_redeem(
     State(state): State<Arc<WebState>>,
     PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
+    Form(form): Form<LinkConfirmForm>,
 ) -> Response {
-    magic_link_redeem_impl(state, &headers, peer_addr, RealmSource::Path(None))
+    magic_link_post(state, &headers, peer_addr, &form, RealmSource::Path(None))
 }
 
-/// `GET /ui/realms/<name>/magic-link` — realm-scoped magic-link redemption.
+/// `POST /ui/realms/<name>/magic-link` — realm-scoped magic-link redemption.
 pub async fn magic_link_redeem_scoped(
     State(state): State<Arc<WebState>>,
     PeerAddr(peer_addr): PeerAddr,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     headers: HeaderMap,
+    Form(form): Form<LinkConfirmForm>,
 ) -> Response {
-    magic_link_redeem_impl(
+    magic_link_post(
         state,
         &headers,
         peer_addr,
+        &form,
         RealmSource::Path(Some(realm_name)),
     )
+}
+
+fn magic_link_page_impl(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    source: RealmSource,
+) -> Response {
+    let (realm, action_prefix) = match resolve_for_source(state, source, false) {
+        PreAuthRealm::Ok {
+            realm,
+            action_prefix,
+        } => (realm, action_prefix),
+        PreAuthRealm::Handled(resp) => return resp,
+    };
+    match link_token::read(headers) {
+        Some(token) => render_link_confirm(
+            state,
+            headers,
+            &token,
+            MAGIC_LINK_COPY,
+            format!("{action_prefix}/magic-link"),
+            state.realm_theme_url_for(realm.id()),
+            true,
+        ),
+        None => magic_link_expired(state, &realm, &action_prefix),
+    }
+}
+
+/// Checks the confirmation `POST` and redeems. A refused `POST` (no link
+/// cookie, wrong binding, bad CSRF) keeps the link; any answer after the
+/// token reached the engine clears it.
+fn magic_link_post(
+    state: Arc<WebState>,
+    headers: &HeaderMap,
+    peer_addr: SocketAddr,
+    form: &LinkConfirmForm,
+    source: RealmSource,
+) -> Response {
+    let token = link_token::confirmed_token(&state, headers, &form.link_binding, &form.csrf, true);
+    let reached_engine = token.is_some();
+    let resp = magic_link_redeem_impl(state, headers, peer_addr, token, source);
+    if reached_engine {
+        link_token::mark_spent(resp)
+    } else {
+        resp
+    }
+}
+
+/// The login page with a neutral "expired or already used" banner — never a
+/// hint about whether the address exists.
+fn magic_link_expired(state: &WebState, realm: &Realm, action_prefix: &str) -> Response {
+    let mut tmpl = LoginTemplate::new(
+        Some(
+            "This sign-in link has expired or has already been used. \
+             Request a new one."
+                .to_string(),
+        ),
+        None,
+        action_prefix,
+        registration_enabled(realm),
+        DEFAULT_LOGIN_LOCALE,
+        state.product_name.clone(),
+        state.logo_url.clone(),
+    );
+    tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
+    tmpl.inline_theme_css = state.inline_theme_css();
+    tmpl.new_magic_link_url = Some(format!("{action_prefix}/login"));
+    render_status(&tmpl, StatusCode::BAD_REQUEST)
 }
 
 /// Shared implementation for both magic-link redemption routes.
@@ -4474,9 +4743,10 @@ fn magic_link_redeem_impl(
     state: Arc<WebState>,
     headers: &HeaderMap,
     peer_addr: SocketAddr,
+    token: Option<FormSecret>,
     source: RealmSource,
 ) -> Response {
-    let (realm, action_prefix) = match resolve_for_source(&state, source, false) {
+    let (realm, action_prefix) = match resolve_for_source(&state, source, true) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
@@ -4484,27 +4754,9 @@ fn magic_link_redeem_impl(
         PreAuthRealm::Handled(resp) => return resp,
     };
 
-    let expired = |state: &Arc<WebState>| -> Response {
-        let mut tmpl = LoginTemplate::new(
-            Some(
-                "This sign-in link has expired or has already been used. \
-                 Request a new one."
-                    .to_string(),
-            ),
-            None,
-            &action_prefix,
-            registration_enabled(&realm),
-            DEFAULT_LOGIN_LOCALE,
-            state.product_name.clone(),
-            state.logo_url.clone(),
-        );
-        tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
-        tmpl.inline_theme_css = state.inline_theme_css();
-        tmpl.new_magic_link_url = Some(format!("{action_prefix}/login"));
-        render_status(&tmpl, StatusCode::BAD_REQUEST)
-    };
+    let expired = |state: &Arc<WebState>| magic_link_expired(state, &realm, &action_prefix);
 
-    let Some(token) = link_token::read(headers).filter(|t| !t.trim().is_empty()) else {
+    let Some(token) = token.filter(|t| !t.trim().is_empty()) else {
         return expired(&state);
     };
 
@@ -5497,15 +5749,23 @@ struct AcceptInvitationTemplate {
     inline_theme_css: Option<String>,
 }
 
-/// `GET /ui/accept-invitation` — bare URL variant.
+const INVITATION_COPY: LinkConfirmCopy = LinkConfirmCopy {
+    heading: "Accept invitation",
+    message: "Accept the invitation to join the organization.",
+    button_label: "Accept invitation",
+};
+
+/// `GET /ui/accept-invitation` — bare URL variant of the confirmation page.
 ///
-/// The emailed `?token=` is moved into the link-token cookie by the route's
-/// middleware before this runs (GA audit L18).
+/// The emailed `?token=` was moved into the link-token cookie by the route's
+/// middleware, and nothing is accepted here: a mail scanner or link preview
+/// that fetches the URL must not join the organization for the user (GA
+/// audit L18). The page's `POST` accepts.
 pub async fn accept_invitation_page(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
 ) -> Response {
-    accept_invitation_page_impl(state, &headers, None)
+    accept_invitation_impl(state, &headers, None, None)
 }
 
 /// `GET /ui/realms/<name>/accept-invitation` — realm-scoped variant.
@@ -5514,15 +5774,37 @@ pub async fn accept_invitation_page_scoped(
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    accept_invitation_page_impl(state, &headers, Some(realm_name))
+    accept_invitation_impl(state, &headers, Some(realm_name), None)
 }
 
-/// Accepts an organization invitation against the resolved realm only.
+/// `POST /ui/accept-invitation` — accepts the stashed invitation.
+pub async fn accept_invitation_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<LinkConfirmForm>,
+) -> Response {
+    accept_invitation_impl(state, &headers, None, Some(&form))
+}
+
+/// `POST /ui/realms/<name>/accept-invitation` — realm-scoped variant.
+pub async fn accept_invitation_submit_scoped(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(realm_name): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<LinkConfirmForm>,
+) -> Response {
+    accept_invitation_impl(state, &headers, Some(realm_name), Some(&form))
+}
+
+/// Renders the confirmation page (`form` is `None`, a `GET`) or accepts an
+/// organization invitation against the resolved realm only (`form` is the
+/// confirmation `POST`).
 #[allow(clippy::needless_pass_by_value)]
-fn accept_invitation_page_impl(
+fn accept_invitation_impl(
     state: Arc<WebState>,
     headers: &HeaderMap,
     path_realm: Option<String>,
+    form: Option<&LinkConfirmForm>,
 ) -> Response {
     let render_result = |success: bool,
                          org_name: String,
@@ -5548,7 +5830,7 @@ fn accept_invitation_page_impl(
         })
     };
 
-    let (realm, action_prefix) = match resolve_pre_auth_realm(&state, path_realm, false) {
+    let (realm, action_prefix) = match resolve_pre_auth_realm(&state, path_realm, form.is_some()) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
@@ -5558,20 +5840,48 @@ fn accept_invitation_page_impl(
     let realm_theme = state.realm_theme_url_for(realm.id());
     let login_url = format!("{action_prefix}/login");
 
-    let token = match link_token::read(headers) {
-        Some(t) => t,
-        None => {
-            return render_result(
-                false,
-                String::new(),
-                "No invitation token provided.".to_string(),
-                login_url,
-                realm_theme,
-            );
+    let token = match form {
+        None => link_token::read(headers),
+        Some(form) => {
+            link_token::confirmed_token(&state, headers, &form.link_binding, &form.csrf, true)
         }
     };
+    let Some(token) = token else {
+        // A refused POST keeps the link: the genuine page can still submit.
+        return render_status(
+            &AcceptInvitationTemplate {
+                success: false,
+                org_name: String::new(),
+                error_message: "This invitation link is missing or invalid.".to_string(),
+                login_url,
+                chrome: false,
+                active: "",
+                user_email: None,
+                is_admin: false,
+                flash: None,
+                csrf: None,
+                narrow: true,
+                product_name: state.product_name.clone(),
+                logo_url: state.logo_url.clone(),
+                realm_theme_url: realm_theme,
+                inline_theme_css: state.inline_theme_css(),
+            },
+            StatusCode::BAD_REQUEST,
+        );
+    };
+    if form.is_none() {
+        return render_link_confirm(
+            &state,
+            headers,
+            &token,
+            INVITATION_COPY,
+            format!("{action_prefix}/accept-invitation"),
+            realm_theme,
+            true,
+        );
+    }
 
-    match state.identity.accept_invitation(realm.id(), &token) {
+    link_token::mark_spent(match state.identity.accept_invitation(realm.id(), &token) {
         Ok(membership) => {
             let org_name = state
                 .identity
@@ -5588,7 +5898,7 @@ fn accept_invitation_page_impl(
             login_url,
             realm_theme,
         ),
-    }
+    })
 }
 
 // ============================================================================

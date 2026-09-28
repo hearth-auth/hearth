@@ -579,14 +579,65 @@ async fn admin_setup_verify_login_end_to_end() {
         .expect("link-token cookie")
         .to_string();
 
-    // The second hop MUST succeed and activate the admin.
-    let resp = app
+    // The second hop renders a confirmation form and spends nothing, so a
+    // mail scanner fetching the link cannot verify the address.
+    let page = app
         .clone()
         .oneshot(
             Request::builder()
                 .uri("/ui/admin/verify-email")
-                .header(axum::http::header::COOKIE, link_cookie)
+                .header(axum::http::header::COOKIE, link_cookie.clone())
                 .body(Body::empty())
+                .expect("build"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(page.status(), StatusCode::OK);
+    let csrf_cookie = page
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with("hearth_ui_csrf="))
+        .and_then(|c| c.split(';').next())
+        .expect("csrf cookie")
+        .to_string();
+    let page_html = String::from_utf8_lossy(
+        &to_bytes(page.into_body(), 1 << 20)
+            .await
+            .expect("page body"),
+    )
+    .into_owned();
+    let field = |name: &str| {
+        page_html
+            .split(&format!("name=\"{name}\" value=\""))
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or_else(|| panic!("confirmation form carries {name}"))
+            .to_string()
+    };
+    let form_body = format!(
+        "link_binding={}&_csrf={}",
+        field("link_binding"),
+        field("_csrf")
+    );
+
+    // Submitting the form MUST succeed and activate the admin.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/admin/verify-email")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("{link_cookie}; {csrf_cookie}"),
+                )
+                .header(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Body::from(form_body))
                 .expect("build"),
         )
         .await

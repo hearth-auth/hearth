@@ -251,16 +251,26 @@ async fn redeem_magic_link(
     build_web_app(h)
         .oneshot(
             Request::builder()
-                .method("GET")
+                .method("POST")
                 .uri(format!("/ui/realms/{realm_name}/magic-link"))
                 // GA audit L18: the link's first GET moved the token into
-                // this cookie.
+                // this cookie; the confirmation page's POST redeems it.
                 .header(
                     axum::http::header::COOKIE,
                     format!("hearth_link_token={}", minted.token()),
                 )
-                .body(Body::empty())
-                .expect("build GET"),
+                .header(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Body::from(format!(
+                    "link_binding={}",
+                    hearth::protocol::web::link_token::link_binding(
+                        &hearth::protocol::web::CookieSecret::from_bytes([4u8; 32]),
+                        minted.token()
+                    )
+                )))
+                .expect("build POST"),
         )
         .await
         .expect("oneshot")

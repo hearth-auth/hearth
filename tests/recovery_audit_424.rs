@@ -736,14 +736,19 @@ async fn magic_link_redemption_route_creates_a_session() {
         .clone()
         .oneshot(
             Request::builder()
+                .method("POST")
                 .uri("/ui/magic-link")
                 // GA audit L18: the link's first GET moved the token into
-                // this cookie.
+                // this cookie; the confirmation page's POST redeems it.
                 .header(
                     header::COOKIE,
                     format!("hearth_link_token={}", response.token()),
                 )
-                .body(Body::empty())
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "link_binding={}",
+                    link_binding(response.token())
+                )))
                 .expect("build GET"),
         )
         .await
@@ -778,14 +783,19 @@ async fn magic_link_redemption_route_creates_a_session() {
         .clone()
         .oneshot(
             Request::builder()
+                .method("POST")
                 .uri("/ui/magic-link")
                 // GA audit L18: the link's first GET moved the token into
-                // this cookie.
+                // this cookie; the confirmation page's POST redeems it.
                 .header(
                     header::COOKIE,
                     format!("hearth_link_token={}", response.token()),
                 )
-                .body(Body::empty())
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "link_binding={}",
+                    link_binding(response.token())
+                )))
                 .expect("build GET"),
         )
         .await
