@@ -572,6 +572,7 @@ impl Config {
         validate_realm_applications_all(self.realms.as_ref(), &mut issues);
         validate_realm_organizations_all(self.realms.as_ref(), &mut issues);
         validate_realm_saml_sps_all(self.realms.as_ref(), &mut issues);
+        validate_realm_protected_resources_all(self.realms.as_ref(), self.dev_mode, &mut issues);
 
         // HSEC-010: Mirror the fail-fast check in validate_all so the admin
         // config-check panel surfaces this error alongside other issues.
@@ -1359,6 +1360,44 @@ fn saml_sp_signing_problem(
         ));
     }
     None
+}
+
+fn validate_realm_protected_resources_all(
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    dev_mode: bool,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    // AGENT_AUTH.md §2.5: a protected resource's `resource_uri` MUST use HTTPS
+    // in production; `--dev` MAY permit HTTP. The spec carves out dev mode
+    // only, so a loopback `http://` URI is refused in production as well. The
+    // scheme is compared on the canonical (lowercased) form. Malformed URIs
+    // are reported by the realm registry check (`to_realm_config`), not here.
+    if dev_mode {
+        return;
+    }
+    let Some(realms) = realms else { return };
+    for (name, cfg) in realms {
+        for (i, resource) in cfg
+            .protected_resources
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let Ok(uri) = crate::core::Uri::try_from(resource.resource_uri.clone()) else {
+                continue;
+            };
+            if !uri.as_str().starts_with("https://") {
+                issues.push(ValidationIssue {
+                    field: format!("realms.{name}.protected_resources[{i}].resource_uri"),
+                    reason: format!(
+                        "'{}' must use https outside --dev mode (AGENT_AUTH.md §2.5)",
+                        resource.resource_uri
+                    ),
+                });
+            }
+        }
+    }
 }
 
 fn validate_realm_saml_sps_all(
@@ -2885,6 +2924,40 @@ mod tests {
                 .any(|i| i.field == "auth.mfa_methods" && i.reason.contains("carrier_pigeon")),
             "an unknown global MFA method must be refused: {issues:?}"
         );
+    }
+
+    /// AGENT_AUTH.md §2.5: a protected resource's URI MUST be HTTPS in
+    /// production; `--dev` MAY permit HTTP. The spec carves out dev mode
+    /// only — a loopback `http://` resource is refused in production too.
+    #[test]
+    fn protected_resource_uri_must_be_https_outside_dev_mode() {
+        let yaml = "realms:\n  acme:\n    protected_resources:\n      \
+                    - resource_uri: \"http://rs.example.com/api\"\n        display_name: RS\n      \
+                    - resource_uri: \"https://ok.example.com\"\n        display_name: OK\n      \
+                    - resource_uri: \"http://127.0.0.1:9000/mcp\"\n        display_name: Local\n      \
+                    - resource_uri: \"HTTP://upper.example.com\"\n        display_name: Upper\n";
+        let mut cfg = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        let fields = |cfg: &Config| -> Vec<String> {
+            let mut f: Vec<String> = cfg
+                .validate_all()
+                .into_iter()
+                .map(|i| i.field)
+                .filter(|f| f.contains("protected_resources"))
+                .collect();
+            f.sort();
+            f
+        };
+        cfg.dev_mode = false;
+        assert_eq!(
+            fields(&cfg),
+            vec![
+                "realms.acme.protected_resources[0].resource_uri".to_string(),
+                "realms.acme.protected_resources[2].resource_uri".to_string(),
+                "realms.acme.protected_resources[3].resource_uri".to_string(),
+            ]
+        );
+        cfg.dev_mode = true;
+        assert_eq!(fields(&cfg), Vec::<String>::new());
     }
 
     #[test]

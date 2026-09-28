@@ -784,6 +784,26 @@ oidc:
 #           - billing.read
 #           - billing.write
 #
+#     # RFC 8707 protected resources (resource servers, MCP servers). This
+#     # list is the realm's ONLY protected-resource registry — there is no
+#     # admin API for it. Reconcile mirrors it at startup and on every config
+#     # reload; an entry removed here is removed from the registry and every
+#     # token issued for it stops validating.
+#     # `resource_uri` is the resource's identifier and token audience, held in
+#     # canonical form (scheme/host lowercased, default port and trailing
+#     # slash dropped). An RFC 8693 token exchange may name any spelling of it
+#     # as `audience` or `resource` (or an audience already in the subject
+#     # token's `aud`); anything else answers `invalid_target`. Outside --dev
+#     # it must be https.
+#     protected_resources:
+#       - resource_uri: "https://api.example.com"
+#         display_name: "Example API"
+#         scopes:                     # resource-local bundles, looked up
+#           - name: api:read          # only when `resource=` names this URI
+#             display_name: "Read API"
+#             permissions:
+#               - billing.read
+#
 #     # YAML-declared groups — created at startup, updated if drifted.
 #     groups:
 #       - name: Engineering

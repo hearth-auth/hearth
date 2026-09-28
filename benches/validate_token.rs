@@ -39,10 +39,10 @@ use std::time::{Duration, Instant};
 use criterion::{black_box, criterion_group, Criterion};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::core::{Clock, RealmId, SystemClock};
+use hearth::core::{Clock, RealmId, SystemClock, Uri};
 use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
-    SessionContext,
+    RegisterProtectedResourceRequest, SessionContext, TokenIssuanceContext,
 };
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
@@ -147,6 +147,20 @@ struct BenchState {
     engine: EmbeddedIdentityEngine,
     realm: RealmId,
     access_token: String,
+    /// A token whose `aud` also names a protected resource, validated while
+    /// the realm holds an audience cutoff for another (removed) resource — so
+    /// the gates also cover the audience-cutoff lookup (AGENT_AUTH.md §2.5).
+    resource_access_token: String,
+}
+
+impl BenchState {
+    /// Both tokens, each validated once per gate iteration.
+    fn tokens(&self) -> [&str; 2] {
+        [
+            self.access_token.as_str(),
+            self.resource_access_token.as_str(),
+        ]
+    }
 }
 
 /// Creates a fully warmed engine with a valid access token.
@@ -204,13 +218,48 @@ fn make_bench_state() -> BenchState {
 
     let access_token = pair.access_token().to_string();
 
+    // A removed protected resource leaves a live audience cutoff in the
+    // revoked-JTI projection, so the lookup below runs against a populated map.
+    let removed = engine
+        .register_protected_resource(
+            &realm,
+            &RegisterProtectedResourceRequest {
+                resource_uri: "https://removed.bench.example.com/mcp".to_string(),
+                display_name: "Removed".to_string(),
+                scopes: Vec::new(),
+                required_claims: Vec::new(),
+            },
+        )
+        .expect("register protected resource");
+    engine
+        .delete_protected_resource(&realm, &removed.id)
+        .expect("delete protected resource");
+    let resource_access_token = engine
+        .issue_tokens_with_context(
+            &realm,
+            user.id(),
+            session.id(),
+            &TokenIssuanceContext {
+                granted_scopes: std::iter::once("openid".to_string()).collect(),
+                resource: Some(
+                    Uri::try_from("https://bench.example.com/mcp".to_string()).expect("uri"),
+                ),
+                ..TokenIssuanceContext::default()
+            },
+        )
+        .expect("issue resource-bound tokens")
+        .access_token()
+        .to_string();
+
     // Prime the `EpochCell` caches and the session hot tier.
     for _ in 0..GATE_WARMUP {
-        black_box(
-            engine
-                .validate_token(&realm, &access_token)
-                .expect("warmup validate_token"),
-        );
+        for token in [access_token.as_str(), resource_access_token.as_str()] {
+            black_box(
+                engine
+                    .validate_token(&realm, token)
+                    .expect("warmup validate_token"),
+            );
+        }
     }
 
     BenchState {
@@ -218,6 +267,7 @@ fn make_bench_state() -> BenchState {
         engine,
         realm,
         access_token,
+        resource_access_token,
     }
 }
 
@@ -242,16 +292,18 @@ fn assert_p99(samples: &mut [Duration], gate: &str, p99_limit: Duration) {
 /// [`make_bench_state`].  VISION.md §7.3.1 targets p99 < 500 µs on production
 /// hardware; the CI gate uses 1 ms to accommodate shared runner overhead.
 fn gate_validate_token_latency(state: &BenchState) {
-    let mut samples = Vec::with_capacity(GATE_SAMPLES);
+    let mut samples = Vec::with_capacity(GATE_SAMPLES * 2);
     for _ in 0..GATE_SAMPLES {
-        let start = Instant::now();
-        black_box(
-            state
-                .engine
-                .validate_token(&state.realm, black_box(state.access_token.as_str()))
-                .expect("validate_token"),
-        );
-        samples.push(start.elapsed());
+        for token in state.tokens() {
+            let start = Instant::now();
+            black_box(
+                state
+                    .engine
+                    .validate_token(&state.realm, black_box(token))
+                    .expect("validate_token"),
+            );
+            samples.push(start.elapsed());
+        }
     }
     assert_p99(&mut samples, "validate_token", VALIDATE_TOKEN_P99);
 }
@@ -266,18 +318,20 @@ fn gate_validate_token_allocs(state: &BenchState) {
     COUNTING.store(true, Ordering::SeqCst);
 
     for _ in 0..ALLOC_ROUNDS {
-        black_box(
-            state
-                .engine
-                .validate_token(&state.realm, black_box(state.access_token.as_str()))
-                .expect("validate_token"),
-        );
+        for token in state.tokens() {
+            black_box(
+                state
+                    .engine
+                    .validate_token(&state.realm, black_box(token))
+                    .expect("validate_token"),
+            );
+        }
     }
 
     COUNTING.store(false, Ordering::SeqCst);
     let total = ALLOC_COUNT.load(Ordering::Relaxed);
     // Ceiling division: round up so a single extra allocation is always visible.
-    let per_call = total.div_ceil(ALLOC_ROUNDS);
+    let per_call = total.div_ceil(ALLOC_ROUNDS * 2);
 
     assert!(
         per_call == MAX_ALLOCS_PER_CALL,

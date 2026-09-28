@@ -186,7 +186,12 @@ MCP tool servers advertise their authorization requirements via a discovery docu
 
 ### 2.5 Protected Resource Registration
 
-Realms register their MCP tool servers as protected resources in Hearth.
+Realms register their MCP tool servers as protected resources in Hearth. Registration is
+declarative: an operator lists them in the realm's YAML `protected_resources` block, and reconcile
+mirrors that block into the registry at startup and on every config reload — entries removed from
+YAML are removed from the registry. There is no admin write API. `scopes` holds the entry's
+resource-local bundle names; `required_claims` has no YAML key and is always empty. The registry
+is also the RFC 8693 token-exchange target allowlist (`OIDC.md` §3.4.1a).
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -198,9 +203,19 @@ Realms register their MCP tool servers as protected resources in Hearth.
 
 **Rules:**
 
-- Resource URIs **MUST** be unique within a realm.
+- Resource URIs are held in one canonical form (scheme and host lowercased, default port and
+  trailing slashes dropped, path and query case kept — `OIDC.md` §3.4.1a), used by the registry,
+  RBAC's resource scope lookup, token exchange and minted `aud` alike.
+- Resource URIs **MUST** be unique within a realm, compared in canonical form. *Enforced at config
+  load.*
 - Resource URIs **MUST** use HTTPS in production. HTTP **MAY** be permitted in `--dev` mode.
+  *Enforced at config load: outside `--dev` a non-`https` `resource_uri` is refused, loopback
+  included.*
 - Deletion of a protected resource **MUST** revoke all outstanding tokens scoped to that resource.
+  *Implemented:* removing a resource (from YAML, on the next reconcile) writes an audience cutoff
+  into the revoked-JTI projection, so every token whose `aud` names it stops validating and
+  introspects inactive, and revokes every grant family bound to it. Hearth cannot recall a JWT a
+  resource server verifies offline without asking Hearth; such tokens lapse at `exp`.
 
 ### 2.6 MCP Scope Strings
 

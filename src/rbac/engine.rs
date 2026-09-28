@@ -1749,15 +1749,19 @@ impl RbacEngine for EmbeddedRbacEngine {
         realm_id: &RealmId,
         resources: &[ProtectedResource],
     ) -> Result<(), RbacError> {
+        // Build (and validate) the whole declared set first, so an invalid
+        // URI changes nothing.
+        let mut desired: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut desired_keys: HashSet<Vec<u8>> = HashSet::new();
         for resource in resources {
-            // Validate the resource URI.
+            // `Uri` is canonical, so every spelling of one URI hashes alike —
+            // the same form the identity registry and exchange allowlist use.
             let uri = Uri::try_from(resource.resource_uri.clone()).map_err(|e| {
                 RbacError::Serialization {
                     reason: format!("invalid resource URI '{}': {e}", resource.resource_uri),
                 }
             })?;
             let hash = uri.storage_hash();
-
             for bundle in &resource.scopes {
                 let permissions: Option<Vec<Permission>> = if bundle.permissions.is_empty() {
                     None
@@ -1769,8 +1773,23 @@ impl RbacEngine for EmbeddedRbacEngine {
                     permissions,
                 };
                 let key = keys::encode_resource_scope(realm_id, &hash, &bundle.name);
-                self.write_put(realm_id, &key, &Self::ser(&stored)?)?;
+                desired_keys.insert(key.clone());
+                desired.push((key, Self::ser(&stored)?));
             }
+        }
+
+        // Mirror YAML exactly: a bundle of a resource dropped from YAML, or
+        // dropped from a still-listed resource, stops resolving. Removals
+        // first, so a failed write leaves fewer bundles, never more.
+        let prefix = keys::resource_scope_realm_scan_prefix(realm_id);
+        let end = keys::prefix_end(&prefix);
+        for entry in self.storage.scan(realm_id, &prefix, &end)? {
+            if !desired_keys.contains(&entry.key) {
+                self.write_delete(realm_id, &entry.key)?;
+            }
+        }
+        for (key, value) in &desired {
+            self.write_put(realm_id, key, value)?;
         }
         Ok(())
     }

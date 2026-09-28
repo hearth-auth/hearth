@@ -392,9 +392,11 @@ pub trait RbacEngine: Send + Sync {
     /// Idempotent.
     fn reconcile_scopes(&self, realm_id: &RealmId, specs: &[ScopeSpec]) -> Result<(), RbacError>;
 
-    /// Persists each declared protected resource's scope bundles into per-realm
-    /// storage keyed by the resource URI hash. Idempotent — bundles already
-    /// present are overwritten.
+    /// Makes the realm's resource scope bundles equal the declared protected
+    /// resources' bundles, keyed by the canonical resource URI's hash: declared
+    /// bundles are written (overwriting), and every stored bundle not declared —
+    /// a dropped bundle, a dropped resource, or all of them when `resources` is
+    /// empty — is deleted. Idempotent.
     fn reconcile_protected_resources(
         &self,
         realm_id: &RealmId,
