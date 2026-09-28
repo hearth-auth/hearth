@@ -649,6 +649,13 @@ pub(crate) fn encode_realm_key_epoch(realm_id: &RealmId) -> Vec<u8> {
     format!("realm:keygen:{}", realm_id.as_uuid()).into_bytes()
 }
 
+/// Parses the realm out of a `realm:keygen:{uuid}` key, or `None` for any other
+/// key (the Raft observer's signing-key rotation arm).
+pub(crate) fn parse_realm_key_epoch_realm(key: &[u8]) -> Option<RealmId> {
+    let uuid = std::str::from_utf8(key.strip_prefix(b"realm:keygen:")?).ok()?;
+    uuid::Uuid::parse_str(uuid).ok().map(RealmId::new)
+}
+
 /// Storage key for the cluster-wide **control epoch**.
 ///
 /// A single `u64` row under the system realm, bumped whenever a node asserts a

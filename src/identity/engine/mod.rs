@@ -223,6 +223,23 @@ const CLOCK_SKEW_SECS: i64 = 60;
 /// the cache-miss path reconciles unconditionally regardless.
 const EPOCH_SYNC_INTERVAL_MICROS: i64 = 200_000;
 
+/// Number of per-realm signing-key debounce windows (a power of two).
+///
+/// Realms are spread over the windows by a hash of their id; two realms that
+/// share a window share its debounce, exactly as every realm used to share
+/// one. 1,024 windows make that rare for any realistic realm count, and the
+/// replicated-write observer reconciles a rotation directly in cluster mode.
+const REALM_EPOCH_WINDOWS: usize = 1024;
+
+/// The debounce window of `realm_id`'s signing-key epoch: an allocation-free
+/// hash of the (random) UUID, masked to the table size.
+fn realm_epoch_window(realm_id: &RealmId) -> usize {
+    let (hi, lo) = realm_id.as_uuid().as_u64_pair();
+    #[allow(clippy::cast_possible_truncation)] // masked to the table size below
+    let hash = (hi ^ lo) as usize;
+    hash & (REALM_EPOCH_WINDOWS - 1)
+}
+
 /// Maximum entries in the in-process session cache (S12-F1).
 const SESSION_CACHE_MAX: usize = 4096;
 
@@ -641,12 +658,22 @@ pub struct EmbeddedIdentityEngine {
     /// The background reloader and bump threads, joined when the engine drops so no thread
     /// outlives the storage handle it reads.
     control_worker: Vec<std::thread::JoinHandle<()>>,
-    /// Micros timestamp before which the hot path skips epoch reconciliation.
+    /// Micros timestamp before which the hot path skips control-epoch
+    /// reconciliation.
     ///
-    /// Reconciling both epochs costs two storage reads, and the validation hot
-    /// path may perform none. This bounds how often it pays for them. See
-    /// [`Self::sync_epochs_debounced`] and [`EPOCH_SYNC_INTERVAL_MICROS`].
+    /// Reconciling an epoch costs a storage read, and the validation hot path
+    /// may perform none. This bounds how often it pays for the (global)
+    /// control epoch. See [`Self::sync_epochs_debounced`] and
+    /// [`EPOCH_SYNC_INTERVAL_MICROS`].
     epoch_sync_after: AtomicI64,
+    /// Per-realm debounce windows for the signing-key epoch, indexed by
+    /// [`realm_epoch_window`] (audit GA 2026-09-28 M5).
+    ///
+    /// The key epoch is per realm, and sharing `epoch_sync_after` meant only
+    /// the realm of the request that won the window was reconciled: a busy
+    /// realm starved a quiet one whose key another node had revoked. Fixed
+    /// size and allocated once, so the hot path allocates nothing to use it.
+    realm_epoch_due: Box<[AtomicI64]>,
     /// Lock-free realm status cache for the `validate_token` hot path.
     ///
     /// Populated at startup and updated on every realm CRUD operation.
@@ -978,6 +1005,18 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
                 Err(err) => tracing::warn!(error = %err, "replicated control epoch is corrupted"),
             }
             return;
+        }
+        // A signing-key rotation on another node. Without this arm a follower
+        // learned of it only from the debounced read on the validation path
+        // (audit GA 2026-09-28 M5). In-memory invalidation only; on the node
+        // that rotated, the local epoch already matches and this is a no-op.
+        if keys::is_system_realm(realm_id) {
+            if let Some(rotated) = keys::parse_realm_key_epoch_realm(key) {
+                if let Ok(epoch) = <[u8; 8]>::try_from(value).map(u64::from_le_bytes) {
+                    self.observe_realm_key_epoch(&rotated, epoch);
+                }
+                return;
+            }
         }
         let prefix = keys::revoked_jti_scan_prefix();
         if let Some(jti_bytes) = key.strip_prefix(prefix.as_slice()) {
@@ -1349,6 +1388,9 @@ impl EmbeddedIdentityEngine {
             control: Arc::clone(&control),
             control_worker: Vec::new(),
             epoch_sync_after: AtomicI64::new(0),
+            realm_epoch_due: (0..REALM_EPOCH_WINDOWS)
+                .map(|_| AtomicI64::new(0))
+                .collect(),
             realm_status_cache: Arc::clone(&caches.realm_status),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -1778,6 +1820,9 @@ impl EmbeddedIdentityEngine {
             control: Arc::clone(&control),
             control_worker: Vec::new(),
             epoch_sync_after: AtomicI64::new(0),
+            realm_epoch_due: (0..REALM_EPOCH_WINDOWS)
+                .map(|_| AtomicI64::new(0))
+                .collect(),
             realm_status_cache: Arc::clone(&caches.realm_status),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -4936,26 +4981,40 @@ impl EmbeddedIdentityEngine {
     /// unconditionally. It is already paying for an Ed25519 verify, so two
     /// rows cost it nothing worth debouncing, and it means a token this engine
     /// has never seen is always judged against fresh epochs.
+    ///
+    /// The control epoch is global and has one window. The signing-key epoch
+    /// is per realm and has one window per realm (`realm_epoch_due`): with a single shared window only the realm of the
+    /// winning request was reconciled, and a busy realm could keep a quiet
+    /// realm's revoked key trusted indefinitely (audit GA 2026-09-28 M5).
     fn sync_epochs_debounced(&self, realm_id: &RealmId) {
         let now = self.clock.now().as_micros();
-        let due = self.epoch_sync_after.load(Ordering::Acquire);
-        if now < due {
-            return;
+        if Self::claim_window(&self.epoch_sync_after, now) {
+            self.sync_control_epoch();
         }
-        if self
-            .epoch_sync_after
-            .compare_exchange(
-                due,
-                now.saturating_add(EPOCH_SYNC_INTERVAL_MICROS),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return;
+        if self.claim_realm_window(realm_id, now) {
+            self.sync_realm_key_epoch(realm_id);
         }
-        self.sync_control_epoch();
-        self.sync_realm_key_epoch(realm_id);
+    }
+
+    /// Claims the debounce window `due` for this call if it has elapsed.
+    /// Returns `true` for exactly one caller per window.
+    fn claim_window(due_at: &AtomicI64, now: i64) -> bool {
+        let due = due_at.load(Ordering::Acquire);
+        now >= due
+            && due_at
+                .compare_exchange(
+                    due,
+                    now.saturating_add(EPOCH_SYNC_INTERVAL_MICROS),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+    }
+
+    /// Claims `realm_id`'s signing-key debounce window for this call if it
+    /// has elapsed.
+    fn claim_realm_window(&self, realm_id: &RealmId, now: i64) -> bool {
+        Self::claim_window(&self.realm_epoch_due[realm_epoch_window(realm_id)], now)
     }
 
     /// Signals the control-cache reloader when the persisted control epoch is
@@ -5031,6 +5090,14 @@ impl EmbeddedIdentityEngine {
     /// would silently no-op in production.
     fn sync_realm_key_epoch(&self, realm_id: &RealmId) {
         let persisted = self.read_persisted_key_epoch(realm_id);
+        self.observe_realm_key_epoch(realm_id, persisted);
+    }
+
+    /// Invalidates `realm_id`'s signing-key caches when `persisted` — its
+    /// signing-key epoch as storage holds it — is ahead of the one this node
+    /// last acted on. In-memory only, so the Raft observer can call it with a
+    /// replicated row's value (audit GA 2026-09-28 M5).
+    fn observe_realm_key_epoch(&self, realm_id: &RealmId, persisted: u64) {
         let local = self.realm_key_epoch.get(realm_id).unwrap_or(0);
         if persisted <= local {
             return;
