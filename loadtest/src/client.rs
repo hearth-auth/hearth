@@ -294,6 +294,32 @@ impl SeedClient {
         }
     }
 
+    /// Puts a client in `introspection` access-token-authorization mode via
+    /// `PATCH /admin/applications/{client_id}`.
+    ///
+    /// The harness introspects *users'* session tokens with its confidential
+    /// client. Since the GA audit (L11) a token without `azp` introspects
+    /// `active:true` only for a client its `aud` names, the client it was
+    /// issued to, or a resource-server client in introspection or decision
+    /// mode — so the harness's client must declare itself a resource server,
+    /// exactly as a production API gateway would.
+    ///
+    /// # Errors
+    /// Returns [`SeedError`] on transport failure or a non-2xx response.
+    pub async fn set_introspection_mode(&self, client_id: &str) -> Result<(), SeedError> {
+        let resp = self
+            .http
+            .patch(format!("{}/admin/applications/{client_id}", self.base_url))
+            .json(&serde_json::json!({"access_token_authorization": "introspection"}))
+            .send()
+            .await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(status_err("set_introspection_mode", resp).await)
+        }
+    }
+
     /// Registers a **confidential** OAuth client that supports the
     /// `client_credentials` grant via `POST /register` (RFC 7591 DCR), returning
     /// its `client_id` and server-generated `client_secret` (HEA-2003).
