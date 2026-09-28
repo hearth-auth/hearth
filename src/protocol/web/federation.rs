@@ -16,6 +16,7 @@
 //! Audit events are emitted on every state-changing path — login
 //! started, completed, account linked/unlinked, JIT provisioned.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use askama::Template;
@@ -33,6 +34,7 @@ use crate::identity::federation::{
 };
 use crate::identity::SessionContext;
 use crate::identity::{CreateUserRequest, IdentityError};
+use crate::protocol::client_info::{build_session_context, PeerAddr};
 
 use super::auth;
 use super::handlers_common;
@@ -196,6 +198,7 @@ async fn begin_impl(
 /// `GET /ui/realms/{realm}/federation/callback?state=&code=`
 pub async fn callback_scoped(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Path(realm_name): Path<String>,
     Query(q): Query<CallbackQuery>,
@@ -209,6 +212,7 @@ pub async fn callback_scoped(
     callback_impl(
         state,
         headers,
+        peer_addr,
         realm_id,
         &realm_name,
         q.state,
@@ -223,6 +227,7 @@ pub async fn callback_scoped(
 /// `GET /ui/federation/callback`
 pub async fn callback(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Query(q): Query<CallbackQuery>,
 ) -> Response {
@@ -235,6 +240,7 @@ pub async fn callback(
     callback_impl(
         state,
         headers,
+        peer_addr,
         realm_id,
         &realm_name,
         q.state,
@@ -249,6 +255,7 @@ pub async fn callback(
 /// `POST /ui/realms/{realm}/federation/callback` — Apple Sign In `form_post`.
 pub async fn callback_scoped_post(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Path(realm_name): Path<String>,
     Form(f): Form<CallbackForm>,
@@ -262,6 +269,7 @@ pub async fn callback_scoped_post(
     callback_impl(
         state,
         headers,
+        peer_addr,
         realm_id,
         &realm_name,
         f.state,
@@ -276,6 +284,7 @@ pub async fn callback_scoped_post(
 /// `POST /ui/federation/callback` — Apple Sign In `form_post` (bare realm).
 pub async fn callback_post(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(f): Form<CallbackForm>,
 ) -> Response {
@@ -288,6 +297,7 @@ pub async fn callback_post(
     callback_impl(
         state,
         headers,
+        peer_addr,
         realm_id,
         &realm_name,
         f.state,
@@ -304,6 +314,7 @@ pub async fn callback_post(
 async fn callback_impl(
     state: Arc<WebState>,
     headers: HeaderMap,
+    peer_addr: SocketAddr,
     realm_id: RealmId,
     realm_name: &str,
     state_token: String,
@@ -380,6 +391,7 @@ async fn callback_impl(
     complete_federation_outcome(
         &state,
         &headers,
+        peer_addr,
         &realm_id,
         realm_name,
         &bag.idp_id,
@@ -402,6 +414,7 @@ async fn callback_impl(
 pub(super) fn complete_federation_outcome(
     state: &Arc<WebState>,
     headers: &HeaderMap,
+    peer_addr: SocketAddr,
     realm_id: &RealmId,
     realm_name: &str,
     bag_idp_id: &IdpId,
@@ -409,15 +422,26 @@ pub(super) fn complete_federation_outcome(
     return_to: &str,
     secure: bool,
 ) -> Response {
+    // The realm's `cidr_policy` ("CIDRs permitted to authenticate") binds
+    // federated logins too (GA audit M13). Checked before anything is
+    // provisioned or linked, so a denied network cannot JIT-create an account.
+    let client_ip = build_session_context(headers, peer_addr, &state.trusted_proxies).ip_address;
+    if let Err(e) = state
+        .identity
+        .check_realm_network_policy(realm_id, client_ip.as_deref())
+    {
+        tracing::warn!(error = %e, "federation: refused by the realm's network policy");
+        return Redirect::to("/ui/login?error=fed_link_failed").into_response();
+    }
     match outcome {
         FederationOutcome::ExistingUser(user_id) => {
             audit_federation_completed(state, realm_id, bag_idp_id, &user_id, false);
-            complete_login(state, headers, realm_id, &user_id, return_to)
+            complete_login(state, headers, peer_addr, realm_id, &user_id, return_to)
         }
         FederationOutcome::AutoLinked(user_id) => {
             audit_federation_linked(state, realm_id, bag_idp_id, &user_id, "auto");
             audit_federation_completed(state, realm_id, bag_idp_id, &user_id, true);
-            complete_login(state, headers, realm_id, &user_id, return_to)
+            complete_login(state, headers, peer_addr, realm_id, &user_id, return_to)
         }
         FederationOutcome::JitProvision(identity) => {
             // Create a fresh user for this external identity.
@@ -487,7 +511,14 @@ pub(super) fn complete_federation_outcome(
             audit_federation_jit(state, realm_id, &identity.idp_id, new_user.id());
             audit_federation_linked(state, realm_id, &identity.idp_id, new_user.id(), "initial");
             audit_federation_completed(state, realm_id, &identity.idp_id, new_user.id(), true);
-            complete_login(state, headers, realm_id, new_user.id(), return_to)
+            complete_login(
+                state,
+                headers,
+                peer_addr,
+                realm_id,
+                new_user.id(),
+                return_to,
+            )
         }
         FederationOutcome::ConfirmLinkRequired(ticket) => {
             // Persist the HMAC-bound cookie and redirect.
@@ -671,26 +702,29 @@ async fn confirm_link_page_impl(
 /// `POST /ui/realms/{realm}/federation/confirm-link` (22.19).
 pub async fn confirm_link_submit_scoped(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     Path(realm_name): Path<String>,
     headers: HeaderMap,
     Form(form): Form<ConfirmLinkForm>,
 ) -> Response {
-    confirm_link_submit_impl(state, Some(realm_name), headers, form).await
+    confirm_link_submit_impl(state, Some(realm_name), headers, peer_addr, form).await
 }
 
 /// `POST /ui/federation/confirm-link` (bare — resolves default realm).
 pub async fn confirm_link_submit(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(form): Form<ConfirmLinkForm>,
 ) -> Response {
-    confirm_link_submit_impl(state, None, headers, form).await
+    confirm_link_submit_impl(state, None, headers, peer_addr, form).await
 }
 
 async fn confirm_link_submit_impl(
     state: Arc<WebState>,
     realm_name: Option<String>,
     headers: HeaderMap,
+    peer_addr: SocketAddr,
     form: ConfirmLinkForm,
 ) -> Response {
     // 21.14 (audit §4.22#12): double-submit CSRF check, before the ticket is
@@ -730,6 +764,15 @@ async fn confirm_link_submit_impl(
         mac,
     ) {
         return Redirect::to("/ui/login").into_response();
+    }
+    // The realm's network policy binds this login path too (GA audit M13).
+    let client_ip = build_session_context(&headers, peer_addr, &state.trusted_proxies).ip_address;
+    if state
+        .identity
+        .check_realm_network_policy(&realm_id, client_ip.as_deref())
+        .is_err()
+    {
+        return Redirect::to("/ui/login?error=fed_link_failed").into_response();
     }
     // Verify local password. This is an Argon2id op, so route it through the
     // shared KDF admission gate — every pre-auth hash MUST join the one permit
@@ -796,6 +839,7 @@ async fn confirm_link_submit_impl(
     complete_login(
         &state,
         &headers,
+        peer_addr,
         &realm_id,
         &ticket_rec.user_id,
         "/ui/account",
@@ -842,58 +886,71 @@ fn uses_form_post_callback(state: &WebState, realm_id: &RealmId, idp_name: &str)
 fn complete_login(
     state: &Arc<WebState>,
     headers: &HeaderMap,
+    peer_addr: SocketAddr,
     realm_id: &RealmId,
     user_id: &UserId,
     return_to: &str,
 ) -> Response {
     let secure = state.is_secure_request(headers);
+    // A-48: the binding cookie is cleared on every exit — the federation hop
+    // is complete whether it ends in a session or in a challenge.
+    let clear_bind = format!("{FED_BIND_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0");
 
-    // A realm that sets `mfa_required` demands a second factor on every login
-    // path, federation included (audit 2026-08-28 §4.18#3). The upstream IdP
-    // asserts a first factor only, so hand the browser to Hearth's own
-    // challenge — or to forced enrolment when the user has no factor Hearth can
-    // challenge. The MFA pending cookie carries the proven identity across the
-    // hop, exactly as the direct login does.
-    let realm_requires_mfa = state
-        .identity
-        .get_realm(realm_id)
-        .ok()
-        .flatten()
-        .and_then(|r| r.config().mfa_required)
-        .unwrap_or(false);
-    if realm_requires_mfa {
-        let cookie = auth::issue_mfa_pending_cookie(
-            &state.cookie_secret,
-            realm_id,
-            user_id,
-            Some(return_to),
-            secure,
-        );
-        let target = if state
-            .identity
-            .mfa_enabled(realm_id, user_id)
-            .unwrap_or(false)
-        {
-            "/ui/mfa-challenge"
-        } else {
-            "/ui/mfa-enroll-required"
-        };
-        state.set_current_realm(realm_id.clone());
-        let mut response = Redirect::to(target).into_response();
-        super::handlers::append_cookie(&mut response, &cookie);
-        // A-48: clear the binding cookie — the federation hop is complete.
-        super::handlers::append_cookie(
-            &mut response,
-            &format!("{FED_BIND_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0"),
-        );
-        return response;
+    let (Ok(Some(realm)), Ok(Some(user))) = (
+        state.identity.get_realm(realm_id),
+        state.identity.get_user(realm_id, user_id),
+    ) else {
+        tracing::warn!("federation: realm or user lookup failed after the upstream login");
+        return handlers_common::server_error();
+    };
+
+    // The upstream IdP asserts ONE factor. The user's own second factor binds
+    // exactly as after a password (GA audit B5): a TOTP, OTP or passkey the
+    // user holds is challenged on every realm, not only on `mfa_required`
+    // realms, and forced enrolment is offered only to a user who holds no
+    // factor — this used to send every non-TOTP user on an `mfa_required`
+    // realm to TOTP enrolment. The MFA pending cookie carries the proven
+    // identity across the hop, exactly as the direct login does.
+    match super::second_factor::second_factor_step(state, &realm, &user) {
+        Ok(Some(step)) => {
+            let mut response = super::second_factor::redirect_to_second_factor(
+                state,
+                realm_id,
+                user_id,
+                step,
+                Some(return_to),
+                secure,
+            );
+            super::handlers::append_cookie(&mut response, &clear_bind);
+            return response;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "federation: second-factor lookup failed");
+            return handlers_common::server_error();
+        }
     }
 
-    // Build a minimal session. The browser context is populated from
-    // request headers in the standard login flow; for federation we
-    // record what we can. The realm asks for no second factor here, so the
-    // default (unproven) MFA context is correct.
-    let ctx = SessionContext::default();
+    // Pending required actions bind a federated login too (GA audit M11).
+    let now = Timestamp::from_micros(now_micros());
+    if let Some(mut ra) = super::required_action::required_action_check_browser(
+        state,
+        realm_id,
+        user_id,
+        Some(return_to),
+        headers,
+        now,
+    ) {
+        state.set_current_realm(realm_id.clone());
+        super::handlers::append_cookie(&mut ra, &clear_bind);
+        return ra;
+    }
+
+    // Nothing owed: the realm asks for no second factor and the user holds
+    // none, so the default (unproven) MFA context is correct. The engine
+    // refuses it if either is untrue. The peer address feeds the realm's
+    // network policy (GA audit M13).
+    let ctx: SessionContext = build_session_context(headers, peer_addr, &state.trusted_proxies);
     let session = match state.identity.create_session(realm_id, user_id, &ctx) {
         Ok(s) => s,
         Err(e) => {
@@ -909,11 +966,7 @@ fn complete_login(
     let mut response = Redirect::to(return_to).into_response();
     super::handlers::append_cookie(&mut response, &session_cookie);
     super::handlers::append_cookie(&mut response, &csrf_cookie);
-    // A-48: clear the binding cookie — flow is complete.
-    super::handlers::append_cookie(
-        &mut response,
-        &format!("{FED_BIND_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0"),
-    );
+    super::handlers::append_cookie(&mut response, &clear_bind);
     response
 }
 

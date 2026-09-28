@@ -324,17 +324,45 @@ const MAGIC_LINK_GRANT_TYPE: &str = "urn:hearth:grant-type:magic-link";
 /// Single use is enforced by `validate_magic_link`, which marks the record
 /// consumed before returning. The resulting session is a normal browserless
 /// session, so revocation and the session-version feed behave as usual.
+///
+/// The link proves control of the mailbox — one factor — and this grant has
+/// no challenge surface. So it refuses (GA audit B4, M11, M13):
+///
+/// * a user with pending required actions (`required_actions_pending`),
+///   exactly as the password grant does;
+/// * a user who holds a second factor: the engine's session gate answers
+///   `MfaRequired` for a session that proved none, and the link is already
+///   spent, so it cannot be replayed;
+/// * a client address the realm's `cidr_policy` denies, via the same gate.
 fn exchange_magic_link(
     state: &Arc<AppState>,
     realm_id: &crate::core::RealmId,
     token: &str,
     dpop_jkt: Option<&str>,
+    client_ip: Option<&str>,
+    user_agent: Option<&str>,
 ) -> Result<serde_json::Value, crate::identity::IdentityError> {
+    state
+        .identity
+        .check_realm_network_policy(realm_id, client_ip)?;
     let user_id = state.identity.validate_magic_link(realm_id, token)?;
+    let user = state
+        .identity
+        .get_user(realm_id, &user_id)?
+        .ok_or(crate::identity::IdentityError::MagicLinkTokenInvalid)?;
+    if !user.required_actions().is_empty() {
+        return Err(crate::identity::IdentityError::RequiredActionsBlocking {
+            actions: user.required_actions().to_vec(),
+        });
+    }
     let session = state.identity.create_session(
         realm_id,
         &user_id,
-        &crate::identity::SessionContext::default(),
+        &crate::identity::SessionContext {
+            ip_address: client_ip.map(str::to_string),
+            user_agent_raw: user_agent.map(str::to_string),
+            ..crate::identity::SessionContext::default()
+        },
     )?;
     let tokens = state
         .identity
@@ -355,7 +383,7 @@ fn exchange_magic_link(
 ///
 /// Uses a flat struct because the proto `TokenExchangeRequest` doesn't cover
 /// the multi-grant-type dispatch (`authorization_code` vs `refresh_token`).
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct HttpTokenRequest {
     /// RFC 6749 §3.2.1: REQUIRED only "if the client is not authenticating
     /// with the authorization server" — a strict `client_secret_basic` client
@@ -416,6 +444,39 @@ struct HttpTokenRequest {
     resource: Option<String>,
     #[serde(default)]
     audience: Option<String>,
+}
+
+/// Prints the grant's shape, never a credential: codes, verifiers, tokens,
+/// secrets, passwords and assertions are redacted (GA audit L20).
+impl std::fmt::Debug for HttpTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |v: &Option<String>| v.as_ref().map(|_| "<redacted>");
+        f.debug_struct("HttpTokenRequest")
+            .field("client_id", &self.client_id)
+            .field("grant_type", &self.grant_type)
+            .field("code", &redact(&self.code))
+            .field("redirect_uri", &self.redirect_uri)
+            .field("code_verifier", &redact(&self.code_verifier))
+            .field("refresh_token", &redact(&self.refresh_token))
+            .field("client_secret", &redact(&self.client_secret))
+            .field("scope", &self.scope)
+            .field("device_code", &redact(&self.device_code))
+            .field("username", &self.username)
+            .field("password", &redact(&self.password))
+            .field("mfa_code", &redact(&self.mfa_code))
+            .field("assertion", &redact(&self.assertion))
+            .field("client_assertion_type", &self.client_assertion_type)
+            .field("client_assertion", &redact(&self.client_assertion))
+            .field("token", &redact(&self.token))
+            .field("subject_token", &redact(&self.subject_token))
+            .field("subject_token_type", &self.subject_token_type)
+            .field("actor_token", &redact(&self.actor_token))
+            .field("actor_token_type", &self.actor_token_type)
+            .field("requested_token_type", &self.requested_token_type)
+            .field("resource", &self.resource)
+            .field("audience", &self.audience)
+            .finish()
+    }
 }
 
 /// HTTP request body for token revocation (RFC 7009).
@@ -3050,7 +3111,17 @@ async fn token_exchange_impl(
                 )
                     .into_response();
             };
-            match exchange_magic_link(&state, &realm_id, &link_token, dpop_jkt.as_deref()) {
+            let user_agent = headers
+                .get(axum::http::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok());
+            match exchange_magic_link(
+                &state,
+                &realm_id,
+                &link_token,
+                dpop_jkt.as_deref(),
+                Some(client_ip.as_str()),
+                user_agent,
+            ) {
                 Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
@@ -4216,7 +4287,17 @@ async fn realm_token_exchange(
                 )
                     .into_response();
             };
-            match exchange_magic_link(&state, &realm_id, &link_token, dpop_jkt.as_deref()) {
+            let user_agent = headers
+                .get(axum::http::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok());
+            match exchange_magic_link(
+                &state,
+                &realm_id,
+                &link_token,
+                dpop_jkt.as_deref(),
+                Some(client_ip.as_str()),
+                user_agent,
+            ) {
                 Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
                 Err(e) => identity_error_to_response(&e).into_response(),
             }

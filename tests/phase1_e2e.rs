@@ -297,13 +297,16 @@ async fn mfa_enrollment_plus_login() {
             .expect("verify_totp with next step");
     }
 
-    // 5. Session + tokens.
+    // 5. Session + tokens. The TOTP login above proved the second factor.
     let session = harness
         .identity()
         .create_session(
             &realm,
             user.id(),
-            &hearth::identity::SessionContext::default(),
+            &hearth::identity::SessionContext {
+                mfa_proof: hearth::identity::MfaProof::Proved,
+                ..hearth::identity::SessionContext::default()
+            },
         )
         .expect("create session");
     let tokens = harness
@@ -429,7 +432,10 @@ async fn passkey_only_authentication() {
         .create_session(
             &realm,
             user.id(),
-            &hearth::identity::SessionContext::default(),
+            &hearth::identity::SessionContext {
+                mfa_proof: hearth::identity::MfaProof::ProvedWebAuthn,
+                ..hearth::identity::SessionContext::default()
+            },
         )
         .expect("create session");
     let tokens = harness

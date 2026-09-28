@@ -489,6 +489,16 @@ pub trait IdentityEngine: Send + Sync {
     /// user enumeration via timing side-channels.
     fn dummy_verify_password(&self, password: &CleartextPassword);
 
+    /// Runs a dummy Argon2id verify of `password` under `realm_id`'s own
+    /// credential parameters and discards the result.
+    ///
+    /// Use this, not [`Self::dummy_verify_password`], on a login's
+    /// unknown-account arm: a realm that raises `password_memory_cost` /
+    /// `password_time_cost` verifies real users at that cost, so the global
+    /// dummy answered measurably faster for an address with no account
+    /// (GA audit L14).
+    fn dummy_verify_password_for_realm(&self, realm_id: &RealmId, password: &CleartextPassword);
+
     /// Checks whether the given IP has exceeded the per-IP login rate limit
     /// for a realm. Returns `Err(RateLimited)` when blocked.
     ///
@@ -1002,12 +1012,72 @@ pub trait IdentityEngine: Send + Sync {
     /// Returns whether the user holds a second factor this realm can challenge.
     ///
     /// True for an enabled TOTP enrolment, for a verified phone number when the
-    /// realm offers `sms`, and for an email-OTP enrolment when the realm offers
-    /// `email_otp`. Login paths use it to choose between a challenge and forced
-    /// enrolment. It MUST NOT be used to decide whether the `mfa_required`
-    /// policy is met — that gate reads factor use, not enrolment
-    /// (audit 2026-08-28 §4.18#3).
+    /// realm offers `sms`, for an email-OTP enrolment when the realm offers
+    /// `email_otp`, and for a registered passkey when the realm offers
+    /// `webauthn` (GA audit B5). An absent `mfa_methods` offers every method.
+    /// Login paths use it to choose between a challenge and forced enrolment:
+    /// forced enrolment is only ever offered when this is `false`. It MUST NOT
+    /// be used to decide whether the `mfa_required` policy is met — that gate
+    /// reads factor use, not enrolment (audit 2026-08-28 §4.18#3).
     fn has_second_factor(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<bool, IdentityError>;
+
+    /// Refuses a second-factor attempt once the user's MFA failure budget is
+    /// spent (the budget TOTP and recovery codes already share: five failures,
+    /// then a five-minute lockout).
+    ///
+    /// Login paths that verify an SMS or email OTP call this before the
+    /// verify, and record each failure with
+    /// [`Self::record_second_factor_failure`]: an OTP record allows five
+    /// guesses of its own, but a new code can be requested, so without a
+    /// per-user budget the guesses were unbounded (GA audit M12).
+    ///
+    /// # Errors
+    ///
+    /// [`IdentityError::RateLimited`] while the budget is spent.
+    fn check_second_factor_budget(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<(), IdentityError>;
+
+    /// Counts one failed second-factor attempt against the user's budget.
+    fn record_second_factor_failure(&self, realm_id: &RealmId, user_id: &UserId);
+
+    /// Resets the user's second-factor failure budget after a success.
+    fn clear_second_factor_failures(&self, realm_id: &RealmId, user_id: &UserId);
+
+    /// Refuses an authentication from a network the realm's `cidr_policy`
+    /// denies (A-9, "CIDRs permitted to authenticate").
+    ///
+    /// `create_session` applies this to every session it creates, from the
+    /// `ip_address` in its [`SessionContext`]; login paths that do work before
+    /// the session — provisioning a federated user, verifying a password —
+    /// call it first so a denied network gets nothing (GA audit M13). An
+    /// absent or unparseable address is not judged: the policy can only
+    /// refuse an address it has.
+    ///
+    /// # Errors
+    ///
+    /// [`IdentityError::Unauthorized`] when the policy denies the address; a
+    /// storage error when the realm cannot be read.
+    fn check_realm_network_policy(
+        &self,
+        realm_id: &RealmId,
+        client_ip: Option<&str>,
+    ) -> Result<(), IdentityError>;
+
+    /// Returns whether the user holds a passkey this realm accepts as a second
+    /// factor (a registered WebAuthn credential, and `mfa_methods` absent or
+    /// listing `webauthn`).
+    ///
+    /// Login paths use it to challenge the passkey after a first factor that
+    /// is not a passkey — a password, a magic link, a federated login
+    /// (GA audit B5).
+    fn has_passkey_factor(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,

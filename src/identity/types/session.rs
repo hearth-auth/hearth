@@ -10,7 +10,13 @@ use crate::core::{SessionId, Timestamp, UserId};
 /// (audit 2026-08-28 §4.18#3). The caller states what happened in this
 /// ceremony; the engine decides. `MfaProof::None` is the default, so a login
 /// path that says nothing is refused on an MFA-required realm.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// The proof is also recorded on the [`Session`] it opened (GA audit B5), so a
+/// later gate — a client that sets `mfa_required`, a role listed in the
+/// realm's `mfa_required_roles` — can ask what the session *proved* rather
+/// than what the account holds. Stored records encode the variant by its
+/// position, so new variants MUST be appended, never inserted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MfaProof {
     /// No second factor was proved in this authentication.
     #[default]
@@ -41,6 +47,16 @@ pub enum MfaProof {
     ///
     /// Use it only where that upstream gate can be named in a comment.
     Inherited,
+    /// A WebAuthn (passkey) ceremony that proved user *presence* only.
+    ///
+    /// Possession of one enrolled passkey and nothing else: one factor. It
+    /// satisfies neither `mfa_required` nor `webauthn_required`. It differs
+    /// from [`MfaProof::None`] in one respect: the factor the account holds —
+    /// the passkey — is the one this ceremony used, so a user whose only
+    /// second factor is a passkey is not refused for "holding a factor they
+    /// did not prove". A user who also holds TOTP, SMS or email OTP still owes
+    /// that factor (GA audit B5).
+    PasskeyPossession,
 }
 
 impl MfaProof {
@@ -111,6 +127,11 @@ pub struct Session {
     /// Never updated on refresh. `None` = no absolute timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) absolute_deadline: Option<Timestamp>,
+    /// What the authentication that opened this session proved about a second
+    /// factor (GA audit B5). Records written before this field existed decode
+    /// as [`MfaProof::None`]: an unknown proof is treated as no proof.
+    #[serde(default)]
+    mfa_proof: MfaProof,
 }
 
 impl Session {
@@ -139,7 +160,17 @@ impl Session {
             device_label: context.device_label.clone(),
             idle_deadline,
             absolute_deadline,
+            mfa_proof: context.mfa_proof,
         }
+    }
+
+    /// Returns what the authentication behind this session proved about a
+    /// second factor.
+    ///
+    /// Gates that demand a second factor for a particular client or role read
+    /// this — never the account's enrolled factors (GA audit B5).
+    pub fn mfa_proof(&self) -> MfaProof {
+        self.mfa_proof
     }
 
     /// Returns the session's unique identifier.
@@ -244,6 +275,7 @@ impl Session {
             device_label: self.device_label.clone(),
             idle_deadline: self.idle_deadline,
             absolute_deadline: self.absolute_deadline,
+            mfa_proof: self.mfa_proof,
         }
     }
 
@@ -261,6 +293,7 @@ impl Session {
             device_label: r.device_label,
             idle_deadline: r.idle_deadline,
             absolute_deadline: r.absolute_deadline,
+            mfa_proof: r.mfa_proof,
         }
     }
 }
@@ -282,6 +315,61 @@ pub(crate) struct SessionStorageRecord {
     pub(crate) device_label: Option<String>,
     pub(crate) idle_deadline: Option<Timestamp>,
     pub(crate) absolute_deadline: Option<Timestamp>,
+    /// Appended last (GA audit B5): postcard is positional, so a record
+    /// written before this field existed is one field short and is read by
+    /// [`decode_session_record`] through [`LegacySessionStorageRecord`].
+    pub(crate) mfa_proof: MfaProof,
+}
+
+/// [`SessionStorageRecord`] as written before sessions recorded their
+/// [`MfaProof`]. Only ever decoded, never written.
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+struct LegacySessionStorageRecord {
+    id: SessionId,
+    user_id: UserId,
+    created_at: Timestamp,
+    expires_at: Timestamp,
+    last_refreshed_at: Timestamp,
+    revoked: bool,
+    ip_address: Option<String>,
+    user_agent_raw: Option<String>,
+    device_label: Option<String>,
+    idle_deadline: Option<Timestamp>,
+    absolute_deadline: Option<Timestamp>,
+}
+
+/// Decodes a stored session record, current layout first, then the layout
+/// written before sessions recorded their MFA proof.
+///
+/// A pre-upgrade session carries no proof, so it decodes as
+/// [`MfaProof::None`]: a gate that needs a proved factor treats it as
+/// unproved and asks the user to authenticate again, rather than trusting a
+/// proof nobody recorded.
+///
+/// # Errors
+///
+/// Returns the current layout's decode error when neither layout fits.
+pub(crate) fn decode_session_record(bytes: &[u8]) -> Result<SessionStorageRecord, String> {
+    match crate::codec::decode::<SessionStorageRecord>(bytes) {
+        Ok(record) => Ok(record),
+        Err(current_err) => crate::codec::decode::<LegacySessionStorageRecord>(bytes)
+            .map(|r| SessionStorageRecord {
+                id: r.id,
+                user_id: r.user_id,
+                created_at: r.created_at,
+                expires_at: r.expires_at,
+                last_refreshed_at: r.last_refreshed_at,
+                revoked: r.revoked,
+                ip_address: r.ip_address,
+                user_agent_raw: r.user_agent_raw,
+                device_label: r.device_label,
+                idle_deadline: r.idle_deadline,
+                absolute_deadline: r.absolute_deadline,
+                mfa_proof: MfaProof::None,
+            })
+            .map_err(|_| current_err),
+    }
 }
 
 #[cfg(test)]
@@ -299,33 +387,49 @@ mod tests {
         any::<i64>().prop_map(Timestamp::from_micros)
     }
 
+    fn arb_mfa_proof() -> impl Strategy<Value = MfaProof> {
+        prop_oneof![
+            Just(MfaProof::None),
+            Just(MfaProof::Proved),
+            Just(MfaProof::ProvedWebAuthn),
+            Just(MfaProof::Inherited),
+            Just(MfaProof::PasskeyPossession),
+        ]
+    }
+
     fn arb_session_storage_record() -> impl Strategy<Value = SessionStorageRecord> {
         (
-            arb_uuid(),
-            arb_uuid(),
-            arb_timestamp(),
-            arb_timestamp(),
-            arb_timestamp(),
-            any::<bool>(),
-            proptest::option::of(".*"),
-            proptest::option::of(".*"),
-            proptest::option::of(".*"),
-            proptest::option::of(arb_timestamp()),
-            proptest::option::of(arb_timestamp()),
+            (
+                arb_uuid(),
+                arb_uuid(),
+                arb_timestamp(),
+                arb_timestamp(),
+                arb_timestamp(),
+                any::<bool>(),
+                proptest::option::of(".*"),
+                proptest::option::of(".*"),
+                proptest::option::of(".*"),
+                proptest::option::of(arb_timestamp()),
+                proptest::option::of(arb_timestamp()),
+            ),
+            arb_mfa_proof(),
         )
             .prop_map(
                 |(
-                    session_uuid,
-                    user_uuid,
-                    created_at,
-                    expires_at,
-                    last_refreshed_at,
-                    revoked,
-                    ip_address,
-                    user_agent_raw,
-                    device_label,
-                    idle_deadline,
-                    absolute_deadline,
+                    (
+                        session_uuid,
+                        user_uuid,
+                        created_at,
+                        expires_at,
+                        last_refreshed_at,
+                        revoked,
+                        ip_address,
+                        user_agent_raw,
+                        device_label,
+                        idle_deadline,
+                        absolute_deadline,
+                    ),
+                    mfa_proof,
                 )| SessionStorageRecord {
                     id: SessionId::new(session_uuid),
                     user_id: UserId::new(user_uuid),
@@ -338,6 +442,7 @@ mod tests {
                     device_label,
                     idle_deadline,
                     absolute_deadline,
+                    mfa_proof,
                 },
             )
     }
@@ -350,5 +455,66 @@ mod tests {
             let decoded: SessionStorageRecord = crate::codec::decode(&bytes).expect("decode");
             prop_assert_eq!(rec, decoded);
         }
+
+        /// Property: the current layout also decodes through the
+        /// upgrade-aware reader, proof intact.
+        #[test]
+        fn session_record_decoder_reads_the_current_layout(rec in arb_session_storage_record()) {
+            let bytes = crate::codec::encode(&rec).expect("encode");
+            let decoded = decode_session_record(&bytes).expect("decode");
+            prop_assert_eq!(rec, decoded);
+        }
+    }
+
+    /// A session written before sessions recorded their MFA proof must still
+    /// load after the upgrade — and must load as *unproved*, never as a proof
+    /// nobody recorded (GA audit B5).
+    #[test]
+    fn a_pre_upgrade_session_record_decodes_as_unproved() {
+        let legacy = LegacySessionStorageRecord {
+            id: SessionId::new(Uuid::new_v4()),
+            user_id: UserId::new(Uuid::new_v4()),
+            created_at: Timestamp::from_micros(1),
+            expires_at: Timestamp::from_micros(2),
+            last_refreshed_at: Timestamp::from_micros(1),
+            revoked: false,
+            ip_address: Some("192.0.2.1".to_string()),
+            user_agent_raw: None,
+            device_label: None,
+            idle_deadline: None,
+            absolute_deadline: Some(Timestamp::from_micros(3)),
+        };
+        let bytes = crate::codec::encode(&legacy).expect("encode legacy");
+        let decoded = decode_session_record(&bytes).expect("a legacy record must decode");
+        assert_eq!(decoded.id, legacy.id);
+        assert_eq!(decoded.ip_address.as_deref(), Some("192.0.2.1"));
+        assert_eq!(decoded.absolute_deadline, Some(Timestamp::from_micros(3)));
+        assert_eq!(decoded.mfa_proof, MfaProof::None);
+    }
+
+    /// The proof a session was opened with is the proof it reports.
+    #[test]
+    fn a_session_reports_the_proof_it_was_opened_with() {
+        let ctx = SessionContext {
+            mfa_proof: MfaProof::ProvedWebAuthn,
+            ..SessionContext::default()
+        };
+        let session = Session::new(
+            SessionId::new(Uuid::new_v4()),
+            UserId::new(Uuid::new_v4()),
+            Timestamp::from_micros(1),
+            Timestamp::from_micros(2),
+            &ctx,
+            None,
+            None,
+        );
+        assert_eq!(session.mfa_proof(), MfaProof::ProvedWebAuthn);
+        let round = Session::from_storage_record(
+            decode_session_record(
+                &crate::codec::encode(&session.to_storage_record()).expect("encode"),
+            )
+            .expect("decode"),
+        );
+        assert_eq!(round.mfa_proof(), MfaProof::ProvedWebAuthn);
     }
 }
