@@ -282,6 +282,17 @@ fn binds_suspension(engine: &EmbeddedIdentityEngine, realm: &RealmId, token: &st
     false
 }
 
+/// Stops and joins `engine`'s background control reloader, for a test that
+/// inspects the reload queue itself. The reloader consumes a queued reload
+/// and, when it fails, re-arms it; while it is running the queue flag reads
+/// false, so a test reading the flag with the reloader live is a race.
+fn stop_background_reloader(engine: &mut EmbeddedIdentityEngine) {
+    engine.control.shutdown();
+    for worker in std::mem::take(&mut engine.control_worker) {
+        worker.join().expect("control reloader thread");
+    }
+}
+
 /// Rule 3 of the hot path: `validate_token` takes no lock, even on the branch
 /// where it observes that another node moved the control epoch.
 ///
@@ -791,7 +802,10 @@ fn a_failed_epoch_reread_after_a_reset_requeues_the_reset() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = open_storage(&dir);
     let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
-    let node = engine_over(&storage, &clock);
+    let mut node = engine_over(&storage, &clock);
+    // The queued reset is read below; a live reloader would take it and retry
+    // it, and the flag reads false while each retry runs.
+    stop_background_reloader(&mut node);
     let sys = keys::system_realm_id();
     let epoch_key = keys::encode_control_epoch();
     storage.increment_u64(&sys, &epoch_key).expect("bump");
