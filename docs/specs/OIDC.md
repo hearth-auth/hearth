@@ -489,8 +489,14 @@ into the identity registry at startup and on every config reload
   lookup, as a client's `client_credentials` cutoff), holding the latest `exp` a pre-removal token
   can carry. Tokens minted after the resource is re-added are unaffected. A token whose `aud` does
   not include Hearth's own audience (an exchange with `audience=` only) is never accepted by
-  Hearth's validator in the first place; a resource server that verifies such a JWT offline keeps
-  accepting it until it expires.
+  Hearth's `validate_token`. It introspects `active: true` only for the resource server's own
+  client (`protected_resources[].introspection_client`, AGENT_AUTH.md §2.5), and inactive once
+  the resource is removed; a resource server that verifies such a JWT offline keeps accepting it
+  until it expires.
+- **Authorization requests are held to the same registry** (AGENT_AUTH.md §2.3): a `resource`
+  at `/authorize` (browser, JSON, gRPC) or PAR that is not a registered protected resource answers
+  RFC 8707 `invalid_target`; an accepted one is stored, consent-keyed and minted in canonical
+  form.
 - There is no admin REST/gRPC write API for the registry, deliberately.
 - Config load refuses an entry whose `resource_uri` is not a valid resource indicator (or has
   surrounding whitespace), a `resource_uri` declared twice in one realm **after

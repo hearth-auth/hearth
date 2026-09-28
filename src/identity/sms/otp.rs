@@ -104,14 +104,17 @@ pub(crate) struct StoredOtp {
     pub hmac_hex: String,
     /// Expiry as Unix timestamp in seconds.
     pub expiry_unix_ts: u64,
-    /// Number of failed verification attempts so far.
-    pub attempt_count: u32,
-    /// Maximum allowed attempts before the record is invalidated.
+    /// Maximum allowed guesses before the record is invalidated.
     ///
     /// Baked in at creation time from the per-realm config (or the module
     /// default). Stored here so mid-flow config changes do not retroactively
     /// affect in-flight OTPs. Absent on records written before this field
     /// was added; those deserialize to `OTP_MAX_ATTEMPTS` via the serde default.
+    ///
+    /// The guesses themselves are counted outside this record, in replicated
+    /// guess slots the verifier claims before each check (G6): a count kept
+    /// here was rewritten by every verification, so a node with a stale copy
+    /// reset it.
     #[serde(default = "default_otp_max_attempts")]
     pub max_attempts: u32,
 }
@@ -144,7 +147,6 @@ impl StoredOtp {
         let stored = Self {
             hmac_hex,
             expiry_unix_ts,
-            attempt_count: 0,
             max_attempts,
         };
         Ok((digits, stored))
@@ -153,11 +155,6 @@ impl StoredOtp {
     /// Returns `true` if the OTP has expired.
     pub(crate) fn is_expired(&self, now_unix_ts: u64) -> bool {
         now_unix_ts >= self.expiry_unix_ts
-    }
-
-    /// Returns `true` if maximum verification attempts have been reached.
-    pub(crate) fn is_exhausted(&self) -> bool {
-        self.attempt_count >= self.max_attempts
     }
 
     /// Verifies `candidate_digits`, sent to `recipient`, against the stored
@@ -411,7 +408,6 @@ mod tests {
             "digits must be numeric"
         );
         assert_eq!(stored.expiry_unix_ts, expiry);
-        assert_eq!(stored.attempt_count, 0);
         assert!(!stored.hmac_hex.is_empty(), "hmac_hex must not be empty");
     }
 
@@ -495,7 +491,6 @@ mod tests {
         let legacy = StoredOtp {
             hmac_hex: hex_encode(hmac::sign(&key, b"123456").as_ref()),
             expiry_unix_ts: 9_999_999_999,
-            attempt_count: 0,
             max_attempts: OTP_MAX_ATTEMPTS,
         };
         assert!(legacy.verify("123456", TEST_PHONE, TEST_KEY).is_err());
@@ -532,38 +527,6 @@ mod tests {
         );
         assert!(stored.is_expired(1_000), "must be expired at expiry time");
         assert!(!stored.is_expired(999), "must not be expired before expiry");
-    }
-
-    #[test]
-    fn is_exhausted_after_max_attempts() {
-        let rng = SystemRandom::new();
-        let (_, mut stored) =
-            StoredOtp::create(&rng, TEST_KEY, TEST_PHONE, 9_999_999_999, OTP_MAX_ATTEMPTS)
-                .expect("StoredOtp::create should succeed");
-        assert!(!stored.is_exhausted(), "fresh OTP must not be exhausted");
-        stored.attempt_count = OTP_MAX_ATTEMPTS - 1;
-        assert!(
-            !stored.is_exhausted(),
-            "one below max must not be exhausted"
-        );
-        stored.attempt_count = OTP_MAX_ATTEMPTS;
-        assert!(stored.is_exhausted(), "at max must be exhausted");
-    }
-
-    #[test]
-    fn per_realm_max_attempts_overrides_module_default() {
-        let rng = SystemRandom::new();
-        // Create an OTP with max_attempts = 2 (lower than the module default of 5).
-        let (_, mut stored) = StoredOtp::create(&rng, TEST_KEY, TEST_PHONE, 9_999_999_999, 2)
-            .expect("StoredOtp::create should succeed");
-        assert!(!stored.is_exhausted(), "fresh OTP must not be exhausted");
-        stored.attempt_count = 1;
-        assert!(!stored.is_exhausted(), "one attempt below limit");
-        stored.attempt_count = 2;
-        assert!(
-            stored.is_exhausted(),
-            "at per-realm limit must be exhausted"
-        );
     }
 
     #[test]
@@ -645,7 +608,7 @@ mod tests {
             serde_json::from_slice(&json).expect("StoredOtp should deserialize from JSON");
         assert_eq!(restored.hmac_hex, original.hmac_hex);
         assert_eq!(restored.expiry_unix_ts, original.expiry_unix_ts);
-        assert_eq!(restored.attempt_count, original.attempt_count);
+        assert_eq!(restored.max_attempts, original.max_attempts);
     }
 
     #[test]

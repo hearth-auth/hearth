@@ -17,3 +17,16 @@ fail-fast = false
 [[profile.default.overrides]]
 filter = 'binary(abuse_export_hardening) & test(=backup_endpoint_rate_limits_after_quota)'
 slow-timeout = { period = "60s", terminate-after = 3 }
+
+# Real-socket three-node Raft clusters. Each test starts three nodes (Raft
+# peers, timers, loopback sockets) and waits up to 20 s for replication to
+# converge. Run in parallel with each other and the rest of the suite, 17+
+# such clusters starved each other's election and heartbeat timers, and a
+# different test timed out "replication did not converge within 20s" on most
+# full runs while every one passed alone (2026-09-28). One cluster at a time.
+[test-groups]
+three-node-cluster = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(cluster_three_node_control_coherence) | binary(cluster_grpc_loopback)'
+test-group = 'three-node-cluster'

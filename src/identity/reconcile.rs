@@ -554,6 +554,12 @@ fn reconcile_protected_resources_for_realm(
             display_name: r.display_name.clone(),
             scopes: r.scopes.iter().map(|b| b.name.clone()).collect(),
             required_claims: Vec::new(),
+            // The application key names a YAML-managed client, whose id is
+            // derived from (realm, key) — config load checked it exists.
+            introspection_client_id: r
+                .introspection_client
+                .as_deref()
+                .map(|key| deterministic_client_id(realm_name, key)),
         })
         .collect();
     let report = engine.reconcile_protected_resources(realm_id, &declared)?;

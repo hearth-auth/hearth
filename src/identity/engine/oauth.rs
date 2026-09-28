@@ -602,10 +602,19 @@ impl EmbeddedIdentityEngine {
         //
         // Records with an empty digest (written before this feature) are
         // treated as valid to preserve backward compatibility.
-        let resource_key = request
+        //
+        // The RFC 8707 resource is resolved first: it must be a registered
+        // protected resource (else `invalid_target`), and its canonical form
+        // keys the consent record and becomes the code's audience, so every
+        // spelling of one resource is the same resource here (G6).
+        let resource = request
             .resource
             .as_deref()
-            .unwrap_or(keys::CONSENT_RESOURCE_KEY_DEFAULT);
+            .map(|r| self.resolve_authorization_resource(realm_id, r))
+            .transpose()?;
+        let resource_key = resource
+            .as_ref()
+            .map_or(keys::CONSENT_RESOURCE_KEY_DEFAULT, Uri::as_str);
         if let Some(existing_consent) = self.get_consent_extended(
             realm_id,
             &request.user_id,
@@ -681,7 +690,7 @@ impl EmbeddedIdentityEngine {
             created_at: now,
             expires_at,
             nonce: request.nonce.clone(),
-            resource: request.resource.clone(),
+            resource: resource.as_ref().map(|r| r.as_str().to_string()),
             amr_values: request.amr_values.clone(),
         };
 
@@ -2270,6 +2279,13 @@ impl EmbeddedIdentityEngine {
         let dc_hash = String::from_utf8(dc_hash_bytes)
             .map_err(|_| IdentityError::InvalidAuthorizationCode)?;
 
+        // The poll takes this lock across its read-modify-write of the row;
+        // without it a poll on this node could write back the `Pending` it
+        // read over this approval.
+        let lock = self.code_exchange_lock(&dc_hash);
+        // INVARIANT: sync window only — no `.await` between here and return.
+        let _decision_guard = lock.lock().expect("code_exchange_lock poisoned");
+
         // 2. Load device code
         let dc_key = keys::encode_device_code(&dc_hash);
         let dc_bytes = self
@@ -2293,7 +2309,17 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidAuthorizationCode);
         }
 
-        // 5. Approve
+        // 5. Claim the decision, then approve (G6). The status check above is
+        //    a local read: an approval on a node that had not applied another
+        //    node's denial (or approval) overwrote it. Approve and deny claim
+        //    the same replicated marker, so exactly one decides.
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_device_decision(&dc_hash),
+            stored.expires_at,
+        )? {
+            return Err(IdentityError::InvalidAuthorizationCode);
+        }
         stored.status = DeviceCodeStatus::Approved {
             user_id: user_id.clone(),
         };
@@ -2319,17 +2345,13 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Loads the still-pending device code `user_code` names, with its
-    /// storage key. `Ok(None)` when no device code carries that user code;
-    /// `DeviceCodeExpired` when it has expired; `InvalidAuthorizationCode`
-    /// when it was already approved or denied.
-    fn load_pending_device_code(
+    /// The device-code hash and row key `user_code` points at, without
+    /// loading the row. `Ok(None)` when no device code carries that user code.
+    fn device_code_key_for_user_code(
         &self,
         realm_id: &RealmId,
         user_code: &str,
-    ) -> Result<Option<(Vec<u8>, StoredDeviceCode)>, IdentityError> {
-        use crate::identity::oidc::DeviceCodeStatus;
-
+    ) -> Result<Option<(String, Vec<u8>)>, IdentityError> {
         let Some(dc_hash_bytes) = self
             .storage
             .get(realm_id, &keys::encode_user_code(user_code))
@@ -2341,6 +2363,23 @@ impl EmbeddedIdentityEngine {
             return Ok(None);
         };
         let dc_key = keys::encode_device_code(&dc_hash);
+        Ok(Some((dc_hash, dc_key)))
+    }
+
+    /// Loads the still-pending device code `user_code` names, with its
+    /// storage key. `Ok(None)` when no device code carries that user code;
+    /// `DeviceCodeExpired` when it has expired; `InvalidAuthorizationCode`
+    /// when it was already approved or denied.
+    fn load_pending_device_code(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+    ) -> Result<Option<(Vec<u8>, StoredDeviceCode)>, IdentityError> {
+        use crate::identity::oidc::DeviceCodeStatus;
+
+        let Some((_, dc_key)) = self.device_code_key_for_user_code(realm_id, user_code)? else {
+            return Ok(None);
+        };
         let Some(dc_bytes) = self
             .storage
             .get(realm_id, &dc_key)
@@ -2389,9 +2428,27 @@ impl EmbeddedIdentityEngine {
     ) -> Result<(), IdentityError> {
         use crate::identity::oidc::DeviceCodeStatus;
 
-        let (dc_key, mut stored) = self
+        let (dc_hash, dc_key) = self
+            .device_code_key_for_user_code(realm_id, user_code)?
+            .ok_or(IdentityError::DeviceCodeExpired)?;
+        // Same lock and the same decision marker as `approve_device_inner`.
+        let lock = self.code_exchange_lock(&dc_hash);
+        // INVARIANT: sync window only — no `.await` between here and return.
+        let _decision_guard = lock.lock().expect("code_exchange_lock poisoned");
+        let (dc_key_loaded, mut stored) = self
             .load_pending_device_code(realm_id, user_code)?
             .ok_or(IdentityError::DeviceCodeExpired)?;
+        if dc_key_loaded != dc_key {
+            // The user code was re-pointed between the two reads.
+            return Err(IdentityError::DeviceCodeExpired);
+        }
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_device_decision(&dc_hash),
+            stored.expires_at,
+        )? {
+            return Err(IdentityError::InvalidAuthorizationCode);
+        }
         stored.status = DeviceCodeStatus::Denied;
         let updated_bytes =
             serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
@@ -2486,6 +2543,20 @@ impl EmbeddedIdentityEngine {
         //    before another node redeemed it, re-created a row that node had
         //    already deleted (G4).
         if !matches!(stored.status, DeviceCodeStatus::Approved { .. }) {
+            // A row read as `Pending` after the user decided (on another
+            // node, not yet applied here) must not be written back: that
+            // would put `Pending` over the decision, and the decision marker
+            // then refuses a second one, stranding the device until expiry
+            // (G6). The next poll reads the decision.
+            if stored.status == DeviceCodeStatus::Pending
+                && self
+                    .storage
+                    .get(realm_id, &keys::encode_consumed_device_decision(&dc_hash))
+                    .map_err(Self::storage_err)?
+                    .is_some()
+            {
+                return Err(IdentityError::AuthorizationPending);
+            }
             stored.last_polled_at = Some(now);
             let updated_bytes =
                 serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
@@ -2784,6 +2855,14 @@ impl EmbeddedIdentityEngine {
             });
         }
 
+        // RFC 8707: the resource must be a registered protected resource; it
+        // is stored in canonical form (G6).
+        let effective_resource = effective_resource
+            .as_deref()
+            .map(|r| self.resolve_authorization_resource(realm_id, r))
+            .transpose()?
+            .map(|r| r.as_str().to_string());
+
         let now = self.clock.now();
         let ttl_secs: i64 = 90;
         let expires_at = now.add_micros(ttl_secs * 1_000_000);
@@ -3064,6 +3143,7 @@ impl EmbeddedIdentityEngine {
                                 reason: e.to_string(),
                             }
                         })?;
+                        self.mark_grant_family_revoked(realm_id, &family)?;
                         family.revoked = true;
                         let updated = serde_json::to_vec(&family).map_err(|e| {
                             IdentityError::Serialization {
@@ -3140,8 +3220,20 @@ impl EmbeddedIdentityEngine {
             return Ok(IntrospectionResponse::inactive());
         }
 
-        // 2b. RFC 7519 §4.1.3 — audience must include the configured value.
-        if !claims.aud.contains(&self.config.token.audience) {
+        // The protected resource(s) in `aud` whose resource server introspects
+        // as the calling client (`introspection_client_id`). Such a caller is
+        // an audience member for every rule below (G6).
+        let caller_is_resource_server = match request.introspecting_client_id {
+            Some(ref cid) => self.is_resource_server_for_audience(realm_id, cid, &claims)?,
+            None => false,
+        };
+
+        // 2b. RFC 7519 §4.1.3 — audience must include the configured value,
+        // unless the caller is the resource server a token exchanged with
+        // `audience=` only was minted for: it carries no Hearth audience, and
+        // introspection is how that server learns the token is still live
+        // (AGENT_AUTH.md §2.5).
+        if !claims.aud.contains(&self.config.token.audience) && !caller_is_resource_server {
             return Ok(IntrospectionResponse::inactive());
         }
 
@@ -3158,7 +3250,11 @@ impl EmbeddedIdentityEngine {
         //   audience member, the client the token's grant family was issued
         //   to, or a declared resource server (GA audit L11 — it used to be
         //   any authenticated client, which then received live RBAC data).
-        if let Some(ref cid) = request.introspecting_client_id {
+        if let Some(ref cid) = request
+            .introspecting_client_id
+            .as_ref()
+            .filter(|_| !caller_is_resource_server)
+        {
             let cid_str = cid.to_string();
             if let Some(token_azp) = claims.azp.as_deref() {
                 if token_azp != cid_str && !claims.aud.contains(cid_str.as_str()) {
@@ -3236,7 +3332,7 @@ impl EmbeddedIdentityEngine {
                                 reason: e.to_string(),
                             }
                         })?;
-                    if family.revoked {
+                    if self.grant_family_is_revoked(realm_id, &family)? {
                         return Ok(IntrospectionResponse::inactive());
                     }
                 }
@@ -3313,6 +3409,67 @@ impl EmbeddedIdentityEngine {
     /// `access_token_authorization` is `Introspection` or `Decision`, which
     /// only an administrator can set (dynamic registration always yields
     /// `Embedded`). An unknown or archived caller is neither.
+    /// Whether `caller` is the client the resource server of a protected
+    /// resource named in the token's `aud` introspects as
+    /// ([`ProtectedResource::introspection_client_id`]). Hearth's own
+    /// audience is skipped; every other value is looked up by its canonical
+    /// form in the realm's registry.
+    ///
+    /// [`ProtectedResource::introspection_client_id`]: crate::identity::ProtectedResource
+    fn is_resource_server_for_audience(
+        &self,
+        realm_id: &RealmId,
+        caller: &ClientId,
+        claims: &TokenClaims,
+    ) -> Result<bool, IdentityError> {
+        let named: &[String] = match &claims.aud {
+            Audience::Single(a) => std::slice::from_ref(a),
+            Audience::Multi(list) => list,
+        };
+        for aud in named {
+            if *aud == self.config.token.audience {
+                continue;
+            }
+            let Ok(canonical) = Uri::try_from(aud.clone()) else {
+                continue;
+            };
+            let Some(id_bytes) = self
+                .storage
+                .get(
+                    realm_id,
+                    &keys::encode_resource_server_uri_index(canonical.as_str()),
+                )
+                .map_err(Self::storage_err)?
+            else {
+                continue;
+            };
+            let Ok(id) = uuid::Uuid::from_slice(&id_bytes) else {
+                continue;
+            };
+            let Some(bytes) = self
+                .storage
+                .get(
+                    realm_id,
+                    &keys::encode_resource_server_id(&crate::core::ResourceServerId::new(id)),
+                )
+                .map_err(Self::storage_err)?
+            else {
+                continue;
+            };
+            let resource: crate::identity::ProtectedResource = serde_json::from_slice(&bytes)
+                .map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            if resource.introspection_client_id.as_ref() == Some(caller) {
+                // The resource server must still be a live client.
+                return Ok(self
+                    .get_client(realm_id, caller)?
+                    .is_some_and(|c| Self::refuse_inactive_client(&c).is_ok()));
+            }
+        }
+        Ok(false)
+    }
+
     fn may_introspect_unbound_user_token(
         &self,
         realm_id: &RealmId,
@@ -3936,6 +4093,41 @@ impl EmbeddedIdentityEngine {
     ///   the canonical form is returned — every spelling of a registered URI
     ///   is accepted and minted identically, matching RBAC's resource scope
     ///   lookup.
+    /// Resolves an authorization request's RFC 8707 `resource` (at
+    /// `/authorize`, over JAR, or pushed with PAR) to the canonical URI of a
+    /// protected resource registered in the realm, or refuses it with
+    /// [`IdentityError::InvalidTarget`] (RFC 8707 §2 `invalid_target`).
+    ///
+    /// The resource becomes the `aud` of the code's access token, so an
+    /// undeclared value would let a client mint a Hearth-signed token for a
+    /// resource server the realm never declared. Every spelling of a
+    /// registered URI resolves to its one canonical form (G6).
+    pub(super) fn resolve_authorization_resource(
+        &self,
+        realm_id: &RealmId,
+        resource: &str,
+    ) -> Result<Uri, IdentityError> {
+        let canonical =
+            Uri::try_from(resource.to_string()).map_err(|reason| IdentityError::InvalidTarget {
+                reason: format!("not a resource indicator: {reason}"),
+            })?;
+        let registered = self
+            .storage
+            .get(
+                realm_id,
+                &keys::encode_resource_server_uri_index(canonical.as_str()),
+            )
+            .map_err(Self::storage_err)?
+            .is_some();
+        if registered {
+            Ok(canonical)
+        } else {
+            Err(IdentityError::InvalidTarget {
+                reason: "not a registered protected resource".to_string(),
+            })
+        }
+    }
+
     pub(super) fn resolve_exchange_target(
         &self,
         realm_id: &RealmId,
@@ -4506,9 +4698,10 @@ impl EmbeddedIdentityEngine {
                 serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
                 })?;
-            if family.revoked {
+            if self.grant_family_is_revoked(realm_id, &family)? {
                 continue;
             }
+            self.mark_grant_family_revoked(realm_id, &family)?;
             family.revoked = true;
             let updated =
                 serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
@@ -4810,9 +5003,10 @@ impl EmbeddedIdentityEngine {
                 serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
                 })?;
-            if family.revoked {
+            if self.grant_family_is_revoked(realm_id, &family)? {
                 continue;
             }
+            self.mark_grant_family_revoked(realm_id, &family)?;
             family.revoked = true;
             let updated =
                 serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {

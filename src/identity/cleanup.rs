@@ -491,6 +491,12 @@ fn sweep_grant_families(
 
         if now >= family.expires_at {
             storage.delete(realm_id, &entry.key)?;
+            // The revocation tombstone lives exactly as long as the row it
+            // guards; nothing else removes it (G6).
+            storage.delete(
+                realm_id,
+                &keys::encode_grant_family_revoked(&family.family_id),
+            )?;
             deleted += 1;
         }
     }
@@ -1177,11 +1183,17 @@ mod tests {
             &serde_json::to_vec(&family).expect("serialize"),
         )
         .expect("put");
+        let tombstone = keys::encode_grant_family_revoked("fid2");
+        s.put(&realm, &tombstone, &[]).expect("put tombstone");
 
         let config = CleanupConfig::default();
         let stats = sweep_expired(&realm, &s, &clock, &config);
         assert_eq!(stats.grant_families_deleted, 1);
         assert!(s.get(&realm, &key).expect("get").is_none());
+        assert!(
+            s.get(&realm, &tombstone).expect("get tombstone").is_none(),
+            "the revocation tombstone outlived the family row it guards"
+        );
     }
 
     #[test]
@@ -1213,11 +1225,17 @@ mod tests {
             &serde_json::to_vec(&family).expect("serialize"),
         )
         .expect("put");
+        let tombstone = keys::encode_grant_family_revoked("fid3");
+        s.put(&realm, &tombstone, &[]).expect("put tombstone");
 
         let config = CleanupConfig::default();
         let stats = sweep_expired(&realm, &s, &clock, &config);
         assert_eq!(stats.grant_families_deleted, 0);
         assert!(s.get(&realm, &key).expect("get").is_some());
+        assert!(
+            s.get(&realm, &tombstone).expect("get tombstone").is_some(),
+            "a live family's revocation tombstone was swept"
+        );
     }
 
     // --- max_per_type ---

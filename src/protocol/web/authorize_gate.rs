@@ -516,6 +516,11 @@ pub(super) fn issue_code(
             let location = build_authorization_redirect(resp.redirect_uri(), &resp);
             Redirect::to(&location).into_response()
         }
+        // The resource was removed from the registry after the entry point
+        // checked it (G6).
+        Err(crate::identity::IdentityError::InvalidTarget { .. }) => handlers_common::bad_request(
+            "invalid_target: resource is not a registered protected resource",
+        ),
         Err(e) => {
             tracing::warn!(error = %e, "authorize: code issuance failed");
             handlers_common::server_error()

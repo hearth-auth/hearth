@@ -155,6 +155,19 @@ async fn rig(sms_realm: bool) -> Rig {
             }),
         })
         .expect("realm");
+    // RFC 8707: a `resource` must name a protected resource of the realm.
+    identity
+        .register_protected_resource(
+            realm.id(),
+            &hearth::identity::RegisterProtectedResourceRequest {
+                resource_uri: RESOURCE.to_string(),
+                display_name: "Gate parity API".to_string(),
+                scopes: Vec::new(),
+                required_claims: Vec::new(),
+                introspection_client_id: None,
+            },
+        )
+        .expect("register the protected resource");
     let user = identity
         .create_user(
             realm.id(),
@@ -2014,4 +2027,69 @@ fn location_of(resp: &axum::response::Response) -> String {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// G6: `resource` must name a registered protected resource (RFC 8707)
+// ---------------------------------------------------------------------------
+
+const UNDECLARED: &str = "https%3A%2F%2Fundeclared.example.com%2Fv1";
+
+/// A plain request naming a resource the realm never declared is refused with
+/// `invalid_target` at the (registered) redirect URI — not issued a code.
+#[tokio::test]
+async fn plain_authorize_refuses_an_unregistered_resource() {
+    let rig = rig(false).await;
+    let client = register(&rig, false, None);
+    let uri = plain_uri(&client, &format!("&resource={UNDECLARED}"));
+    let resp = get(&rig, &uri, &session_cookie(&rig)).await;
+    let loc = location(&resp);
+    assert_eq!(
+        (
+            redirect_param(&loc, "error", false).as_deref(),
+            redirect_param(&loc, "code", false),
+        ),
+        (Some("invalid_target"), None),
+        "an undeclared resource must answer invalid_target; got {} {loc}",
+        resp.status()
+    );
+}
+
+/// A plain request naming any spelling of a registered resource gets a code
+/// whose token carries the resource's canonical form in `aud`.
+#[tokio::test]
+async fn plain_authorize_carries_a_registered_resource_in_canonical_form() {
+    let rig = rig(false).await;
+    let client = register(&rig, false, None);
+    let uri = plain_uri(
+        &client,
+        "&resource=HTTPS%3A%2F%2FAPI.Example.com%3A443%2Fv1%2F",
+    );
+    let resp = get(&rig, &uri, &session_cookie(&rig)).await;
+    let loc = location(&resp);
+    let code = redirect_param(&loc, "code", false)
+        .unwrap_or_else(|| panic!("a registered resource gets a code; got {loc}"));
+    let aud = exchanged_audience(&rig, &client, None, code);
+    assert!(aud.iter().any(|a| a == RESOURCE), "aud = {aud:?}");
+}
+
+/// A request object naming an undeclared resource is refused (400, as every
+/// JAR error on this entry point), not issued a code.
+#[tokio::test]
+async fn jar_authorize_refuses_an_unregistered_resource() {
+    let rig = rig(false).await;
+    let (client, pair) = jar_client(&rig, false);
+    let uri = jar_uri(
+        &rig,
+        &client,
+        &pair,
+        &serde_json::json!({ "resource": "https://undeclared.example.com/v1" }),
+        "",
+    );
+    let resp = get(&rig, &uri, &session_cookie(&rig)).await;
+    assert_eq!(
+        (resp.status(), location(&resp)),
+        (StatusCode::BAD_REQUEST, String::new()),
+        "a request object naming an undeclared resource must be refused"
+    );
 }
