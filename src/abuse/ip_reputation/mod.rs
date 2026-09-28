@@ -24,7 +24,7 @@
 //! # Hot-path contract
 //!
 //! `check()` MUST be synchronous.  Both reference adapters satisfy this:
-//! - `SpamhausDropProvider`: O(n) scan over in-memory `Vec<Cidr>` behind one
+//! - `SpamhausDropProvider`: O(n) scan over in-memory `Vec<IpRange>` behind one
 //!   `SwapCell::load()` (a single `Arc` clone; readers never block readers).
 //! - `MaxMindAsnProvider`: memory-mapped B-tree search inside the MMDB reader.
 //!

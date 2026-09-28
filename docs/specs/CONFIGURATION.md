@@ -1345,6 +1345,18 @@ contain. Both lists empty (the default) means no network restriction.
 | `allow` | list of CIDRs | `[]` | Sources permitted to authenticate. Empty = no allow-list restriction. |
 | `deny` | list of CIDRs | `[]` | Sources refused outright. Evaluated before `allow`. |
 
+Each entry is a single IP address (`192.0.2.7`, `2001:db8::7`) or a CIDR range
+(`10.0.0.0/8`, `2001:db8::/32`), in the same strict grammar as
+`server.trusted_proxies`. `hearth config validate` and start-up refuse any
+other entry, naming the realm and position (e.g.
+`realms.acme.security.cidr_policy.allow[1]`) — nothing is silently dropped.
+Refused: a range with **host bits set** (`10.1.2.255/24` — write `10.1.2.0/24`
+or `10.1.2.255`), a signed or zero-padded prefix (`/+8`, `/08`), a zone id
+(`fe80::1%eth0`), brackets, a port, and surrounding whitespace. Unlike
+`trusted_proxies` there is no breadth limit: `deny: ["0.0.0.0/0"]` is a valid
+policy. An IPv4 client reaching a dual-stack listener as `::ffff:a.b.c.d` is
+matched as its IPv4 address.
+
 ```yaml
 realms:
   my-realm:

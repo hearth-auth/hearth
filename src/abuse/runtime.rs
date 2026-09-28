@@ -525,14 +525,22 @@ pub fn cidr_policy_denies(policy: &CidrPolicy, ip: IpAddr) -> bool {
 
 /// Compiles a stored [`CidrPolicy`] into a [`CidrFilter`].
 ///
-/// Unparseable entries are dropped rather than failing the request: the
-/// start-up validator already refused them, so reaching here with a bad entry
-/// means the record was written by an older binary, and a tenant must not be
-/// locked out of their own realm by one stale line (§6.1 fail-open).
+/// Entries are parsed with [`crate::abuse::cidr::parse_entry`] — the same
+/// `core::IpRange` grammar `hearth config validate` and start-up run over
+/// `realms.<name>.security.cidr_policy` (`validate_cidr_policies`), so a
+/// policy that loaded has no entry this can refuse. Should one appear anyway
+/// (a stored realm record from outside the config path), it is dropped with a
+/// warning rather than failing the request (§6.1 fail-open).
 fn compile_filter(policy: &CidrPolicy) -> CidrFilter {
     let parse = |v: &Vec<String>| {
         v.iter()
-            .filter_map(|s| crate::abuse::cidr::Cidr::parse(s).ok())
+            .filter_map(|s| match crate::abuse::cidr::parse_entry(s) {
+                Ok(range) => Some(range),
+                Err(e) => {
+                    tracing::warn!(error = %e, "ignoring invalid cidr_policy entry");
+                    None
+                }
+            })
             .collect::<Vec<_>>()
     };
     CidrFilter::new(parse(&policy.allow), parse(&policy.deny))

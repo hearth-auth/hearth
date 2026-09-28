@@ -1,9 +1,19 @@
 //! Tenant-managed IPv4/IPv6 CIDR allow/deny lists (A-9).
 //!
-//! Operators load per-realm allow/deny CIDR lists from storage (key prefix
-//! `abuse:{realm}:cidr:*`) and build a [`CidrFilter`] for fast in-memory
-//! lookup.  The filter is replaced atomically on reload — store it behind an
-//! `Arc<crate::core::SwapCell<CidrFilter>>` at the call site.
+//! Operators set per-realm allow/deny lists in
+//! `realms.<name>.security.cidr_policy` and a [`CidrFilter`] is built from
+//! them for in-memory lookup. The Spamhaus DROP feed is compiled into the same
+//! type.
+//!
+//! # Entries
+//!
+//! Each entry is a [`crate::core::IpRange`]: a single address or a CIDR range,
+//! parsed by the one strict grammar Hearth uses for every network list (host
+//! bits, signed or zero-padded prefixes, zone ids, brackets and ports are all
+//! refused). Unlike `server.trusted_proxies`, no breadth rule applies — a deny
+//! list may block `0.0.0.0/0` on purpose. The config validator runs the same
+//! parser over `cidr_policy`, so a policy that loads is a policy that matches.
+//! IPv4-mapped IPv6 clients (`::ffff:a.b.c.d`) are matched as IPv4.
 //!
 //! # Evaluation order
 //!
@@ -20,102 +30,34 @@
 //! This ensures that misconfiguration does not lock operators out of their
 //! own realm.
 
-use std::fmt;
 use std::net::IpAddr;
-use std::str::FromStr;
+
+use crate::core::{IpRange, IpRangeError};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error type
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Error returned when a CIDR string cannot be parsed.
-#[derive(Debug, thiserror::Error)]
-pub enum CidrParseError {
-    /// The string is not in `address/prefix` format.
-    #[error("missing '/' separator in CIDR '{0}'")]
-    MissingSeparator(String),
-    /// The host address portion is not a valid IP address.
-    #[error("invalid IP address in CIDR '{0}': {1}")]
-    InvalidAddress(String, std::net::AddrParseError),
-    /// The prefix length is not a valid decimal integer.
-    #[error("invalid prefix length in CIDR '{0}': {1}")]
-    InvalidPrefixLen(String, std::num::ParseIntError),
-    /// The prefix length exceeds the maximum for the address family.
-    #[error("prefix length {1} exceeds maximum for address family in CIDR '{0}'")]
-    PrefixLenTooLong(String, u8),
+/// A list entry that is not a valid [`IpRange`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("'{entry}' {reason}")]
+pub struct CidrEntryError {
+    /// The entry as written.
+    pub entry: String,
+    /// Why it was refused.
+    pub reason: IpRangeError,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Cidr
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A parsed IPv4 or IPv6 CIDR network.
+/// Parses one allow/deny entry, keeping the entry text in the error.
 ///
-/// Constructed via [`Cidr::parse`] or the [`FromStr`] implementation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Cidr {
-    /// The masked network address (host bits zeroed).
-    network: IpAddr,
-    /// Prefix length (0–32 for IPv4, 0–128 for IPv6).
-    prefix_len: u8,
-}
-
-impl Cidr {
-    /// Parses a CIDR string such as `"192.168.0.0/16"` or `"::1/128"`.
-    ///
-    /// Host bits beyond the prefix length are silently masked to zero so
-    /// `"192.168.1.1/24"` is treated the same as `"192.168.1.0/24"`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CidrParseError`] when the string is malformed.
-    pub fn parse(s: &str) -> Result<Self, CidrParseError> {
-        let (addr_part, prefix_part) = s
-            .split_once('/')
-            .ok_or_else(|| CidrParseError::MissingSeparator(s.to_owned()))?;
-
-        let addr = IpAddr::from_str(addr_part)
-            .map_err(|e| CidrParseError::InvalidAddress(s.to_owned(), e))?;
-
-        let prefix_len: u8 = prefix_part
-            .parse()
-            .map_err(|e| CidrParseError::InvalidPrefixLen(s.to_owned(), e))?;
-
-        let max = match addr {
-            IpAddr::V4(_) => 32,
-            IpAddr::V6(_) => 128,
-        };
-        if prefix_len > max {
-            return Err(CidrParseError::PrefixLenTooLong(s.to_owned(), prefix_len));
-        }
-
-        // Mask host bits in the network address.
-        let network = mask_addr(addr, prefix_len);
-        Ok(Self {
-            network,
-            prefix_len,
-        })
-    }
-
-    /// Returns `true` if `ip` falls within this network.
-    #[must_use]
-    pub fn contains(&self, ip: IpAddr) -> bool {
-        contains_inner(self.network, self.prefix_len, ip)
-    }
-}
-
-impl FromStr for Cidr {
-    type Err = CidrParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Cidr::parse(s)
-    }
-}
-
-impl fmt::Display for Cidr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}", self.network, self.prefix_len)
-    }
+/// # Errors
+///
+/// Returns [`CidrEntryError`] when `entry` is not a valid [`IpRange`].
+pub fn parse_entry(entry: &str) -> Result<IpRange, CidrEntryError> {
+    entry.parse().map_err(|reason| CidrEntryError {
+        entry: entry.to_string(),
+        reason,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -142,14 +84,14 @@ pub enum CidrOutcome {
 /// lock-free and allocation-free.
 #[derive(Debug, Clone)]
 pub struct CidrFilter {
-    allow: Vec<Cidr>,
-    deny: Vec<Cidr>,
+    allow: Vec<IpRange>,
+    deny: Vec<IpRange>,
 }
 
 impl CidrFilter {
     /// Constructs a filter from pre-parsed allow and deny lists.
     #[must_use]
-    pub fn new(allow: Vec<Cidr>, deny: Vec<Cidr>) -> Self {
+    pub fn new(allow: Vec<IpRange>, deny: Vec<IpRange>) -> Self {
         Self { allow, deny }
     }
 
@@ -164,13 +106,14 @@ impl CidrFilter {
 
     /// Parses and constructs a filter from string slices.
     ///
-    /// Returns the first parse error encountered. Use this for loading from
-    /// YAML configuration or API input.
+    /// Refuses the whole filter at the first bad entry: dropping it would
+    /// silently change who is allowed or denied.
     ///
     /// # Errors
     ///
-    /// Returns [`CidrParseError`] when any entry is malformed.
-    pub fn from_strs<A, D>(allow: A, deny: D) -> Result<Self, CidrParseError>
+    /// Returns [`CidrEntryError`] naming the first entry that is not a valid
+    /// [`IpRange`].
+    pub fn from_strs<A, D>(allow: A, deny: D) -> Result<Self, CidrEntryError>
     where
         A: IntoIterator,
         A::Item: AsRef<str>,
@@ -179,11 +122,11 @@ impl CidrFilter {
     {
         let allow = allow
             .into_iter()
-            .map(|s| Cidr::parse(s.as_ref()))
+            .map(|s| parse_entry(s.as_ref()))
             .collect::<Result<Vec<_>, _>>()?;
         let deny = deny
             .into_iter()
-            .map(|s| Cidr::parse(s.as_ref()))
+            .map(|s| parse_entry(s.as_ref()))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { allow, deny })
     }
@@ -229,60 +172,6 @@ impl Default for CidrFilter {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Internal helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Masks host bits in `addr` beyond `prefix_len`.
-fn mask_addr(addr: IpAddr, prefix_len: u8) -> IpAddr {
-    match addr {
-        IpAddr::V4(v4) => {
-            let n = u32::from(v4);
-            let masked = if prefix_len == 0 {
-                0
-            } else {
-                n & (!0u32 << (32 - prefix_len))
-            };
-            IpAddr::V4(masked.into())
-        }
-        IpAddr::V6(v6) => {
-            let n = u128::from(v6);
-            let masked = if prefix_len == 0 {
-                0
-            } else {
-                n & (!0u128 << (128 - prefix_len))
-            };
-            IpAddr::V6(masked.into())
-        }
-    }
-}
-
-/// Returns `true` if `addr` falls within `network/prefix_len`.
-///
-/// Mismatched address families (e.g. IPv4 network vs IPv6 address) always
-/// return `false`.  IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are NOT
-/// transparently unwrapped — the caller is responsible for normalisation.
-fn contains_inner(network: IpAddr, prefix_len: u8, addr: IpAddr) -> bool {
-    match (network, addr) {
-        (IpAddr::V4(net), IpAddr::V4(ip)) => {
-            if prefix_len == 0 {
-                return true;
-            }
-            let shift = 32 - u32::from(prefix_len);
-            (u32::from(net) >> shift) == (u32::from(ip) >> shift)
-        }
-        (IpAddr::V6(net), IpAddr::V6(ip)) => {
-            if prefix_len == 0 {
-                return true;
-            }
-            let shift = 128 - u32::from(prefix_len);
-            (u128::from(net) >> shift) == (u128::from(ip) >> shift)
-        }
-        // Mixed address families never match.
-        _ => false,
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -300,64 +189,80 @@ mod tests {
         IpAddr::V6(Ipv6Addr::LOCALHOST)
     }
 
-    // ── Cidr::parse ──────────────────────────────────────────────────────────
+    // ── parse_entry ──────────────────────────────────────────────────────────
 
     #[test]
     fn parse_ipv4_cidr() {
-        let c = Cidr::parse("192.168.1.0/24").expect("valid test CIDR");
-        assert_eq!(c.prefix_len, 24);
-        assert_eq!(c.network, v4(192, 168, 1, 0));
+        let c = parse_entry("192.168.1.0/24").expect("valid test CIDR");
+        assert_eq!(c.prefix_len(), 24);
+        assert_eq!(c.network(), v4(192, 168, 1, 0));
     }
 
     #[test]
-    fn parse_ipv4_host_bits_masked() {
-        // "192.168.1.5/24" → network should be 192.168.1.0
-        let c = Cidr::parse("192.168.1.5/24").expect("valid test CIDR");
-        assert_eq!(c.network, v4(192, 168, 1, 0));
+    fn parse_ipv4_host_bits_refused() {
+        // "192.168.1.5/24" is either the host or the /24; refuse to guess.
+        let err = parse_entry("192.168.1.5/24").expect_err("host bits");
+        assert_eq!(err.entry, "192.168.1.5/24");
+        assert_eq!(
+            err.reason,
+            IpRangeError::HostBitsSet {
+                network: v4(192, 168, 1, 0),
+                prefix: 24
+            }
+        );
     }
 
     #[test]
     fn parse_ipv4_slash32_is_host_route() {
-        let c = Cidr::parse("10.0.0.1/32").expect("valid test CIDR");
+        let c = parse_entry("10.0.0.1/32").expect("valid test CIDR");
         assert!(c.contains(v4(10, 0, 0, 1)));
         assert!(!c.contains(v4(10, 0, 0, 2)));
     }
 
     #[test]
     fn parse_ipv4_slash0_matches_all() {
-        let c = Cidr::parse("0.0.0.0/0").expect("valid test CIDR");
+        let c = parse_entry("0.0.0.0/0").expect("valid test CIDR");
         assert!(c.contains(v4(1, 2, 3, 4)));
         assert!(c.contains(v4(255, 255, 255, 255)));
     }
 
     #[test]
     fn parse_ipv6_cidr() {
-        let c = Cidr::parse("2001:db8::/32").expect("valid test CIDR");
-        assert_eq!(c.prefix_len, 32);
+        let c = parse_entry("2001:db8::/32").expect("valid test CIDR");
+        assert_eq!(c.prefix_len(), 32);
     }
 
     #[test]
-    fn parse_error_missing_slash() {
-        assert!(matches!(
-            Cidr::parse("192.168.0.0"),
-            Err(CidrParseError::MissingSeparator(_))
-        ));
+    fn parse_bare_address_is_a_host_route() {
+        let c = parse_entry("192.168.0.9").expect("bare address");
+        assert_eq!(c.prefix_len(), 32);
+        assert!(c.contains(v4(192, 168, 0, 9)));
+        assert!(!c.contains(v4(192, 168, 0, 10)));
     }
 
     #[test]
     fn parse_error_bad_address() {
-        assert!(matches!(
-            Cidr::parse("999.0.0.0/24"),
-            Err(CidrParseError::InvalidAddress(_, _))
-        ));
+        let err = parse_entry("999.0.0.0/24").expect_err("bad address");
+        assert_eq!(err.reason, IpRangeError::Malformed);
+        assert!(err.to_string().starts_with("'999.0.0.0/24' "), "{err}");
+    }
+
+    #[test]
+    fn parse_error_signed_or_padded_prefix() {
+        for bad in ["10.0.0.0/+8", "10.0.0.0/08"] {
+            assert_eq!(
+                parse_entry(bad).expect_err(bad).reason,
+                IpRangeError::Malformed
+            );
+        }
     }
 
     #[test]
     fn parse_error_prefix_too_long() {
-        assert!(matches!(
-            Cidr::parse("192.168.0.0/33"),
-            Err(CidrParseError::PrefixLenTooLong(_, 33))
-        ));
+        assert_eq!(
+            parse_entry("192.168.0.0/33").expect_err("/33").reason,
+            IpRangeError::PrefixOutOfRange { max: 32 }
+        );
     }
 
     // ── CidrFilter::check — deny list only ───────────────────────────────────
@@ -379,6 +284,13 @@ mod tests {
     fn deny_list_allows_non_matching_ip() {
         let f = CidrFilter::from_strs([] as [&str; 0], ["10.0.0.0/8"]).expect("valid test CIDR");
         assert_eq!(f.check(v4(192, 168, 0, 1)), CidrOutcome::Allow);
+    }
+
+    #[test]
+    fn deny_list_matches_a_v4_mapped_client() {
+        let f = CidrFilter::from_strs([] as [&str; 0], ["10.0.0.0/8"]).expect("valid test CIDR");
+        let mapped: IpAddr = "::ffff:10.1.2.3".parse().expect("ip");
+        assert_eq!(f.check(mapped), CidrOutcome::Deny);
     }
 
     // ── CidrFilter::check — allow list only ──────────────────────────────────

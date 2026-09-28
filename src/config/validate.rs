@@ -612,6 +612,7 @@ impl Config {
         }
 
         validate_trusted_proxies(&self.server, &mut issues);
+        validate_cidr_policies(self.realms.as_ref(), &mut issues);
         validate_argon2_costs_all(&self.auth, self.realms.as_ref(), self.dev_mode, &mut issues);
 
         // ── Checks that used to live only in `validate` (audit §4.13#8) ─────
@@ -1150,6 +1151,45 @@ fn validate_argon2_costs_all(
                 field: format!("realms.{name}.password_memory_cost"),
                 reason,
             });
+        }
+    }
+}
+
+/// Refuses every `realms.<name>.security.cidr_policy` entry the runtime would.
+///
+/// The runtime (`abuse::runtime::compile_filter`) parses each entry as a
+/// [`crate::core::IpRange`] and drops what does not parse. Nothing checked the
+/// lists at load, so a typo was silently discarded — and a typo in the only
+/// `allow` entry emptied the allow list, lifting the realm's network
+/// restriction altogether. This runs the same parser, so a policy that loads
+/// is a policy that matches.
+///
+/// Unlike `trusted_proxies`, no breadth rule applies: `deny: [0.0.0.0/0]` and
+/// `allow: [::/0]` are legitimate policies.
+fn validate_cidr_policies(
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(realms) = realms else { return };
+    let mut names: Vec<&String> = realms.keys().collect();
+    names.sort();
+    for name in names {
+        let Some(policy) = realms[name]
+            .security
+            .as_ref()
+            .and_then(|s| s.cidr_policy.as_ref())
+        else {
+            continue;
+        };
+        for (list, entries) in [("allow", &policy.allow), ("deny", &policy.deny)] {
+            for (i, entry) in entries.iter().enumerate() {
+                if let Err(reason) = entry.parse::<crate::core::IpRange>() {
+                    issues.push(ValidationIssue {
+                        field: format!("realms.{name}.security.cidr_policy.{list}[{i}]"),
+                        reason: format!("'{entry}' {reason}."),
+                    });
+                }
+            }
         }
     }
 }
@@ -2436,6 +2476,102 @@ mod tests {
         ] {
             let validated = trusted_proxy_issues(&[entry]).is_empty();
             let parsed = crate::core::TrustedProxies::parse([entry]).is_ok();
+            assert_eq!(
+                validated, parsed,
+                "'{entry}': validate={validated} runtime={parsed}"
+            );
+        }
+    }
+
+    // ===== G3 follow-up: realms.<name>.security.cidr_policy =====
+    //
+    // There was no validator for these lists at all. `abuse::runtime`'s
+    // `compile_filter` silently dropped any entry the old `Cidr::parse`
+    // refused — its comment claimed "the start-up validator already refused
+    // them", but none did. A typo in the only `allow` entry therefore emptied
+    // the allow list, which lifts the realm's network restriction entirely.
+
+    /// `cidr_policy` issues for realm `acme` with the given lists.
+    fn cidr_policy_issues(allow: &[&str], deny: &[&str]) -> Vec<ValidationIssue> {
+        let list = |v: &[&str]| {
+            v.iter()
+                .map(|e| format!("\"{e}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let yaml = format!(
+            "realms:\n  acme:\n    security:\n      cidr_policy:\n        allow: [{}]\n        \
+             deny: [{}]\n",
+            list(allow),
+            list(deny)
+        );
+        Config::from_yaml_str_unchecked(&yaml)
+            .expect("parses")
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field.contains("cidr_policy"))
+            .collect()
+    }
+
+    #[test]
+    fn cidr_policy_entries_the_runtime_refuses_are_refused_naming_realm_and_entry() {
+        let issues = cidr_policy_issues(
+            &["10.0.0.0/8", "10.1.2.255/24"],
+            &["198.51.100.0/+24", "fe80::1%eth0"],
+        );
+        let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
+        assert_eq!(
+            fields,
+            [
+                "realms.acme.security.cidr_policy.allow[1]",
+                "realms.acme.security.cidr_policy.deny[0]",
+                "realms.acme.security.cidr_policy.deny[1]",
+            ],
+            "{issues:?}"
+        );
+        assert!(issues[0].reason.contains("'10.1.2.255/24'"), "{issues:?}");
+        assert!(
+            issues[0].reason.contains("10.1.2.0/24"),
+            "host bits: the refusal names the network form; got {}",
+            issues[0].reason
+        );
+        assert!(
+            issues[1].reason.contains("'198.51.100.0/+24'"),
+            "{issues:?}"
+        );
+    }
+
+    /// Unlike `trusted_proxies`, a policy list may be as broad as the operator
+    /// likes: `deny: [0.0.0.0/0]` blocks all IPv4, `allow: [::/0]` admits all
+    /// IPv6. Bare addresses are single hosts.
+    #[test]
+    fn cidr_policy_accepts_broad_ranges_and_bare_addresses() {
+        let issues = cidr_policy_issues(
+            &["10.0.0.0/8", "2001:db8::/32", "192.0.2.7", "::/0"],
+            &["0.0.0.0/0", "198.51.100.0/24"],
+        );
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// Validation and runtime share one parser.
+    #[test]
+    fn cidr_policy_validation_agrees_with_the_runtime_parser() {
+        for entry in [
+            "10.0.0.0/8",
+            "192.0.2.7",
+            "0.0.0.0/0",
+            "::/0",
+            "::ffff:192.0.2.0/120",
+            "10.1.2.255/24",
+            "10.0.0.0/+8",
+            "10.0.0.0/08",
+            "[2001:db8::]/32",
+            "10.0.0.0:443/8",
+            "fe80::1%eth0",
+            "junk",
+        ] {
+            let validated = cidr_policy_issues(&[entry], &[]).is_empty();
+            let parsed = crate::abuse::cidr::parse_entry(entry).is_ok();
             assert_eq!(
                 validated, parsed,
                 "'{entry}': validate={validated} runtime={parsed}"
