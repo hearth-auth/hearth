@@ -27,7 +27,10 @@ name: Security
 #
 # Doc-only PRs are skipped by ci.yml's `docs-only` filter output, which gates
 # the call to this workflow — security scanners don't add value on documentation
-# diffs and would just burn runner minutes. (This used to be a `paths-ignore` on
+# diffs and would just burn runner minutes. docs-only is 'true' only when EVERY
+# changed file is documentation (GA audit M19; guard:
+# scripts/check-docs-only-filter.sh) — it used to be 'true' when ANY was, which
+# skipped this workflow on every code PR that also edited a .md file. (This used to be a `paths-ignore` on
 # this file's own pull_request trigger; that trigger is gone, see below.)
 #
 # ─────────────────────────────────────────────────────────────────────────────

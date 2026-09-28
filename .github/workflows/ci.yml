@@ -73,7 +73,11 @@ jobs:
       sdks-any: ${{ steps.filter.outputs.sdks-any }}
       proto: ${{ steps.filter.outputs.proto }}
       loadtest: ${{ steps.filter.outputs.loadtest }}
-      docs-only: ${{ steps.filter.outputs.docs-only }}
+      # 'true' only when EVERY changed file is documentation (GA audit M19).
+      # Written as an explicit comparison so an unset/empty `non-docs` output
+      # yields 'false' — the fail-closed direction, which runs the security
+      # scanners rather than skipping them.
+      docs-only: ${{ steps.docs.outputs.non-docs == 'false' && 'true' || 'false' }}
       abuse-coverage: ${{ steps.filter.outputs.abuse-coverage }}
       ldap: ${{ steps.filter.outputs.ldap }}
 
@@ -92,8 +96,13 @@ jobs:
         id: filter
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
-          # `predicate-quantifier: every` is the default — a filter matches
-          # if any one of its patterns matches a changed file.
+          # Default `predicate-quantifier: some`: a changed file matches a
+          # filter when it matches any one of the filter's patterns, and the
+          # filter output is 'true' when ANY changed file matches. That is the
+          # right shape for every filter in this step ("did anything this job
+          # cares about change?"). It is the wrong shape for "is this PR
+          # documentation-only?", which is why docs-only is computed by its
+          # own step below (GA audit M19).
           filters: |
             rust:
               - 'src/**'
@@ -208,10 +217,6 @@ jobs:
             # with its own paths trigger, its own reasons and a named owner).
             # Deleted rather than wired: wiring them would fold an advisory
             # workflow into the required check against an explicit decision.
-            docs-only:
-              - 'docs/**'
-              - '**.md'
-              - 'CHANGELOG.md'
             abuse-coverage:
               - 'docs/plans/HEA-1114-abuse-prevention.md'
               - 'tests/abuse_*.rs'
@@ -229,6 +234,30 @@ jobs:
             # can arrive with no diff at all" — so the leftover output told a
             # reader the job was path-gated when it runs on every PR.
 
+      # GA audit M19: docs-only used to be a filter in the step above, where it
+      # was 'true' whenever ANY changed file was documentation. Every PR that
+      # also touched a .md file (CHANGELOG.md, CLAUDE.md …) therefore skipped
+      # the `security` job, and required-summary counts `skipped` as a pass —
+      # PR #358 changed Rust and merged without Trivy, osv-scanner or CodeQL
+      # ever running on it.
+      #
+      # The question is inverted here: did ANY changed file fall outside the
+      # documentation set? With `predicate-quantifier: every` a file matches
+      # `non-docs` only when it matches '**' AND none of the negated doc
+      # patterns, so `non-docs` is 'true' as soon as one non-doc file changed.
+      # The job output docs-only is its negation: 'true' only when EVERY
+      # changed file is documentation. Guard: scripts/check-docs-only-filter.sh.
+      - name: Compute non-documentation changes
+        id: docs
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          predicate-quantifier: 'every'
+          filters: |
+            non-docs:
+              - '**'
+              - '!docs/**'
+              - '!**/*.md'
+
       - name: Summarize filter results
         run: |
           {
@@ -242,7 +271,7 @@ jobs:
             echo "| sdks-any | ${{ steps.filter.outputs.sdks-any }} |"
             echo "| proto | ${{ steps.filter.outputs.proto }} |"
             echo "| loadtest | ${{ steps.filter.outputs.loadtest }} |"
-            echo "| docs-only | ${{ steps.filter.outputs.docs-only }} |"
+            echo "| non-docs (any non-documentation file changed) | ${{ steps.docs.outputs.non-docs }} |"
             echo "| abuse-coverage | ${{ steps.filter.outputs.abuse-coverage }} |"
             echo "| ldap | ${{ steps.filter.outputs.ldap }} |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -380,6 +409,17 @@ jobs:
       # outside the loop, and a folded workflow that regains a PR trigger.
       - name: Required-check coverage — guard self-test
         run: bash scripts/tests/check-required-summary-coverage.test.sh
+
+      # GA audit M19: docs-only must mean "every changed file is documentation".
+      # As an any-match filter it skipped the security job on every PR that
+      # also touched a .md file, and `skipped` passes required-summary.
+      - name: docs-only routing (check-docs-only-filter.sh)
+        run: bash scripts/check-docs-only-filter.sh
+
+      # Proof the guard can go red: it must reject the pre-fix any-match filter,
+      # a missing 'every' quantifier and a fail-open negation.
+      - name: docs-only routing — guard self-test
+        run: bash scripts/tests/check-docs-only-filter.test.sh
 
       # Audit §4.12#13: `make sdk-smoke-local` booted `serve --dev` from the
       # repo root with no --config. That auto-detects ./hearth.yaml, which
@@ -1581,6 +1621,8 @@ jobs:
     name: security
     needs: [filter]
     # Old trigger: every PR except doc-only ones (paths-ignore docs/**, **.md).
+    # docs-only is 'true' only when EVERY changed file is documentation (GA
+    # audit M19): a PR that touches Rust and a .md file runs the scanners.
     if: (needs.filter.result == 'success' && needs.filter.outputs.docs-only != 'true') || github.ref == 'refs/heads/main'
     uses: ./.github/workflows/security.yml
     permissions:

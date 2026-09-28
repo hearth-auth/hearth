@@ -394,6 +394,14 @@ required-summary-check: ## Assert every CI job can fail the required check
 	@bash scripts/check-required-summary-coverage.sh
 	@bash scripts/tests/check-required-summary-coverage.test.sh
 
+## Guard: ci.yml's docs-only routing must mean "every changed file is
+## documentation", not "any changed file is" — the any-match form skipped the
+## security job on every PR that touched a .md file (GA audit M19). Runs in
+## ci.yml's filter job.
+docs-only-filter-check: ## Assert docs-only skips the scanners only on documentation-only PRs
+	@bash scripts/check-docs-only-filter.sh
+	@bash scripts/tests/check-docs-only-filter.test.sh
+
 ## Guard: a script that boots `serve --dev` must control which config the
 ## server reads (audit 2026-08-28 §4.12#13). Runs in ci.yml's filter job.
 dev-config-isolation-check: ## Assert every serve --dev launch is config-isolated
