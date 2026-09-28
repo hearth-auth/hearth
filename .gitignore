@@ -34,6 +34,14 @@ unsafe-check/target/
 node_modules/
 .reflex/
 
+# The repo root installs with npm (package-lock.json is the release tooling's
+# real lockfile; semantic-release.yml runs `npm install`). pnpm-workspace.yaml
+# exists only as a package-discovery manifest for multi-semantic-release, so a
+# local `pnpm install` writes a second, unused lockfile — the committed one went
+# stale for three months and carried 2 critical + 21 high advisories that no
+# install ever used (GA audit supply-chain finding). Never commit it.
+/pnpm-lock.yaml
+
 # Tailwind standalone CLI (binary, not committed — install via `make tailwind-install`)
 ui/tailwindcss
 

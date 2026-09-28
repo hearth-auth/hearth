@@ -303,12 +303,15 @@ jobs:
           # field is a lockfile-internal group name, NOT a path glob, so the
           # previous `group = "examples/**"` override was silently ignored.
           # Production scope: root Cargo.lock, fuzz harness, all SDK lockfiles,
-          # root pnpm-lock.yaml (UI tooling), docs-site/package-lock.json.
+          # root package-lock.json (release tooling: semantic-release.yml runs
+          # `npm install` from it), docs-site/package-lock.json. The root
+          # pnpm-lock.yaml this list used to name was used by no install and was
+          # deleted (GA audit supply-chain finding).
           scan-args: |-
             --config=osv-scanner.toml
             --lockfile=Cargo.lock
             --lockfile=fuzz/Cargo.lock
-            --lockfile=pnpm-lock.yaml
+            --lockfile=package-lock.json
             --lockfile=docs-site/package-lock.json
             --lockfile=sdks/go/go.mod
             --lockfile=sdks/node/package-lock.json

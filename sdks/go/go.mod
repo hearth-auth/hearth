@@ -2,6 +2,12 @@ module github.com/hearth-auth/hearth/sdks/go
 
 go 1.26.3
 
+// The go directive is the minimum Go an importer needs; the toolchain directive
+// is the Go this module builds and tests with. go1.26.6 fixes the stdlib
+// advisories osv-scanner reports against 1.26.3 (GO-2026-4970, -5026, -5856,
+// -5942, -5972, -6088..6091, -6218), without forcing importers to upgrade.
+toolchain go1.26.6
+
 require google.golang.org/protobuf v1.36.11
 
 require (
@@ -32,15 +38,15 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.59.0 // indirect
+	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.1 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.5.0 // indirect
 	golang.org/x/arch v0.22.0 // indirect
-	golang.org/x/crypto v0.53.0 // indirect
-	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/crypto v0.56.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 )
