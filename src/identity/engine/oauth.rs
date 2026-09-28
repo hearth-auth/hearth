@@ -36,6 +36,7 @@ use super::validate_claim_payload;
 use super::EmbeddedIdentityEngine;
 use super::CLIENT_TOKEN_CUTOFF_PREFIX;
 use super::CLOCK_SKEW_SECS;
+use super::{audience_cutoff_hash_hex, AUDIENCE_CUTOFF_HASH_HEX_LEN, AUDIENCE_TOKEN_CUTOFF_PREFIX};
 
 impl EmbeddedIdentityEngine {
     // ===== Legacy OIDC RSA key material =====
@@ -3178,6 +3179,11 @@ impl EmbeddedIdentityEngine {
         if self.is_token_jti_revoked(realm_id, &claims) {
             return Ok(IntrospectionResponse::inactive());
         }
+        // A token for a protected resource removed since it was minted is
+        // inactive (AGENT_AUTH.md §2.5), as in `validate_token`.
+        if self.is_audience_cut_off(realm_id, &claims) {
+            return Ok(IntrospectionResponse::inactive());
+        }
         if claims.sid != "none" {
             let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
             if let Ok(uuid) = uuid::Uuid::parse_str(sid_str) {
@@ -3860,56 +3866,78 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Validates one protected-resource registration: shared by the single
-    /// register call and the YAML reconcile so both accept the same set.
+    /// Validates one protected-resource registration and returns its
+    /// canonical `resource_uri`: shared by the single register call and the
+    /// YAML reconcile so both accept, and store, the same thing.
     ///
-    /// `resource_uri` must be a valid RFC 8707 resource indicator (absolute,
-    /// with a scheme, no fragment) with no surrounding whitespace — it is
-    /// compared byte-for-byte against exchange `audience` / `resource`
-    /// values, so a padded value could never match. Every `mcp:`-prefixed
-    /// scope must be `{namespace}:{category}:{action}` (AGENT_AUTH.md §2.6,
-    /// A-10).
+    /// `resource_uri` must be a valid RFC 8707 resource indicator (see
+    /// [`Uri`]: absolute, scheme and host, no userinfo or fragment) with no
+    /// surrounding whitespace. The registry keys and stores the canonical
+    /// form, which is what exchange `audience` / `resource` values are
+    /// canonicalized to before the lookup. Every `mcp:`-prefixed scope must be
+    /// `{namespace}:{category}:{action}` (AGENT_AUTH.md §2.6, A-10).
     pub(super) fn validate_protected_resource_request(
         request: &crate::identity::types::RegisterProtectedResourceRequest,
-    ) -> Result<(), IdentityError> {
+    ) -> Result<Uri, IdentityError> {
         if request.resource_uri.is_empty() {
             return Err(IdentityError::InvalidInput {
                 reason: "resource_uri must not be empty".to_string(),
             });
         }
-        let valid = Uri::try_from(request.resource_uri.clone())
-            .is_ok_and(|uri| uri.as_str() == request.resource_uri);
-        if !valid {
-            return Err(IdentityError::InvalidInput {
-                reason: "resource_uri must be an absolute URI with a scheme, no fragment and no \
-                         surrounding whitespace"
+        let canonical = Uri::try_from(request.resource_uri.clone())
+            .ok()
+            .filter(|_| request.resource_uri == request.resource_uri.trim())
+            .ok_or_else(|| IdentityError::InvalidInput {
+                reason: "resource_uri must be an absolute URI with a scheme and host, no \
+                         userinfo, no fragment and no surrounding whitespace"
                     .to_string(),
-            });
-        }
+            })?;
         crate::identity::mcp::validate_mcp_scope_vocabulary(&request.scopes)
-            .map_err(|reason| IdentityError::InvalidInput { reason })
+            .map_err(|reason| IdentityError::InvalidInput { reason })?;
+        Ok(canonical)
     }
 
-    /// Refuses an RFC 8693 `audience` or `resource` that is not the URI of a
-    /// protected resource registered in the realm (GA audit M8): RFC 8693
-    /// §2.2.2 `invalid_target`.
-    pub(super) fn require_registered_exchange_target(
+    /// Resolves one RFC 8693 `audience` or `resource` value to the audience
+    /// the exchanged token will carry (GA audit M8), or refuses it with RFC
+    /// 8693 §2.2.2 `invalid_target`:
+    ///
+    /// - a value the subject token already carries in `aud` is narrowing and
+    ///   is kept verbatim;
+    /// - otherwise it must parse as a resource indicator whose canonical form
+    ///   ([`Uri`]) is either already in the subject's `aud` or the
+    ///   `resource_uri` of a protected resource registered in the realm, and
+    ///   the canonical form is returned — every spelling of a registered URI
+    ///   is accepted and minted identically, matching RBAC's resource scope
+    ///   lookup.
+    pub(super) fn resolve_exchange_target(
         &self,
         realm_id: &RealmId,
+        subject_aud: &Audience,
         target: &str,
-    ) -> Result<(), IdentityError> {
+    ) -> Result<String, IdentityError> {
+        let rejected = || IdentityError::TokenExchangeRejected {
+            reason: "audience/resource is not a registered protected resource".to_string(),
+            oauth_error: "invalid_target",
+        };
+        if subject_aud.contains(target) {
+            return Ok(target.to_string());
+        }
+        let canonical = Uri::try_from(target.to_string()).map_err(|_| rejected())?;
+        if subject_aud.contains(canonical.as_str()) {
+            return Ok(canonical.as_str().to_string());
+        }
         let registered = self
             .storage
-            .get(realm_id, &keys::encode_resource_server_uri_index(target))
+            .get(
+                realm_id,
+                &keys::encode_resource_server_uri_index(canonical.as_str()),
+            )
             .map_err(Self::storage_err)?
             .is_some();
         if registered {
-            Ok(())
+            Ok(canonical.as_str().to_string())
         } else {
-            Err(IdentityError::TokenExchangeRejected {
-                reason: "audience/resource is not a registered protected resource".to_string(),
-                oauth_error: "invalid_target",
-            })
+            Err(rejected())
         }
     }
 
@@ -4407,6 +4435,22 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
         self.insert_revoked_jti_cache(realm_id, &cutoff_id, cutoff_exp);
 
+        self.revoke_grant_families_where(realm_id, |family| {
+            family.client_id.as_ref() == Some(client_id)
+        })
+    }
+
+    /// Marks revoked every not-yet-revoked grant family in the realm that
+    /// `matches`, so its refresh tokens stop rotating.
+    ///
+    /// Each family is re-read and written under its rotation lock, so the
+    /// revocation neither clobbers a concurrent rotation's hash write nor is
+    /// clobbered by it.
+    pub(super) fn revoke_grant_families_where(
+        &self,
+        realm_id: &RealmId,
+        matches: impl Fn(&StoredGrantFamily) -> bool,
+    ) -> Result<(), IdentityError> {
         let family_prefix = keys::grant_family_scan_prefix();
         let family_end = keys::prefix_end(&family_prefix);
         let family_entries = self
@@ -4418,12 +4462,9 @@ impl EmbeddedIdentityEngine {
                 serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
                 })?;
-            if listed.client_id.as_ref() != Some(client_id) {
+            if !matches(&listed) {
                 continue;
             }
-            // Serialize with any in-flight rotation on this family, then
-            // re-read under the lock so this revocation neither clobbers a
-            // concurrent rotation's hash write nor is clobbered by it.
             let lock = self.grant_family_lock(realm_id, &listed.family_id);
             // INVARIANT: guard held only across the sync re-read + revoke-write window; no .await in scope.
             let _guard = lock.lock().expect("grant family lock poisoned");
@@ -4451,6 +4492,65 @@ impl EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
         Ok(())
+    }
+
+    /// The revoked-JTI projection id of the audience cutoff for `aud`:
+    /// `aud-cutoff:` followed by the first 16 bytes of SHA-256(`aud`) in hex.
+    ///
+    /// Hashed so the id has a fixed length (80 bytes with the realm prefix)
+    /// that always fits `StackKeyBuf` — `validate_token` derives it for every
+    /// `aud` entry without allocating. Real `jti`s are UUIDs, so the prefix
+    /// cannot collide with one.
+    pub(super) fn audience_token_cutoff_id(aud: &str) -> String {
+        let mut hex = [0u8; AUDIENCE_CUTOFF_HASH_HEX_LEN];
+        audience_cutoff_hash_hex(aud, &mut hex);
+        let mut id = String::with_capacity(AUDIENCE_TOKEN_CUTOFF_PREFIX.len() + hex.len());
+        id.push_str(AUDIENCE_TOKEN_CUTOFF_PREFIX);
+        // INVARIANT: `audience_cutoff_hash_hex` writes only ASCII hex digits.
+        id.push_str(std::str::from_utf8(&hex).unwrap_or_default());
+        id
+    }
+
+    /// Stops every token bound to a protected resource that is being removed
+    /// (AGENT_AUTH.md §2.5):
+    ///
+    /// 1. an audience cutoff for `resource_uri` (canonical) is projected into
+    ///    the revoked-JTI cache. Its value is the latest `exp` any token minted
+    ///    for the resource so far can carry; `validate_token` and introspection
+    ///    refuse a token that names the resource in `aud` and whose `exp` is
+    ///    not after it. A token minted after the resource is re-registered is
+    ///    unaffected, and the row self-evicts once every covered token has
+    ///    expired;
+    /// 2. every grant family bound to the resource is revoked, so its refresh
+    ///    tokens cannot mint fresh (post-cutoff) tokens for it.
+    ///
+    /// Tokens whose `aud` does not include Hearth's own audience are never
+    /// validated by Hearth; a resource server that verifies them offline keeps
+    /// accepting them until they expire.
+    pub(super) fn revoke_resource_tokens(
+        &self,
+        realm_id: &RealmId,
+        resource_uri: &Uri,
+    ) -> Result<(), IdentityError> {
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        // Exchange tokens are capped by the global TTL, code/refresh tokens by
+        // the realm's effective TTL: cover the longer of the two.
+        let (realm_access_ttl, _) = self.effective_token_ttl_secs(realm_id);
+        let ttl = realm_access_ttl.max(self.config.token.access_token_ttl_secs);
+        let cutoff_exp = now_secs.saturating_add(ttl);
+        let cutoff_id = Self::audience_token_cutoff_id(resource_uri.as_str());
+        // Durable first, as for the client cutoff.
+        self.storage
+            .put(
+                realm_id,
+                &keys::encode_revoked_jti(&cutoff_id),
+                &cutoff_exp.to_le_bytes(),
+            )
+            .map_err(Self::storage_err)?;
+        self.insert_revoked_jti_cache(realm_id, &cutoff_id, cutoff_exp);
+        self.revoke_grant_families_where(realm_id, |family| {
+            family.resources.iter().any(|r| r == resource_uri)
+        })
     }
 
     // ===== OAuth consent =====

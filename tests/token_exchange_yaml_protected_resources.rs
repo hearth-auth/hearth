@@ -28,7 +28,7 @@ const REALM: &str = "texyaml";
 const TE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const SECRET: &str = "yaml-token-exchange-secret-0123!";
 const RS: &str = "https://rs.example.com/api";
-const RS2: &str = "https://mcp.example.com/";
+const RS2: &str = "https://mcp.example.com";
 const UNLISTED: &str = "https://unlisted.example.com/api";
 
 /// A `hearth.yaml` holding one realm whose `protected_resources` lists
@@ -352,4 +352,296 @@ async fn register_refuses_a_fragment_or_padded_resource_uri() {
         );
     }
     assert_eq!(registered_uris(&h, &realm), Vec::<String>::new());
+}
+
+// ── One URI rule for the exchange allowlist and RBAC ─────────────────────────
+
+const PERM: &str = "tools.invoke";
+const BUNDLE: &str = "mcp:tools:invoke";
+/// The canonical form of every spelling in `SPELLINGS`.
+const CANON: &str = "https://mcp.example.com/api";
+const SPELLINGS: [&str; 4] = [
+    "https://mcp.example.com/api",
+    "https://mcp.example.com/api/",
+    "HTTPS://MCP.Example.COM:443/api",
+    "https://mcp.EXAMPLE.com:443/api/",
+];
+/// URIs that differ from `CANON` in something canonicalization keeps.
+const DIFFERENT: [&str; 4] = [
+    "https://mcp.example.com/other",
+    "https://mcp.example.com/API",
+    "http://mcp.example.com/api",
+    "https://mcp.example.com:8443/api",
+];
+
+/// Realm YAML declaring `tools.invoke` and, per `uri`, a protected resource
+/// whose `mcp:tools:invoke` bundle grants it (none → no `protected_resources`).
+fn bundle_config(uris: &[&str]) -> Config {
+    let mut yaml = format!(
+        "realms:\n  {REALM}:\n    session_ttl: \"12h\"\n    permissions:\n      \
+         - name: {PERM}\n        display_name: Invoke\n"
+    );
+    if !uris.is_empty() {
+        yaml.push_str("    protected_resources:\n");
+        for uri in uris {
+            yaml.push_str(&format!(
+                "      - resource_uri: \"{uri}\"\n        display_name: MCP\n        \
+                 scopes:\n          - name: \"{BUNDLE}\"\n            display_name: Invoke\n            \
+                 permissions: [{PERM}]\n"
+            ));
+        }
+    }
+    let mut config = Config::from_yaml_str_unchecked(&yaml).expect("parse yaml");
+    config.dev_mode = true;
+    config
+}
+
+fn reconcile_config(h: &common::TestHarness, config: &Config) -> RealmId {
+    reconcile_realms(h.identity(), h.authz(), config).expect("reconcile");
+    h.identity()
+        .get_realm_by_name(REALM)
+        .unwrap()
+        .expect("realm exists")
+        .id()
+        .clone()
+}
+
+fn user_with_bundle_permission(h: &common::TestHarness, realm: &RealmId) -> hearth::core::UserId {
+    let user = h
+        .identity()
+        .create_user(
+            realm,
+            &CreateUserRequest {
+                email: format!("rb-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "RB".into(),
+                ..CreateUserRequest::default()
+            },
+        )
+        .unwrap();
+    h.rbac()
+        .grant_user_permission(
+            realm,
+            &hearth::rbac::UserPermissionGrant {
+                realm_id: realm.clone(),
+                user_id: user.id().clone(),
+                permission: hearth::rbac::Permission::new(PERM).unwrap(),
+                scope: hearth::rbac::Scope::Realm,
+                granted_at: hearth::core::Timestamp::from_micros(0),
+                granted_by: None,
+            },
+        )
+        .unwrap();
+    user.id().clone()
+}
+
+/// Whether RBAC grants `mcp:tools:invoke` to a third-party client for a token
+/// bound to `resource` — i.e. whether its resource scope lookup finds the
+/// YAML bundle under that spelling.
+fn rbac_grants_bundle(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    user: &hearth::core::UserId,
+    resource: &str,
+) -> bool {
+    let uri = hearth::core::Uri::try_from(resource.to_string()).unwrap();
+    match h.rbac().resolve_with_scopes(
+        user,
+        realm,
+        None,
+        &[BUNDLE.to_string()],
+        ClientTrustLevel::ThirdParty,
+        &[BUNDLE.to_string()],
+        Some(&uri),
+    ) {
+        Ok(resolved) => {
+            assert_eq!(resolved.granted_scopes, vec![BUNDLE.to_string()]);
+            true
+        }
+        Err(hearth::rbac::RbacError::InvalidScope { .. }) => false,
+        Err(other) => panic!("unexpected RBAC error {other:?}"),
+    }
+}
+
+/// Every spelling of one URI is the same resource to BOTH layers — the
+/// token-exchange allowlist and RBAC's resource scope lookup — and a URI that
+/// differs in scheme, port, path or path case is a different resource to both.
+#[tokio::test]
+async fn spelling_variants_match_in_both_layers() {
+    let h = common::TestHarness::embedded().await.unwrap();
+    let realm = reconcile_config(&h, &bundle_config(&["HTTPS://MCP.Example.com:443/api/"]));
+    assert_eq!(
+        registered_uris(&h, &realm),
+        vec![CANON.to_string()],
+        "the registry stores the canonical form"
+    );
+    let c = client(&h, &realm);
+    let user = user_with_bundle_permission(&h, &realm);
+
+    for spelling in SPELLINGS {
+        for via in [Target::Audience, Target::Resource] {
+            let token = exchange(&h, &realm, &c, via, spelling)
+                .unwrap_or_else(|e| panic!("{via:?}={spelling}: {e:?}"));
+            let claims = hearth::identity::tokens::decode_claims_unverified(&token).unwrap();
+            assert!(
+                claims.aud.contains(CANON),
+                "{via:?}={spelling}: the minted aud carries the canonical form"
+            );
+        }
+        assert!(
+            rbac_grants_bundle(&h, &realm, &user, spelling),
+            "RBAC finds the bundle under {spelling}"
+        );
+    }
+    for different in DIFFERENT {
+        for via in [Target::Audience, Target::Resource] {
+            assert_invalid_target(exchange(&h, &realm, &c, via, different), different);
+        }
+        assert!(
+            !rbac_grants_bundle(&h, &realm, &user, different),
+            "RBAC must not find the bundle under {different}"
+        );
+    }
+}
+
+/// RBAC's resource scope bundles mirror YAML exactly, like the registry: a
+/// bundle dropped from a listed resource, a resource dropped from the list,
+/// and an emptied list all remove the bundles.
+#[tokio::test]
+async fn rbac_resource_bundles_follow_yaml() {
+    let h = common::TestHarness::embedded().await.unwrap();
+    let realm = reconcile_config(&h, &bundle_config(&[RS, RS2]));
+    let user = user_with_bundle_permission(&h, &realm);
+    assert!(rbac_grants_bundle(&h, &realm, &user, RS));
+    assert!(rbac_grants_bundle(&h, &realm, &user, RS2));
+
+    // RS dropped from YAML: its bundles go, RS2's stay.
+    reconcile_config(&h, &bundle_config(&[RS2]));
+    assert!(!rbac_grants_bundle(&h, &realm, &user, RS), "RS removed");
+    assert!(rbac_grants_bundle(&h, &realm, &user, RS2), "RS2 kept");
+
+    // RS2 still listed but without its bundle.
+    reconcile_config(&h, &config(&[RS2]));
+    assert!(
+        !rbac_grants_bundle(&h, &realm, &user, RS2),
+        "bundle removed"
+    );
+
+    // Back, then the whole key removed.
+    reconcile_config(&h, &bundle_config(&[RS2]));
+    assert!(rbac_grants_bundle(&h, &realm, &user, RS2), "re-added");
+    reconcile_config(&h, &bundle_config(&[]));
+    assert!(!rbac_grants_bundle(&h, &realm, &user, RS2), "list emptied");
+}
+
+// ── Removing a resource stops its tokens (AGENT_AUTH.md §2.5) ────────────────
+
+fn resource_bound_pair(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    resource: Option<&str>,
+) -> hearth::identity::TokenPair {
+    let user = h
+        .identity()
+        .create_user(
+            realm,
+            &CreateUserRequest {
+                email: format!("rt-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "RT".into(),
+                ..CreateUserRequest::default()
+            },
+        )
+        .unwrap();
+    let session = h
+        .identity()
+        .create_session(realm, user.id(), &SessionContext::default())
+        .unwrap();
+    h.identity()
+        .issue_tokens_with_context(
+            realm,
+            user.id(),
+            session.id(),
+            &TokenIssuanceContext {
+                granted_scopes: std::iter::once("read".to_string()).collect(),
+                resource: resource.map(|r| hearth::core::Uri::try_from(r.to_string()).unwrap()),
+                ..TokenIssuanceContext::default()
+            },
+        )
+        .unwrap()
+}
+
+fn introspect_active(h: &common::TestHarness, realm: &RealmId, token: &str) -> bool {
+    h.identity()
+        .introspect_token(
+            realm,
+            &hearth::identity::oidc::TokenIntrospectionRequest {
+                token: token.to_string(),
+                token_type_hint: None,
+                introspecting_client_id: None,
+            },
+        )
+        .unwrap()
+        .active
+}
+
+/// Every token whose `aud` names a resource removed from YAML stops
+/// validating and introspects inactive at once, and its refresh token stops
+/// rotating; tokens for other resources and for Hearth alone are untouched.
+#[tokio::test]
+async fn removing_a_resource_stops_its_tokens() {
+    let h = common::TestHarness::embedded().await.unwrap();
+    let realm = reconcile(&h, &[RS, RS2]);
+    let c = client(&h, &realm);
+
+    let for_rs = resource_bound_pair(&h, &realm, Some(RS));
+    let for_rs2 = resource_bound_pair(&h, &realm, Some(RS2));
+    let plain = resource_bound_pair(&h, &realm, None);
+    let exchanged = exchange(&h, &realm, &c, Target::Resource, RS).unwrap();
+    for token in [
+        for_rs.access_token(),
+        for_rs2.access_token(),
+        plain.access_token(),
+        exchanged.as_str(),
+    ] {
+        h.identity()
+            .validate_token(&realm, token)
+            .unwrap_or_else(|e| panic!("precondition: valid before removal: {e:?}"));
+        assert!(introspect_active(&h, &realm, token), "precondition");
+    }
+
+    reconcile(&h, &[RS2]);
+
+    for (what, token) in [
+        ("issued for RS", for_rs.access_token()),
+        ("exchanged to RS", exchanged.as_str()),
+    ] {
+        assert!(
+            matches!(
+                h.identity().validate_token(&realm, token),
+                Err(IdentityError::InvalidToken)
+            ),
+            "{what}: validate_token must refuse a token for a removed resource"
+        );
+        assert!(!introspect_active(&h, &realm, token), "{what}: inactive");
+    }
+    let refreshed = h
+        .identity()
+        .refresh_tokens(&realm, for_rs.refresh_token(), None, None);
+    assert!(
+        refreshed.is_err(),
+        "a refresh token bound to a removed resource must not rotate: {:?}",
+        refreshed.map(|p| p.access_token().to_string())
+    );
+
+    for (what, token) in [
+        ("issued for RS2", for_rs2.access_token()),
+        ("plain", plain.access_token()),
+    ] {
+        h.identity()
+            .validate_token(&realm, token)
+            .unwrap_or_else(|e| panic!("{what}: untouched by RS's removal: {e:?}"));
+        assert!(introspect_active(&h, &realm, token), "{what}: active");
+    }
+    h.identity()
+        .refresh_tokens(&realm, for_rs2.refresh_token(), None, None)
+        .expect("RS2's refresh token still rotates");
 }

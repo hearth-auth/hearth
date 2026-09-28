@@ -3805,7 +3805,9 @@ impl RealmYamlConfig {
         // registry (the RFC 8693 token-exchange target allowlist, OIDC.md
         // §3.4.1a), which enforces the same rules. Checking here makes a bad
         // entry a config-load error naming it, not a reconcile failure.
-        let mut seen_uris: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        // Duplicates compare canonical forms (`core::Uri`): two spellings of
+        // one URI are one resource.
+        let mut seen_uris: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (i, resource) in self
             .protected_resources
             .as_deref()
@@ -3814,22 +3816,29 @@ impl RealmYamlConfig {
             .enumerate()
         {
             let uri = resource.resource_uri.as_str();
-            let valid_uri = crate::core::Uri::try_from(uri.to_string())
-                .is_ok_and(|parsed| parsed.as_str() == uri);
-            if !valid_uri {
-                errors.push(RegistryError::InvalidRealmConfigField {
+            let canonical = crate::core::Uri::try_from(uri.to_string())
+                .ok()
+                .filter(|_| uri == uri.trim());
+            match canonical {
+                None => errors.push(RegistryError::InvalidRealmConfigField {
                     field: format!("protected_resources[{i}].resource_uri"),
                     value: uri.to_string(),
-                    reason: "must be an absolute URI with a scheme, no fragment and no \
-                             surrounding whitespace (RFC 8707 resource indicator)"
+                    reason: "must be an absolute URI with a scheme and host, no userinfo, no \
+                             fragment and no surrounding whitespace (RFC 8707 resource indicator)"
                         .to_string(),
-                });
-            } else if !seen_uris.insert(uri) {
-                errors.push(RegistryError::InvalidRealmConfigField {
-                    field: format!("protected_resources[{i}].resource_uri"),
-                    value: uri.to_string(),
-                    reason: "declared more than once in this realm".to_string(),
-                });
+                }),
+                Some(canonical) => {
+                    if !seen_uris.insert(canonical.as_str().to_string()) {
+                        errors.push(RegistryError::InvalidRealmConfigField {
+                            field: format!("protected_resources[{i}].resource_uri"),
+                            value: uri.to_string(),
+                            reason: format!(
+                                "declared more than once in this realm (canonical form `{}`)",
+                                canonical.as_str()
+                            ),
+                        });
+                    }
+                }
             }
             let bundle_names: Vec<String> =
                 resource.scopes.iter().map(|b| b.name.clone()).collect();
@@ -3851,7 +3860,10 @@ impl RealmYamlConfig {
             .unwrap_or_default()
             .into_iter()
             .map(|resource| ProtectedResource {
-                resource_uri: resource.resource_uri,
+                // Stored canonical so RBAC and the identity registry agree;
+                // an invalid URI was already reported above.
+                resource_uri: crate::core::Uri::try_from(resource.resource_uri.clone())
+                    .map_or(resource.resource_uri, |uri| uri.as_str().to_string()),
                 display_name: resource.display_name,
                 scopes: resource
                     .scopes
@@ -4286,6 +4298,29 @@ mod tests {
                 resource("https://rs.example.com/api", &[]),
             ]),
             vec!["protected_resources[2].resource_uri".to_string()]
+        );
+    }
+
+    /// Two spellings of one URI are the same resource: the duplicate check
+    /// compares canonical forms, and the stored `resource_uri` is canonical.
+    #[test]
+    fn protected_resource_uri_is_canonical_and_duplicates_compare_canonically() {
+        assert_eq!(
+            protected_resource_errors(vec![
+                resource("https://rs.example.com/api", &[]),
+                resource("HTTPS://RS.example.com:443/api/", &[]),
+            ]),
+            vec!["protected_resources[1].resource_uri".to_string()]
+        );
+        let cfg = RealmYamlConfig {
+            protected_resources: Some(vec![resource("HTTPS://RS.example.com:443/api/", &[])]),
+            ..RealmYamlConfig::default()
+        }
+        .to_realm_config(&AuthConfig::default(), None)
+        .expect("valid");
+        assert_eq!(
+            cfg.protected_resources[0].resource_uri,
+            "https://rs.example.com/api"
         );
     }
 

@@ -3087,11 +3087,14 @@ pub trait IdentityEngine: Send + Sync {
         request: &types::UpdateProtectedResourceRequest,
     ) -> Result<types::ProtectedResource, IdentityError>;
 
-    /// Deletes a protected resource.
+    /// Deletes a protected resource and stops its tokens (AGENT_AUTH.md §2.5).
     ///
-    /// All outstanding tokens scoped to this resource's `resource_uri` are NOT
-    /// automatically revoked in this milestone; see AGENT_AUTH.md §2.5 for the
-    /// future revocation requirement. Emits `ProtectedResourceDeleted` audit event.
+    /// Before the registry rows go, an audience cutoff for the canonical
+    /// `resource_uri` is written into the revoked-JTI projection — every
+    /// access token whose `aud` names the resource stops validating and
+    /// introspects inactive — and every grant family bound to the resource is
+    /// revoked, so its refresh tokens stop rotating. Emits
+    /// `ProtectedResourceDeleted` audit event.
     fn delete_protected_resource(
         &self,
         realm_id: &RealmId,
@@ -3100,10 +3103,13 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Makes the realm's protected-resource registry equal `declared`.
     ///
-    /// The registry is keyed by `resource_uri` (exact string). A declared URI
-    /// that is not registered is registered; a registered one whose display
-    /// name, scopes or required claims differ is updated in place (its id is
-    /// kept); a registered URI that is not declared is deleted. The declared
+    /// The registry is keyed by the canonical `resource_uri` (`core::Uri`), so
+    /// two spellings of one URI are one entry. A declared URI that is not
+    /// registered is registered; a registered one whose display name, scopes
+    /// or required claims differ is updated in place (its id is kept); a
+    /// registered URI that is not declared is deleted — which, like
+    /// [`Self::delete_protected_resource`], stops every token minted for it
+    /// (AGENT_AUTH.md §2.5). The declared
     /// set is the realm's YAML `protected_resources` and is the registry's only
     /// source of truth: this is what `audience` / `resource` of an RFC 8693
     /// token exchange are checked against (OIDC.md §3.4.1a).

@@ -462,37 +462,38 @@ fn reconcile_rbac_for_realm(
         }
     }
 
-    if let Some(resources) = yaml_cfg.protected_resources.as_ref() {
-        let domain_resources: Vec<ProtectedResource> = resources
-            .iter()
-            .map(|r| ProtectedResource {
-                resource_uri: r.resource_uri.clone(),
-                display_name: r.display_name.clone(),
-                scopes: r
-                    .scopes
-                    .iter()
-                    .map(|b| ScopeBundle {
-                        name: b.name.clone(),
-                        display_name: b.display_name.clone(),
-                        description: b.description.clone(),
-                        permissions: b
-                            .permissions
-                            .iter()
-                            .filter_map(|p| Permission::new(p.clone()).ok())
-                            .collect(),
-                    })
-                    .collect(),
-            })
-            .collect();
-        if !domain_resources.is_empty() {
-            if let Err(e) = rbac.reconcile_protected_resources(realm_id, &domain_resources) {
-                tracing::warn!(
-                    realm = realm_name,
-                    error = %e,
-                    "failed to reconcile YAML protected resources"
-                );
-            }
-        }
+    // Protected-resource scope bundles mirror YAML exactly, like the identity
+    // registry: an absent or empty `protected_resources` removes them all.
+    let domain_resources: Vec<ProtectedResource> = yaml_cfg
+        .protected_resources
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|r| ProtectedResource {
+            resource_uri: r.resource_uri.clone(),
+            display_name: r.display_name.clone(),
+            scopes: r
+                .scopes
+                .iter()
+                .map(|b| ScopeBundle {
+                    name: b.name.clone(),
+                    display_name: b.display_name.clone(),
+                    description: b.description.clone(),
+                    permissions: b
+                        .permissions
+                        .iter()
+                        .filter_map(|p| Permission::new(p.clone()).ok())
+                        .collect(),
+                })
+                .collect(),
+        })
+        .collect();
+    if let Err(e) = rbac.reconcile_protected_resources(realm_id, &domain_resources) {
+        tracing::warn!(
+            realm = realm_name,
+            error = %e,
+            "failed to reconcile YAML protected resources"
+        );
     }
 
     if let Some(groups) = yaml_cfg.groups.as_ref() {
@@ -527,8 +528,9 @@ fn reconcile_rbac_for_realm(
 ///
 /// The YAML block is the registry's only source of truth — there is no admin
 /// write API — so an absent block means an empty registry, and an entry
-/// removed from YAML is deleted here. Each entry's `resource_uri` is the key
-/// and the value RFC 8693 `audience` / `resource` must equal; its scope
+/// removed from YAML is deleted here (which stops its tokens). Each entry's
+/// canonical `resource_uri` is the key and what RFC 8693 `audience` /
+/// `resource` values are canonicalized and matched against; its scope
 /// bundle names become the record's `scopes`. The same entries feed the RBAC
 /// scope bundles in [`reconcile_rbac_for_realm`].
 ///
