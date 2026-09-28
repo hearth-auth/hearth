@@ -433,7 +433,7 @@ All SDKs must define and expose the following error/exception types. Language-na
 | `RequiredActionError` | The server answered `400 required_actions_pending` (below), or a token with `token_type === "required_action"` is presented as an access token (defensive: Hearth issues no such token) |
 
 `RequiredActionError` must additionally expose:
-- `requiredActions: string[]` — the pending action names (e.g. `["VERIFY_EMAIL", "UPDATE_PASSWORD"]`), from the token's `required_actions` claim.
+- `requiredActions: string[]` — the pending action names (e.g. `["VERIFY_EMAIL", "UPDATE_PASSWORD"]`): from the REST `actions` array below, or from the `required_actions` claim of a presented required-action token.
 
 It carries no redirect URL: the server never supplies one.
 
@@ -457,7 +457,7 @@ All server-side SDKs (node, go, python, php, rust, kotlin) must provide HTTP mid
 3. On success: injects verified claims into the request context using a well-known key.
 4. On missing/invalid token: responds with `401 Unauthorized`, `WWW-Authenticate: Bearer realm="hearth"`.
 5. On insufficient scope/role: responds with `403 Forbidden`.
-6. On a token where `token_type === "required_action"`: MUST respond with `401 Unauthorized` and throw `RequiredActionError` (not a generic `UnauthorizedError`). The `requiredActions` field MUST be populated from the `required_actions` claim in the JWT. This token is valid but scoped only to completing the required actions — it MUST NOT be accepted for general API access.
+6. On a token where `token_type === "required_action"` (defensive — Hearth issues no such token, see Section 5): MUST respond with `401 Unauthorized` and throw `RequiredActionError` (not a generic `UnauthorizedError`). The `requiredActions` field MUST be populated from the `required_actions` claim in the JWT. This token is valid but scoped only to completing the required actions — it MUST NOT be accepted for general API access.
 7. Does not call `next` on auth failure.
 
 The browser SDK (`@hearth-auth/browser`) is exempt from the middleware requirement but must provide equivalent helpers for SPA route guards.

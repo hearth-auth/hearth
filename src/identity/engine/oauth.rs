@@ -1094,7 +1094,6 @@ impl EmbeddedIdentityEngine {
             groups: access_groups,
             org_groups: Vec::new(),
             permissions: access_permissions,
-            required_actions: Vec::new(),
             act: None,
             amr: stored_code.amr_values.clone(),
             cnf: request
@@ -1126,7 +1125,6 @@ impl EmbeddedIdentityEngine {
             groups: access_claims.groups.clone(),
             org_groups: Vec::new(),
             permissions: access_claims.permissions.clone(),
-            required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
             // M1 (RFC 9449 §5): bind refresh token to the DPoP key presented at exchange.
@@ -1210,7 +1208,6 @@ impl EmbeddedIdentityEngine {
             groups: id_groups,
             org_groups: Vec::new(),
             permissions: id_permissions,
-            required_actions: Vec::new(),
             act: None,
             amr: stored_code.amr_values.clone(),
             cnf: None,
@@ -1625,7 +1622,6 @@ impl EmbeddedIdentityEngine {
             groups: Vec::new(),
             org_groups: Vec::new(),
             permissions: Vec::new(),
-            required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
             cnf: request
@@ -1786,7 +1782,6 @@ impl EmbeddedIdentityEngine {
             groups: Vec::new(),
             org_groups: Vec::new(),
             permissions: Vec::new(),
-            required_actions: Vec::new(),
             act: None,
             amr: vec!["jwtbearer".to_string()],
             cnf: request
@@ -2617,7 +2612,6 @@ impl EmbeddedIdentityEngine {
                     groups: Vec::new(),
                     org_groups: Vec::new(),
                     permissions: Vec::new(),
-                    required_actions: Vec::new(),
                     act: None,
                     amr: Vec::new(),
                     cnf: None,

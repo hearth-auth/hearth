@@ -117,8 +117,7 @@ pub use tokens::{
     decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
     verify_rs256_id_token_signature, verify_token_signature, CnfClaim, IssueTokenRequest, Jwk,
     JwksDocument, JwtAssertionClaims, RsaIdTokenSigningKey, SigningKey, TokenClaims, TokenConfig,
-    TokenPair, REQUIRED_ACTION_TOKEN_TYPE, RSA_ID_TOKEN_MIN_MODULUS_BITS,
-    RSA_ID_TOKEN_MODULUS_BITS,
+    TokenPair, RSA_ID_TOKEN_MIN_MODULUS_BITS, RSA_ID_TOKEN_MODULUS_BITS,
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{

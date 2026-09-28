@@ -4206,7 +4206,6 @@ impl EmbeddedIdentityEngine {
             groups: effective_groups.clone(),
             org_groups,
             permissions: effective_perms.clone(),
-            required_actions: Vec::new(),
             act: None,
             amr: family.amr_values.clone(),
             cnf: dpop_jkt.map(|jkt| crate::identity::tokens::CnfClaim {
@@ -4235,7 +4234,6 @@ impl EmbeddedIdentityEngine {
             groups: effective_groups,
             org_groups: Vec::new(),
             permissions: effective_perms,
-            required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
             // M1 (RFC 9449 §5): propagate DPoP key binding to the rotated refresh token.
@@ -17949,7 +17947,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .cloned()
                     .collect()
             },
-            required_actions: Vec::new(),
             act: Some(new_act),
             amr: subject_claims.amr.clone(),
             sv: subject_claims.sv,
