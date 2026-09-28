@@ -46,6 +46,9 @@
 #   SEED              [1]      determinism seed
 #   SETTLE            [0]      seconds to wait after seeding before the run
 #   EXTRA_RUN_ARGS    []       extra flags appended to the `run` subcommand
+#   SERVER_LOG_OUT    [loadtest/reports/server.log]  where the server log is
+#                             copied on exit (the temp workdir is deleted), so a
+#                             failed request in the report can be explained
 #
 # Loopback / dev only — the server boots with `--dev` (bootstrap enabled,
 # relaxed security) and `security.load_test_unthrottled` which disables ALL
@@ -111,6 +114,7 @@ WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/hearth-loadtest.XXXXXX")"
 CORPUS_CONFIG="${LOADTEST_DIR}/loadtest-corpus.yaml"
 SEED_HANDLE="${LOADTEST_DIR}/reports/seed-handle.json"
 SERVER_LOG="${WORKDIR}/server.log"
+SERVER_LOG_OUT="${SERVER_LOG_OUT:-${LOADTEST_DIR}/reports/server.log}"
 SERVER_PID=""
 
 # ── Teardown ─────────────────────────────────────────────────────────────────
@@ -119,6 +123,13 @@ cleanup() {
   if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
     kill "${SERVER_PID}" 2>/dev/null || true
     wait "${SERVER_PID}" 2>/dev/null || true
+  fi
+  # Keep the server log next to the report: a failed request (a 5xx) in the
+  # report can only be explained from it, and WORKDIR is deleted below.
+  if [[ -f "${SERVER_LOG}" ]]; then
+    mkdir -p "$(dirname "${SERVER_LOG_OUT}")"
+    cp "${SERVER_LOG}" "${SERVER_LOG_OUT}" 2>/dev/null \
+      && echo "==> Server log kept at ${SERVER_LOG_OUT}" >&2
   fi
   rm -rf "${WORKDIR}"
   exit "${code}"
