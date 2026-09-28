@@ -1094,6 +1094,111 @@ pub async fn verify_email_confirm_submit(
     )
 }
 
+/// Continues the flow once `done` is off the pending list: the next pending
+/// action's page, or — when none remain — back to the client with a code or
+/// to the browser login's destination.
+#[allow(clippy::needless_pass_by_value)]
+fn advance_flow(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    claims: ra_token::RaClaims,
+    done: RequiredAction,
+    secure: bool,
+    now: Timestamp,
+) -> Response {
+    let remaining: Vec<RequiredAction> = claims
+        .pending_actions
+        .into_iter()
+        .filter(|a| *a != done)
+        .collect();
+    if !remaining.is_empty() {
+        return next_required_action(
+            state,
+            realm,
+            &claims.sub,
+            remaining,
+            claims.oidc_params,
+            claims.browser_return_to,
+            secure,
+            now,
+        );
+    }
+    if claims.browser_return_to.is_some() {
+        resume_browser_flow(state, realm, &claims.sub, claims.browser_return_to, secure)
+    } else if let Some(oidc_params) = claims.oidc_params {
+        resume_oidc_flow(state, realm, &claims.sub, oidc_params, secure)
+    } else {
+        resume_browser_flow(state, realm, &claims.sub, None, secure)
+    }
+}
+
+/// Removes `action` from the account's persisted pending actions, so the
+/// next login does not ask for it again. Best effort: a failure is logged,
+/// and the flow still advances (the next login re-evaluates).
+fn clear_persisted_action(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    action: RequiredAction,
+) {
+    let Ok(Some(user)) = state.identity.get_user(realm, user_id) else {
+        tracing::warn!("clear_persisted_action: user lookup failed");
+        return;
+    };
+    if !user.required_actions().contains(&action) {
+        return;
+    }
+    let remaining: Vec<RequiredAction> = user
+        .required_actions()
+        .iter()
+        .copied()
+        .filter(|a| *a != action)
+        .collect();
+    if let Err(e) = state.identity.update_user(
+        realm,
+        user_id,
+        &UpdateUserRequest {
+            required_actions: Some(remaining),
+            ..Default::default()
+        },
+    ) {
+        tracing::warn!(error = %e, "clear_persisted_action: update_user failed");
+    }
+}
+
+/// An action the user had already satisfied when its page was reached — an
+/// operator put it on an account that holds the factor, or the user finished
+/// it elsewhere. Records it as completed (`RequiredActionAutoCleared`),
+/// clears it from the account and continues the flow, so the page never
+/// redirects to itself.
+#[allow(clippy::too_many_arguments)]
+fn skip_satisfied_action(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    claims: ra_token::RaClaims,
+    action: RequiredAction,
+    reason: &'static str,
+    secure: bool,
+    now: Timestamp,
+) -> Response {
+    clear_persisted_action(state, realm, user_id, action);
+    if let Err(e) = state.audit.append(&CreateAuditEvent {
+        realm_id: realm.clone(),
+        actor: user_id.as_uuid().to_string(),
+        action: AuditAction::RequiredActionAutoCleared,
+        resource_type: "user".to_string(),
+        resource_id: user_id.as_uuid().to_string(),
+        metadata: Some(serde_json::json!({
+            "action_type": crate::protocol::convert::identity::required_action_to_wire(action),
+            "reason": reason,
+        })),
+    }) {
+        tracing::warn!(error = %e, "skip_satisfied_action: audit append failed");
+    }
+    advance_flow(state, realm, claims, action, secure, now)
+}
+
 fn render_verify_email_expired(state: &Arc<WebState>) -> Response {
     let tmpl = VerifyEmailExpiredTemplate {
         chrome: false,
@@ -1485,8 +1590,32 @@ pub async fn enroll_phone_otp_page(
 ) -> Response {
     // Verify the RA session token, exactly as the email twin does — cookie
     // presence alone proves nothing (audit 2026-08-28 §4.19#7).
-    if let Err(response) = validated_ra_session(&state, &headers) {
-        return response;
+    let (realm, claims) = match validated_ra_session(&state, &headers) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    // A user who already holds a verified phone has nothing to enrol here.
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+    match state.identity.get_user(&realm, &user_id) {
+        Ok(Some(user)) if user.phone_verified() => {
+            let secure = state.is_secure_request(&headers);
+            let now = Timestamp::from_micros(now_micros());
+            return skip_satisfied_action(
+                &state,
+                &realm,
+                &user_id,
+                claims,
+                RequiredAction::EnrollPhoneOtp,
+                "phone_already_verified",
+                secure,
+                now,
+            );
+        }
+        Ok(Some(_)) => {}
+        _ => return handlers_common::server_error(),
     }
     render_enroll_phone_page(&state, &headers, None)
 }
@@ -2036,14 +2165,26 @@ pub async fn enroll_email_otp_page(
         return handlers_common::server_error();
     };
     let user_id = UserId::new(user_uuid);
-    let email = state
-        .identity
-        .get_user(&realm, &user_id)
-        .ok()
-        .flatten()
-        .map(|u| u.email().to_string())
-        .unwrap_or_default();
-    render_enroll_email_otp_page(&state, &headers, &email, None)
+    let user = match state.identity.get_user(&realm, &user_id) {
+        Ok(Some(user)) => user,
+        _ => return handlers_common::server_error(),
+    };
+    // A user who already has email OTP has nothing to enrol here, and must
+    // not be sent another code.
+    if user.email_otp_enabled() {
+        let secure = state.is_secure_request(&headers);
+        return skip_satisfied_action(
+            &state,
+            &realm,
+            &user_id,
+            claims,
+            RequiredAction::EnrollEmailOtp,
+            "email_otp_already_enabled",
+            secure,
+            now,
+        );
+    }
+    render_enroll_email_otp_page(&state, &headers, user.email(), None)
 }
 
 /// Sends an email OTP to the user's registered email address and renders
@@ -2370,6 +2511,94 @@ pub struct EnrollMfaForm {
     pub code: String,
 }
 
+/// Where a user stands against a pending `EnrollMfa`.
+enum EnrollMfaStatus {
+    /// Already satisfied: a passkey, or TOTP where the realm does not
+    /// require a passkey specifically.
+    Satisfied,
+    /// The realm requires a passkey (TOTP does not count — audit §4.18#9),
+    /// which this page cannot register.
+    NeedsPasskey,
+    /// TOTP enrolment on this page satisfies it.
+    NeedsTotp,
+}
+
+/// Evaluates `EnrollMfa` for `user_id` exactly as
+/// `inject_enroll_mfa_if_needed` decides to add it. `Err(())` when a lookup
+/// fails (logged): the answer is then unknown.
+fn enroll_mfa_status(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+) -> Result<EnrollMfaStatus, ()> {
+    let log = |what: &str, e: &dyn std::fmt::Display| {
+        tracing::warn!(error = %e, lookup = what, "enroll_mfa_status: lookup failed");
+    };
+    let has_totp = state
+        .identity
+        .mfa_enabled(realm, user_id)
+        .map_err(|e| log("totp", &e))?;
+    let has_passkeys = !state
+        .identity
+        .list_webauthn_credentials(realm, user_id)
+        .map_err(|e| log("passkeys", &e))?
+        .is_empty();
+    let realm_requires_passkey = state
+        .identity
+        .get_realm(realm)
+        .map_err(|e| log("realm", &e))?
+        .and_then(|r| r.config().webauthn_required)
+        .unwrap_or(false);
+    Ok(if has_passkeys || (has_totp && !realm_requires_passkey) {
+        EnrollMfaStatus::Satisfied
+    } else if realm_requires_passkey {
+        EnrollMfaStatus::NeedsPasskey
+    } else {
+        EnrollMfaStatus::NeedsTotp
+    })
+}
+
+/// `409` for a passkey requirement this page cannot meet: it can only enrol
+/// TOTP, which would not count. Says so instead of enrolling a factor that
+/// does not satisfy the realm, or looping.
+fn passkey_required_page(state: &Arc<WebState>, headers: &HeaderMap) -> Response {
+    enroll_mfa_error_page(
+        state,
+        headers,
+        "This sign-in requires a passkey, and a passkey cannot be registered on this page. \
+         Ask your administrator to register one for your account.",
+        StatusCode::CONFLICT,
+    )
+}
+
+/// The enrol-MFA page showing only `message`, answered with `status`.
+fn enroll_mfa_error_page(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    message: &str,
+    status: StatusCode,
+) -> Response {
+    let tmpl = EnrollMfaPageTemplate {
+        error: Some(message.to_string()),
+        secret_base32: String::new(),
+        provisioning_uri: String::new(),
+        qr_svg: String::new(),
+        recovery_codes: Vec::new(),
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        narrow: true,
+        flash: None,
+        csrf: ra_form_token(state, headers),
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
+    };
+    super::templates::render_status(&tmpl, status)
+}
+
 /// Initiates TOTP enrollment for the `EnrollMfa` required action.
 ///
 /// Reads the RA session cookie to identify the user, calls `enroll_totp` to
@@ -2404,14 +2633,36 @@ pub async fn enroll_mfa_page(State(state): State<Arc<WebState>>, headers: Header
         return handlers_common::server_error();
     };
     let user_id = UserId::new(user_uuid);
-    let identity = state.identity.clone();
 
-    let enroll_result = tokio::task::spawn_blocking(move || identity.enroll_totp(&realm, &user_id))
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "enroll_mfa_page: enroll_totp panicked");
-            Err(IdentityError::Storage(Box::new(e)))
-        });
+    match enroll_mfa_status(&state, &realm, &user_id) {
+        Err(()) => return handlers_common::server_error(),
+        Ok(EnrollMfaStatus::Satisfied) => {
+            let secure = state.is_secure_request(&headers);
+            return skip_satisfied_action(
+                &state,
+                &realm,
+                &user_id,
+                claims,
+                RequiredAction::EnrollMfa,
+                "mfa_already_enrolled",
+                secure,
+                now,
+            );
+        }
+        Ok(EnrollMfaStatus::NeedsPasskey) => return passkey_required_page(&state, &headers),
+        Ok(EnrollMfaStatus::NeedsTotp) => {}
+    }
+
+    let identity = state.identity.clone();
+    let enroll_realm = realm.clone();
+    let enroll_user = user_id.clone();
+    let enroll_result =
+        tokio::task::spawn_blocking(move || identity.enroll_totp(&enroll_realm, &enroll_user))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "enroll_mfa_page: enroll_totp panicked");
+                Err(IdentityError::Storage(Box::new(e)))
+            });
 
     match enroll_result {
         Ok(enrollment) => {
@@ -2437,30 +2688,28 @@ pub async fn enroll_mfa_page(State(state): State<Arc<WebState>>, headers: Header
             super::templates::render(&tmpl)
         }
         Err(IdentityError::MfaAlreadyEnabled) => {
-            // Already enrolled — send the browser back to this page.
-            Redirect::to("/required-action/enroll-mfa").into_response()
+            // TOTP was enabled between the check above and now (another tab):
+            // the action is satisfied — never redirect back to this page.
+            let secure = state.is_secure_request(&headers);
+            skip_satisfied_action(
+                &state,
+                &realm,
+                &user_id,
+                claims,
+                RequiredAction::EnrollMfa,
+                "mfa_already_enrolled",
+                secure,
+                now,
+            )
         }
         Err(e) => {
             tracing::warn!(error = %e, "enroll_mfa_page: enroll_totp failed");
-            let tmpl = EnrollMfaPageTemplate {
-                error: Some("Unable to start MFA enrollment. Please try again.".to_string()),
-                secret_base32: String::new(),
-                provisioning_uri: String::new(),
-                qr_svg: String::new(),
-                recovery_codes: Vec::new(),
-                chrome: false,
-                active: "",
-                user_email: None,
-                is_admin: false,
-                narrow: true,
-                flash: None,
-                csrf: ra_form_token(&state, &headers),
-                product_name: state.product_name.clone(),
-                logo_url: state.logo_url.clone(),
-                realm_theme_url: state.realm_theme_url(),
-                inline_theme_css: state.inline_theme_css(),
-            };
-            super::templates::render_status(&tmpl, StatusCode::INTERNAL_SERVER_ERROR)
+            enroll_mfa_error_page(
+                &state,
+                &headers,
+                "Unable to start MFA enrollment. Please try again.",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
         }
     }
 }
@@ -2555,40 +2804,29 @@ pub async fn enroll_mfa_submit(
         Ok(()) => {}
     }
 
-    // Enrollment confirmed — advance the RA flow (remove EnrollMfa from pending).
-    let secure = state.is_secure_request(&headers);
-    let remaining: Vec<RequiredAction> = claims
-        .pending_actions
-        .into_iter()
-        .filter(|a| *a != RequiredAction::EnrollMfa)
-        .collect();
-
-    if remaining.is_empty() {
-        if claims.browser_return_to.is_some() {
-            resume_browser_flow(
-                &state,
-                &realm,
-                &claims.sub,
-                claims.browser_return_to,
-                secure,
-            )
-        } else if let Some(oidc_params) = claims.oidc_params {
-            resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
-        } else {
-            resume_browser_flow(&state, &realm, &claims.sub, None, secure)
-        }
-    } else {
-        next_required_action(
-            &state,
-            &realm,
-            &claims.sub,
-            remaining,
-            claims.oidc_params,
-            claims.browser_return_to,
-            secure,
-            now,
-        )
+    // Enrollment confirmed. Clear the action from the account too: an
+    // operator-set `EnrollMfa` left on it would send the user back here on
+    // every later login.
+    clear_persisted_action(&state, &realm, &user_id, RequiredAction::EnrollMfa);
+    if let Err(e) = state.audit.append(&CreateAuditEvent {
+        realm_id: realm.clone(),
+        actor: user_id.as_uuid().to_string(),
+        action: AuditAction::RequiredActionCompleted,
+        resource_type: "user".to_string(),
+        resource_id: user_id.as_uuid().to_string(),
+        metadata: Some(serde_json::json!({ "action_type": "ENROLL_MFA" })),
+    }) {
+        tracing::warn!(error = %e, "enroll_mfa_submit: audit append failed");
     }
+    let secure = state.is_secure_request(&headers);
+    advance_flow(
+        &state,
+        &realm,
+        claims,
+        RequiredAction::EnrollMfa,
+        secure,
+        now,
+    )
 }
 
 #[cfg(test)]
