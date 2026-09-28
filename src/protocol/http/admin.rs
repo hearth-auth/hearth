@@ -5025,8 +5025,10 @@ struct BackupRestoreParams {
 /// - `include_audit=true` — include audit events
 ///
 /// Response: `application/octet-stream` with `Content-Disposition: attachment`.
-/// No passphrase encryption — TLS provides transport security; encryption is
-/// CLI-only (`--encrypt` flag on `hearth backup create`).
+/// Every section is encrypted with a fresh DEK, and the DEK is wrapped with a
+/// key derived from `HEARTH_MASTER_KEY` (`sections_encrypted = true`), so the
+/// archive's signing keys and credentials are unreadable without that key. A
+/// restore must run with the same `HEARTH_MASTER_KEY`.
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 async fn admin_backup_create(
     State(state): State<Arc<AppState>>,

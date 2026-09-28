@@ -80,7 +80,7 @@ impl<H: HttpTransport> EmailSender for PostmarkEmailSender<H> {
         }
 
         tracing::info!(
-            recipient = %message.to,
+            recipient = %super::mask_email_address(&message.to),
             subject = %message.subject,
             "email.send: delivered via Postmark"
         );

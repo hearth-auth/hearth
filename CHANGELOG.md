@@ -444,6 +444,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   response body is unchanged. Both lines log the error's kind and a PII-safe form of its message:
   e-mail addresses (an SMTP rejection names the recipient), values after secret-looking keys
   (`password=`, `token:`, `Authorization: Bearer …`) and long opaque tokens are masked.
+- **E-mail transports no longer log the recipient's address** — the SMTP, SendGrid, Postmark,
+  Mailgun and Mailtrap senders, and the production `log` transport, logged every recipient in full
+  at `INFO`/`WARN`. They now log it masked (`a***@example.com`). The dev-only `log` transport still
+  logs the whole message, so its links stay clickable.
 - **A large audit restore no longer freezes the node** — the audit import of a backup restore held
   the realm's audit-chain lock for the whole import: a scan decoding every existing event, every
   chunk's fsync, for archives up to 4 GiB. Audit writes to that realm run on the async runtime's

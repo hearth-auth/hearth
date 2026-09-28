@@ -2248,7 +2248,7 @@ fn render_enroll_email_otp_page(
     error: Option<&str>,
 ) -> Response {
     let tmpl = EnrollEmailOtpPageTemplate {
-        masked_email: mask_email(email),
+        masked_email: crate::identity::email::mask_email_address(email),
         error: error.map(str::to_string),
         chrome: false,
         active: "",
@@ -2272,7 +2272,7 @@ fn render_enroll_email_otp_verify(
     error: Option<&str>,
 ) -> Response {
     let tmpl = EnrollEmailOtpVerifyTemplate {
-        masked_email: mask_email(email),
+        masked_email: crate::identity::email::mask_email_address(email),
         nonce: nonce.map(str::to_string),
         error: error.map(str::to_string),
         chrome: false,
@@ -2288,17 +2288,6 @@ fn render_enroll_email_otp_verify(
         inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
-}
-
-/// Masks an email address for display: shows the first character, then
-/// `***`, then the domain. E.g. `alice@example.com` → `a***@example.com`.
-fn mask_email(email: &str) -> String {
-    if let Some((local, domain)) = email.split_once('@') {
-        let first = local.chars().next().unwrap_or('*');
-        format!("{first}***@{domain}")
-    } else {
-        "***".to_string()
-    }
 }
 
 /// Returns the HMAC key bytes to use for email OTP operations.
