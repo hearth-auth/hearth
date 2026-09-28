@@ -250,6 +250,14 @@ pub(crate) fn compute_totp(secret: &[u8], time_step: u64) -> String {
     format!("{otp:0>width$}", width = TOTP_DIGITS as usize)
 }
 
+/// The Unix second from which a code for `step` is no longer accepted by
+/// [`validate_totp`]: the step is inside the window while the current step is
+/// at most `step + TOTP_WINDOW`.
+pub(crate) fn step_acceptance_ends_at(step: u64) -> u64 {
+    step.saturating_add(TOTP_WINDOW + 1)
+        .saturating_mul(TOTP_PERIOD)
+}
+
 /// Validates a TOTP code against a secret at the given Unix timestamp.
 ///
 /// Checks the current time step and ±`TOTP_WINDOW` adjacent steps.

@@ -481,6 +481,19 @@ fn login_rig_with_mfa(
             }),
         })
         .expect("realm");
+    // RFC 8707: a `resource` must name a protected resource of the realm.
+    e.identity
+        .register_protected_resource(
+            realm.id(),
+            &hearth::identity::RegisterProtectedResourceRequest {
+                resource_uri: RESOURCE.to_string(),
+                display_name: "API".to_string(),
+                scopes: Vec::new(),
+                required_claims: Vec::new(),
+                introspection_client_id: None,
+            },
+        )
+        .expect("register the protected resource");
     let user = e
         .identity
         .create_user(

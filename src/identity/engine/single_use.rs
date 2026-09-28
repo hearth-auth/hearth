@@ -50,6 +50,67 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)
     }
 
+    /// Claims one guess from a cluster-wide budget of `max` guesses (G6).
+    ///
+    /// The budget is `max` slots under `slot_prefix`
+    /// ([`keys::encode_guess_slot_prefix`](crate::identity::keys::encode_guess_slot_prefix)).
+    /// A guess claims the first free slot with one replicated
+    /// `put_if_absent` BEFORE the guess is checked, so every node draws from
+    /// the same budget: a counter kept in a record the verifier rewrites is
+    /// reset by any node whose read of it is stale, which multiplied the
+    /// budget by the number of nodes.
+    ///
+    /// Slots this node already sees taken are skipped without a write; a
+    /// stale read can only show a taken slot as free, and that slot's claim
+    /// then fails and the next is tried. Returns the claimed slot (1-based),
+    /// or `None` when all `max` are spent. Each slot is dated `expires_at`
+    /// and reclaimed by the `consumed:` sweep, so the budget is bounded and
+    /// needs no other cleanup.
+    pub(super) fn claim_guess_slot(
+        &self,
+        realm_id: &RealmId,
+        slot_prefix: &[u8],
+        max: u32,
+        expires_at: Timestamp,
+    ) -> Result<Option<u32>, IdentityError> {
+        for slot in 1..=max {
+            let mut key = slot_prefix.to_vec();
+            key.extend_from_slice(slot.to_string().as_bytes());
+            if self
+                .storage
+                .get(realm_id, &key)
+                .map_err(Self::storage_err)?
+                .is_some()
+            {
+                continue;
+            }
+            if self.claim_single_use(realm_id, &key, expires_at)? {
+                return Ok(Some(slot));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Returns every guess under `slot_prefix` to the budget — a correct
+    /// guess ends the run of failures it counts, as the node-local tracker's
+    /// reset does. Best-effort: a slot this node does not see yet stays
+    /// claimed until the sweep reclaims it, which only makes the budget
+    /// stricter.
+    pub(super) fn release_guess_slots(&self, realm_id: &RealmId, slot_prefix: &[u8]) {
+        let end = crate::identity::keys::prefix_end(slot_prefix);
+        let released = self
+            .storage
+            .scan(realm_id, slot_prefix, &end)
+            .and_then(|slots| {
+                slots
+                    .iter()
+                    .try_for_each(|slot| self.storage.delete(realm_id, &slot.key))
+            });
+        if let Err(e) = released {
+            tracing::warn!(error = %e, "guess slots not released after a correct guess");
+        }
+    }
+
     /// A pending OTP's expiry as a [`Timestamp`], for dating its marker.
     pub(super) fn otp_expiry(stored: &crate::identity::sms::otp::StoredOtp) -> Timestamp {
         let secs = i64::try_from(stored.expiry_unix_ts).unwrap_or(i64::MAX / 1_000_000);

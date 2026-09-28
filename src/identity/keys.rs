@@ -901,6 +901,25 @@ pub(crate) fn grant_family_scan_prefix() -> Vec<u8> {
     GRANT_FAMILY_PREFIX.as_bytes().to_vec()
 }
 
+/// Prefix for grant-family revocation tombstones.
+///
+/// Deliberately not under `oauth:family:`: the family sweeper decodes every
+/// row under that prefix as a [`StoredGrantFamily`](crate::identity::oidc::StoredGrantFamily).
+const GRANT_FAMILY_REVOKED_PREFIX: &str = "oauth:family-revoked:";
+
+/// Encodes the write-once revocation tombstone of a grant family.
+///
+/// Revoking a family writes it, and nothing but the family sweep (which
+/// deletes it together with the family row) ever removes it. A rotation writes
+/// the whole family row back, so a rotation that read the row before a
+/// revocation and wrote after a leader change could set `revoked = false`
+/// again; it never writes this key, so the revocation survives that write.
+///
+/// Format: `oauth:family-revoked:{family_id}`
+pub(crate) fn encode_grant_family_revoked(family_id: &str) -> Vec<u8> {
+    format!("{GRANT_FAMILY_REVOKED_PREFIX}{family_id}").into_bytes()
+}
+
 /// Encodes the storage key for a device authorization code.
 ///
 /// Format: `oauth:device:{device_code_hash}`
@@ -2430,6 +2449,58 @@ pub(crate) fn encode_consumed_txn(jti: &str) -> Vec<u8> {
 /// Format: `consumed:otp:{channel}:{nonce}`
 pub(crate) fn encode_consumed_otp(channel: &str, nonce: &str) -> Vec<u8> {
     encode_consumed("otp", &format!("{channel}:{nonce}"))
+}
+
+/// Single-use marker for one TOTP time step of one user: a code is accepted
+/// once cluster-wide, whichever node verifies it.
+///
+/// Format: `consumed:totp:{user_uuid}:{step}`
+pub(crate) fn encode_consumed_totp_step(user_id: &UserId, step: u64) -> Vec<u8> {
+    encode_consumed("totp", &format!("{}:{step}", user_id.as_uuid()))
+}
+
+/// Single-use marker for one recovery code of one user, keyed by the SHA-256
+/// hex of the code's stored (salted) hash, so a regenerated code never
+/// collides with a spent one.
+///
+/// Format: `consumed:recovery:{user_uuid}:{sha256_hex}`
+pub(crate) fn encode_consumed_recovery_code(user_id: &UserId, stored_hash_digest: &str) -> Vec<u8> {
+    encode_consumed(
+        "recovery",
+        &format!("{}:{stored_hash_digest}", user_id.as_uuid()),
+    )
+}
+
+/// Single-use marker for an email-change confirmation token, keyed by the
+/// token's SHA-256 hex.
+///
+/// Format: `consumed:email-change:{sha256_hex}`
+pub(crate) fn encode_consumed_email_change(token_hash: &str) -> Vec<u8> {
+    encode_consumed("email-change", token_hash)
+}
+
+/// Decision marker for a device authorization: whichever of approve or deny
+/// claims it first decides the device code.
+///
+/// Format: `consumed:device-decision:{device_code_sha256_hex}`
+pub(crate) fn encode_consumed_device_decision(device_code_hash: &str) -> Vec<u8> {
+    encode_consumed("device-decision", device_code_hash)
+}
+
+/// Decision marker for an organization invitation: whichever of accept or
+/// revoke claims it first decides the invitation.
+///
+/// Format: `consumed:invitation:{invitation_uuid}`
+pub(crate) fn encode_consumed_invitation(invitation_id: &InvitationId) -> Vec<u8> {
+    encode_consumed("invitation", &invitation_id.as_uuid().to_string())
+}
+
+/// Prefix of the guess slots of one guess budget (`kind` names the budget,
+/// `id` its subject). Slot `n` is `{prefix}{n}`.
+///
+/// Format: `consumed:guess:{kind}:{id}:`
+pub(crate) fn encode_guess_slot_prefix(kind: &str, id: &str) -> Vec<u8> {
+    encode_consumed("guess", &format!("{kind}:{id}:"))
 }
 
 /// Single-use marker for the `UPDATE_PASSWORD` required action completed with

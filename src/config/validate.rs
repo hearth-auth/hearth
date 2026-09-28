@@ -573,6 +573,7 @@ impl Config {
         validate_realm_organizations_all(self.realms.as_ref(), &mut issues);
         validate_realm_saml_sps_all(self.realms.as_ref(), &mut issues);
         validate_realm_protected_resources_all(self.realms.as_ref(), self.dev_mode, &mut issues);
+        validate_realm_introspection_clients_all(self.realms.as_ref(), &mut issues);
 
         // HSEC-010: Mirror the fail-fast check in validate_all so the admin
         // config-check panel surfaces this error alongside other issues.
@@ -1393,6 +1394,45 @@ fn validate_realm_protected_resources_all(
                     reason: format!(
                         "'{}' must use https outside --dev mode (AGENT_AUTH.md §2.5)",
                         resource.resource_uri
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// `protected_resources[].introspection_client` must be the key of an
+/// application declared in the same realm (under `applications` or its alias
+/// `oauth_clients`): reconcile derives the client's id from that key, so a
+/// typo would silently name a client that does not exist (G6).
+fn validate_realm_introspection_clients_all(
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(realms) = realms else { return };
+    for (name, cfg) in realms {
+        let declared = |key: &str| {
+            [cfg.applications.as_ref(), cfg.oauth_clients.as_ref()]
+                .into_iter()
+                .flatten()
+                .any(|apps| apps.contains_key(key))
+        };
+        for (i, resource) in cfg
+            .protected_resources
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let Some(key) = resource.introspection_client.as_deref() else {
+                continue;
+            };
+            if !declared(key) {
+                issues.push(ValidationIssue {
+                    field: format!("realms.{name}.protected_resources[{i}].introspection_client"),
+                    reason: format!(
+                        "'{key}' is not an application of realm '{name}' \
+                         (applications / oauth_clients)"
                     ),
                 });
             }

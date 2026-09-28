@@ -591,6 +591,7 @@ async fn protected_resource_scope_vocabulary_enforces_mcp_format() {
                 display_name: "Plain API".to_string(),
                 scopes: vec!["openid".to_string(), "profile".to_string()],
                 required_claims: vec![],
+                introspection_client_id: None,
             },
         )
         .expect("plain OAuth scopes must still register");
@@ -609,6 +610,7 @@ async fn protected_resource_scope_vocabulary_enforces_mcp_format() {
                     display_name: "MCP Server".to_string(),
                     scopes: vec![bad.to_string()],
                     required_claims: vec![],
+                    introspection_client_id: None,
                 },
             )
             .err();
@@ -628,6 +630,7 @@ async fn protected_resource_scope_vocabulary_enforces_mcp_format() {
                 display_name: "MCP Server".to_string(),
                 scopes: vec!["mcp:tools:invoke".to_string()],
                 required_claims: vec![],
+                introspection_client_id: None,
             },
         )
         .expect("well-formed MCP scope registers");

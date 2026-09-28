@@ -126,6 +126,7 @@ impl std::error::Error for IdentityError {
             | Self::ProtectedResourceNotFound
             | Self::DuplicateResourceUri
             | Self::TokenExchangeRejected { .. }
+            | Self::InvalidTarget { .. }
             | Self::DelegationDepthExceeded { .. }
             | Self::EmptyScopeIntersection
             | Self::ActorTokenReplayed

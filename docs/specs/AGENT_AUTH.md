@@ -170,6 +170,15 @@ MCP clients need tokens scoped to a specific tool server. Hearth **MUST** suppor
 
 - Authorization requests and token requests **MUST** accept a `resource` parameter containing the URI of the target MCP server.
 - The `resource` value **MUST** match a registered protected resource (see [Section 2.5](#25-protected-resource-registration)).
+  *Enforced on every surface:* the browser `/authorize` (plain query, JAR), PAR, and `/authorize`
+  over JSON or gRPC (which take a resource only through a pushed `request_uri`) canonicalize the
+  value (`core::Uri`) and refuse anything that is not a registered resource of the realm with RFC
+  8707 `invalid_target` — the browser plain branch as an error redirect to the registered
+  `redirect_uri`, JAR/PAR errors as `400`, JSON as `400 {"error":"invalid_target"}`, gRPC as
+  `INVALID_ARGUMENT`. A pushed request whose resource was removed before the code is asked for is
+  refused the same way. The canonical form is what the code stores, what the consent record for
+  the resource is keyed by, and what the token's `aud` carries, so every spelling of one resource
+  is one resource.
 - Resulting access tokens **MUST** include an `aud` (audience) claim matching the requested resource URI.
 - If no `resource` parameter is provided, the token **MUST** be scoped to Hearth itself (the default audience).
 - Multiple `resource` parameters in a single request **MAY** be supported; each produces a separate token.
@@ -200,6 +209,7 @@ is also the RFC 8693 token-exchange target allowlist (`OIDC.md` §3.4.1a).
 | `display_name` | String | Human-readable name. |
 | `scopes` | List of strings | Scopes this resource supports. |
 | `required_claims` | List of strings | Claims the resource requires in tokens. |
+| `introspection_client_id` | Client ID (optional) | The client the resource server authenticates as at the RFC 7662 introspection endpoint. YAML: `introspection_client`, the key of an application in the same realm. |
 
 **Rules:**
 
@@ -208,6 +218,13 @@ is also the RFC 8693 token-exchange target allowlist (`OIDC.md` §3.4.1a).
   RBAC's resource scope lookup, token exchange and minted `aud` alike.
 - Resource URIs **MUST** be unique within a realm, compared in canonical form. *Enforced at config
   load.*
+- A resource server introspects as the client its entry names (`introspection_client`). That
+  client may introspect any access token whose `aud` names the resource — including a token
+  exchanged with `audience=` only, which carries no Hearth audience and which introspection
+  otherwise refuses for every caller. Any other client still gets `active: false` unless the
+  token's own claims name it (GA audit L11). An `introspection_client` that is not an application
+  of the realm is refused at config load. Without it, an `audience=`-only token can only be
+  verified offline and lapses at `exp` (it is still cut off at removal for every introspection).
 - Resource URIs **MUST** use HTTPS in production. HTTP **MAY** be permitted in `--dev` mode.
   *Enforced at config load: outside `--dev` a non-`https` `resource_uri` is refused, loopback
   included.*

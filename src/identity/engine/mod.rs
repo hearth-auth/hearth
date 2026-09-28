@@ -375,7 +375,9 @@ mod advisory_lock;
 pub(super) mod approval;
 pub(crate) mod client_jwks;
 mod control;
+mod grant_family_revocation;
 mod id_token_keys;
+mod mfa_single_use;
 pub(super) mod oauth;
 mod retired_keys;
 mod sharded_cache;
@@ -3894,7 +3896,9 @@ impl EmbeddedIdentityEngine {
                 reason: e.to_string(),
             })?;
 
-        if family.revoked {
+        // The tombstone, not just the row flag: a rotation elsewhere that read
+        // the row before a revocation can have written it back un-revoked (G6).
+        if self.grant_family_is_revoked(realm_id, &family)? {
             return Err(IdentityError::TokenRevoked);
         }
 
@@ -4287,6 +4291,14 @@ impl EmbeddedIdentityEngine {
             &keys::encode_consumed_refresh(&presented_hash),
             crate::core::Timestamp::from_micros(claims.exp.saturating_mul(1_000_000)),
         )? {
+            // A revocation spends the family's current token too
+            // (`mark_grant_family_revoked`), writing its tombstone first. The
+            // claim was decided in the Raft log after that tombstone, so this
+            // node has applied it: a revoked family is refused as revoked, not
+            // answered as a theft that would also end the session.
+            if self.grant_family_is_revoked(realm_id, &family)? {
+                return Err(IdentityError::TokenRevoked);
+            }
             return Err(self.revoke_replayed_family(
                 realm_id,
                 &family_key,
@@ -4327,6 +4339,9 @@ impl EmbeddedIdentityEngine {
         rotation_guard: std::sync::MutexGuard<'_, ()>,
         session_id: &SessionId,
     ) -> IdentityError {
+        if let Err(e) = self.mark_grant_family_revoked(realm_id, &family) {
+            return e;
+        }
         family.revoked = true;
         let written = serde_json::to_vec(&family)
             .map_err(|e| IdentityError::Serialization {
@@ -8856,6 +8871,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 if let Ok(Some(fbytes)) = self.storage.get(realm_id, &family_key) {
                     if let Ok(mut fam) = serde_json::from_slice::<StoredGrantFamily>(&fbytes) {
                         if !fam.revoked {
+                            if let Err(e) = self.mark_grant_family_revoked(realm_id, &fam) {
+                                tracing::warn!(
+                                    error = %e,
+                                    "session revoke: grant family tombstone not written"
+                                );
+                            }
                             fam.revoked = true;
                             if let Ok(updated) = serde_json::to_vec(&fam) {
                                 let _ = self.storage.put(realm_id, &family_key, &updated);
@@ -10112,10 +10133,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::MfaAlreadyEnabled);
         }
 
+        // The guess budget is cluster-wide (G6): the node-local tracker above
+        // only counts this node's guesses.
+        self.claim_mfa_guess(realm_id, user_id)?;
+
         // Validate code against the stored secret
         let secret = TotpSecret::from_base32(&state.secret_base32)?;
         let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
-        let matched_step = totp::validate_totp(secret.as_bytes(), code, now_secs, None);
+        let matched_step = totp::validate_totp(secret.as_bytes(), code, now_secs, None)
+            .map(|step| {
+                self.claim_totp_step(realm_id, user_id, step)
+                    .map(|won| won.then_some(step))
+            })
+            .transpose()?
+            .flatten();
 
         if let Some(step) = matched_step {
             // Hash the pending plaintext recovery codes now (deferred from
@@ -10134,6 +10165,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             state.pending_recovery_codes = None;
             self.save_mfa_state(realm_id, user_id, &state)?;
             self.clear_mfa_attempts(realm_id, user_id);
+            self.release_mfa_guesses(realm_id, user_id);
             self.record_audit(
                 realm_id,
                 Some(&AuditContext {
@@ -10185,15 +10217,30 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::MfaNotEnabled);
         }
 
+        // The guess budget is cluster-wide (G6): the node-local tracker above
+        // only counts this node's guesses.
+        self.claim_mfa_guess(realm_id, user_id)?;
+
         let secret = TotpSecret::from_base32(&state.secret_base32)?;
         let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
+        // `last_used_step` is read from a record another node may have
+        // advanced since this node read it, so it cannot decide the single
+        // use across a cluster. The replicated step claim does: a code that
+        // lost it was already accepted — on any node — and is a replay (G6).
         let matched_step =
-            totp::validate_totp(secret.as_bytes(), code, now_secs, state.last_used_step);
+            totp::validate_totp(secret.as_bytes(), code, now_secs, state.last_used_step)
+                .map(|step| {
+                    self.claim_totp_step(realm_id, user_id, step)
+                        .map(|won| won.then_some(step))
+                })
+                .transpose()?
+                .flatten();
 
         if let Some(step) = matched_step {
             state.last_used_step = Some(step);
             self.save_mfa_state(realm_id, user_id, &state)?;
             self.clear_mfa_attempts(realm_id, user_id);
+            self.release_mfa_guesses(realm_id, user_id);
             self.record_audit(
                 realm_id,
                 Some(&AuditContext {
@@ -10242,13 +10289,31 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::MfaNotEnabled);
         }
 
-        let idx = totp::verify_recovery_code(code, &state.recovery_code_hashes)?;
+        // The guess budget is cluster-wide (G6).
+        self.claim_mfa_guess(realm_id, user_id)?;
+
+        // The spend is decided by a replicated claim on the code, not by the
+        // record: a node whose read of the record predates another node's
+        // spend would accept the code again, and a stale write of the whole
+        // record can put a spent code's hash back (G6).
+        let idx = match totp::verify_recovery_code(code, &state.recovery_code_hashes)? {
+            Some(i) => match state.recovery_code_hashes[i].as_deref() {
+                Some(stored_hash)
+                    if self.claim_recovery_code(realm_id, user_id, stored_hash)? =>
+                {
+                    Some(i)
+                }
+                _ => None,
+            },
+            None => None,
+        };
         match idx {
             Some(i) => {
                 // Mark recovery code as used
                 state.recovery_code_hashes[i] = None;
                 self.save_mfa_state(realm_id, user_id, &state)?;
                 self.clear_mfa_attempts(realm_id, user_id);
+                self.release_mfa_guesses(realm_id, user_id);
                 self.record_audit(
                     realm_id,
                     Some(&AuditContext {
@@ -11727,6 +11792,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if user.email() != stored.old_email {
             // The address was already changed by another path; invalidate.
             let _ = self.storage.delete(realm_id, &key);
+            return Err(IdentityError::EmailChangeTokenInvalid);
+        }
+
+        // Claim the token's single use before the first write. Every check
+        // above is a local read, and the delete below cannot decide it (a
+        // delete of an absent key succeeds): a confirmation on a node that had
+        // not applied another node's would swap the indexes and rewrite the
+        // user record a second time (G6).
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_email_change(&token_hash),
+            Timestamp::from_micros(
+                stored
+                    .created_at_micros
+                    .saturating_add(EMAIL_CHANGE_TOKEN_EXPIRY_MICROS),
+            ),
+        )? {
             return Err(IdentityError::EmailChangeTokenInvalid);
         }
 
@@ -14632,6 +14714,38 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvitationInvalid);
         }
 
+        // A refusal `add_member` would give must come before the claim below,
+        // which spends the invitation for good.
+        let org = self
+            .get_organization(realm_id, invitation.org_id())?
+            .ok_or(IdentityError::OrganizationNotFound)?;
+        if org.status() != OrganizationStatus::Active {
+            return Err(IdentityError::OrganizationSuspended);
+        }
+        if let Some(existing) = self.get_user_by_email(realm_id, invitation.email())? {
+            if self
+                .get_membership(realm_id, invitation.org_id(), existing.id())?
+                .is_some()
+            {
+                return Err(IdentityError::AlreadyMember);
+            }
+        }
+
+        // Claim the invitation's decision before the first write (G6). The
+        // status check above is a local read and the lock is node-local: an
+        // acceptance that read the invitation before another node accepted or
+        // revoked it, and wrote after leadership moved to its own node,
+        // admitted the invitee anyway — re-adding a member an admin had just
+        // removed, or accepting a revoked invitation. Accept and revoke claim
+        // the same replicated marker, so exactly one decides.
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_invitation(&invitation_id),
+            invitation.expires_at(),
+        )? {
+            return Err(IdentityError::InvitationInvalid);
+        }
+
         // Find or create user by email
         let existing_user = self.get_user_by_email(realm_id, invitation.email())?;
         let user_created = existing_user.is_none();
@@ -14712,6 +14826,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             })?;
 
         if invitation.status() != InvitationStatus::Pending {
+            return Err(IdentityError::InvitationInvalid);
+        }
+        // The decision marker `accept_invitation` claims (G6): a revocation
+        // that loses it was preceded by an acceptance on some node, and must
+        // not overwrite it.
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_invitation(invitation_id),
+            invitation.expires_at(),
+        )? {
             return Err(IdentityError::InvitationInvalid);
         }
 
@@ -17223,7 +17347,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?
             .ok_or(IdentityError::InvalidSmsOtp)?;
 
-        let mut stored: StoredOtp =
+        let stored: StoredOtp =
             serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
@@ -17234,22 +17358,21 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidSmsOtp);
         }
 
-        // 3. Check attempt count (delete exhausted record and fail vaguely).
-        if stored.is_exhausted() {
+        // 3-4. Spend one guess of the code's budget BEFORE checking it. The
+        //    budget is replicated guess slots, not a count in the record: a
+        //    node whose read of the record was stale wrote back a count that
+        //    had not seen the other nodes' guesses, so every node granted the
+        //    full budget (G6). Exhausted: delete the record and fail vaguely.
+        let Some(slot) = self.claim_guess_slot(
+            realm_id,
+            &keys::encode_guess_slot_prefix("sms-otp", nonce),
+            stored.max_attempts,
+            Self::otp_expiry(&stored),
+        )?
+        else {
             let _ = self.storage.delete(realm_id, &otp_key);
             return Err(IdentityError::InvalidSmsOtp);
-        }
-
-        // 4. Increment attempt count and persist before verification —
-        //    prevents a race where two concurrent requests both pass the check.
-        stored.attempt_count = stored.attempt_count.saturating_add(1);
-        let updated_bytes =
-            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
-        self.storage
-            .put(realm_id, &otp_key, &updated_bytes)
-            .map_err(Self::storage_err)?;
+        };
 
         // 5. Constant-time HMAC verification, bound to the expected phone.
         let result = stored.verify(candidate_code, phone, otp_hmac_key_bytes);
@@ -17273,8 +17396,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 Ok(())
             }
             Err(e) => {
-                // 6b. If now exhausted, delete the record.
-                if stored.is_exhausted() {
+                // 6b. If that was the last guess, delete the record.
+                if slot >= stored.max_attempts {
                     let _ = self.storage.delete(realm_id, &otp_key);
                 }
                 Err(e)
@@ -17384,7 +17507,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?
             .ok_or(IdentityError::InvalidEmailOtp)?;
 
-        let mut stored: StoredOtp =
+        let stored: StoredOtp =
             serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
@@ -17394,19 +17517,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidEmailOtp);
         }
 
-        if stored.is_exhausted() {
+        // One guess of the code's cluster-wide budget, spent before the check
+        // (G6; see `verify_sms_otp`).
+        let Some(slot) = self.claim_guess_slot(
+            realm_id,
+            &keys::encode_guess_slot_prefix("email-otp", nonce),
+            stored.max_attempts,
+            Self::otp_expiry(&stored),
+        )?
+        else {
             let _ = self.storage.delete(realm_id, &otp_key);
             return Err(IdentityError::InvalidEmailOtp);
-        }
-
-        stored.attempt_count = stored.attempt_count.saturating_add(1);
-        let updated_bytes =
-            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
-        self.storage
-            .put(realm_id, &otp_key, &updated_bytes)
-            .map_err(Self::storage_err)?;
+        };
 
         let result = stored.verify(candidate_code, email, otp_hmac_key_bytes);
 
@@ -17427,7 +17549,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 Ok(())
             }
             Err(_) => {
-                if stored.is_exhausted() {
+                if slot >= stored.max_attempts {
                     let _ = self.storage.delete(realm_id, &otp_key);
                 }
                 Err(IdentityError::InvalidEmailOtp)
@@ -17611,6 +17733,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             display_name: request.display_name.clone(),
             scopes: request.scopes.clone(),
             required_claims: request.required_claims.clone(),
+            introspection_client_id: request.introspection_client_id.clone(),
             created_at: now,
             updated_at: now,
         };
@@ -17716,6 +17839,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if let Some(claims) = &request.required_claims {
             resource.required_claims = claims.clone();
         }
+        if let Some(client) = &request.introspection_client_id {
+            resource.introspection_client_id.clone_from(client);
+        }
         resource.updated_at = self.clock.now();
         let new_bytes =
             serde_json::to_vec(&resource).map_err(|e| IdentityError::Serialization {
@@ -17788,6 +17914,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(())
     }
 
+    fn canonical_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource: &str,
+    ) -> Result<String, IdentityError> {
+        self.resolve_authorization_resource(realm_id, resource)
+            .map(|uri| uri.as_str().to_string())
+    }
+
     fn reconcile_protected_resources(
         &self,
         realm_id: &RealmId,
@@ -17834,7 +17969,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 Some(current) => {
                     let drifted = current.display_name != request.display_name
                         || current.scopes != request.scopes
-                        || current.required_claims != request.required_claims;
+                        || current.required_claims != request.required_claims
+                        || current.introspection_client_id != request.introspection_client_id;
                     if drifted {
                         self.update_protected_resource(
                             realm_id,
@@ -17843,6 +17979,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                                 display_name: Some(request.display_name.clone()),
                                 scopes: Some(request.scopes.clone()),
                                 required_claims: Some(request.required_claims.clone()),
+                                introspection_client_id: Some(
+                                    request.introspection_client_id.clone(),
+                                ),
                             },
                         )?;
                         report.updated.push(uri.clone());
@@ -18683,6 +18822,8 @@ mod tests {
     /// Hot-path epoch reconciliation: debounced storage reads, bounded staleness.
     mod epoch_sync_debounce;
 
+    /// Every spelling of a resource reads the one consent record (G6).
+    mod authorize_resource_consent;
     /// Under FAPI 2.0 an assertion's `aud` is the issuer as a single string.
     mod client_assertion_audience;
     /// `private_key_jwt` assertion-JTI replay markers carry an expiry and are swept.

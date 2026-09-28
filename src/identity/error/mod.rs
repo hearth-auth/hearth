@@ -445,6 +445,13 @@ pub enum IdentityError {
         /// OAuth 2.0 error code to return to the caller.
         oauth_error: &'static str,
     },
+    /// An authorization request's RFC 8707 `resource` is not a protected
+    /// resource registered in the realm (or not a valid resource indicator).
+    /// Answered as `invalid_target` (RFC 8707 §2).
+    InvalidTarget {
+        /// Internal reason (logged, not sent to the client).
+        reason: String,
+    },
     /// The delegation chain depth would exceed the agent's `max_delegation_depth`.
     DelegationDepthExceeded {
         /// The agent's configured maximum.

@@ -164,6 +164,7 @@ impl IdentityError {
             Self::ProtectedResourceNotFound => Some("protected_resource_not_found"),
             Self::DuplicateResourceUri => Some("duplicate_resource_uri"),
             Self::TokenExchangeRejected { oauth_error, .. } => Some(oauth_error),
+            Self::InvalidTarget { .. } => Some("invalid_target"),
             Self::DelegationDepthExceeded { .. } => Some("invalid_grant"),
             Self::EmptyScopeIntersection => Some("invalid_scope"),
             Self::ActorTokenReplayed => Some("invalid_grant"),
