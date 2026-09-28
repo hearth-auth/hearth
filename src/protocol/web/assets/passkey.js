@@ -421,6 +421,92 @@
     });
   }
 
+  // ── passkeySecondFactor ─────────────────────────────────────────────
+  //
+  // Drives /ui/mfa-passkey-challenge: after a first factor (password, magic
+  // link, federated login), the user proves the passkey their account holds.
+  // The server binds the challenge to the pending login, so only that user's
+  // own credentials are offered and accepted.
+
+  function initPasskeySecondFactor() {
+    var root = document.getElementById('passkey-mfa-root');
+    if (!root) return;
+    var beginUrl = root.dataset.beginUrl || '';
+    var completeUrl = root.dataset.completeUrl || '';
+    var btn = document.getElementById('passkey-mfa-btn');
+    var errorEl = document.getElementById('passkey-mfa-error');
+    var errorLiveEl = document.getElementById('passkey-mfa-error-live');
+
+    function showError(msg) {
+      if (errorLiveEl) errorLiveEl.textContent = msg;
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.hidden = false;
+        errorEl.removeAttribute('aria-hidden');
+      }
+    }
+
+    function run() {
+      if (!window.PublicKeyCredential) {
+        showError('Passkeys are not available in this browser.');
+        return;
+      }
+      if (btn) btn.disabled = true;
+      fetch(beginUrl, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
+        body: '{}',
+      })
+        .then(function (resp) {
+          if (!resp.ok) throw new Error('Could not start the passkey check.');
+          return resp.json();
+        })
+        .then(function (opts) {
+          return navigator.credentials.get({
+            publicKey: {
+              challenge: b64urlDecode(opts.challenge),
+              rpId: opts.rpId,
+              userVerification: opts.userVerification || 'preferred',
+              timeout: opts.timeout || 300000,
+              allowCredentials: (opts.allowCredentials || []).map(function (c) {
+                return { type: 'public-key', id: b64urlDecode(c.id) };
+              }),
+            },
+          });
+        })
+        .then(function (cred) {
+          if (!cred) throw new Error('Passkey check cancelled.');
+          return fetch(completeUrl, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
+            body: JSON.stringify({
+              credential_id: b64urlEncode(cred.rawId),
+              client_data_json: b64urlEncode(cred.response.clientDataJSON),
+              authenticator_data: b64urlEncode(cred.response.authenticatorData),
+              signature: b64urlEncode(cred.response.signature),
+            }),
+          });
+        })
+        .then(function (resp) {
+          return resp.json().catch(function () { return {}; }).then(function (result) {
+            if (result.redirect) { window.location.href = result.redirect; return; }
+            throw new Error(result.error || 'Passkey check failed.');
+          });
+        })
+        .catch(function (e) {
+          if (e && e.name === 'NotAllowedError') { showError('Passkey check cancelled.'); return; }
+          showError((e && e.message) || 'Passkey check failed.');
+        })
+        .then(function () {
+          if (btn) btn.disabled = false;
+        });
+    }
+
+    if (btn) btn.addEventListener('click', run);
+  }
+
   // ── Boot ────────────────────────────────────────────────────────────
 
   function init() {
@@ -428,6 +514,7 @@
     initPasskeyManager();
     initPasskeyRows();
     initLoginFormLoadingState();
+    initPasskeySecondFactor();
   }
 
   if (document.readyState === 'loading') {

@@ -13,21 +13,50 @@ Add token verification and RBAC to a Kotlin/JVM application using the Hearth Kot
 
 ## Install
 
-Add to your `build.gradle.kts`:
+:::warning[Not yet on Maven Central]
+The Kotlin SDK is **not published** to Maven Central or any other public repository (checked
+2026-09-28: the `io.hearth` group returns 404). Build it from source and install it to your local
+Maven repository. Earlier revisions of this page gave the coordinates `io.hearth-auth:hearth-sdk`;
+no such artifact exists — the build defines the ones below.
+:::
+
+The build (`sdks/kotlin/build.gradle.kts`) publishes three artifacts under group `io.hearth`,
+version `0.1.0`:
+
+| Artifact | Contents |
+|---|---|
+| `io.hearth:hearth-core` | `HearthClient`, token verification, RBAC checks, admin client (`io.hearth.sdk`) |
+| `io.hearth:hearth-ktor` | Ktor server plugin (`io.hearth.sdk.ktor`) |
+| `io.hearth:hearth-spring` | Spring Security integration (`io.hearth.sdk.spring`) |
+
+```bash
+git clone https://github.com/hearth-auth/hearth
+cd hearth/sdks/kotlin
+gradle publishToMavenLocal   # Gradle 8.10+; the repo ships no wrapper
+```
+
+Then add to your `build.gradle.kts`:
 
 ```kotlin
+repositories {
+    mavenLocal()
+    mavenCentral()
+}
+
 dependencies {
-    implementation("io.hearth-auth:hearth-sdk:1.0.0")
+    implementation("io.hearth:hearth-core:0.1.0")
+    // implementation("io.hearth:hearth-ktor:0.1.0")    // Ktor
+    // implementation("io.hearth:hearth-spring:0.1.0")  // Spring Security
 }
 ```
 
-Or Maven:
+Or Maven (after `publishToMavenLocal`):
 
 ```xml
 <dependency>
-    <groupId>io.hearth-auth</groupId>
-    <artifactId>hearth-sdk</artifactId>
-    <version>1.0.0</version>
+    <groupId>io.hearth</groupId>
+    <artifactId>hearth-core</artifactId>
+    <version>0.1.0</version>
 </dependency>
 ```
 

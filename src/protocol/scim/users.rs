@@ -146,26 +146,51 @@ fn audit(
     );
 }
 
-/// Returns `true` when the target user holds admin-level permissions
-/// (`hearth.admin` or `hearth.users.admin`).
+/// Refuses (`403`, with `refusal` as the detail) when the target user holds
+/// admin-level permissions (`hearth.admin` or `hearth.users.admin`).
 ///
 /// SCIM provisioning tokens are narrowed-scope service accounts and must not
 /// be able to modify or delete principals that hold admin authority, as that
 /// would enable realm takeover via a compromised integration token.
 ///
-/// Fails open (returns `false`) on RBAC errors so an unseeded realm or
-/// temporary RBAC failure does not lock out legitimate provisioning.
-fn is_admin_principal(state: &AppState, realm_id: &RealmId, user_id: &UserId) -> bool {
+/// Fails CLOSED on an RBAC read error (GA audit L13): the error is a `503`
+/// the caller returns instead of mutating. It used to answer "not an admin",
+/// which let a provisioning token delete or modify an admin principal
+/// whenever the RBAC read failed. A user with no assignments (or an unseeded
+/// realm) resolves to an empty set, not an error, so provisioning of ordinary
+/// users is unaffected.
+fn admin_principal_guard(
+    state: &AppState,
+    realm_id: &RealmId,
+    user_id: &UserId,
+    refusal: &str,
+) -> Result<(), Response> {
     const PROTECTED: &[&str] = &["hearth.admin", "hearth.users.admin"];
     match state
         .rbac
         .resolve_permissions(user_id, realm_id, None, None)
     {
-        Ok(resolved) => resolved
-            .permissions
-            .iter()
-            .any(|p: &Permission| PROTECTED.contains(&p.as_str())),
-        Err(_) => false,
+        Ok(resolved)
+            if resolved
+                .permissions
+                .iter()
+                .any(|p: &Permission| PROTECTED.contains(&p.as_str())) =>
+        {
+            Err(ScimError::forbidden(refusal.to_string()).into_response())
+        }
+        Ok(_) => Ok(()),
+        Err(e) => {
+            tracing::warn!(
+                realm_id = %realm_id,
+                error = %e,
+                "SCIM admin-principal check could not resolve permissions; refusing"
+            );
+            Err(ScimError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "could not determine whether the target is an admin principal; retry later",
+            )
+            .into_response())
+        }
     }
 }
 
@@ -430,9 +455,15 @@ pub async fn replace_user(
     }
 
     // SCIM provisioning tokens may not replace admin principals (HEA-2032).
-    if auth.is_scim_token && is_admin_principal(&state, &auth.realm_id, &user_id) {
-        return ScimError::forbidden("SCIM provisioning token may not replace an admin principal")
-            .into_response();
+    if auth.is_scim_token {
+        if let Err(resp) = admin_principal_guard(
+            &state,
+            &auth.realm_id,
+            &user_id,
+            "SCIM provisioning token may not replace an admin principal",
+        ) {
+            return resp;
+        }
     }
 
     let (first_name, last_name) = match require_name(&body) {
@@ -543,9 +574,15 @@ pub async fn patch_user(
     }
 
     // SCIM provisioning tokens may not patch admin principals (HEA-2032).
-    if auth.is_scim_token && is_admin_principal(&state, &auth.realm_id, &user_id) {
-        return ScimError::forbidden("SCIM provisioning token may not patch an admin principal")
-            .into_response();
+    if auth.is_scim_token {
+        if let Err(resp) = admin_principal_guard(
+            &state,
+            &auth.realm_id,
+            &user_id,
+            "SCIM provisioning token may not patch an admin principal",
+        ) {
+            return resp;
+        }
     }
 
     let current_ext = state
@@ -690,9 +727,15 @@ pub async fn delete_user(
     }
 
     // SCIM provisioning tokens may not delete admin principals (HEA-2032).
-    if auth.is_scim_token && is_admin_principal(&state, &auth.realm_id, &user_id) {
-        return ScimError::forbidden("SCIM provisioning token may not delete an admin principal")
-            .into_response();
+    if auth.is_scim_token {
+        if let Err(resp) = admin_principal_guard(
+            &state,
+            &auth.realm_id,
+            &user_id,
+            "SCIM provisioning token may not delete an admin principal",
+        ) {
+            return resp;
+        }
     }
 
     match state.identity.delete_user(&auth.realm_id, &user_id) {

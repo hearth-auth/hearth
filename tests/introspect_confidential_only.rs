@@ -86,6 +86,11 @@ fn register(h: &common::TestHarness, realm: &RealmId, secret: Option<&str>) -> C
                     "client_credentials".to_string(),
                 ],
                 trust_level: ClientTrustLevel::FirstParty,
+                // A declared resource server: since GA audit L11 only such a
+                // client (or the token's own client) may introspect a
+                // user-session token that carries no `azp`.
+                access_token_authorization:
+                    hearth::identity::AccessTokenAuthorization::Introspection,
                 ..RegisterClientRequest::default()
             },
         )
@@ -95,7 +100,8 @@ fn register(h: &common::TestHarness, realm: &RealmId, secret: Option<&str>) -> C
 }
 
 /// Mints an ordinary user-session access token — the `azp`-absent,
-/// `sid != "none"` shape the audience gate lets ANY authenticated client read.
+/// `sid != "none"` shape the audience gate lets a declared resource server
+/// read (GA audit L11).
 fn user_session_token(h: &common::TestHarness, realm: &RealmId) -> (String, String) {
     let user = h
         .identity()

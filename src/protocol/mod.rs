@@ -13,6 +13,7 @@ pub mod grpc;
 pub mod http;
 pub mod proto;
 pub mod redact;
+pub(crate) mod role_ceiling;
 pub mod scim;
 pub mod step_up;
 pub mod tls;

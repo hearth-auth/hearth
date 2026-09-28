@@ -12,7 +12,8 @@ import TabItem from '@theme/TabItem';
 Add token verification and permission checks to a Rust service using `hearth-sdk`.
 
 :::note[crates.io status]
-`hearth-sdk` is not yet published to crates.io (trusted-publishing configuration pending). Install from the git repository as shown below.
+`hearth-sdk` is published to [crates.io](https://crates.io/crates/hearth-sdk); the latest release
+is **1.6.11** (checked 2026-09-28). The copy on `main` may be ahead of the published crate.
 :::
 
 ## Install
@@ -21,15 +22,17 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-# Recommended: install from the git repository
-hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", package = "hearth-sdk" }
+hearth-sdk = "1.6"
 
 # For Axum / Tower middleware support, enable the feature:
-# hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", features = ["tower-middleware"] }
+# hearth-sdk = { version = "1.6", features = ["tower-middleware"] }
 
 # For Actix-web middleware support, enable the feature:
-# hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", features = ["actix-middleware"] }
+# hearth-sdk = { version = "1.6", features = ["actix-middleware"] }
 ```
+
+To track unreleased changes, depend on the git repository instead:
+`hearth-sdk = { git = "https://github.com/hearth-auth/hearth", branch = "main", package = "hearth-sdk" }`.
 
 ## Build the client
 

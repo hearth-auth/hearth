@@ -137,6 +137,22 @@ pub struct LoadParams {
     )]
     pub allow_remote_target: bool,
 
+    /// Treat a latency-budget breach as advisory: write `"pass": false` to
+    /// `report.json` but exit 0, provided every journey stayed inside the
+    /// error budget. Without this flag a run whose report says `pass:false`
+    /// exits non-zero (code 3), so the exit code never contradicts the report
+    /// (GA audit M20).
+    ///
+    /// The CI smoke (`make loadtest-smoke`) sets it: 15 s of load on a shared
+    /// GitHub runner cannot hold the sub-ms HTTP budgets, so gating a PR on
+    /// them would be noise. An erroring journey fails the run either way.
+    #[arg(
+        long,
+        env = "HEARTH_LOADTEST_LATENCY_ADVISORY",
+        default_value_t = false
+    )]
+    pub latency_advisory: bool,
+
     /// Run mode: `steady` (fixed users), `ramp` (saturation knee), `soak`
     /// (long-window drift), or `tier-miss` (corpus-scale lookup with per-tier
     /// hot/cold latency split).
@@ -338,15 +354,33 @@ pub enum LoadError {
     Saturate(String),
     /// One or more journeys exceeded [`crate::budget::MAX_FAILURE_RATE`].
     ///
-    /// This is the run's only non-zero exit condition (audit 2026-09-21, task
-    /// 23.14). A *latency* breach deliberately does NOT fail the process: the
-    /// sub-ms budgets are documented to read `pass:false` on an ordinary dev
-    /// box (see `loadtest/README.md` § "Budgets"), so gating the exit code on
-    /// them would make `make loadtest` fail everywhere and mean nothing. A
-    /// journey that is *erroring* is a different thing entirely — it means the
-    /// harness measured the reject path, or the server is broken — and before
-    /// this variant existed the process exited 0 regardless.
+    /// Audit 2026-09-21, task 23.14: before this variant existed the process
+    /// exited 0 even when every request errored. An erroring journey means the
+    /// harness measured the reject path, or the server is broken, so it fails
+    /// the run whether or not `--latency-advisory` is set.
     JourneyFailures(Vec<String>),
+    /// The run was healthy but `report.json` says `"pass": false` — a journey
+    /// breached its latency budget (or, in ramp mode, the saturation knee was
+    /// reached). Carries the breaching journeys; may be empty when the mode's
+    /// verdict is not per-journey.
+    ///
+    /// GA audit 2026-09-28 (M20): the report said `pass:false` while the
+    /// process exited 0, so no gate could act on the verdict it wrote. This
+    /// fails the run unless `--latency-advisory` is set. Exit code 3, distinct
+    /// from 1, so a caller can tell "too slow" from "broken".
+    BudgetBreached(Vec<String>),
+}
+
+impl LoadError {
+    /// The process exit code for this error: `3` for a latency-budget breach
+    /// on an otherwise healthy run, `1` for everything else.
+    #[must_use]
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::BudgetBreached(_) => 3,
+            _ => 1,
+        }
+    }
 }
 
 impl std::fmt::Display for LoadError {
@@ -366,6 +400,17 @@ impl std::fmt::Display for LoadError {
                  the reject path, not the hot path; the reported latencies are \
                  not a valid measurement",
                 crate::budget::MAX_FAILURE_RATE * 100.0,
+                names.join(", "),
+            ),
+            Self::BudgetBreached(names) if names.is_empty() => write!(
+                f,
+                "report.json says pass=false (latency budget / saturation knee); \
+                 pass --latency-advisory to treat latency as advisory"
+            ),
+            Self::BudgetBreached(names) => write!(
+                f,
+                "journeys breached their HTTP p99 budget: {} — report.json says \
+                 pass=false; pass --latency-advisory to treat latency as advisory",
                 names.join(", "),
             ),
         }
@@ -471,14 +516,57 @@ pub async fn run_load(params: &LoadParams) -> Result<(), LoadError> {
     // including a run in which every request 4xx'd. `make loadtest-smoke` is
     // the CI gate in `.github/workflows/loadtest-smoke.yml`; it could only
     // ever prove the binary did not crash. Fail the process when a journey
-    // blew the error budget. Latency breaches stay advisory on purpose (see
-    // `LoadError::JourneyFailures`).
-    let failing = unhealthy_journeys(&report);
-    if failing.is_empty() {
-        Ok(())
-    } else {
-        Err(LoadError::JourneyFailures(failing))
+    // blew the error budget, and — GA audit M20 — when the report's own
+    // verdict is `pass:false`, unless the caller opted into advisory latency.
+    run_verdict(&report, params.latency_advisory)
+}
+
+/// The process verdict for a finished run.
+///
+/// 1. Any journey over the error budget → [`LoadError::JourneyFailures`],
+///    always (the latencies of an erroring run are not a measurement).
+/// 2. Otherwise, `report.pass == false` → [`LoadError::BudgetBreached`],
+///    unless `latency_advisory` is set.
+/// 3. Otherwise `Ok(())`.
+///
+/// `report.pass` is the single source of truth for the latency verdict, so
+/// the exit code can no longer disagree with `report.json` (GA audit M20).
+fn run_verdict(report: &LoadReport, latency_advisory: bool) -> Result<(), LoadError> {
+    let failing = unhealthy_journeys(report);
+    if !failing.is_empty() {
+        return Err(LoadError::JourneyFailures(failing));
     }
+    if !report.pass && !latency_advisory {
+        return Err(LoadError::BudgetBreached(breached_journeys(report)));
+    }
+    Ok(())
+}
+
+/// Every journey in `report` that breached its latency budget
+/// (`pass == Some(false)`), deduplicated and sorted, across the primary rows
+/// and every ramp step / soak bucket — the same scope as
+/// [`unhealthy_journeys`].
+fn breached_journeys(report: &LoadReport) -> Vec<String> {
+    let breached = |rows: &[crate::report::JourneyRow]| -> Vec<String> {
+        rows.iter()
+            .filter(|r| r.pass == Some(false))
+            .map(|r| r.journey.clone())
+            .collect()
+    };
+    let mut names = breached(&report.journeys);
+    if let Some(steps) = &report.ramp_steps {
+        for step in steps {
+            names.extend(breached(&step.journeys));
+        }
+    }
+    if let Some(buckets) = &report.soak_buckets {
+        for bucket in buckets {
+            names.extend(breached(&bucket.journeys));
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Every journey in `report` that exceeded the error budget, deduplicated and
@@ -1442,5 +1530,120 @@ mod tests {
             vec!["revoke_revalidate".to_string()],
             "the same journey failing in several buckets is named once"
         );
+    }
+
+    // ── Latency-budget verdict (GA audit 2026-09-28, M20) ────────────────────
+
+    /// A zero-failure row whose p99 breached its HTTP budget.
+    fn breached_row(journey: &str) -> crate::report::JourneyRow {
+        crate::report::JourneyRow {
+            p99_ms: 2,
+            http_budget_p99_us: Some(1500),
+            pass: Some(false),
+            ..gate_row(journey, 500, 0)
+        }
+    }
+
+    #[test]
+    fn a_latency_breach_fails_the_run_by_default() {
+        // Regression (M20): report.json said `"pass": false` (validate p99 2 ms
+        // against a 1.5 ms budget) and the process still exited 0, so a gate
+        // that ran the harness could never go red on the verdict it wrote.
+        let mut report = gate_report(
+            vec![breached_row("validate"), gate_row("issuance", 500, 0)],
+            None,
+            None,
+        );
+        report.pass = false;
+        match run_verdict(&report, false) {
+            Err(LoadError::BudgetBreached(names)) => {
+                assert_eq!(names, vec!["validate".to_string()]);
+            }
+            other => panic!("expected BudgetBreached, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn latency_advisory_lets_a_breaching_but_healthy_run_exit_zero() {
+        let mut report = gate_report(vec![breached_row("validate")], None, None);
+        report.pass = false;
+        assert!(
+            matches!(run_verdict(&report, true), Ok(())),
+            "--latency-advisory must turn a latency-only failure into a pass"
+        );
+    }
+
+    #[test]
+    fn latency_advisory_never_excuses_an_erroring_journey() {
+        let mut report = gate_report(vec![gate_row("validate", 500, 500)], None, None);
+        report.pass = false;
+        match run_verdict(&report, true) {
+            Err(LoadError::JourneyFailures(names)) => {
+                assert_eq!(names, vec!["validate".to_string()]);
+            }
+            other => panic!("expected JourneyFailures, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_passing_report_passes_in_both_modes() {
+        let report = gate_report(vec![gate_row("validate", 500, 0)], None, None);
+        assert!(report.pass);
+        assert!(matches!(run_verdict(&report, false), Ok(())));
+        assert!(matches!(run_verdict(&report, true), Ok(())));
+    }
+
+    #[test]
+    fn a_ramp_knee_breach_is_named_from_its_step() {
+        // Ramp mode's `pass` is `knee_rps.is_none()`; the breaching rows live in
+        // the knee step. The verdict must name them, not report an empty list.
+        let mut report = gate_report(
+            vec![breached_row("session_lookup")],
+            Some(vec![RampStep {
+                users: 10,
+                rps: 1.0,
+                breached: true,
+                journeys: vec![breached_row("session_lookup")],
+            }]),
+            None,
+        );
+        report.knee_rps = Some(1.0);
+        report.pass = false;
+        match run_verdict(&report, false) {
+            Err(LoadError::BudgetBreached(names)) => {
+                assert_eq!(names, vec!["session_lookup".to_string()]);
+            }
+            other => panic!("expected BudgetBreached, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exit_codes_separate_a_budget_breach_from_a_broken_run() {
+        assert_eq!(LoadError::BudgetBreached(vec![]).exit_code(), 3);
+        assert_eq!(
+            LoadError::JourneyFailures(vec!["validate".to_string()]).exit_code(),
+            1
+        );
+        assert_eq!(LoadError::HostGuard("x".to_string()).exit_code(), 1);
+    }
+
+    #[test]
+    fn latency_advisory_flag_defaults_off_and_parses() {
+        assert!(!parse(&[]).latency_advisory);
+        assert!(parse(&["--latency-advisory"]).latency_advisory);
+    }
+
+    #[test]
+    fn latency_advisory_env_var_is_what_make_loadtest_smoke_sets() {
+        // `make loadtest-smoke` passes HEARTH_LOADTEST_LATENCY_ADVISORY=true
+        // through run-loadtest.sh; the flag must honour it. nextest runs each
+        // test in its own process, so mutating the environment is contained.
+        std::env::set_var("HEARTH_LOADTEST_LATENCY_ADVISORY", "true");
+        let on = parse(&[]).latency_advisory;
+        std::env::set_var("HEARTH_LOADTEST_LATENCY_ADVISORY", "false");
+        let off = parse(&[]).latency_advisory;
+        std::env::remove_var("HEARTH_LOADTEST_LATENCY_ADVISORY");
+        assert!(on, "HEARTH_LOADTEST_LATENCY_ADVISORY=true must enable it");
+        assert!(!off, "HEARTH_LOADTEST_LATENCY_ADVISORY=false must not");
     }
 }

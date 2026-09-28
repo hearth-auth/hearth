@@ -195,6 +195,91 @@ pub(super) fn run_authorize_gates(
     consent_gate(state, realm, user_id, params, amr_values, secure, now)
 }
 
+/// Refuses an authorization for a client or role that demands a second
+/// factor when the SESSION proved none (GA audit B5).
+///
+/// Client `mfa_required` and realm `mfa_required_roles` used to be enforced
+/// only at enrolment: the required-action gate asked whether the account
+/// *held* a factor and, once it did, issued the code. A session that never
+/// proved one — a password-only login from before the factor was enrolled, a
+/// magic-link session, a session from before sessions recorded their proof —
+/// was issued codes for exactly the clients the operator had marked
+/// sensitive.
+///
+/// A user who holds no factor at all is left to the required-action gate,
+/// which injects `EnrollMfa`. A user who holds one must prove it, which
+/// means signing in again: the session is revoked and the client is told
+/// `login_required`, so its next request lands on the login page and the
+/// second-factor challenge. Runs on fresh entry only; an interstitial resume
+/// continues a request this gate already admitted.
+pub(super) fn mfa_use_gate(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    session: &super::auth::UiSession,
+    params: &AuthorizeParams,
+) -> Option<Response> {
+    if session.mfa_proof.satisfies_mfa_required() {
+        return None;
+    }
+    let realm_config = match state.identity.get_realm(realm) {
+        Ok(r) => r.map(|r| r.config().clone()),
+        Err(e) => {
+            tracing::warn!(error = %e, "authorize: realm lookup failed at the MFA-use gate");
+            return Some(handlers_common::server_error());
+        }
+    };
+    let client_id = params.client_id.as_uuid().to_string();
+    match super::required_action::client_or_role_requires_mfa(
+        state,
+        realm,
+        &session.user_id,
+        realm_config.as_ref(),
+        Some(&client_id),
+    ) {
+        Ok(false) => return None,
+        Ok(true) => {}
+        Err(()) => return Some(handlers_common::server_error()),
+    }
+    match state.identity.has_second_factor(realm, &session.user_id) {
+        // Nothing to prove yet: the required-action gate enrols a factor.
+        Ok(false) => return None,
+        Ok(true) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "authorize: factor lookup failed at the MFA-use gate");
+            return Some(handlers_common::server_error());
+        }
+    }
+
+    let client = match state.identity.get_client(realm, &params.client_id) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Some(handlers_common::bad_request("unknown client")),
+        Err(e) => {
+            tracing::warn!(error = %e, "authorize: get_client failed at the MFA-use gate");
+            return Some(handlers_common::server_error());
+        }
+    };
+    // The unproved session must not be reused for this client: revoke it so
+    // the client's retry reaches the login page and its factor challenge.
+    if let Err(e) = state.identity.revoke_session(realm, &session.session_id) {
+        tracing::warn!(error = %e, "authorize: revoking an unproved session failed");
+        return Some(handlers_common::server_error());
+    }
+    let error_return = ErrorReturn {
+        client_id: &params.client_id,
+        redirect_uri: &params.redirect_uri,
+        state: &params.state,
+        response_mode: params.response_mode.as_ref(),
+        jarm_alg: client.authorization_signed_response_alg(),
+    };
+    Some(authorization_error_redirect(
+        state,
+        realm,
+        &error_return,
+        "login_required",
+        "this application requires a second factor; sign in again",
+    ))
+}
+
 /// `Some(error redirect)` when `params` is a `prompt=none` request, which a
 /// gate about to show UI must return instead (OIDC Core §3.1.2.1); `None`
 /// for an interactive request, which the gate may suspend.

@@ -541,7 +541,7 @@ fn reconcile_seed_users(
             Ok(Some(_)) => {
                 tracing::trace!(
                     realm = realm_name,
-                    email = %user_cfg.email,
+                    email = %crate::identity::email::mask_email_address(&user_cfg.email),
                     "seed user already exists; skipping"
                 );
                 continue;
@@ -549,7 +549,7 @@ fn reconcile_seed_users(
             Err(e) => {
                 tracing::warn!(
                     realm = realm_name,
-                    email = %user_cfg.email,
+                    email = %crate::identity::email::mask_email_address(&user_cfg.email),
                     error = %e,
                     "seed user: get_user_by_email failed; skipping"
                 );
@@ -573,7 +573,7 @@ fn reconcile_seed_users(
             Err(e) => {
                 tracing::warn!(
                     realm = realm_name,
-                    email = %user_cfg.email,
+                    email = %crate::identity::email::mask_email_address(&user_cfg.email),
                     error = %e,
                     "seed user: create_user failed; skipping"
                 );
@@ -599,7 +599,7 @@ fn reconcile_seed_users(
         ) {
             tracing::warn!(
                 realm = realm_name,
-                email = %user_cfg.email,
+                email = %crate::identity::email::mask_email_address(&user_cfg.email),
                 error = %e,
                 "seed user: update_user (activate) failed"
             );
@@ -613,7 +613,7 @@ fn reconcile_seed_users(
         ) {
             tracing::warn!(
                 realm = realm_name,
-                email = %user_cfg.email,
+                email = %crate::identity::email::mask_email_address(&user_cfg.email),
                 error = %e,
                 "seed user: set_password failed"
             );
@@ -634,7 +634,7 @@ fn reconcile_seed_users(
                     ) {
                         tracing::warn!(
                             realm = realm_name,
-                            email = %user_cfg.email,
+                            email = %crate::identity::email::mask_email_address(&user_cfg.email),
                             role = role_name,
                             error = %e,
                             "seed user: assign_role failed"
@@ -644,7 +644,7 @@ fn reconcile_seed_users(
                 Ok(None) => {
                     tracing::warn!(
                         realm = realm_name,
-                        email = %user_cfg.email,
+                        email = %crate::identity::email::mask_email_address(&user_cfg.email),
                         role = role_name,
                         "seed user: role not found; skipping assignment"
                     );
@@ -652,7 +652,7 @@ fn reconcile_seed_users(
                 Err(e) => {
                     tracing::warn!(
                         realm = realm_name,
-                        email = %user_cfg.email,
+                        email = %crate::identity::email::mask_email_address(&user_cfg.email),
                         role = role_name,
                         error = %e,
                         "seed user: get_role_by_name failed; skipping assignment"
@@ -663,7 +663,7 @@ fn reconcile_seed_users(
 
         tracing::info!(
             realm = realm_name,
-            email = %user_cfg.email,
+            email = %crate::identity::email::mask_email_address(&user_cfg.email),
             "created seed user"
         );
     }

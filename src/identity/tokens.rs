@@ -435,12 +435,22 @@ pub struct JwtAssertionClaims {
 }
 
 /// A pair of access and refresh tokens.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TokenPair {
     /// The short-lived access token (JWT).
     access_token: String,
     /// The long-lived refresh token (JWT).
     refresh_token: String,
+}
+
+/// Redacts both tokens: each is a bearer credential (GA audit L20).
+impl std::fmt::Debug for TokenPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenPair")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl TokenPair {

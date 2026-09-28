@@ -239,7 +239,16 @@ async fn a_restored_system_realm_brings_back_operators_their_factors_and_the_sig
     // A system-realm token issued before the backup.
     let session = src
         .identity()
-        .create_session(&sys, &op, &SessionContext::default())
+        .create_session(
+            &sys,
+            &op,
+            &SessionContext {
+                // The user holds a second factor, so a session must say it proved
+                // one (GA audit B4/B5): this stands for a completed login.
+                mfa_proof: hearth::identity::MfaProof::Proved,
+                ..SessionContext::default()
+            },
+        )
         .expect("session");
     let pre_backup_token = src
         .identity()

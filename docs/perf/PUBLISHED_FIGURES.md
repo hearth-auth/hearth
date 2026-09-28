@@ -80,9 +80,9 @@ document depends on relaxed durability.
 
 | ID | Operation | **Plane** | p50 | p99 | Concurrency | Host | Artifact · SHA | Reproduced at HEAD? |
 |----|-----------|-----------|-----|-----|-------------|------|----------------|---------------------|
-| **L1** | `validate_token` (hot tier) | **engine** | **1.31 µs** | — | T=1 | dev-ryzen-7840hs | `c7-saturation-v2-raw.json` · `981516f1` | ✅ **exceeded** — HEAD measured 0.779–0.795 µs (1.65–1.69× faster); 2 samples only — see §4.2 methodology note |
+| **L1** | `validate_token` (hot tier) | **engine** | **1.31 µs** (per-core mean from `per_core_ops_s`, not a percentile) | — | T=1 | dev-ryzen-7840hs | `c7-saturation-v2-raw.json` · `981516f1` | ✅ **exceeded** — HEAD measured 0.779–0.795 µs (1.65–1.69× faster); 2 samples only — see §4.2 methodology note |
 | **L1-H** | `validate_token` + user fetch → `GET /userinfo` | **HTTP** | **50.1 µs** | 153.7 µs | T=1 | dev-ryzen-7840hs | `c11-http-delta-raw.json` · `1b2fda55` | ⚠️ **not reproduced** — see §4.1 |
-| **L2** | Session lookup (hot tier) | **engine** | **0.118 µs** | — | T=1 | dev-ryzen-7840hs | `c7-saturation-v2-raw.json` · `981516f1` | ✅ **exceeded** — HEAD 0.0678–0.0693 µs; 2 samples only — see §4.2 methodology note |
+| **L2** | Session lookup (hot tier) | **engine** | **0.118 µs** (per-core mean from `per_core_ops_s`, not a percentile) | — | T=1 | dev-ryzen-7840hs | `c7-saturation-v2-raw.json` · `981516f1` | ✅ **exceeded** — HEAD 0.0678–0.0693 µs; 2 samples only — see §4.2 methodology note |
 | **L2-H** | Session lookup over HTTP | **HTTP** | *no endpoint exists* | — | — | — | — | n/a — exercised only inside L1-H |
 | **L5** | `lookup_user` (hot tier) | **engine** | ⛔ **WITHDRAWN** | — | T=1 | dev-ryzen-7840hs | `hea1967-c7-saturation-sample{1,2}-raw.json` · `1b6b7745` | ❌ **failed to reproduce — 236% spread.** See §4.2 |
 | **L9** | `introspect_token` (RFC 7662) | **engine** | **44.0 µs** | — | T=1 | dev-ryzen-7840hs | `c11-http-delta-raw.json` · `1b2fda55` | ✅ **exceeded** — HEAD 39.2 µs |
@@ -413,11 +413,17 @@ CPU during this sweep, and I will not publish a number I cannot attribute.
 
 ### ✅ Publish (HEAD-verified, conservative values)
 
+> **GA audit 2026-09-28:** "HEAD-verified" below means verified at the HEAD of the
+> 2026-07-29/30 measurement pass. Every engine-plane hot-path figure predates PR #358
+> (`060d4541`), which replaced the `arc-swap` primitive on the read path; none has been
+> re-measured since. L1/L2 were previously labelled p50 but are per-core means derived
+> from throughput.
+
 | Figure | Value | Plane |
 |---|---|---|
-| `validate_token` latency | 1.31 µs p50 | engine |
+| `validate_token` time per op | 1.31 µs per-core mean (1 ÷ throughput — not a measured p50) | engine |
 | `validate_token` throughput | 760,877 /core/s · 9,409,220 /s @16T | engine |
-| Session lookup latency | 0.118 µs p50 | engine |
+| Session lookup time per op | 0.118 µs per-core mean (1 ÷ throughput — not a measured p50) | engine |
 | Permission check throughput | 5,987,782 /core/s · 52,048,086 /s @16T | engine |
 | `introspect_token` latency | 44.0 µs p50 | engine |
 | Durable session creation (floor) | 484 /s @T=1, **fsync-before-ack, W=1.000** | engine |

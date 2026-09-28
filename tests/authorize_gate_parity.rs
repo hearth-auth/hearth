@@ -263,7 +263,16 @@ fn session_cookie(rig: &Rig) -> String {
     use sha2::Sha256;
     let session = rig
         .identity
-        .create_session(&rig.realm_id, &rig.user_id, &SessionContext::default())
+        .create_session(
+            &rig.realm_id,
+            &rig.user_id,
+            &SessionContext {
+                // The user may hold a second factor, and a session must say it
+                // proved one (GA audit B4/B5): this stands for a completed login.
+                mfa_proof: hearth::identity::MfaProof::Proved,
+                ..SessionContext::default()
+            },
+        )
         .expect("session");
     let mut mac = <Hmac<Sha256>>::new_from_slice(&COOKIE_SECRET).expect("key");
     mac.update(session.id().as_uuid().as_bytes());
@@ -1642,7 +1651,16 @@ fn fault_session_cookie(rig: &FaultRig) -> String {
     use sha2::Sha256;
     let session = rig
         .identity
-        .create_session(&rig.realm_id, &rig.user_id, &SessionContext::default())
+        .create_session(
+            &rig.realm_id,
+            &rig.user_id,
+            &SessionContext {
+                // The user may hold a second factor, and a session must say it
+                // proved one (GA audit B4/B5): this stands for a completed login.
+                mfa_proof: hearth::identity::MfaProof::Proved,
+                ..SessionContext::default()
+            },
+        )
         .expect("session");
     let mut mac = <Hmac<Sha256>>::new_from_slice(&COOKIE_SECRET).expect("key");
     mac.update(session.id().as_uuid().as_bytes());
@@ -1841,7 +1859,16 @@ async fn authorize_fails_closed_when_the_required_action_lookup_errors() {
     use sha2::Sha256;
     let session = rig
         .identity
-        .create_session(&rig.realm_id, &rig.user_id, &SessionContext::default())
+        .create_session(
+            &rig.realm_id,
+            &rig.user_id,
+            &SessionContext {
+                // The user may hold a second factor, and a session must say it
+                // proved one (GA audit B4/B5): this stands for a completed login.
+                mfa_proof: hearth::identity::MfaProof::Proved,
+                ..SessionContext::default()
+            },
+        )
         .expect("session");
     let mut mac = <Hmac<Sha256>>::new_from_slice(&COOKIE_SECRET).expect("key");
     mac.update(session.id().as_uuid().as_bytes());

@@ -1473,7 +1473,7 @@ The DCR policy can also be changed at runtime without restarting the server via 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `mode` | string | `"disabled"` | DCR policy: `"disabled"` (only admins may create clients), `"open"` (any caller may register a client — unauthenticated), or `"authenticated"` (requires a valid bearer token per RFC 7591 §3.1 initial access token). |
+| `mode` | string | `"disabled"` | DCR policy: `"disabled"` (only admins may create clients), `"open"` (any caller may register a client — unauthenticated), or `"authenticated"` (requires an RFC 7591 §3.1 initial access token: a bearer token issued by this realm whose `permissions` claim carries `hearth.clients.admin` or `hearth.admin`; any other valid token is refused with `403 insufficient_scope`). |
 
 ```yaml
 realms:
@@ -1485,7 +1485,7 @@ realms:
   production:
     auth:
       dcr:
-        mode: authenticated # bearer token required for self-registration
+        mode: authenticated # initial access token (hearth.clients.admin) required
 ```
 
 > **Security note:** `open` DCR allows any caller to register an OAuth client without authentication — suitable only for developer sandboxes and internal networks. Use `authenticated` when DCR must be available in production, or `disabled` (the default) if all clients are managed by administrators.

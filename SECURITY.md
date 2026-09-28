@@ -2,7 +2,18 @@
 
 ## Supported Versions
 
-Hearth is pre-1.0. Security fixes are applied to the `main` branch only. Once 1.0 ships, a supported-version table will be maintained here.
+Hearth 1.0.0 shipped on 2026-06-21. Support follows the 1.x window in
+[VERSIONING.md](VERSIONING.md#support-window-for-the-1x-line):
+
+| Version | Supported | Until |
+|---|---|---|
+| 1.x (latest release, currently 1.6.x) | ✅ Active support — bug and security fixes | 2027-12-21 |
+| 1.x (security-only phase) | ✅ Security fixes only | 2028-06-21 |
+| < 1.0 (pre-release) | ❌ | — |
+
+Fixes land on `main` first and ship in the next 1.x release; there are no back-port branches for
+older 1.x minors. **Note:** the newest installable server release, v1.6.10, predates the security
+fixes merged in PR #358 — until the next release is cut, those fixes exist only on `main`.
 
 ## Reporting a Vulnerability
 
@@ -10,7 +21,7 @@ Hearth is pre-1.0. Security fixes are applied to the `main` branch only. Once 1.
 
 Use one of the following channels:
 
-- **GitHub Security Advisories (preferred):** Use the "Report a vulnerability" button on the [Security tab](https://github.com/hearth-auth/hearth/security/advisories/new) of this repository. This opens a private, encrypted channel between you and the maintainers. No GitHub account is required.
+- **GitHub Security Advisories (preferred):** Use the "Report a vulnerability" button on the [Security tab](https://github.com/hearth-auth/hearth/security/advisories/new) of this repository. This opens a private channel between you and the maintainers. You need to be signed in to a GitHub account to use it; if you do not have one, use email.
 - **Email:** therecluse26@protonmail.com — PGP key available on request.
 
 ### What to include
@@ -42,7 +53,7 @@ The following are **in scope** for security reports:
 | Storage encryption | AES-256-GCM three-tier envelope encryption (`src/storage/encryption.rs`) |
 | JWT signing & verification | Ed25519 token issuance and validation (`src/identity/tokens.rs`) |
 | Credential hashing | Argon2id password hashing and legacy migration (`src/identity/credentials.rs`) |
-| Session management | Session lifecycle, TTL, revocation (`src/identity/engine.rs`) |
+| Session management | Session lifecycle, TTL, revocation (`src/identity/sessions.rs`, `src/identity/engine/`) |
 | SAML 2.0 | SP/IdP flows, XML signature validation (`src/identity/federation/saml/`) |
 | OIDC / OAuth 2.0 | Relying party, authorization server, PKCE (`src/identity/federation/oidc.rs`, `src/protocol/web/`) |
 | RBAC engine | Role composition, cycle detection, org scoping (`src/rbac/`) |
@@ -78,7 +89,7 @@ We will not pursue civil or criminal action against researchers who:
 
 | Audit type | Status | Notes |
 |------------|--------|-------|
-| Internal pre-release assessment | ✅ Complete | No critical findings across all in-scope components |
+| Internal assessments | 🔄 Findings open | Internal audits are not clean. The 2026-08-12 production-readiness audit reported critical findings, and the 2026-09-28 GA-readiness audit of `main` at `060d4541` reported high-severity blockers (consent bypass on refresh and device grants, second-factor bypasses, an unauthenticated connection-exhaustion DoS, a revocation race). Remediation is in progress; the verdict at the time of writing is **not GA-ready**. |
 | Third-party penetration test | 🔄 In procurement | Scope document at `docs/security-audit/pentest-scope.md`; board budget approval pending (HEA-1244) |
 | Independent threat model review | ⏳ Pending pentest | Blocked on HEA-1244 completion (HEA-1243) |
 
@@ -86,21 +97,29 @@ This page will be updated with the pentest report summary and firm name once the
 
 ## Known Exceptions
 
+The server's advisory ignore lists (`deny.toml`, `.cargo/audit.toml`) carry no exception for a
+crate that is compiled into the Hearth binary. The former RUSTSEC-2023-0071 (`rsa`) exception was
+removed: `rsa` is not in the server's `Cargo.lock` (RSA key generation uses `rcgen` + `aws-lc-rs`;
+signing uses `ring`).
+
+Advisory exceptions for SDK and tooling lockfiles live in [`osv-scanner.toml`](osv-scanner.toml),
+each with its rationale.
+
 | CVE / Advisory | Affected crate / package | Justification |
 |---|---|---|
-| RUSTSEC-2023-0071 | `rsa` | Marvin Attack timing side-channel affects PKCS#1 v1.5 decryption only. Hearth uses the `rsa` crate exclusively for RSA key generation and PKCS#8 serialization — no decryption operations are performed. |
+| RUSTSEC-2023-0071 | `rsa`, **Rust SDK only** (`sdks/rust/Cargo.lock`, via `jsonwebtoken`'s `rust_crypto` backend and a test-only dependency) | Marvin Attack timing side-channel in PKCS#1 v1.5 decryption. The Rust SDK performs no RSA decryption. No patched `rsa` release exists. |
 
 ## Encryption at Rest
 
 Encryption at rest is **active** in Hearth 1.0. All data written to disk — WAL records and SST file sections — is encrypted using a three-tier key hierarchy:
 
-1. **Host Key (32 B)** — loaded from `HEARTH_MASTER_KEY` env var or auto-generated to `hearth.host_key` on first start. Protects the KEKs in `hearth.keys`.
+1. **Host Key (32 B)** — loaded from the `HEARTH_MASTER_KEY` env var (64 hex chars, e.g. `openssl rand -hex 32`). If the variable is unset, Hearth reads an existing `hearth.host_key` file from the data directory; if there is none, production mode **refuses to start** — it never auto-generates a key (`src/storage/key_registry.rs`). Only `--dev` mode auto-generates a key and persists it to `hearth.host_key`. Protects the KEKs in `hearth.keys`.
 2. **KEK (32 B)** — stored encrypted in `hearth.keys`; wraps per-file DEKs. The key registry is realm-keyed, but only the system realm's KEK is provisioned, so **one KEK covers every realm**. Size your key-compromise blast radius accordingly: recovering that one KEK exposes every realm's data, not one tenant's.
 3. **File DEK (32 B per SST/WAL segment)** — randomly generated per file; stored in the 76-byte encryption header at the start of each file.
 
 Key rotation re-wraps only the DEK header in each file (O(file count), not O(data size)) — the ciphertext on disk is unchanged.
 
-If you self-host Hearth and need to rotate the host key, back up `hearth.host_key` and `hearth.keys` before any rotation operation. Loss of the host key makes all on-disk data permanently unrecoverable.
+If you self-host Hearth and need to rotate the host key, back up `HEARTH_MASTER_KEY` (or `hearth.host_key`, where one exists) and `hearth.keys` before any rotation operation. Loss of the host key makes all on-disk data permanently unrecoverable.
 
 ## Release Signing
 
@@ -113,7 +132,7 @@ Every Hearth release binary and SBOM is signed via **cosign keyless signing** us
 | `--certificate-oidc-issuer` | `https://token.actions.githubusercontent.com` |
 | `--certificate-identity-regexp` | `^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$` |
 
-Every release also ships a **SLSA L1 provenance document** (`hearth.intoto.jsonl`) and a **CycloneDX SBOM** (`hearth-sbom.cdx.json`).
+Every release also ships a **SLSA provenance document** (`multiple.intoto.jsonl`, one document covering every binary and the SBOM — the asset name on v1.6.10) and a **CycloneDX SBOM** (`hearth-sbom.cdx.json`).
 
 See [docs/guides/verify-release.md](docs/guides/verify-release.md) for full verification instructions including `cosign verify-blob`, `slsa-verifier`, and SBOM inspection.
 

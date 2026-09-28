@@ -116,17 +116,20 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-opentelemetry = "0.32"
-opentelemetry = { version = "0.31", features = ["trace"] }
-opentelemetry_sdk = { version = "0.31", features = ["trace", "rt-tokio"] }
+tracing-opentelemetry = "0.33"
+opentelemetry = { version = "0.32", features = ["trace"] }
+# 0.32.1 is the floor: it fixes GHSA-w9wp-h8wv-79jx (unbounded allocation in
+# W3C Baggage propagation). Hearth installs no text-map propagator, so the path
+# was unreachable, but osv-scanner and Dependabot flag every lower version.
+opentelemetry_sdk = { version = "0.32.1", features = ["trace", "rt-tokio"] }
 # `default-features = false` drops `reqwest-blocking-client`, the default HTTP
 # client, which linked the policy-banned `reqwest` into the published binary
 # (audit 2026-08-28 §4.8#9). The OTLP/HTTP exporter is kept and re-pointed at
 # `hyper-client` — hyper is already a production dependency.
 # Direct dependency so the OTLP/HTTP exporter can be handed an explicit
 # hyper+rustls client instead of otlp's reqwest default (audit §4.8#9).
-opentelemetry-http = { version = "0.31", default-features = false, features = ["hyper"] }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = [
+opentelemetry-http = { version = "0.32", default-features = false, features = ["hyper"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
     "grpc-tonic",
     "http-proto",
     "hyper-client",
@@ -135,7 +138,7 @@ opentelemetry-otlp = { version = "0.31", default-features = false, features = [
     "logs",
     "internal-logs",
 ] }
-opentelemetry-semantic-conventions = "0.31"
+opentelemetry-semantic-conventions = "0.32"
 ureq = { version = "3", features = ["json"] }
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }

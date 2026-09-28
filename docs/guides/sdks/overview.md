@@ -6,19 +6,22 @@ description: Official Hearth client SDKs — TypeScript, Node.js, Go, Python, Ru
 
 # Hearth SDKs
 
-Hearth ships official client SDKs for integrating authentication and RBAC into your application. Every GA SDK implements the same contract: **auth code + PKCE flow**, zero-network RBAC checks decoded from the JWT, transparent token refresh, and the Hearth Admin API.
+Hearth ships official client SDKs for integrating authentication and RBAC into your application. Every SDK implements the same contract: **auth code + PKCE flow**, zero-network RBAC checks decoded from the JWT, transparent token refresh, and the Hearth Admin API.
 
 ## SDK catalogue
 
-| Language / Runtime | Package | Install | Status |
-|--------------------|---------|---------|--------|
-| [TypeScript / React](./typescript.md) | `@hearth-auth/sdk` | `npm install @hearth-auth/sdk` | GA |
-| [Node.js (server)](./node.md) | `@hearth-auth/node` | `npm install @hearth-auth/node` | GA |
-| [Go](./go.md) | `github.com/hearth-auth/hearth/sdks/go` | `go get github.com/hearth-auth/hearth/sdks/go` | GA |
-| [Python](./python.md) | `hearth-sdk` | `pip install hearth-sdk` | GA |
-| [Rust](./rust.md) | `hearth-sdk` (git) | see [install instructions](./rust.md#install) | GA |
-| [PHP](./php.md) | `hearth-auth/php-sdk` | `composer require hearth-auth/php-sdk:^1.0` | GA |
-| [Kotlin / JVM](./kotlin.md) | `io.hearth-auth:hearth-sdk` | see [install instructions](./kotlin.md#install) | GA |
+Registry status was checked on 2026-09-28. Not every SDK is installable from its registry, and
+the published versions lag the source on `main` — check the registry before pinning a version.
+
+| Language / Runtime | Package | Install | Registry status |
+|--------------------|---------|---------|-----------------|
+| [TypeScript / React](./typescript.md) | `@hearth-auth/sdk` | `npm install @hearth-auth/sdk` | npm — **1.6.2** |
+| [Node.js (server)](./node.md) | `@hearth-auth/node` | `npm install @hearth-auth/node` | npm — **1.6.2** |
+| [Go](./go.md) | `github.com/hearth-auth/hearth/sdks/go` | `go get github.com/hearth-auth/hearth/sdks/go` | Go module proxy — **v1.6.11** |
+| [Python](./python.md) | `hearth-sdk` | `pip install hearth-sdk` | PyPI — **1.6.8** |
+| [Rust](./rust.md) | `hearth-sdk` | `cargo add hearth-sdk` — see [install](./rust.md#install) | crates.io — **1.6.11** |
+| [PHP](./php.md) | `hearth-auth/php-sdk` | `composer require hearth-auth/php-sdk:dev-main` | Packagist — **`dev-main` only**; no tagged release, so `^1.0` does not resolve |
+| [Kotlin / JVM](./kotlin.md) | `io.hearth:hearth-core` | build from source — see [install](./kotlin.md#install) | **Not published** (Maven Central has no `io.hearth` group) |
 
 ## TypeScript vs Node.js — which should I use?
 

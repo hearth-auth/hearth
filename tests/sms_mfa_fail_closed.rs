@@ -1168,7 +1168,16 @@ fn ui_session_cookie(rig: &LoginRig, user_id: &UserId) -> String {
     let session = rig
         .state
         .identity
-        .create_session(&rig.realm_id, user_id, &SessionContext::default())
+        .create_session(
+            &rig.realm_id,
+            user_id,
+            &SessionContext {
+                // The user may hold a second factor, and a session must say it
+                // proved one (GA audit B4/B5): this stands for a completed login.
+                mfa_proof: hearth::identity::MfaProof::Proved,
+                ..SessionContext::default()
+            },
+        )
         .expect("session");
     let mut mac = <Hmac<Sha256>>::new_from_slice(&COOKIE_SECRET).expect("key");
     mac.update(session.id().as_uuid().as_bytes());

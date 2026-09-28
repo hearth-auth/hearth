@@ -65,7 +65,8 @@ fn run_load(params: &LoadParams) -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("load run failed: {e}");
-            std::process::ExitCode::FAILURE
+            // 3 = latency budget breached on a healthy run; 1 = anything else.
+            std::process::ExitCode::from(e.exit_code())
         }
     }
 }

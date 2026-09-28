@@ -3897,6 +3897,42 @@ fn parse_user_id_path(raw: &str) -> Result<UserId, (StatusCode, Json<serde_json:
         })
 }
 
+/// Refuses a role definition that would grant a permission the caller does not
+/// hold (GA audit M6), mirroring gRPC `CreateRole`/`UpdateRole` through the
+/// shared [`crate::protocol::role_ceiling`] check. `hearth.admin` is exempt.
+fn require_role_definition_ceiling(
+    state: &AppState,
+    auth: &AdminAuth,
+    permissions: &[Permission],
+    parent_roles: &[RoleId],
+) -> Result<(), axum::response::Response> {
+    match crate::protocol::role_ceiling::role_definition_ceiling_violation(
+        state.rbac.as_ref(),
+        &auth.realm_id,
+        &auth.permissions,
+        permissions,
+        parent_roles,
+    ) {
+        Ok(None) => Ok(()),
+        Ok(Some(missing)) => {
+            tracing::warn!(
+                realm_id = %auth.realm_id,
+                missing_permission = %missing,
+                "role definition blocked: grantor does not hold the permission being granted"
+            );
+            Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "forbidden",
+                    "error_description": "role grants permissions the caller does not hold"
+                })),
+            )
+                .into_response())
+        }
+        Err(e) => Err(rbac_error_to_response(&e).into_response()),
+    }
+}
+
 fn permissions_from_strings(raw: Vec<String>) -> Result<Vec<Permission>, RbacError> {
     raw.into_iter()
         .map(|s| Permission::new(s).map_err(|reason| RbacError::InvalidPermission { reason }))
@@ -3960,6 +3996,9 @@ async fn admin_create_role(
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
+    if let Err(resp) = require_role_definition_ceiling(&state, &auth, &permissions, &parent_roles) {
+        return resp;
+    }
     match state.rbac.create_role(
         &auth.realm_id,
         &CreateRoleRequest {
@@ -4046,6 +4085,14 @@ async fn admin_update_role(
         }
         None => None,
     };
+    if let Err(resp) = require_role_definition_ceiling(
+        &state,
+        &auth,
+        permissions.as_deref().unwrap_or_default(),
+        parent_roles.as_deref().unwrap_or_default(),
+    ) {
+        return resp;
+    }
     match state.rbac.update_role(
         &auth.realm_id,
         &role_id,

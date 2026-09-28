@@ -2450,7 +2450,7 @@ mod tests {
 /// Identifies the end-user by email address. The client_id is used for
 /// per-client rate limiting only; no client authentication is required for
 /// public clients.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct PasswordGrantRequest {
     /// The user's email address.
     pub email: String,
@@ -2468,6 +2468,19 @@ pub struct PasswordGrantRequest {
     ///
     /// When `None`, adaptive MFA uses an empty string for the UA component.
     pub user_agent: Option<String>,
+}
+
+/// Redacts the password (GA audit L20).
+impl std::fmt::Debug for PasswordGrantRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasswordGrantRequest")
+            .field("email", &self.email)
+            .field("password", &"<redacted>")
+            .field("scope", &self.scope)
+            .field("client_ip", &self.client_ip)
+            .field("user_agent", &self.user_agent)
+            .finish()
+    }
 }
 
 /// Response from a successful ROPC grant — mirrors `OidcTokenResponse`.
@@ -2500,7 +2513,6 @@ impl PasswordGrantResponse {
 /// Used with `grant_type = urn:hearth:params:grant-type:step-up-mfa`.
 /// The caller re-supplies the password and adds an `mfa_code`; both are
 /// verified before tokens are issued and the device fingerprint is recorded.
-#[derive(Debug)]
 pub struct StepUpMfaGrantRequest {
     /// The user's email address.
     pub email: String,
@@ -2514,4 +2526,18 @@ pub struct StepUpMfaGrantRequest {
     pub client_ip: Option<String>,
     /// Raw `User-Agent` header value — used to record the trusted device fingerprint.
     pub user_agent: Option<String>,
+}
+
+/// Redacts the password and the MFA code (GA audit L20).
+impl std::fmt::Debug for StepUpMfaGrantRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StepUpMfaGrantRequest")
+            .field("email", &self.email)
+            .field("password", &"<redacted>")
+            .field("mfa_code", &"<redacted>")
+            .field("scope", &self.scope)
+            .field("client_ip", &self.client_ip)
+            .field("user_agent", &self.user_agent)
+            .finish()
+    }
 }

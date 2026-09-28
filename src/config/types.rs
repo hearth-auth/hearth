@@ -533,7 +533,7 @@ pub enum SmtpEncryption {
 /// Required when [`EmailTransport::Smtp`] is selected. Credentials are
 /// optional; if `username` is set then `password` MUST also be set (and
 /// vice versa) — the config validator enforces the pair.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SmtpConfig {
     /// SMTP server hostname (e.g. `smtp.example.com`, `mailpit`).
@@ -551,24 +551,55 @@ pub struct SmtpConfig {
     pub password: Option<String>,
 }
 
+/// Redacts the provider credential (GA audit L20).
+impl std::fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("encryption", &self.encryption)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 /// `SendGrid` transport settings.
 ///
 /// Required when [`EmailTransport::Sendgrid`] is selected.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendgridConfig {
     /// `SendGrid` API key.
     pub api_key: String,
 }
 
+/// Redacts the provider credential (GA audit L20).
+impl std::fmt::Debug for SendgridConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendgridConfig")
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
+}
+
 /// `Postmark` transport settings.
 ///
 /// Required when [`EmailTransport::Postmark`] is selected.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostmarkConfig {
     /// `Postmark` server token.
     pub server_token: String,
+}
+
+/// Redacts the provider credential (GA audit L20).
+impl std::fmt::Debug for PostmarkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PostmarkConfig")
+            .field("server_token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// `Mailgun` region selector.
@@ -585,7 +616,7 @@ pub enum MailgunRegion {
 /// `Mailgun` transport settings.
 ///
 /// Required when [`EmailTransport::Mailgun`] is selected.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MailgunConfig {
     /// `Mailgun` API key.
@@ -597,10 +628,21 @@ pub struct MailgunConfig {
     pub region: MailgunRegion,
 }
 
+/// Redacts the provider credential (GA audit L20).
+impl std::fmt::Debug for MailgunConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailgunConfig")
+            .field("api_key", &"<redacted>")
+            .field("domain", &self.domain)
+            .field("region", &self.region)
+            .finish()
+    }
+}
+
 /// `Mailtrap` transport settings.
 ///
 /// Required when [`EmailTransport::Mailtrap`] is selected.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MailtrapConfig {
     /// `Mailtrap` API key.
@@ -612,6 +654,16 @@ pub struct MailtrapConfig {
     /// (`send.api.mailtrap.io`). Obtain the inbox ID from your
     /// Mailtrap dashboard URL (e.g. `https://mailtrap.io/inboxes/12345/messages`).
     pub inbox_id: Option<u64>,
+}
+
+/// Redacts the provider credential (GA audit L20).
+impl std::fmt::Debug for MailtrapConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailtrapConfig")
+            .field("api_key", &"<redacted>")
+            .field("inbox_id", &self.inbox_id)
+            .finish()
+    }
 }
 
 /// Email sender configuration.
@@ -672,7 +724,7 @@ pub enum SmsTransport {
 /// Twilio SMS transport settings.
 ///
 /// Required when [`SmsTransport::Twilio`] is selected.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TwilioConfig {
     /// Twilio Account SID (e.g. `AC…`).
@@ -684,10 +736,21 @@ pub struct TwilioConfig {
     pub from: String,
 }
 
+/// Redacts the auth token (GA audit L20).
+impl std::fmt::Debug for TwilioConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwilioConfig")
+            .field("account_sid", &self.account_sid)
+            .field("auth_token", &"<redacted>")
+            .field("from", &self.from)
+            .finish()
+    }
+}
+
 /// AWS SNS SMS transport settings.
 ///
 /// Required when [`SmsTransport::AwsSns`] is selected.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnsSmsConfig {
     /// AWS region (e.g. `us-east-1`).
@@ -699,6 +762,18 @@ pub struct SnsSmsConfig {
     /// Optional alphanumeric sender ID shown on recipient device (up to 11 chars).
     #[serde(default)]
     pub sender_id: Option<String>,
+}
+
+/// Redacts the secret access key (GA audit L20).
+impl std::fmt::Debug for SnsSmsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnsSmsConfig")
+            .field("region", &self.region)
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"<redacted>")
+            .field("sender_id", &self.sender_id)
+            .finish()
+    }
 }
 
 /// SMS sender configuration.

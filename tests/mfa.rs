@@ -170,7 +170,11 @@ async fn mfa_enrollment_full_flow() {
         .create_session(
             &realm,
             user.id(),
-            &hearth::identity::SessionContext::default(),
+            // The TOTP challenge above proved the second factor (GA audit B5).
+            &hearth::identity::SessionContext {
+                mfa_proof: hearth::identity::MfaProof::Proved,
+                ..hearth::identity::SessionContext::default()
+            },
         )
         .expect("create session");
     assert!(

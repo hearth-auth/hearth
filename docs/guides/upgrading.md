@@ -104,9 +104,13 @@ Work through this list for every upgrade, including patch releases.
 
   **As of the current release the WAL format version is `1`, and it has not changed across any shipped
   v1.x release.** The only migration in the table is `v0 → v1`, which upgrades the legacy pre-header
-  format. In practice this means **in-place binary rollback between shipped v1.x versions is safe** —
-  the data directory is byte-compatible. The constraint below matters only if a future release bumps
-  the version, which will be called out in `CHANGELOG.md` under `**Breaking:**`.
+  format. **An unchanged WAL version does NOT make in-place rollback safe.** The WAL and SST
+  *headers* are versioned; the records inside them are not. Users, sessions, credentials and audit
+  events are encoded with `postcard` (`src/codec.rs`), which is not self-describing and carries no
+  per-record version, and those types change between releases — for example `AuditAction` gained
+  `InvitationCreated`, `InvitationAccepted` and `InvitationRevoked` after v1.6.11. An older binary
+  cannot decode a record that uses a variant or field it does not know. See
+  [Rollback](#rollback-procedure).
 
   When a bump *does* occur it is one-way: upgrading rewrites the file to the new version on startup,
   and the older binary will then refuse to start with `WAL format version N is not supported by this
@@ -262,7 +266,7 @@ The Hearth Helm chart uses `strategy.type: Recreate` in its Deployment. This mea
 > stop the running Hearth instance before starting a new one
 > ```
 >
-> `Recreate` prevents this by ensuring only one pod is ever scheduled against the PVC at a time. Use Raft cluster mode for zero-downtime failover.
+> `Recreate` prevents this by ensuring only one pod is ever scheduled against the PVC at a time. An upgrade therefore has a short outage while the old pod stops and the new one starts. **Single-node is the only supported production topology**; Raft cluster mode is experimental and must not be used for failover or zero-downtime upgrades (see [Clustering](./clustering.md)).
 
 ---
 
@@ -329,22 +333,29 @@ Run these checks immediately after bringing the new binary up, regardless of dep
 
 ## Rollback procedure
 
-### When rollback is safe without a backup
+### Rollback means restore from backup
 
-Rollback to the previous binary is safe in place **if and only if the WAL format version did not change** between the old and new binary — and, in **cluster mode**, the Raft log format did not change either. The release after v1.6.11 changes the Raft log format: a cluster node cannot roll back to an older binary in place and needs its data directory restored ([Cluster upgrades](#cluster-full-restart)).
+**Do not roll back in place across releases. Restore the pre-upgrade backup instead.** An unchanged
+WAL format version (the `xxd` check in the [pre-upgrade checklist](#pre-upgrade-checklist)) proves
+only that the older binary can open the files; it does not prove it can decode the records in them:
 
-**For every currently shipped v1.x release this is the case** — the WAL format version has been `1`
-throughout, so in-place rollback is the normal path:
+- Records (users, sessions, credentials, audit events) are encoded with `postcard`
+  (`src/codec.rs`). The encoding is not self-describing and carries no per-record version.
+- Those types change between releases. An enum that gains a variant is the common case —
+  `AuditAction` gained `InvitationCreated`, `InvitationAccepted` and `InvitationRevoked` after
+  v1.6.11 — and postcard stores the variant *index*, so an older binary cannot decode a record the
+  newer one wrote with a new variant. There is no downgrade guard that refuses to start; the failure
+  surfaces when the unreadable record is read.
+- In **cluster mode** (experimental), the release after v1.6.11 also changes the Raft log format, so
+  a cluster node cannot roll back in place either ([Cluster upgrades](#cluster-full-restart)).
 
-1. Stop the new binary.
-2. Reinstall the old binary.
-3. Start the service.
-
-The data directory is fully compatible and no restore is required. Confirm with the `xxd` check in the
-[pre-upgrade checklist](#pre-upgrade-checklist) if you want positive verification before starting.
-
-If you are unsure whether a future version changed the format, **check `CHANGELOG.md` for a
-`**Breaking:**` WAL-format entry**, or treat it as a version-bump rollback (below).
+The rollback path is therefore the same whether or not the WAL version moved: stop the new binary,
+keep a copy of the post-upgrade data directory, reinstall the old binary and restore the archive you
+took and signed in the pre-upgrade checklist — the steps under
+[When the WAL format version changed](#when-the-wal-format-version-changed) below. Writes made after
+the upgrade are lost unless you re-apply them. An in-place rollback with no restore is only defensible
+between two builds whose stored types are known to be identical (for example a rebuild of the same
+commit); nothing in the release process verifies that today.
 
 ### When the WAL format version changed
 

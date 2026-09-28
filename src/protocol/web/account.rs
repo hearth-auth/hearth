@@ -146,7 +146,7 @@ pub async fn account_index(State(state): State<Arc<WebState>>, session: UiSessio
 // ---------------------------------------------------------------------------
 
 /// `application/x-www-form-urlencoded` body for `POST /ui/account/password`.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ChangePasswordForm {
     /// Current password (verified before applying the change).
     #[serde(default)]
@@ -160,6 +160,19 @@ pub struct ChangePasswordForm {
     /// CSRF double-submit token (matches the `hearth_ui_csrf` cookie).
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
+}
+
+/// Redacts every field: all three are passwords and the fourth is the CSRF
+/// token (GA audit L20).
+impl std::fmt::Debug for ChangePasswordForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChangePasswordForm")
+            .field("current_password", &"<redacted>")
+            .field("new_password", &"<redacted>")
+            .field("confirm_password", &"<redacted>")
+            .field("csrf", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Handles `POST /ui/account/password`.

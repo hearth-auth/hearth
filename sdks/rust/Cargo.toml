@@ -32,11 +32,15 @@ ring = "0.17"
 tokio = { version = "1", features = ["sync", "time"] }
 tower = { version = "0.4", optional = true }
 http = { version = "1", optional = true }
-actix-web = { version = "4", optional = true }
+# default-features = false: a middleware crate must not switch on HTTP/2,
+# compression or cookies in the importer's actix-web. The default `http2`
+# feature also pulled h2 0.3 (RUSTSEC-2026-0258, fixed only on the 0.4 line,
+# which actix-http 3.x cannot use) into this crate's lockfile.
+actix-web = { version = "4", optional = true, default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
-actix-web = "4"
+actix-web = { version = "4", default-features = false, features = ["macros"] }
 # Test-only: mints the RS256 tokens that prove `verify_token` refuses them.
 # Already in the lock file via jsonwebtoken's `rust_crypto` backend.
 rsa = { version = "0.9", features = ["getrandom"] }

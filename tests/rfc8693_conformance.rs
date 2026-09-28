@@ -20,7 +20,7 @@ mod common;
 use hearth::core::RealmId;
 use hearth::identity::{
     tokens::ActClaim, CreateRealmRequest, CreateUserRequest, IdentityEngine, IdentityError,
-    Rfc8693Request, SessionContext, TokenIssuanceContext,
+    RegisterClientRequest, Rfc8693Request, SessionContext, TokenIssuanceContext,
 };
 use serde_json::Value;
 
@@ -31,6 +31,31 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock")
         .as_secs() as i64
+}
+
+/// A registered confidential client holding the token-exchange grant.
+///
+/// GA audit M8: an unregistered (random) `client_id` is refused with
+/// `invalid_client` before the error each vector exercises is reached.
+fn make_exchange_client(
+    identity: &dyn IdentityEngine,
+    realm_id: &RealmId,
+) -> hearth::core::ClientId {
+    identity
+        .register_client(
+            realm_id,
+            &RegisterClientRequest {
+                client_name: format!("rfc8693-client-{}", uuid::Uuid::new_v4()),
+                client_secret: Some("rfc8693-client-secret!".to_string()),
+                redirect_uris: vec!["https://client.example.com/cb".to_string()],
+                grant_types: vec!["urn:ietf:params:oauth:grant-type:token-exchange".to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register exchange client")
+        .client_id()
+        .clone()
 }
 
 fn make_realm(identity: &dyn IdentityEngine) -> RealmId {
@@ -201,7 +226,7 @@ async fn rfc8693_response_required_fields() {
         .rfc8693_token_exchange(
             &realm_id,
             &Rfc8693Request {
-                client_id: hearth::core::ClientId::new(uuid::Uuid::new_v4()),
+                client_id: make_exchange_client(identity, &realm_id),
                 subject_token,
                 subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
                 actor_token: None,
@@ -273,7 +298,7 @@ async fn rfc8693_err01_wrong_subject_token_type() {
         .rfc8693_token_exchange(
             &realm_id,
             &Rfc8693Request {
-                client_id: hearth::core::ClientId::new(uuid::Uuid::new_v4()),
+                client_id: make_exchange_client(identity, &realm_id),
                 subject_token,
                 // Wrong type — must be access_token, not jwt
                 subject_token_type: "urn:ietf:params:oauth:token-type:jwt".to_string(),
@@ -346,7 +371,7 @@ async fn rfc8693_err02_invalid_signature_subject_token_rejected() {
         .rfc8693_token_exchange(
             &realm_id,
             &Rfc8693Request {
-                client_id: hearth::core::ClientId::new(uuid::Uuid::new_v4()),
+                client_id: make_exchange_client(identity, &realm_id),
                 subject_token,
                 subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
                 actor_token: None,
@@ -399,7 +424,7 @@ async fn rfc8693_err03_scope_wider_than_subject() {
         .rfc8693_token_exchange(
             &realm_id,
             &Rfc8693Request {
-                client_id: hearth::core::ClientId::new(uuid::Uuid::new_v4()),
+                client_id: make_exchange_client(identity, &realm_id),
                 subject_token,
                 subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
                 actor_token: None,
