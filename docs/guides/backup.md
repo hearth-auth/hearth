@@ -416,6 +416,7 @@ hearth backup restore --input <archive> [OPTIONS]
 | `--dry-run` | off | Parse and report without writing anything |
 | `--skip-verify` | off | Skip the integrity check restore runs before it writes. Only for a very large archive already verified out of band. **Refused whenever a verify key is configured** — usable only together with `--allow-unsigned` (see below) |
 | `--allow-missing-signing-key` | off | Restore anyway when the archive has no restorable signing key, accepting a freshly generated key (see below) |
+| `--replace-system-signing-key` | off | With `--mode overwrite` only: also replace a **live** system realm's signing key with the archived one, signing every operator out. Never reinstalls a key the target rotated away from. See [Restoring the system realm](#restoring-the-system-realm) |
 | `--verify-key` | from `--config` | Base64url Ed25519 public key the archive's manifest must be signed with. Overrides `security.backup.verify_key` |
 | `--allow-unsigned` | off | Restore even though **no** verify key is configured, so the archive's origin is not authenticated. Never overrides a configured key. See [Signed archives](#signed-archives) |
 | `--data-dir` | `data` | Path to the target data directory |
