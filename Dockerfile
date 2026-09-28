@@ -184,8 +184,21 @@ EXPOSE 8420
 # a process-alive ping (/health is always-200). Using /readyz means Docker /
 # Compose will not mark the container healthy — and therefore will not route
 # traffic to it — until storage is fully initialised.
+#
+# The probe URL is HEARTH_HEALTHCHECK_URL, so it can follow the listener:
+#   - plaintext (TLS terminated by a proxy): the default below;
+#   - direct TLS (server.tls_cert_path set):
+#       docker run -e HEARTH_HEALTHCHECK_URL=https://127.0.0.1:8420/readyz ...
+#   - a different server.port: change the port in the URL.
+# `--no-check-certificate` is deliberate: the probe targets 127.0.0.1, which
+# the certificate never names, and it only asks "is this process ready".
+# Limitation: the listener must accept connections on 127.0.0.1, i.e.
+# server.bind_address must be 0.0.0.0, ::, or 127.0.0.1 — a bind to one
+# specific non-loopback address makes the check fail. The hearth server itself
+# does not read this variable.
+ENV HEARTH_HEALTHCHECK_URL=http://127.0.0.1:8420/readyz
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
-    CMD wget -qO- http://127.0.0.1:8420/readyz || exit 1
+    CMD wget -q -O /dev/null --no-check-certificate --no-hsts "$HEARTH_HEALTHCHECK_URL" || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hearth"]
 CMD ["serve", "-c", "/etc/hearth/hearth.yaml"]

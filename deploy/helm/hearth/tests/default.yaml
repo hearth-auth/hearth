@@ -5,10 +5,10 @@ kind: ServiceAccount
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-1.6.8
+    helm.sh/chart: hearth-1.6.11
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "1.6.8"
+    app.kubernetes.io/version: "1.6.11"
     app.kubernetes.io/managed-by: Helm
 ---
 # Source: hearth/templates/configmap.yaml
@@ -17,14 +17,15 @@ kind: ConfigMap
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-1.6.8
+    helm.sh/chart: hearth-1.6.11
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "1.6.8"
+    app.kubernetes.io/version: "1.6.11"
     app.kubernetes.io/managed-by: Helm
 data:
   hearth.yaml: |
     email:
+      allow_log_transport_in_production: true
       transport: log
     observability:
       log_format: json
@@ -50,10 +51,10 @@ kind: PersistentVolumeClaim
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-1.6.8
+    helm.sh/chart: hearth-1.6.11
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "1.6.8"
+    app.kubernetes.io/version: "1.6.11"
     app.kubernetes.io/managed-by: Helm
 spec:
   accessModes:
@@ -68,10 +69,10 @@ kind: Service
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-1.6.8
+    helm.sh/chart: hearth-1.6.11
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "1.6.8"
+    app.kubernetes.io/version: "1.6.11"
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
@@ -90,10 +91,10 @@ kind: Deployment
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-1.6.8
+    helm.sh/chart: hearth-1.6.11
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "1.6.8"
+    app.kubernetes.io/version: "1.6.11"
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
@@ -110,7 +111,7 @@ spec:
     metadata:
       annotations:
         # Force pod restart when config changes
-        checksum/config: 25ea6296d05706370c4fe9436d66e7cc90d906e0193d2a22f83494afee0d7944
+        checksum/config: 9e79e878823268801fc189175c1169337e040cc25ec79608e6058ee728d9a21c
       labels:
         app.kubernetes.io/name: hearth
         app.kubernetes.io/instance: hearth
@@ -131,16 +132,28 @@ spec:
             runAsGroup: 10001
             runAsNonRoot: true
             runAsUser: 10001
-          image: "ghcr.io/hearth-auth/hearth:1.6.8"
+          image: "ghcr.io/hearth-auth/hearth:v1.6.11"
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/hearth", "serve", "-c", "/etc/hearth/hearth.yaml"]
           ports:
+            # Named `http` for Service/probe compatibility; it speaks HTTPS
+            # when the chart mounts a TLS certificate (see `tls` in values).
             - name: http
               containerPort: 8420
               protocol: TCP
           env:
             - name: RUST_LOG
-              value: "info,hearth=debug"
+              value: "info"
+            - name: HEARTH_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hearth-keys
+                  key: HEARTH_MASTER_KEY
+            - name: HEARTH_KEK
+              valueFrom:
+                secretKeyRef:
+                  name: hearth-keys
+                  key: HEARTH_KEK
           volumeMounts:
             - name: config
               mountPath: /etc/hearth
@@ -150,11 +163,15 @@ spec:
             # readOnlyRootFilesystem requires a writable /tmp
             - name: tmp
               mountPath: /tmp
+          # httpGet.scheme follows the TLS setting (HTTPS when the listener
+          # terminates TLS); Kubernetes skips certificate verification for
+          # HTTPS probes, so an internal or self-signed certificate works.
           livenessProbe:
             failureThreshold: 3
             httpGet:
               path: /health
               port: http
+              scheme: HTTP
             initialDelaySeconds: 10
             periodSeconds: 15
             timeoutSeconds: 5
@@ -163,6 +180,7 @@ spec:
             httpGet:
               path: /readyz
               port: http
+              scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3

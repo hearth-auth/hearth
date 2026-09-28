@@ -10,6 +10,12 @@
 {{- if gt (int .Values.replicaCount) 1 }}
 {{- fail (printf "hearth: replicaCount=%v is not a supported configuration. Hearth is single-writer and takes an exclusive lock on storage.data_dir; a second replica sharing the ReadWriteOnce PVC will fail to start with AlreadyLocked. Use Raft cluster mode (one PVC per node) for high availability, not extra Deployment replicas." .Values.replicaCount) }}
 {{- end }}
+{{- if and .Values.tls.enabled (not (include "hearth.tlsSecretName" .)) }}
+{{- fail "hearth: tls.enabled=true needs a certificate: set tls.existingSecret to a kubernetes.io/tls Secret (keys tls.crt and tls.key), or supply secret.tlsCert and secret.tlsKey." }}
+{{- end }}
+{{- $envNames := include "hearth.operatorEnvNames" . | fromJson }}
+{{- $keys := .Values.encryptionKeys }}
+{{- $keysSecret := $keys.existingSecret | default (printf "%s-keys" (include "hearth.fullname" .)) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -59,6 +65,8 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/usr/local/bin/hearth", "serve", "-c", "/etc/hearth/hearth.yaml"]
           ports:
+            # Named `http` for Service/probe compatibility; it speaks HTTPS
+            # when the chart mounts a TLS certificate (see `tls` in values).
             - name: http
               containerPort: {{ .Values.config.server.port | default 8420 }}
               protocol: TCP
@@ -76,6 +84,33 @@ spec:
                   key: {{ $key }}
             {{- end }}
             {{- end }}
+            {{- /*
+              Production mode refuses to start without HEARTH_MASTER_KEY
+              (storage host key) and a key-encryption key (HEARTH_KEK or
+              security.key_encryption_key). Both come from a Secret the
+              operator creates; the chart never generates them, because a
+              regenerated master key makes the existing data unreadable.
+              A name already supplied via env / secret.env / extraEnv wins.
+            */}}
+            {{- if $keys.enabled }}
+            {{- if not (hasKey $envNames "HEARTH_MASTER_KEY") }}
+            - name: HEARTH_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $keysSecret }}
+                  key: {{ $keys.masterKeySecretKey }}
+            {{- end }}
+            {{- if not (hasKey $envNames "HEARTH_KEK") }}
+            - name: HEARTH_KEK
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $keysSecret }}
+                  key: {{ $keys.kekSecretKey }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/hearth
@@ -84,7 +119,7 @@ spec:
             - name: data
               mountPath: {{ .Values.persistence.mountPath }}
             {{- end }}
-            {{- if and .Values.secret.tlsCert .Values.secret.tlsKey }}
+            {{- if include "hearth.tlsSecretName" . }}
             - name: tls
               mountPath: /etc/hearth/tls
               readOnly: true
@@ -92,10 +127,13 @@ spec:
             # readOnlyRootFilesystem requires a writable /tmp
             - name: tmp
               mountPath: /tmp
+          # httpGet.scheme follows the TLS setting (HTTPS when the listener
+          # terminates TLS); Kubernetes skips certificate verification for
+          # HTTPS probes, so an internal or self-signed certificate works.
           livenessProbe:
-            {{- toYaml .Values.livenessProbe | nindent 12 }}
+            {{- include "hearth.probe" (dict "probe" .Values.livenessProbe "root" $) | nindent 12 }}
           readinessProbe:
-            {{- toYaml .Values.readinessProbe | nindent 12 }}
+            {{- include "hearth.probe" (dict "probe" .Values.readinessProbe "root" $) | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
@@ -107,10 +145,10 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Values.persistence.existingClaim | default (include "hearth.fullname" .) }}
         {{- end }}
-        {{- if and .Values.secret.tlsCert .Values.secret.tlsKey }}
+        {{- if include "hearth.tlsSecretName" . }}
         - name: tls
           secret:
-            secretName: {{ include "hearth.fullname" . }}
+            secretName: {{ include "hearth.tlsSecretName" . }}
             items:
               - key: tls.crt
                 path: tls.crt

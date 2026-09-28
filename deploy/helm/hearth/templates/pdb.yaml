@@ -1,4 +1,16 @@
 {{- if .Values.podDisruptionBudget.enabled }}
+{{- /*
+  Hearth runs exactly one replica (see the guard in deployment.yaml). A
+  `minAvailable` equal to or above the replica count allows no voluntary
+  eviction at all, so `kubectl drain` on the pod's node blocks forever.
+  Refuse to render that rather than ship it. The default is
+  `maxUnavailable: 1`, which never blocks a drain.
+*/ -}}
+{{- $pdb := .Values.podDisruptionBudget }}
+{{- $min := toString (index $pdb "minAvailable" | default "") }}
+{{- if and (regexMatch "^[0-9]+$" $min) (ge (atoi $min) (int .Values.replicaCount)) }}
+{{- fail (printf "hearth: podDisruptionBudget.minAvailable=%s with replicaCount=%v allows no voluntary eviction, so a node drain would block forever. Use podDisruptionBudget.maxUnavailable: 1 (the default) instead." $min .Values.replicaCount) }}
+{{- end }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -6,7 +18,11 @@ metadata:
   labels:
     {{- include "hearth.labels" . | nindent 4 }}
 spec:
-  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- if $min }}
+  minAvailable: {{ $pdb.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ $pdb.maxUnavailable | default 1 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "hearth.selectorLabels" . | nindent 6 }}

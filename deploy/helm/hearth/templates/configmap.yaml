@@ -6,4 +6,4 @@ metadata:
     {{- include "hearth.labels" . | nindent 4 }}
 data:
   hearth.yaml: |
-    {{- .Values.config | toYaml | nindent 4 }}
+    {{- include "hearth.config" . | nindent 4 }}
