@@ -696,7 +696,8 @@ fn introspects_active_as(
 /// must not narrow who may introspect it. A resource server that receives an
 /// agent's delegated user token and validates it by introspection is neither
 /// the exchanging client nor (with `resource=`) named in `aud` by client_id;
-/// the RFC 7662 audience gate lets any authenticated client introspect a
+/// the RFC 7662 audience gate lets a declared resource server (GA audit L11:
+/// `access_token_authorization` `introspection`/`decision`) introspect a
 /// user-session token that is bound to no `azp`, and exchange must keep it so.
 #[tokio::test]
 async fn a_resource_server_can_still_introspect_an_exchanged_user_token() {
@@ -704,6 +705,17 @@ async fn a_resource_server_can_still_introspect_an_exchanged_user_token() {
     let subject_client = register(&env.h, &env.realm_id, None);
     let actor = register_scoped(&env.h, &env.realm_id, "read");
     let resource_server = register_scoped(&env.h, &env.realm_id, "read");
+    env.h
+        .identity()
+        .update_client(
+            &env.realm_id,
+            &resource_server,
+            &UpdateClientRequest {
+                access_token_authorization: Some(AccessTokenAuthorization::Introspection),
+                ..Default::default()
+            },
+        )
+        .expect("declare the resource server");
     let subject = scoped_user_access(&env.h, &env.realm_id, &subject_client);
     let exchanged = exchange(&env.h, &env.realm_id, &actor, &subject);
 

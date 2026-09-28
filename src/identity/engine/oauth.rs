@@ -2896,8 +2896,10 @@ impl EmbeddedIdentityEngine {
         // - `azp` set (delegated/bound token): only azp-match or aud-match allowed.
         // - `azp` absent, `sid == "none"` (M2M/client_credentials): only the
         //   owning client (`sub == cid`) or an audience member may self-introspect.
-        // - `azp` absent, `sid != "none"` (unbound user session token): any
-        //   authenticated client may introspect (no restriction).
+        // - `azp` absent, `sid != "none"` (unbound user session token): an
+        //   audience member, the client the token's grant family was issued
+        //   to, or a declared resource server (GA audit L11 — it used to be
+        //   any authenticated client, which then received live RBAC data).
         if let Some(ref cid) = request.introspecting_client_id {
             let cid_str = cid.to_string();
             if let Some(token_azp) = claims.azp.as_deref() {
@@ -2910,8 +2912,11 @@ impl EmbeddedIdentityEngine {
                 if claims.sub != cid_str && !claims.aud.contains(cid_str.as_str()) {
                     return Ok(IntrospectionResponse::inactive());
                 }
+            } else if !claims.aud.contains(cid_str.as_str())
+                && !self.may_introspect_unbound_user_token(realm_id, cid, &claims)?
+            {
+                return Ok(IntrospectionResponse::inactive());
             }
-            // Unbound user-session tokens: any authenticated client may introspect.
         }
 
         // 3. Check expiration and iat sanity
@@ -3036,6 +3041,54 @@ impl EmbeddedIdentityEngine {
             roles: live_roles,
             groups: live_groups,
         })
+    }
+
+    /// Whether `caller` may introspect a session-bound access token that
+    /// carries no `azp` (GA audit L11): only the client the token's grant
+    /// family was issued to, the client that obtained it by token exchange
+    /// (its `act.sub`), or a declared resource server — a client whose
+    /// `access_token_authorization` is `Introspection` or `Decision`, which
+    /// only an administrator can set (dynamic registration always yields
+    /// `Embedded`). An unknown or archived caller is neither.
+    fn may_introspect_unbound_user_token(
+        &self,
+        realm_id: &RealmId,
+        caller: &ClientId,
+        claims: &TokenClaims,
+    ) -> Result<bool, IdentityError> {
+        use crate::identity::oidc::AccessTokenAuthorization;
+        let Some(client) = self.get_client(realm_id, caller)? else {
+            return Ok(false);
+        };
+        if Self::refuse_inactive_client(&client).is_err() {
+            return Ok(false);
+        }
+        if client.access_token_authorization() != AccessTokenAuthorization::Embedded {
+            return Ok(true);
+        }
+        // An RFC 8693 exchanged token was issued to the exchanging client,
+        // which its outermost `act.sub` records (as the bare UUID, or as the
+        // `client_…` subject of an actor token).
+        if let Some(act) = claims.act.as_ref() {
+            if act.sub == caller.to_string() || act.sub == caller.as_uuid().to_string() {
+                return Ok(true);
+            }
+        }
+        let Some(fid) = claims.fid.as_deref() else {
+            return Ok(false);
+        };
+        let Some(bytes) = self
+            .storage
+            .get(realm_id, &keys::encode_grant_family(fid))
+            .map_err(Self::storage_err)?
+        else {
+            return Ok(false);
+        };
+        let family: StoredGrantFamily =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        Ok(family.client_id.as_ref() == Some(caller))
     }
 
     pub(super) fn decide_token_permission_inner(
