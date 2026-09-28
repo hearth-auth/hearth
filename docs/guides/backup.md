@@ -712,10 +712,14 @@ export holds the barrier, **writes to that node block** until the export's read
 pass for the current realm completes; they are not lost, only delayed. Reads —
 token validation, session and user lookups — are **never** blocked, so
 authentication continues normally during a backup. The blocking window scales
-with realm size (how long it takes to scan and serialise the realm's entities),
-so for very large realms prefer a low-write window. The barrier is released
-between realms, so a multi-realm backup does not hold all writes for the whole
-run.
+with realm size (how long it takes to scan and serialise the realm's entities
+into memory), so for very large realms prefer a low-write window. The barrier
+covers only that read pass: it is released before the realm's sections are
+encrypted, compressed and written to the archive, so a slow or remote backup
+destination does not stall writes. The cost is memory — the exporter holds one
+realm's serialised sections in RAM between the two steps. The barrier is also
+released between realms, so a multi-realm backup does not hold all writes for
+the whole run.
 
 This barrier is **single-node**. Multi-node export consistency is not provided
 (clustering is EXPERIMENTAL — see the clustering guide). The offline CLI

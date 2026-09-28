@@ -3125,3 +3125,119 @@ async fn a_deleted_realm_is_not_restored_with_a_key_it_revoked() {
         );
     }
 }
+
+// ── export barrier scope (audit GA 2026-09-28 M4) ─────────────────────────────
+
+/// M4: an export must hold the storage write barrier only for its consistent
+/// read pass, not while it encrypts, compresses and writes the archive.
+///
+/// The archive is written into a named pipe whose reader stops reading after
+/// the first byte, so the export stalls mid-write — the shape of a slow or
+/// full backup destination. A write issued meanwhile must complete. Before the
+/// fix the export held `backup_barrier.write()` until it returned, so every
+/// login, refresh and audit append on the node blocked behind the archive I/O.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn export_releases_the_write_barrier_before_writing_the_archive() {
+    use std::io::Read as _;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    let identity = h.identity_arc();
+
+    // Encrypted sections do not compress, so ~2.4 MiB of user attributes is
+    // an archive stream far larger than a pipe's buffer.
+    let value = "v".repeat(1000);
+    for i in 0..200u32 {
+        identity
+            .create_user(
+                &realm,
+                &CreateUserRequest {
+                    email: format!("bulk-{i}@m4.example"),
+                    display_name: "Bulk".into(),
+                    first_name: "Bulk".into(),
+                    last_name: "User".into(),
+                    attributes: (0..12).map(|a| (format!("a{a}"), value.clone())).collect(),
+                },
+            )
+            .expect("seed user");
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fifo = dir.path().join("archive.pipe");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo failed");
+
+    let (first_byte_tx, first_byte_rx) = mpsc::channel();
+    let (drain_tx, drain_rx) = mpsc::channel::<()>();
+    let reader = {
+        let fifo = fifo.clone();
+        std::thread::spawn(move || {
+            let mut pipe = std::fs::File::open(&fifo).expect("open the pipe for reading");
+            let mut byte = [0u8; 1];
+            pipe.read_exact(&mut byte).expect("first archive byte");
+            let _ = first_byte_tx.send(());
+            let _ = drain_rx.recv_timeout(Duration::from_secs(120));
+            let mut rest = Vec::new();
+            pipe.read_to_end(&mut rest).expect("drain the pipe");
+        })
+    };
+
+    let export = {
+        let (identity, audit, rbac) = (h.identity_arc(), h.audit_arc(), h.rbac_arc());
+        let realm = realm.clone();
+        let fifo = fifo.clone();
+        std::thread::spawn(move || {
+            let mut writer = BackupArchive::create(&fifo).expect("archive on the pipe");
+            let dek = BackupExporter::generate_dek().expect("dek");
+            BackupExporter::new(identity, audit, rbac)
+                .export_realm(&realm, &mut writer, &ExportOptions::default(), &dek)
+                .map(|_| ())
+        })
+    };
+
+    first_byte_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the export never started writing the archive");
+    // AUDIT: justified-sleep: lets the export fill the pipe and stall in its
+    // archive write; the assertion below does not depend on its length.
+    std::thread::sleep(Duration::from_millis(300));
+
+    let (wrote_tx, wrote_rx) = mpsc::channel();
+    let writer_thread = {
+        let identity = h.identity_arc();
+        let realm = realm.clone();
+        std::thread::spawn(move || {
+            let result = identity.create_user(
+                &realm,
+                &CreateUserRequest {
+                    email: "during-export@m4.example".into(),
+                    display_name: "During".into(),
+                    first_name: "During".into(),
+                    last_name: "Export".into(),
+                    attributes: Default::default(),
+                },
+            );
+            let _ = wrote_tx.send(());
+            result.map(|_| ())
+        })
+    };
+    let wrote_while_stalled = wrote_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+
+    // Unstall everything before asserting, so a failure does not hang.
+    let _ = drain_tx.send(());
+    reader.join().expect("reader");
+    export.join().expect("export thread").expect("export");
+    writer_thread.join().expect("writer").expect("create_user");
+
+    assert!(
+        wrote_while_stalled,
+        "a write blocked while the export was stalled writing its archive: the export held \
+         the storage write barrier through encryption and archive I/O"
+    );
+}

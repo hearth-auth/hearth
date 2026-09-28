@@ -232,18 +232,27 @@ impl BackupExporter {
         opts: &ExportOptions,
         dek: &[u8; 32],
     ) -> Result<RealmManifest, BackupError> {
-        // Acquire a consistent-snapshot barrier so no write can interleave
-        // between the per-entity read passes below (HEA-2167). While this guard
-        // is held, all storage writes block; reads — including ours — proceed.
-        // Every entity read below therefore reflects a single point in time, so
-        // the archive cannot be torn (e.g. a group membership referencing a
-        // user the archive omits). Engines without a barrier (test doubles,
-        // cluster wrapper) return `None` and the export proceeds without
-        // isolation. Held until this function returns.
+        // Phase 1 — the consistent read pass. Acquire the snapshot barrier so
+        // no write can interleave between the per-entity reads below
+        // (HEA-2167). While this guard is held, all storage writes block;
+        // reads — including ours — proceed. Every entity read below therefore
+        // reflects a single point in time, so the archive cannot be torn (e.g.
+        // a group membership referencing a user the archive omits). Engines
+        // without a barrier (test doubles, cluster wrapper) return `None` and
+        // the export proceeds without isolation.
+        //
+        // The pass only reads and serialises into memory (`members`); the
+        // guard is released before phase 2 encrypts, compresses and writes
+        // the archive. Holding it through that I/O stalled every write on the
+        // node — logins, refreshes, audit appends — for as long as the backup
+        // destination took (audit GA 2026-09-28 M4).
         let barrier = self.identity.backup_barrier();
-        let _snapshot = barrier
+        let snapshot = barrier
             .as_ref()
             .map(|b| b.write().unwrap_or_else(std::sync::PoisonError::into_inner));
+        // Plaintext archive members, zeroed on drop: credentials and key
+        // material pass through here.
+        let mut members: Vec<(String, Zeroizing<Vec<u8>>)> = Vec::new();
 
         let realm = self
             .identity
@@ -259,8 +268,7 @@ impl BackupExporter {
         // realm.json
         if let Some(ref r) = realm {
             let data = serde_json::to_vec_pretty(r)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/realm.json"), &encrypted)?;
+            members.push((format!("{prefix}/realm.json"), Zeroizing::new(data)));
         }
 
         // users.ndjson
@@ -272,8 +280,7 @@ impl BackupExporter {
         counts.users = users.len() as u64;
         if !users.is_empty() {
             let data = to_ndjson(&users)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/users.ndjson"), &encrypted)?;
+            members.push((format!("{prefix}/users.ndjson"), Zeroizing::new(data)));
         }
 
         // credentials.ndjson
@@ -284,8 +291,7 @@ impl BackupExporter {
         counts.credentials = credentials.len() as u64;
         if !credentials.is_empty() {
             let data = to_ndjson(&credentials)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/credentials.ndjson"), &encrypted)?;
+            members.push((format!("{prefix}/credentials.ndjson"), Zeroizing::new(data)));
         }
 
         // mfa_factors.ndjson — TOTP/recovery-code state (decrypted; every
@@ -299,8 +305,7 @@ impl BackupExporter {
         counts.mfa_factors = mfa_factors.len() as u64;
         if !mfa_factors.is_empty() {
             let data = to_ndjson(&mfa_factors)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/mfa_factors.ndjson"), &encrypted)?;
+            members.push((format!("{prefix}/mfa_factors.ndjson"), Zeroizing::new(data)));
         }
 
         // clients.ndjson
@@ -312,8 +317,7 @@ impl BackupExporter {
         counts.clients = clients.len() as u64;
         if !clients.is_empty() {
             let data = to_ndjson(&clients)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/clients.ndjson"), &encrypted)?;
+            members.push((format!("{prefix}/clients.ndjson"), Zeroizing::new(data)));
         }
 
         // roles.ndjson
@@ -326,8 +330,7 @@ impl BackupExporter {
         counts.roles = roles.len() as u64;
         if !roles.is_empty() {
             let data = to_ndjson(&roles)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/roles.ndjson"), &encrypted)?;
+            members.push((format!("{prefix}/roles.ndjson"), Zeroizing::new(data)));
         }
 
         // permissions.ndjson
@@ -338,8 +341,7 @@ impl BackupExporter {
         counts.permissions = permissions.len() as u64;
         if !permissions.is_empty() {
             let data = to_ndjson(&permissions)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/permissions.ndjson"), &encrypted)?;
+            members.push((format!("{prefix}/permissions.ndjson"), Zeroizing::new(data)));
         }
 
         // groups.ndjson
@@ -351,8 +353,7 @@ impl BackupExporter {
         counts.groups = groups.len() as u64;
         if !groups.is_empty() {
             let data = to_ndjson(&groups)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/groups.ndjson"), &encrypted)?;
+            members.push((format!("{prefix}/groups.ndjson"), Zeroizing::new(data)));
         }
 
         // assignments.ndjson
@@ -363,8 +364,7 @@ impl BackupExporter {
         counts.assignments = assignments.len() as u64;
         if !assignments.is_empty() {
             let data = to_ndjson(&assignments)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/assignments.ndjson"), &encrypted)?;
+            members.push((format!("{prefix}/assignments.ndjson"), Zeroizing::new(data)));
         }
 
         // scopes.ndjson
@@ -375,8 +375,7 @@ impl BackupExporter {
         counts.scopes = scopes.len() as u64;
         if !scopes.is_empty() {
             let data = to_ndjson(&scopes)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/scopes.ndjson"), &encrypted)?;
+            members.push((format!("{prefix}/scopes.ndjson"), Zeroizing::new(data)));
         }
 
         // organizations.ndjson
@@ -388,8 +387,10 @@ impl BackupExporter {
         counts.organizations = organizations.len() as u64;
         if !organizations.is_empty() {
             let data = to_ndjson(&organizations)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/organizations.ndjson"), &encrypted)?;
+            members.push((
+                format!("{prefix}/organizations.ndjson"),
+                Zeroizing::new(data),
+            ));
         }
 
         // group_memberships.ndjson — the edges between a group and its
@@ -404,8 +405,10 @@ impl BackupExporter {
         counts.group_memberships = group_memberships.len() as u64;
         if !group_memberships.is_empty() {
             let data = to_ndjson(&group_memberships)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/group_memberships.ndjson"), &encrypted)?;
+            members.push((
+                format!("{prefix}/group_memberships.ndjson"),
+                Zeroizing::new(data),
+            ));
         }
 
         // organization_memberships.ndjson — same shape as group memberships:
@@ -417,11 +420,10 @@ impl BackupExporter {
         counts.organization_memberships = org_memberships.len() as u64;
         if !org_memberships.is_empty() {
             let data = to_ndjson(&org_memberships)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(
-                &format!("{prefix}/organization_memberships.ndjson"),
-                &encrypted,
-            )?;
+            members.push((
+                format!("{prefix}/organization_memberships.ndjson"),
+                Zeroizing::new(data),
+            ));
         }
 
         // consents.ndjson — a restored user must not be re-prompted for
@@ -433,8 +435,7 @@ impl BackupExporter {
         counts.consents = consents.len() as u64;
         if !consents.is_empty() {
             let data = to_ndjson(&consents)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/consents.ndjson"), &encrypted)?;
+            members.push((format!("{prefix}/consents.ndjson"), Zeroizing::new(data)));
         }
 
         // agents.ndjson — the agent record AND its credentials. An agent that
@@ -447,8 +448,7 @@ impl BackupExporter {
         counts.agents = agents.len() as u64;
         if !agents.is_empty() {
             let data = to_ndjson(&agents)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/agents.ndjson"), &encrypted)?;
+            members.push((format!("{prefix}/agents.ndjson"), Zeroizing::new(data)));
         }
 
         // identity_providers.ndjson — the connector configs. The IdpId must
@@ -460,8 +460,10 @@ impl BackupExporter {
         counts.identity_providers = idps.len() as u64;
         if !idps.is_empty() {
             let data = to_ndjson(&idps)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/identity_providers.ndjson"), &encrypted)?;
+            members.push((
+                format!("{prefix}/identity_providers.ndjson"),
+                Zeroizing::new(data),
+            ));
         }
 
         // federation_links.ndjson — the user-to-IdP bindings. Without them a
@@ -474,8 +476,10 @@ impl BackupExporter {
         counts.federation_links = links.len() as u64;
         if !links.is_empty() {
             let data = to_ndjson(&links)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/federation_links.ndjson"), &encrypted)?;
+            members.push((
+                format!("{prefix}/federation_links.ndjson"),
+                Zeroizing::new(data),
+            ));
         }
 
         // webhooks.ndjson — silent loss of an integration nobody notices until
@@ -488,8 +492,7 @@ impl BackupExporter {
         counts.webhooks = webhooks.len() as u64;
         if !webhooks.is_empty() {
             let data = to_ndjson(&webhooks)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/webhooks.ndjson"), &encrypted)?;
+            members.push((format!("{prefix}/webhooks.ndjson"), Zeroizing::new(data)));
         }
 
         // saml_service_providers.ndjson + saml_signing_key.json — the SPs and
@@ -503,11 +506,10 @@ impl BackupExporter {
         counts.saml_service_providers = sps.len() as u64;
         if !sps.is_empty() {
             let data = to_ndjson(&sps)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(
-                &format!("{prefix}/saml_service_providers.ndjson"),
-                &encrypted,
-            )?;
+            members.push((
+                format!("{prefix}/saml_service_providers.ndjson"),
+                Zeroizing::new(data),
+            ));
         }
         if let Some(saml_key) = self
             .identity
@@ -516,8 +518,10 @@ impl BackupExporter {
         {
             // Unsealed on the way out, resealed under the destination's KEK on
             // the way in. The archive member itself is DEK-encrypted.
-            let encrypted = encrypt_bytes(&saml_key, dek)?;
-            writer.add_file(&format!("{prefix}/saml_signing_key.json"), &encrypted)?;
+            members.push((
+                format!("{prefix}/saml_signing_key.json"),
+                Zeroizing::new(saml_key.to_vec()),
+            ));
         }
 
         // scim_mappings.ndjson — without them the next SCIM sync re-creates
@@ -529,8 +533,10 @@ impl BackupExporter {
         counts.scim_mappings = scim.len() as u64;
         if !scim.is_empty() {
             let data = to_ndjson(&scim)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/scim_mappings.ndjson"), &encrypted)?;
+            members.push((
+                format!("{prefix}/scim_mappings.ndjson"),
+                Zeroizing::new(data),
+            ));
         }
 
         // invitations.ndjson — an outstanding invitation link must still
@@ -542,8 +548,7 @@ impl BackupExporter {
         counts.invitations = invitations.len() as u64;
         if !invitations.is_empty() {
             let data = to_ndjson(&invitations)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/invitations.ndjson"), &encrypted)?;
+            members.push((format!("{prefix}/invitations.ndjson"), Zeroizing::new(data)));
         }
 
         // retiring_signing_keys.json — a restore taken mid-rotation is exactly
@@ -557,8 +562,10 @@ impl BackupExporter {
         counts.retiring_signing_keys = retiring.len() as u64;
         if !retiring.is_empty() {
             let data = to_ndjson(&retiring)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(&format!("{prefix}/retiring_signing_keys.json"), &encrypted)?;
+            members.push((
+                format!("{prefix}/retiring_signing_keys.json"),
+                Zeroizing::new(data),
+            ));
         }
 
         // signing_key.json (AES-256-GCM encrypted PKCS#8 bytes)
@@ -566,8 +573,10 @@ impl BackupExporter {
             .identity
             .export_realm_signing_key_pkcs8(realm_id)
             .map_err(|e| BackupError::Engine(e.to_string()))?;
-        let encrypted = encrypt_bytes(&pkcs8, dek)?;
-        writer.add_file(&format!("{prefix}/signing_key.json"), &encrypted)?;
+        members.push((
+            format!("{prefix}/signing_key.json"),
+            Zeroizing::new(pkcs8.to_vec()),
+        ));
 
         // id_token_signing_key.json — the realm's RS256 ID-token key, present
         // once any client in the realm selected RS256 (task 26.55). Without it
@@ -579,8 +588,10 @@ impl BackupExporter {
             .export_realm_id_token_rsa_key(realm_id)
             .map_err(|e| BackupError::Engine(e.to_string()))?
         {
-            let encrypted = encrypt_bytes(&rsa_pkcs8, dek)?;
-            writer.add_file(&format!("{prefix}/id_token_signing_key.json"), &encrypted)?;
+            members.push((
+                format!("{prefix}/id_token_signing_key.json"),
+                Zeroizing::new(rsa_pkcs8.to_vec()),
+            ));
         }
 
         // retiring_id_token_signing_keys.json — the RS256 twin of
@@ -592,11 +603,10 @@ impl BackupExporter {
         counts.retiring_id_token_signing_keys = retiring_rsa.len() as u64;
         if !retiring_rsa.is_empty() {
             let data = to_ndjson(&retiring_rsa)?;
-            let encrypted = encrypt_bytes(&data, dek)?;
-            writer.add_file(
-                &format!("{prefix}/retiring_id_token_signing_keys.json"),
-                &encrypted,
-            )?;
+            members.push((
+                format!("{prefix}/retiring_id_token_signing_keys.json"),
+                Zeroizing::new(data),
+            ));
         }
 
         // audit.ndjson (optional), plus the chain material a restore needs to
@@ -610,8 +620,7 @@ impl BackupExporter {
             counts.audit_events = events.len() as u64;
             if !events.is_empty() {
                 let data = to_ndjson(&events)?;
-                let encrypted = encrypt_bytes(&data, dek)?;
-                writer.add_file(&format!("{prefix}/audit.ndjson"), &encrypted)?;
+                members.push((format!("{prefix}/audit.ndjson"), Zeroizing::new(data)));
 
                 let material = self
                     .audit
@@ -625,10 +634,19 @@ impl BackupExporter {
                         )
                     })?;
                 let chain_json = serde_json::to_vec(&material)?;
-                let encrypted_chain = encrypt_bytes(&chain_json, dek)?;
-                writer.add_file(&format!("{prefix}/audit_chain.json"), &encrypted_chain)?;
+                members.push((
+                    format!("{prefix}/audit_chain.json"),
+                    Zeroizing::new(chain_json),
+                ));
                 audit_chain_included = true;
             }
+        }
+
+        // Phase 2 — the archive I/O, outside the barrier.
+        drop(snapshot);
+        for (path, plaintext) in &members {
+            let encrypted = encrypt_bytes(plaintext, dek)?;
+            writer.add_file(path, &encrypted)?;
         }
 
         Ok(RealmManifest {
