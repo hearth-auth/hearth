@@ -41,8 +41,13 @@ const ATTACKER: Ipv4Addr = Ipv4Addr::LOCALHOST;
 /// A well-behaved client's address.
 const CLIENT: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
 
-/// An address listed as a trusted proxy — exempt from the per-address cap.
-const TRUSTED_PROXY: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 3);
+/// The `server.trusted_proxies` entry: a CIDR range, as an operator fronting
+/// Hearth with rescheduled ingress pods writes it.
+const TRUSTED_PROXY_RANGE: &str = "127.0.1.0/24";
+
+/// An address inside [`TRUSTED_PROXY_RANGE`] — exempt from the per-address
+/// cap, though it is not listed individually.
+const TRUSTED_PROXY: Ipv4Addr = Ipv4Addr::new(127, 0, 1, 9);
 
 /// Installs the limits every test in this binary shares (the limits are a
 /// process-global `OnceLock`; nextest runs one process per test).
@@ -53,7 +58,8 @@ fn install_limits() {
         header_read_timeout: HEADER_READ_TIMEOUT,
         tls_handshake_timeout: TLS_HANDSHAKE_TIMEOUT,
         max_connections_per_ip: PER_IP_CAP,
-        per_ip_exempt: vec![IpAddr::V4(TRUSTED_PROXY)],
+        per_ip_exempt: hearth::core::TrustedProxies::parse([TRUSTED_PROXY_RANGE])
+            .expect("valid trusted_proxies"),
         ..ServerLimits::default()
     });
 }

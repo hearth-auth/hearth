@@ -666,11 +666,16 @@ pub enum SessionLimitPolicy {
 
 /// Per-realm CIDR allow/deny lists (A-9).
 ///
-/// Stored as the operator's literal CIDR strings so an unparseable entry can
-/// be reported against the exact text they wrote. The compiled
-/// [`crate::abuse::cidr::CidrFilter`] is built from these at the call site;
-/// entries that do not parse are dropped there (fail-open per §6.1) after the
-/// start-up validator has already refused them.
+/// Evaluation is deny first, then allow: a `deny` match refuses outright;
+/// otherwise a non-empty `allow` list refuses every address it does not
+/// contain. Both lists empty means no network restriction.
+///
+/// Stored as the operator's literal strings so an unparseable entry can be
+/// reported against the exact text they wrote. Each is a single address or a
+/// CIDR range in the strict [`crate::core::IpRange`] grammar; `hearth config
+/// validate` and start-up refuse any other entry, naming the realm and list
+/// position. The compiled [`crate::abuse::cidr::CidrFilter`] is built from
+/// these at the call site with the same parser.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CidrPolicy {
     /// CIDRs permitted to authenticate. Empty = no allow-list restriction.
