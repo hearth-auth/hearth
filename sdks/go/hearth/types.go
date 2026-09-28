@@ -210,10 +210,25 @@ type PageResponse[T any] struct {
 	NextCursor *string `json:"next_cursor"`
 }
 
+// TrustLevel is a client's trust level, sent as the proto ClientTrustLevel name.
+type TrustLevel string
+
+const (
+	// TrustLevelFirstParty marks an operator-owned client. It needs no user
+	// consent and may receive the user's RBAC claims.
+	TrustLevelFirstParty TrustLevel = "CLIENT_TRUST_LEVEL_FIRST_PARTY"
+	// TrustLevelThirdParty marks an external client. It needs user consent and
+	// never receives first-party-only claims.
+	TrustLevelThirdParty TrustLevel = "CLIENT_TRUST_LEVEL_THIRD_PARTY"
+)
+
 // RegisterClientRequest contains parameters for registering an OAuth client.
+//
+// TrustLevel is optional; when empty the server default (third-party) applies.
 type RegisterClientRequest struct {
-	ClientName   string   `json:"client_name"`
-	RedirectURIs []string `json:"redirect_uris"`
+	ClientName   string     `json:"client_name"`
+	RedirectURIs []string   `json:"redirect_uris"`
+	TrustLevel   TrustLevel `json:"trust_level,omitempty"`
 }
 
 // OAuthClient represents an OAuth client record.

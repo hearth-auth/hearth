@@ -196,10 +196,19 @@ export interface PageResponse<T> {
   next_cursor: string | null;
 }
 
+/**
+ * A client's trust level. `first_party` is an operator-owned client: it needs
+ * no user consent and may receive the user's RBAC claims. `third_party` (the
+ * server default) needs consent and never receives first-party-only claims.
+ */
+export type ClientTrustLevel = "first_party" | "third_party";
+
 /** Parameters for registering an OAuth client. */
 export interface RegisterClientParams {
   clientName: string;
   redirectUris: string[];
+  /** Optional; when omitted the server default (`third_party`) applies. */
+  trustLevel?: ClientTrustLevel;
 }
 
 /** OAuth client record from the API. */

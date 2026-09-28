@@ -90,6 +90,13 @@ export class HearthApiClient {
       {
         client_name: params.clientName,
         redirect_uris: params.redirectUris,
+        // The server reads trust_level as the proto enum name.
+        ...(params.trustLevel && {
+          trust_level:
+            params.trustLevel === "first_party"
+              ? "CLIENT_TRUST_LEVEL_FIRST_PARTY"
+              : "CLIENT_TRUST_LEVEL_THIRD_PARTY",
+        }),
       },
       accessToken,
     );
