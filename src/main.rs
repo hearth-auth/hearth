@@ -762,25 +762,36 @@ async fn main() {
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "hearth", &mut std::io::stdout());
         }
-        Commands::Rbac { action } => match action {
-            RbacAction::Orphans { action } => match action {
-                OrphansAction::List { realm, data_dir } => {
-                    if let Err(e) = run_rbac_orphans_list(realm.as_deref(), &data_dir) {
-                        tracing::error!("error: {e}");
-                        std::process::exit(1);
-                    }
+        Commands::Rbac { action } => {
+            // Without this every `tracing::error!` below went to a dispatcher
+            // that does not exist: a refused store open (no HEARTH_MASTER_KEY,
+            // the data-directory lock held) exited 1 with no output at all.
+            let _tracing_guard = init_cli_tracing();
+            run_rbac_command(action);
+        }
+    }
+}
+
+/// Dispatches `hearth rbac …`. Exits 1 on failure, after reporting it.
+fn run_rbac_command(action: RbacAction) {
+    match action {
+        RbacAction::Orphans { action } => match action {
+            OrphansAction::List { realm, data_dir } => {
+                if let Err(e) = run_rbac_orphans_list(realm.as_deref(), &data_dir) {
+                    tracing::error!("error: {e}");
+                    std::process::exit(1);
                 }
-                OrphansAction::Purge {
-                    realm,
-                    data_dir,
-                    dry_run,
-                } => {
-                    if let Err(e) = run_rbac_orphans_purge(realm.as_deref(), &data_dir, dry_run) {
-                        tracing::error!("error: {e}");
-                        std::process::exit(1);
-                    }
+            }
+            OrphansAction::Purge {
+                realm,
+                data_dir,
+                dry_run,
+            } => {
+                if let Err(e) = run_rbac_orphans_purge(realm.as_deref(), &data_dir, dry_run) {
+                    tracing::error!("error: {e}");
+                    std::process::exit(1);
                 }
-            },
+            }
         },
     }
 }
@@ -5711,8 +5722,10 @@ fn run_config_validate(file: &std::path::Path) -> Result<(), Box<dyn std::error:
 /// reality" defect pointing the other way. Saying so on the success path
 /// closes the gap without inventing a new one.
 ///
-/// `serve` accepts EITHER the environment variable or an existing
-/// `{data_dir}/hearth.host_key`, so both satisfy this.
+/// Production `serve` takes the host key from `HEARTH_MASTER_KEY` ONLY — it
+/// never reads a `{data_dir}/hearth.host_key` file — so only the variable
+/// satisfies this. When such a file exists the warning says it is ignored, so
+/// an operator does not mistake it for a key source.
 fn config_validate_host_key_warning(config: &Config) -> Option<String> {
     if config.dev_mode || config.storage.data_dir.is_empty() {
         return None;
@@ -5721,15 +5734,19 @@ fn config_validate_host_key_warning(config: &Config) -> Option<String> {
         return None;
     }
     let host_key = std::path::Path::new(&config.storage.data_dir).join("hearth.host_key");
-    if host_key.exists() {
-        return None;
-    }
+    let ignored_file = if host_key.exists() {
+        format!(
+            " '{}' exists but is ignored: production never reads a host key file.",
+            host_key.display()
+        )
+    } else {
+        String::new()
+    };
     Some(format!(
-        "HEARTH_MASTER_KEY is unset and '{}' does not exist. Production refuses to \
-         auto-generate a host key, so `hearth serve` will fail to start on a host in this \
-         state even though this configuration is valid. Set HEARTH_MASTER_KEY before \
-         starting, or run this check on the host that already holds the key.",
-        host_key.display()
+        "HEARTH_MASTER_KEY is unset. Production takes the storage host key only from \
+         HEARTH_MASTER_KEY, so `hearth serve` will fail to start on a host in this state \
+         even though this configuration is valid. Set HEARTH_MASTER_KEY before starting, or \
+         run this check where it is set.{ignored_file}"
     ))
 }
 
@@ -5747,11 +5764,9 @@ fn config_validate_host_key_warning(config: &Config) -> Option<String> {
 /// not occur in `docs/guides/clustering.md` at all; the guide has been
 /// corrected, and this closes the same gap in the validator.
 ///
-/// [`config_validate_host_key_warning`] does not cover it. That check is
-/// satisfied by an existing `{data_dir}/hearth.host_key`, which is exactly the
-/// per-node, auto-generated key that is *wrong* in a cluster — so on a node
-/// that has already run once it stays silent on the very configuration that
-/// will fail.
+/// [`config_validate_host_key_warning`] does not cover it: that check can
+/// only say the variable is missing on THIS host, not that every node must
+/// carry the same value.
 ///
 /// A warning rather than an error, for the reason task 26.23 established: the
 /// key is a property of the machine, not of the file being validated, and
@@ -5773,9 +5788,9 @@ fn config_validate_cluster_master_key_warning(config: &Config) -> Option<String>
     }
     Some(format!(
         "HEARTH_MASTER_KEY is unset and this is a {node_count}-node cluster configuration. \
-         A cluster node must NOT auto-generate its own host key: the master key and the KEK \
-         wrap data that replicates, so a node with a different key cannot decrypt rows its \
-         peers wrote. Set one value for HEARTH_MASTER_KEY and export the SAME value on every \
+         Every node needs it, and needs the same one: the master key and the KEK wrap data \
+         that replicates, so a node with a different key cannot decrypt rows its peers \
+         wrote. Set one value for HEARTH_MASTER_KEY and export the SAME value on every \
          node before starting any of them."
     ))
 }
@@ -6710,12 +6725,11 @@ mod tests {
         );
     }
 
-    /// Control — an existing host-key file satisfies it too.
-    ///
-    /// `serve` accepts either, so a check that demanded the environment
-    /// variable would refuse every already-initialised deployment.
+    /// An existing `hearth.host_key` does NOT satisfy it: production never
+    /// reads that file, so `serve` refuses this host and the check must say
+    /// so — naming the variable, and that the file is ignored.
     #[test]
-    fn config_validate_accepts_an_existing_host_key_file() {
+    fn config_validate_reports_a_missing_master_key_even_with_a_host_key_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::remove_var("HEARTH_MASTER_KEY");
         std::fs::write(dir.path().join("hearth.host_key"), [0u8; 72]).expect("write host key");
@@ -6723,11 +6737,12 @@ mod tests {
         config.dev_mode = false;
         config.storage.data_dir = dir.path().display().to_string();
 
-        let warning = config_validate_host_key_warning(&config);
+        let warning = config_validate_host_key_warning(&config)
+            .expect("a host key file must not satisfy the production check");
 
         assert!(
-            warning.is_none(),
-            "an existing hearth.host_key must satisfy it: {warning:?}"
+            warning.contains("HEARTH_MASTER_KEY") && warning.contains("ignored"),
+            "the report must name the variable and say the file is ignored; got: {warning}"
         );
     }
 
@@ -6751,25 +6766,18 @@ mod tests {
         }
     }
 
-    /// A multi-node config with no master key must be reported — and reported
-    /// even though an existing `hearth.host_key` satisfies the single-node
-    /// check, because a per-node auto-generated host key is precisely what is
-    /// wrong in a cluster.
+    /// A multi-node config with no master key must be reported with the
+    /// cluster-specific rule — the key must be the SAME on every node — which
+    /// the single-node host-key check does not state.
     #[test]
     fn config_validate_reports_a_missing_cluster_master_key() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::remove_var("HEARTH_MASTER_KEY");
-        std::fs::write(dir.path().join("hearth.host_key"), [0u8; 72]).expect("write host key");
         let mut config = Config::dev();
         config.dev_mode = false;
         config.storage.data_dir = dir.path().display().to_string();
         config.cluster = Some(cluster_config_with_peers(2));
 
-        assert!(
-            config_validate_host_key_warning(&config).is_none(),
-            "fixture broken: the single-node check must be satisfied here, otherwise this \
-             test does not show the cluster-specific gap"
-        );
         let warning = config_validate_cluster_master_key_warning(&config)
             .expect("a multi-node config without a shared master key must be reported");
         assert!(

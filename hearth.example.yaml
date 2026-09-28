@@ -55,11 +55,13 @@
 # │                            Generate: openssl rand -hex 32           │
 # │                                                                     │
 # │ [ ] HEARTH_MASTER_KEY     — host key wrapping every realm KEK on    │
-# │     (env var)               disk. On a FRESH production data dir    │
-# │                            with no hearth.host_key file, startup    │
-# │                            aborts without it. `hearth config        │
-# │                            validate` does NOT check for it, so a    │
-# │                            "valid" config can still fail to serve.  │
+# │     (env var)               disk; production startup aborts         │
+# │                            without it. It is the ONLY key source    │
+# │                            outside --dev: a hearth.host_key file    │
+# │                            in the data dir is ignored. `hearth      │
+# │                            config validate` only WARNS when it is   │
+# │                            unset (exit 0), so a "valid" config can  │
+# │                            still fail to serve.                     │
 # │                            Generate: openssl rand -hex 32           │
 # │                                                                     │
 # │ [ ] server.trusted_proxies — REQUIRED whenever                      │
@@ -97,7 +99,8 @@
 # Two things must also be in the environment before `serve` will start:
 #   export HEARTH_MASTER_KEY=$(openssl rand -hex 32)   # host key
 #   export HEARTH_KEK=$(openssl rand -hex 32)          # key-encryption key
-# Neither is checked by `hearth config validate`.
+# `hearth config validate` fails without HEARTH_KEK (or security.key_encryption_key)
+# but only warns, exiting 0, without HEARTH_MASTER_KEY.
 #
 # server:
 #   bind_address: "0.0.0.0"

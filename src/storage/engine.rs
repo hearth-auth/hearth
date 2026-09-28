@@ -142,9 +142,10 @@ pub struct StorageConfig {
     pub allow_missing_keks: bool,
     /// Background SST compaction configuration.
     pub compaction: CompactionConfig,
-    /// When `true`, auto-generation of the host key is permitted if
-    /// `HEARTH_MASTER_KEY` is unset (dev/test only). When `false` (production),
-    /// startup fails if the env var is absent — preventing a world-readable key.
+    /// When `true` (dev/test only), a missing `HEARTH_MASTER_KEY` falls back
+    /// to `{data_dir}/hearth.host_key`, auto-generating it on first open. When
+    /// `false` (production), the host key comes from `HEARTH_MASTER_KEY` only:
+    /// startup fails if the variable is absent, and the file is never read.
     pub dev_mode: bool,
     /// Total byte budget for the process-wide decrypted-block cache shared by
     /// all v3 SST readers (HEA-1914). Bounds decrypted cold-tier residency
@@ -551,7 +552,7 @@ impl EmbeddedStorageEngine {
             Err(e) => return Err(StorageError::Io(e)),
         }
 
-        // Load key registry (host key from env/auto-gen)
+        // Load key registry (host key from HEARTH_MASTER_KEY; dev: file/auto-gen)
         let key_registry = Arc::new(KeyRegistry::load_with_fs(
             &config.data_dir,
             Arc::clone(&fs),
@@ -4696,6 +4697,41 @@ mod tests {
             SyncMode::EveryWrite,
             "production() must always use SyncMode::EveryWrite"
         );
+    }
+
+    // ── G1: a production open never reads `hearth.host_key` ──────────────────
+
+    /// A store first opened in dev mode carries an auto-generated
+    /// `hearth.host_key`. Opening it with the production config (what `serve`
+    /// and every one-shot CLI command use) and no `HEARTH_MASTER_KEY` must
+    /// refuse, naming the variable, instead of reading that file.
+    #[test]
+    fn production_open_refuses_a_store_whose_only_key_is_the_host_key_file() {
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let _dev = EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                .expect("dev open auto-generates the host key file");
+        }
+        assert!(
+            dir.path().join("hearth.host_key").exists(),
+            "fixture: the dev open must have written hearth.host_key"
+        );
+
+        let result = EmbeddedStorageEngine::open(StorageConfig::production(
+            dir.path().to_path_buf(),
+            64 * 1024 * 1024,
+            4 * 1024 * 1024,
+            1000,
+        ));
+        match result {
+            Err(StorageError::Crypto { reason }) => assert!(
+                reason.contains("HEARTH_MASTER_KEY"),
+                "the refusal must name HEARTH_MASTER_KEY, got: {reason}"
+            ),
+            Err(other) => panic!("expected StorageError::Crypto, got: {other:?}"),
+            Ok(_) => panic!("production open must not accept the hearth.host_key file"),
+        }
     }
 
     // ── F2 regression: hot-tier get must be zero-alloc ───────────────────────

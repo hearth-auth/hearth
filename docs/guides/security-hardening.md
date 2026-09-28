@@ -124,17 +124,18 @@ The host key (`HEARTH_MASTER_KEY`) encrypts the Key Encryption Keys (KEKs) held 
 registry currently holds a **single** KEK — the system realm's — and that one KEK wraps the
 data key of every WAL segment and SST for every realm.
 
-> **Production requirement (HEA-1368):** In production mode (any startup without `--dev`),
-> Hearth **refuses to start** if `HEARTH_MASTER_KEY` is unset and no `hearth.host_key` file
-> exists. Auto-generation is only permitted under `--dev`. The startup error message is
-> actionable and explains the remediation. This is intentional fail-closed security behavior.
+> **Production requirement:** In production mode (any startup without `--dev`), the host key
+> comes from `HEARTH_MASTER_KEY` **only**. Hearth **refuses to start** when the variable is
+> unset, and it never reads a `hearth.host_key` file from the data directory — a plaintext key
+> stored beside the ciphertext it protects would defeat encryption at rest, so such a file is
+> ignored (the startup error says so). Generating and reading `hearth.host_key` happens only
+> under `--dev`. This is intentional fail-closed security behavior.
 
 - **Never commit the host key to version control.**
 - Store it in a secrets manager (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager).
 - Inject it at runtime via the `HEARTH_MASTER_KEY` environment variable.
-- If you previously ran Hearth without `HEARTH_MASTER_KEY` set, Hearth auto-generated and
-  persisted the key to `<data-dir>/hearth.host_key` (mode 0600). You can export it:
-  `export HEARTH_MASTER_KEY=$(xxd -p -c 32 /path/to/hearth.host_key | tr -d '\n')`
+- Do not leave a `hearth.host_key` file in a production data directory. Production ignores it,
+  and it is a plaintext key on the same disk as the data.
 - Rotate it by re-wrapping the KEKs in `hearth.keys` (Hearth supports O(n files) rotation —
   only DEK headers are re-wrapped, not bulk data).
 

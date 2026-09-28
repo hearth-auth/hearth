@@ -41,7 +41,7 @@ key:
 
 | Env var | Required? | Purpose |
 |---------|-----------|---------|
-| `HEARTH_MASTER_KEY` | Required in production | 32-byte host key that wraps every realm KEK on disk, and the passphrase for `hearth backup export` / `restore`. When unset, production startup fails rather than auto-generating a world-readable `hearth.host_key` file. |
+| `HEARTH_MASTER_KEY` | Required in production | 32-byte host key that wraps every realm KEK on disk, and the passphrase for `hearth backup export` / `restore`. It is the only host-key source in production: when unset, startup fails, and a `{data_dir}/hearth.host_key` file is never read (only `--dev` generates and reads one). `hearth config validate` warns when it is unset. |
 | `HEARTH_PREVIOUS_MASTER_KEY` | Only during a host-key rotation | Previous host key value. Set it when startup fails with `HostKeyMismatch` after rotating `HEARTH_MASTER_KEY`; remove it once every realm KEK has been re-wrapped. |
 | `HEARTH_KEK` | One of this or `security.key_encryption_key` | Key-encryption key for realm signing keys at rest. 64 lowercase hex characters (`openssl rand -hex 32`). |
 | `HEARTH_SMS_OTP_HMAC_KEY` | Required whenever `sms.transport` is not `"log"` | At least 32 bytes. Cryptographically binds an SMS OTP to this server; startup fails without it once a real SMS transport is configured. |
