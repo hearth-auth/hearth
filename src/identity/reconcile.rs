@@ -522,6 +522,51 @@ fn reconcile_rbac_for_realm(
     }
 }
 
+/// Makes the realm's identity protected-resource registry equal its YAML
+/// `protected_resources` (OIDC.md §3.4.1a).
+///
+/// The YAML block is the registry's only source of truth — there is no admin
+/// write API — so an absent block means an empty registry, and an entry
+/// removed from YAML is deleted here. Each entry's `resource_uri` is the key
+/// and the value RFC 8693 `audience` / `resource` must equal; its scope
+/// bundle names become the record's `scopes`. The same entries feed the RBAC
+/// scope bundles in [`reconcile_rbac_for_realm`].
+///
+/// # Errors
+///
+/// Propagates the engine's error. The registry is an allowlist, so a failed
+/// reconcile is surfaced rather than logged and skipped.
+fn reconcile_protected_resources_for_realm(
+    engine: &dyn IdentityEngine,
+    realm_id: &RealmId,
+    realm_name: &str,
+    yaml_cfg: &RealmYamlConfig,
+) -> Result<(), IdentityError> {
+    let declared: Vec<crate::identity::RegisterProtectedResourceRequest> = yaml_cfg
+        .protected_resources
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|r| crate::identity::RegisterProtectedResourceRequest {
+            resource_uri: r.resource_uri.clone(),
+            display_name: r.display_name.clone(),
+            scopes: r.scopes.iter().map(|b| b.name.clone()).collect(),
+            required_claims: Vec::new(),
+        })
+        .collect();
+    let report = engine.reconcile_protected_resources(realm_id, &declared)?;
+    if !report.is_empty() {
+        info!(
+            realm = realm_name,
+            registered = ?report.registered,
+            updated = ?report.updated,
+            removed = ?report.removed,
+            "reconciled YAML protected resources"
+        );
+    }
+    Ok(())
+}
+
 /// Creates seed users declared under `realms.<name>.seed_users`.
 ///
 /// Each user is created-if-missing (idempotent by email). Existing users are
@@ -918,6 +963,10 @@ fn reconcile_declared_realms(
         // Errors are logged (not fatal) so a bad RBAC block doesn't abort
         // reconciliation of other realms.
         reconcile_rbac_for_realm(rbac, &realm_id, name, yaml_cfg);
+
+        // Mirror the same YAML `protected_resources` into the identity
+        // registry that RFC 8693 token exchange checks targets against.
+        reconcile_protected_resources_for_realm(engine, &realm_id, name, yaml_cfg)?;
 
         // Reconcile seed users declared under this realm. Runs after RBAC
         // so that role names from the YAML `roles:` block are resolvable.

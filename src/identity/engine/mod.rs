@@ -3,7 +3,7 @@
 //! Implements `IdentityEngine` using the `StorageEngine` trait for persistence
 //! and `Clock` trait for deterministic timestamps.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -330,9 +330,10 @@ use crate::identity::types::{
     DemoSeedSpec, FederationLinkExport, ImportClientRequest, ImportUserRequest, InvitationStatus,
     ListAgentsQuery, Organization, OrganizationInvitation, OrganizationMembership,
     OrganizationRole, OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey,
-    ProtectedResource, Realm, RealmStatus, RegisterProtectedResourceRequest, RegisterUserRequest,
-    RegisterUserResponse, RegistrationPolicy, RetiringSigningKeyExport, RevocationExport,
-    Rfc8693Request, Rfc8693Response, ScimMappingExport, ScimMappingKind, Session, SessionContext,
+    ProtectedResource, ProtectedResourceReconcileReport, Realm, RealmStatus,
+    RegisterProtectedResourceRequest, RegisterUserRequest, RegisterUserResponse,
+    RegistrationPolicy, RetiringSigningKeyExport, RevocationExport, Rfc8693Request,
+    Rfc8693Response, ScimMappingExport, ScimMappingKind, Session, SessionContext,
     SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
     UpdateProtectedResourceRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
     Webhook,
@@ -17465,22 +17466,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
-        if request.resource_uri.is_empty() {
-            return Err(IdentityError::InvalidInput {
-                reason: "resource_uri must not be empty".to_string(),
-            });
-        }
-        if !request.resource_uri.contains("://") {
-            return Err(IdentityError::InvalidInput {
-                reason: "resource_uri must be an absolute URI with a scheme".to_string(),
-            });
-        }
-        // AGENT_AUTH.md §2.6: a realm declares its MCP scope vocabulary here,
-        // and every `mcp:`-prefixed scope in it MUST be
-        // `{namespace}:{category}:{action}`. This is the enforcement point the
-        // validator was written for and had never been wired to (A-10).
-        crate::identity::mcp::validate_mcp_scope_vocabulary(&request.scopes)
-            .map_err(|reason| IdentityError::InvalidInput { reason })?;
+        Self::validate_protected_resource_request(request)?;
         let uri_key = keys::encode_resource_server_uri_index(&request.resource_uri);
         if self
             .storage
@@ -17663,6 +17649,71 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             &resource_id.as_uuid().to_string(),
         )?;
         Ok(())
+    }
+
+    fn reconcile_protected_resources(
+        &self,
+        realm_id: &RealmId,
+        declared: &[RegisterProtectedResourceRequest],
+    ) -> Result<ProtectedResourceReconcileReport, IdentityError> {
+        // Validate the whole declared set before writing anything, so a bad
+        // entry leaves the registry as it was rather than half-reconciled.
+        let mut declared_uris: HashSet<&str> = HashSet::with_capacity(declared.len());
+        for request in declared {
+            Self::validate_protected_resource_request(request)?;
+            if !declared_uris.insert(request.resource_uri.as_str()) {
+                return Err(IdentityError::InvalidInput {
+                    reason: format!(
+                        "protected resource resource_uri `{}` is declared more than once",
+                        request.resource_uri
+                    ),
+                });
+            }
+        }
+
+        let existing = self.list_protected_resources(realm_id)?;
+        let mut report = ProtectedResourceReconcileReport::default();
+
+        // Removals first: the registry is an allowlist of token-exchange
+        // targets, so if a later write fails the registry is left narrower
+        // than declared, never wider.
+        for resource in &existing {
+            if !declared_uris.contains(resource.resource_uri.as_str()) {
+                self.delete_protected_resource(realm_id, &resource.id)?;
+                report.removed.push(resource.resource_uri.clone());
+            }
+        }
+
+        let by_uri: HashMap<&str, &ProtectedResource> = existing
+            .iter()
+            .map(|r| (r.resource_uri.as_str(), r))
+            .collect();
+        for request in declared {
+            match by_uri.get(request.resource_uri.as_str()) {
+                Some(current) => {
+                    let drifted = current.display_name != request.display_name
+                        || current.scopes != request.scopes
+                        || current.required_claims != request.required_claims;
+                    if drifted {
+                        self.update_protected_resource(
+                            realm_id,
+                            &current.id,
+                            &UpdateProtectedResourceRequest {
+                                display_name: Some(request.display_name.clone()),
+                                scopes: Some(request.scopes.clone()),
+                                required_claims: Some(request.required_claims.clone()),
+                            },
+                        )?;
+                        report.updated.push(request.resource_uri.clone());
+                    }
+                }
+                None => {
+                    self.register_protected_resource(realm_id, request)?;
+                    report.registered.push(request.resource_uri.clone());
+                }
+            }
+        }
+        Ok(report)
     }
 
     // ── B.4 RFC 8693 Token Exchange ───────────────────────────────────────────

@@ -144,10 +144,10 @@ pub use types::{
     CreateAgentApiKeyResponse, CreateAgentRequest, CreateApprovalRequestInput,
     CreateCrossRealmPolicyRequest, CreateTransactionTokenRequest, CrossRealmTrustPolicy,
     DelegationGrantEntry, DeriveAatRequest, IssueAatRequest, ListAgentsQuery, PlaintextApiKey,
-    ProtectedResource, RegisterProtectedResourceRequest, RegisterSpiffeIdRequest,
-    RetiringSigningKeyExport, RevocationExport, Rfc8693Request, Rfc8693Response,
-    SpiffeIdentityMapping, StoredDelegationGrant, TransactionTokenClaims, TransactionTokenResponse,
-    UpdateAgentRequest, UpdateProtectedResourceRequest,
+    ProtectedResource, ProtectedResourceReconcileReport, RegisterProtectedResourceRequest,
+    RegisterSpiffeIdRequest, RetiringSigningKeyExport, RevocationExport, Rfc8693Request,
+    Rfc8693Response, SpiffeIdentityMapping, StoredDelegationGrant, TransactionTokenClaims,
+    TransactionTokenResponse, UpdateAgentRequest, UpdateProtectedResourceRequest,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -3097,6 +3097,30 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         resource_id: &ResourceServerId,
     ) -> Result<(), IdentityError>;
+
+    /// Makes the realm's protected-resource registry equal `declared`.
+    ///
+    /// The registry is keyed by `resource_uri` (exact string). A declared URI
+    /// that is not registered is registered; a registered one whose display
+    /// name, scopes or required claims differ is updated in place (its id is
+    /// kept); a registered URI that is not declared is deleted. The declared
+    /// set is the realm's YAML `protected_resources` and is the registry's only
+    /// source of truth: this is what `audience` / `resource` of an RFC 8693
+    /// token exchange are checked against (OIDC.md §3.4.1a).
+    ///
+    /// Every declared entry is validated before anything is written, so an
+    /// invalid set changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// - [`IdentityError::InvalidInput`] — an entry has an invalid
+    ///   `resource_uri` or MCP scope, or two entries share a `resource_uri`.
+    /// - Realm-status and storage errors from the underlying writes.
+    fn reconcile_protected_resources(
+        &self,
+        realm_id: &RealmId,
+        declared: &[types::RegisterProtectedResourceRequest],
+    ) -> Result<types::ProtectedResourceReconcileReport, IdentityError>;
 
     // ── B.4 RFC 8693 Token Exchange ───────────────────────────────────────────
 

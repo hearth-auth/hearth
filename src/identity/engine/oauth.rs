@@ -3860,6 +3860,36 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
+    /// Validates one protected-resource registration: shared by the single
+    /// register call and the YAML reconcile so both accept the same set.
+    ///
+    /// `resource_uri` must be a valid RFC 8707 resource indicator (absolute,
+    /// with a scheme, no fragment) with no surrounding whitespace — it is
+    /// compared byte-for-byte against exchange `audience` / `resource`
+    /// values, so a padded value could never match. Every `mcp:`-prefixed
+    /// scope must be `{namespace}:{category}:{action}` (AGENT_AUTH.md §2.6,
+    /// A-10).
+    pub(super) fn validate_protected_resource_request(
+        request: &crate::identity::types::RegisterProtectedResourceRequest,
+    ) -> Result<(), IdentityError> {
+        if request.resource_uri.is_empty() {
+            return Err(IdentityError::InvalidInput {
+                reason: "resource_uri must not be empty".to_string(),
+            });
+        }
+        let valid = Uri::try_from(request.resource_uri.clone())
+            .is_ok_and(|uri| uri.as_str() == request.resource_uri);
+        if !valid {
+            return Err(IdentityError::InvalidInput {
+                reason: "resource_uri must be an absolute URI with a scheme, no fragment and no \
+                         surrounding whitespace"
+                    .to_string(),
+            });
+        }
+        crate::identity::mcp::validate_mcp_scope_vocabulary(&request.scopes)
+            .map_err(|reason| IdentityError::InvalidInput { reason })
+    }
+
     /// Refuses an RFC 8693 `audience` or `resource` that is not the URI of a
     /// protected resource registered in the realm (GA audit M8): RFC 8693
     /// §2.2.2 `invalid_target`.
