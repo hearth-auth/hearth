@@ -204,6 +204,12 @@ const PROMPT_NONE_MAX_PROBES: u32 = 50;
 /// opening a meaningful replay window.
 const CLOCK_SKEW_SECS: i64 = 60;
 
+/// Revoked-JTI projection id prefix for a client-wide `client_credentials`
+/// cutoff (GA audit L5). The entry `{realm}:client-cutoff:{client_uuid}` holds
+/// the latest `exp` any sessionless token issued to that client before it was
+/// archived or deleted can carry. Real `jti`s are UUIDs, so it cannot collide.
+const CLIENT_TOKEN_CUTOFF_PREFIX: &str = "client-cutoff:";
+
 /// How long the token-validation hot path may reuse its last epoch
 /// reconciliation before reading the rows again.
 ///
@@ -3492,6 +3498,9 @@ impl EmbeddedIdentityEngine {
             let Some(client) = self.get_client(realm_id, client_id)? else {
                 return Err(IdentityError::TokenRevoked);
             };
+            // B9: an archived client's families are revoked on archival; this
+            // gate also covers a family written while archival was running.
+            Self::refuse_inactive_client(&client)?;
             let realm_fapi = self
                 .get_realm(realm_id)?
                 .ok_or(IdentityError::RealmNotFound)?
@@ -3517,11 +3526,16 @@ impl EmbeddedIdentityEngine {
             // are already constrained by rotation + DPoP binding. A secretless
             // client with an assertion key or a JWKS is not public: it binds
             // like a secret holder (it authenticates with `private_key_jwt`).
+            let authenticated = bind_ctx.and_then(|c| c.authenticated_client_id.as_ref());
             if !client.is_public() {
-                let authenticated = bind_ctx.and_then(|c| c.authenticated_client_id.as_ref());
                 if authenticated != Some(client_id) {
                     return Err(IdentityError::InvalidClient);
                 }
+            } else if authenticated.is_some_and(|presented| presented != client_id) {
+                // GA audit L10: a public client proves nothing, but a request
+                // that NAMES a client must name the family's own. Otherwise
+                // one public client could redeem another's refresh token.
+                return Err(IdentityError::InvalidClient);
             }
         }
 
@@ -5346,10 +5360,49 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         claims: &TokenClaims,
     ) -> Result<(), IdentityError> {
-        if self.is_token_jti_revoked(realm_id, claims) {
+        if self.is_token_jti_revoked(realm_id, claims) || self.is_client_cut_off(realm_id, claims) {
             return Err(IdentityError::InvalidToken);
         }
         Ok(())
+    }
+
+    /// Returns `true` when a sessionless token was issued to a client that has
+    /// since been archived or deleted (GA audit L5): the revoked-JTI
+    /// projection holds a `client-cutoff:{client}` entry whose value is the
+    /// latest `exp` any pre-cutoff token can carry, and this token's `exp` is
+    /// not after it.
+    ///
+    /// Hot-path safe: the key is formatted into a stack buffer and looked up
+    /// with a single epoch-pinned `load()` — no allocation, lock or syscall.
+    fn is_client_cut_off(&self, realm_id: &RealmId, claims: &TokenClaims) -> bool {
+        use std::fmt::Write as _;
+        let Some(client_uuid) = claims.sub.strip_prefix("client_") else {
+            return false;
+        };
+        let mut key = StackKeyBuf::new();
+        if write!(
+            key,
+            "{}:{CLIENT_TOKEN_CUTOFF_PREFIX}{client_uuid}",
+            realm_id.as_uuid()
+        )
+        .is_ok()
+        {
+            if let Some(k) = key.as_str() {
+                return self
+                    .revoked_jti_cache
+                    .get(k)
+                    .is_some_and(|cutoff| claims.exp <= cutoff);
+            }
+        }
+        // Oversized `sub` (never one Hearth issued to a client): off the warm
+        // path, one allocation keeps the check correct.
+        let heap_key = format!(
+            "{}:{CLIENT_TOKEN_CUTOFF_PREFIX}{client_uuid}",
+            realm_id.as_uuid()
+        );
+        self.revoked_jti_cache
+            .get(heap_key.as_str())
+            .is_some_and(|cutoff| claims.exp <= cutoff)
     }
 
     /// Returns `true` when the token's `jti` appears in the revocation
