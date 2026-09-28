@@ -4,14 +4,12 @@
 
 [advisories]
 ignore = [
-    # RUSTSEC-2023-0071: Marvin Attack timing side-channel in rsa crate.
-    # Hearth uses rsa only for key generation and PKCS#8 serialization — no
-    # PKCS#1 v1.5 decryption is performed anywhere in the codebase, which is
-    # the only affected code path. All RSA signing is delegated to
-    # ring::signature::RsaKeyPair (unaffected). No patched version of rsa is
-    # available; revisit when rsa 0.10+ lands with tonic/tower ecosystem support
-    # (tracked in HEA-116).
-    "RUSTSEC-2023-0071",
+    # RUSTSEC-2023-0071 (rsa, Marvin Attack) was removed by the GA audit (L1):
+    # `rsa` is not in this Cargo.lock at all — RSA key generation moved to
+    # rcgen/aws-lc-rs (deny.toml), signing and verification are on `ring` — so
+    # the ignore matched nothing and only claimed a decision about a crate the
+    # server does not link. The Rust SDK's own lockfile, which does contain rsa,
+    # is covered by osv-scanner.toml.
     # RUSTSEC-2026-0235: out-of-bounds reads validating untrusted rkyv archives
     # that contain Rc/Arc. rkyv 0.7.46 is an *optional, unselected* dependency of
     # rust_decimal (rust_decimal <- byte-unit <- openraft); only rust_decimal's

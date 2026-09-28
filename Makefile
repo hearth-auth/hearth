@@ -554,7 +554,9 @@ ci-fast: fmt clippy proto-lint css-check test-quality abuse-check security-gate
 ##
 ## validate_token gates (HEA-739):
 ##   validate_token latency    p99 ≤ 1 ms  (1×runner headroom over 500 µs production target)
-##   validate_token allocs     ≤ 64 allocs/call (regression ceiling)
+##   validate_token allocs     = 0 allocs/call (zero-alloc proof; MAX_ALLOCS_PER_CALL
+##                             in benches/validate_token.rs — the gate fails on any
+##                             allocation, not above a ceiling)
 bench-gate:
 	PROTOC=$(PROTOC) cargo bench --bench rbac_check $(CARGO_FLAGS)
 	PROTOC=$(PROTOC) cargo bench --bench session_lookup $(CARGO_FLAGS)
