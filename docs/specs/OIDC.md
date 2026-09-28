@@ -461,18 +461,42 @@ the resource-local scope bundles, so there is one source of truth. Reconcile mir
 into the identity registry at startup and on every config reload
 (`IdentityEngine::reconcile_protected_resources`, called from `reconcile_realms`):
 
-- The identifier is the entry's **`resource_uri`**. An exchange's `audience` / `resource` must
-  equal it **byte-for-byte** — no case folding, default-port stripping or trailing-slash
-  normalization — and the minted token's `aud` carries it verbatim.
+- The identifier is the entry's **`resource_uri`, in canonical form**. One rule
+  (`core::Uri`) canonicalizes every resource indicator Hearth handles — the YAML entry at config
+  load, an exchange's `audience` / `resource`, an authorization grant's `resource`, and RBAC's
+  resource scope lookup — so every spelling of one URI is the same resource to the exchange
+  allowlist and to RBAC:
+  - scheme and host lowercased; path and query keep their case;
+  - the scheme's default port dropped (`:443` for `https`, `:80` for `http`);
+  - trailing slashes dropped (`https://mcp.acme.example/` → `https://mcp.acme.example`,
+    `/v1/` → `/v1`);
+  - query kept verbatim; fragments, userinfo and a missing host are refused.
+
+  `HTTPS://MCP.Acme.Example:443/api/` and `https://mcp.acme.example/api` are therefore one
+  resource; `https://mcp.acme.example/API`, `http://…/api` and `…:8443/api` are three others and
+  answer `invalid_target`. A value the subject token already carries in `aud` is narrowing and is
+  kept verbatim; any other accepted target is minted into `aud` in canonical form.
 - The registry is exactly the YAML set. An entry added to YAML becomes a valid target on the next
   reconcile; an entry removed from YAML (or removing the whole `protected_resources` key) is
   deleted from the registry, and the next exchange naming it answers `invalid_target`. A changed
-  `display_name` or bundle list updates the record in place.
+  `display_name` or bundle list updates the record in place. RBAC's resource scope bundles mirror
+  YAML the same way.
+- **Removing a resource stops its tokens** (AGENT_AUTH.md §2.5). Every access token whose `aud`
+  names the removed resource — from an authorization grant with `resource=` or from an exchange —
+  stops validating (`validate_token`) and introspects `active: false` at once, and every grant
+  family bound to the resource is revoked, so its refresh tokens stop rotating. Mechanism: an
+  audience cutoff in the revoked-JTI projection (the same projection, and the same allocation-free
+  lookup, as a client's `client_credentials` cutoff), holding the latest `exp` a pre-removal token
+  can carry. Tokens minted after the resource is re-added are unaffected. A token whose `aud` does
+  not include Hearth's own audience (an exchange with `audience=` only) is never accepted by
+  Hearth's validator in the first place; a resource server that verifies such a JWT offline keeps
+  accepting it until it expires.
 - There is no admin REST/gRPC write API for the registry, deliberately.
-- Config load refuses an entry whose `resource_uri` is not an absolute URI with a scheme (or has
-  a fragment or surrounding whitespace), a `resource_uri` declared twice in one realm, and an
-  `mcp:`-prefixed bundle name that is not `mcp:{category}:{action}` — so reconcile never meets an
-  entry the registry would reject.
+- Config load refuses an entry whose `resource_uri` is not a valid resource indicator (or has
+  surrounding whitespace), a `resource_uri` declared twice in one realm **after
+  canonicalization**, an `mcp:`-prefixed bundle name that is not `mcp:{category}:{action}`, and —
+  outside `--dev` — a `resource_uri` that is not `https` (loopback included: AGENT_AUTH.md §2.5
+  carves out dev mode only). So reconcile never meets an entry the registry would reject.
 
 ```yaml
 realms:
