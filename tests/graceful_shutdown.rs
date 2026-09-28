@@ -320,8 +320,8 @@ mod sigterm {
             .expect("server must start processing the partial request");
 
         send_sigterm(child.id());
-        // AUDIT: justified-sleep: gives the signal handler a moment to run; the
-        // assertion window below (HTTP drain = 6 s) is far wider (L24).
+        // The HTTP drain (6 s) keeps the process alive far longer than this wait.
+        // AUDIT: justified-sleep: lets the SIGTERM handler run before probing gRPC (L24).
         std::thread::sleep(Duration::from_millis(1500));
 
         let grpc_accepts = std::net::TcpStream::connect_timeout(

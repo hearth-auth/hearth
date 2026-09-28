@@ -132,7 +132,7 @@ async fn unfinished_requests_from_one_address_cannot_starve_another_client() {
         let _ = sock.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n").await;
         attacker.push(sock);
     }
-    // Let the server admit (or refuse) every attacker connection.
+    // AUDIT: justified-sleep: no observable signal that the accept loop has admitted every socket (B6).
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let started = Instant::now();

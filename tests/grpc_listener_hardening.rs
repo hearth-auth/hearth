@@ -215,7 +215,7 @@ async fn the_grpc_listener_caps_connections_per_address() {
     for _ in 0..PER_IP_CAP {
         held.push(connect_from(ATTACKER, addr).await);
     }
-    // Let the accept loop count them.
+    // AUDIT: justified-sleep: no observable signal that the accept loop has counted the sockets (B6).
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let mut extra = connect_from(ATTACKER, addr).await;
