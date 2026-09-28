@@ -1336,9 +1336,12 @@ Per-realm security policy.
 #### `realms.<name>.security.cidr_policy` (A-9)
 
 Tenant-managed network allow/deny lists, consulted on the login form before any
-password hashing. Evaluation is **deny first, then allow**: a `deny` match
-refuses outright, and a non-empty `allow` list refuses everything it does not
-contain. Both lists empty (the default) means no network restriction.
+password hashing. Evaluation is deny first, then allow: a `deny` match refuses
+outright; otherwise a non-empty `allow` list refuses every address it does not
+contain. Both lists empty means no network restriction. (Both lists are empty by
+default.) A `deny` entry inside an allowed range therefore carves an exception
+out of it: `allow: ["10.0.0.0/8"]` with `deny: ["10.1.2.3"]` admits
+`10.1.2.4` and refuses `10.1.2.3`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

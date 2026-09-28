@@ -666,6 +666,10 @@ pub enum SessionLimitPolicy {
 
 /// Per-realm CIDR allow/deny lists (A-9).
 ///
+/// Evaluation is deny first, then allow: a `deny` match refuses outright;
+/// otherwise a non-empty `allow` list refuses every address it does not
+/// contain. Both lists empty means no network restriction.
+///
 /// Stored as the operator's literal strings so an unparseable entry can be
 /// reported against the exact text they wrote. Each is a single address or a
 /// CIDR range in the strict [`crate::core::IpRange`] grammar; `hearth config

@@ -269,14 +269,28 @@ fn a9_allow_list_denies_non_matching_ip() {
 // CidrFilter — combined allow + deny
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// IP in both allow and deny → allow wins (explicit trust).
+/// CONFIGURATION.md §`cidr_policy`: Evaluation is deny first, then allow: a
+/// `deny` match refuses outright; otherwise a non-empty `allow` list refuses
+/// every address it does not contain. Both lists empty means no network
+/// restriction. So a deny exception inside an allowed range refuses its
+/// address and only that address.
 #[test]
-fn a9_allow_overrides_deny() {
+fn a9_deny_is_evaluated_before_allow() {
     let f = CidrFilter::from_strs(["10.0.0.0/8"], ["10.1.2.3/32"]).expect("valid test CIDR");
     assert_eq!(
         f.check(v4(10, 1, 2, 3)),
+        CidrOutcome::Deny,
+        "a deny match refuses outright, even inside the allow list"
+    );
+    assert_eq!(
+        f.check(v4(10, 1, 2, 4)),
         CidrOutcome::Allow,
-        "allow list must override deny list for the same IP"
+        "the rest of the allowed range is still admitted"
+    );
+    assert_eq!(
+        f.check(v4(192, 0, 2, 1)),
+        CidrOutcome::Deny,
+        "outside a non-empty allow list is refused"
     );
 }
 

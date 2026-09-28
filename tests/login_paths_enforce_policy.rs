@@ -493,6 +493,39 @@ async fn a_session_from_a_denied_network_is_refused() {
         .expect("an allowed network still gets one");
 }
 
+/// Deny is evaluated first, then allow: a deny exception carved out of an
+/// allowed range refuses its address, while the rest of the range still
+/// signs in and everything outside the allow list is refused.
+#[tokio::test]
+async fn a_deny_exception_inside_an_allowed_range_is_refused() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let (realm, _) = create_realm(
+        &h,
+        RealmConfig {
+            cidr_policy: Some(CidrPolicy {
+                allow: vec!["10.0.0.0/8".to_string()],
+                deny: vec!["10.1.2.3/32".to_string()],
+            }),
+            ..RealmConfig::default()
+        },
+    );
+    let user = create_user(&h, &realm);
+    let session_from = |ip: &str| {
+        h.identity().create_session(
+            &realm,
+            user.id(),
+            &SessionContext {
+                ip_address: Some(ip.to_string()),
+                ..SessionContext::default()
+            },
+        )
+    };
+
+    session_from("10.1.2.3").expect_err("the denied address inside the allowed range");
+    session_from("10.1.2.4").expect("the rest of the allowed range");
+    session_from("192.0.2.10").expect_err("outside the allow list");
+}
+
 /// The step-up grant from a denied network issues no tokens.
 #[tokio::test]
 async fn step_up_grant_from_a_denied_network_is_refused() {

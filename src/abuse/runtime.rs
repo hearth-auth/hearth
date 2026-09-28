@@ -752,6 +752,29 @@ mod tests {
         );
     }
 
+    /// A-9: deny is evaluated first, then allow — on both gates that apply the
+    /// policy (the web form's pre-auth check and the engine's session gate).
+    #[test]
+    fn tenant_cidr_deny_exception_inside_the_allow_list_refuses_the_login() {
+        let guards = AbuseGuards::disabled();
+        let policy = CidrPolicy {
+            allow: vec!["10.0.0.0/8".to_string()],
+            deny: vec!["10.1.2.3/32".to_string()],
+        };
+        assert_eq!(
+            guards.pre_auth_login(Some(ip(10, 1, 2, 3)), "a@example.com", None, Some(&policy)),
+            PreAuthVerdict::Deny {
+                reason: "a9_cidr_policy"
+            }
+        );
+        assert_eq!(
+            guards.pre_auth_login(Some(ip(10, 1, 2, 4)), "a@example.com", None, Some(&policy)),
+            PreAuthVerdict::Allow
+        );
+        assert!(cidr_policy_denies(&policy, ip(10, 1, 2, 3)));
+        assert!(!cidr_policy_denies(&policy, ip(10, 1, 2, 4)));
+    }
+
     /// P-3: the heuristic adapter must be installed when enabled, and a
     /// scripted client refused.
     #[test]

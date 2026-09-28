@@ -17,12 +17,19 @@
 //!
 //! # Evaluation order
 //!
-//! 1. If the IP matches the **allow list** → [`CidrOutcome::Allow`].
-//!    (Explicit trust cannot be overridden by the deny list.)
-//! 2. If the IP matches the **deny list** → [`CidrOutcome::Deny`].
-//! 3. If the allow list is **non-empty** and the IP is **not** in it →
+//! Evaluation is deny first, then allow: a `deny` match refuses outright;
+//! otherwise a non-empty `allow` list refuses every address it does not
+//! contain. Both lists empty means no network restriction.
+//!
+//! 1. If the IP matches the **deny list** → [`CidrOutcome::Deny`], even when
+//!    it is also inside the allow list (a deny exception in an allowed range).
+//! 2. If the allow list is **non-empty** and the IP is **not** in it →
 //!    [`CidrOutcome::Deny`] (strict allowlist mode).
-//! 4. Otherwise → [`CidrOutcome::Allow`] (fail-open, §6.1).
+//! 3. Otherwise → [`CidrOutcome::Allow`] (fail-open, §6.1).
+//!
+//! Deny-first loses no expressible policy — a non-empty allow list already
+//! refuses everything outside it — and it is the only order in which a deny
+//! entry inside an allowed range has any effect.
 //!
 //! # Failure mode: fail-open
 //!
@@ -143,24 +150,19 @@ impl CidrFilter {
     /// This method is allocation-free and safe to call on the hot path.
     #[must_use]
     pub fn check(&self, ip: IpAddr) -> CidrOutcome {
-        // Step 1: explicit trust — allow list match bypasses the deny list.
-        if !self.allow.is_empty() {
-            if self.allow.iter().any(|c| c.contains(ip)) {
-                return CidrOutcome::Allow;
-            }
-            // Step 3: strict allowlist mode — IP not in the allow list.
-            // We defer until after the deny check only for clarity; the
-            // deny list is irrelevant here because we already know the IP
-            // is not explicitly trusted.
-            return CidrOutcome::Deny;
-        }
-
-        // Step 2: deny list.
+        // Step 1: a deny match refuses outright — even inside the allow list,
+        // so an operator can carve an exception out of an allowed range.
         if self.deny.iter().any(|c| c.contains(ip)) {
             return CidrOutcome::Deny;
         }
 
-        // Step 4: fail-open default.
+        // Step 2: a non-empty allow list refuses every address it does not
+        // contain.
+        if !self.allow.is_empty() && !self.allow.iter().any(|c| c.contains(ip)) {
+            return CidrOutcome::Deny;
+        }
+
+        // Step 3: allowed (both lists empty = no restriction, §6.1).
         CidrOutcome::Allow
     }
 }
@@ -309,16 +311,16 @@ mod tests {
         assert_eq!(f.check(v4(10, 0, 0, 1)), CidrOutcome::Deny);
     }
 
-    // ── CidrFilter::check — allow overrides deny ─────────────────────────────
+    // ── CidrFilter::check — deny is evaluated before allow ───────────────────
 
     #[test]
-    fn allow_list_overrides_deny_list() {
-        // IP is in both allow and deny — allow wins.
+    fn deny_list_wins_over_allow_list() {
+        // IP is in both allow and deny — deny wins.
         let f = CidrFilter::from_strs(["10.0.0.0/8"], ["10.0.0.0/8"]).expect("valid test CIDR");
         assert_eq!(
             f.check(v4(10, 1, 2, 3)),
-            CidrOutcome::Allow,
-            "allow list must take precedence over deny list"
+            CidrOutcome::Deny,
+            "a deny match refuses outright, even inside the allow list"
         );
     }
 

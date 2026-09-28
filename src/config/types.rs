@@ -3004,8 +3004,9 @@ pub struct RealmSecurityYaml {
 
 /// `realms.<name>.security.cidr_policy` — A-9 allow/deny CIDR lists.
 ///
-/// Evaluation order is deny-then-allow: a deny match rejects outright, and a
-/// non-empty allow list rejects everything it does not contain.
+/// Evaluation is deny first, then allow: a `deny` match refuses outright;
+/// otherwise a non-empty `allow` list refuses every address it does not
+/// contain. Both lists empty means no network restriction.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CidrPolicyYaml {
