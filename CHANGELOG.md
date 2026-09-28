@@ -6,6 +6,266 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+<!-- GA audit fixes, 2026-09-28 (branch feature/ga-readiness-fixes-9-28-26). -->
+
+### Security
+- **Third-party clients no longer receive the user's permissions on refresh or the device grant.**
+  The claim profile's `first_party_only` gate withheld `permissions` from a third-party client's
+  first access token, but the refresh grant and the device grant then fell back to the user's
+  full permission set, up to `hearth.admin`. The claim profile's output is now final on every
+  grant (GA audit B1).
+- **Access tokens issued for a client now carry the RFC 9068 `client_id` claim**, and the REST,
+  SCIM and gRPC admin surfaces refuse a token whose client is not first-party, even if a claim
+  profile releases admin permissions to it (GA audit B1).
+- **`POST /authorize`, `POST /realms/{realm}/authorize` and gRPC `Authorize` now require consent.**
+  These bearer-token surfaces issued a code for any client and any scope. They now issue a code
+  only when the client does not require consent (`require_consent: false`) or the user has a
+  recorded consent that covers every requested scope, and otherwise answer `403`
+  `HEARTH_CONSENT_REQUIRED` (gRPC `PERMISSION_DENIED`) (GA audit B2). Integrations that mint
+  codes this way for their own app must register it as a first-party client
+  (`trust_level: first_party`, which needs no consent) or have the user consent once in the
+  browser flow.
+- **The bearer-token authorize surfaces and device approval honour `mfa_required`.** For a client
+  with `mfa_required` (or a user in a realm `mfa_required_roles` role), JSON/gRPC `Authorize`
+  answers `403 HEARTH_MFA_REQUIRED` unless the bearer token's session proved a second factor, and
+  approving a device from a session that proved none ends that session so the user signs in again
+  with the factor (GA audit B2, B3, B5).
+- **gRPC `Authorize` and `Decide` refuse DPoP-bound tokens.** gRPC has no DPoP proof channel, so a
+  `cnf`-bound token is refused (`UNAUTHENTICATED`) or denied (`allowed: false`), as the gRPC admin
+  API already did (GA audit B2).
+- **The device approval page shows who is asking, and approval records consent.** Entering a user
+  code at `/ui/device` now shows the requesting application's name, logo and scopes, and nothing
+  is approved until the user presses Approve. Approving a client that requires consent records
+  that consent (visible and revocable under connected apps); Deny sends the device
+  `access_denied` (GA audit B3).
+- **Every grant now honours the client's `grant_types`** — `authorization_code` (at `/authorize`
+  and the code exchange), `refresh_token` (issuing and redeeming refresh tokens) and the device
+  grant (`urn:ietf:params:oauth:grant-type:device_code`, at both `device_authorization` and the
+  token poll). Previously only `client_credentials` and the jwt-bearer grant were checked, so any
+  client could start a device flow and the console's refresh-token toggle did nothing
+  (GA audit M7).
+- **`/userinfo` evaluates claim-release gates against the client the token was issued to**, so a
+  `first_party_only` claim no longer reaches a third-party client there (GA audit M10).
+
+- **Archived OAuth clients stop working everywhere** — a client archived by removal from
+  `hearth.yaml` (or by `status: archived` through the admin API) is now refused on every grant
+  (`client_credentials`, jwt-bearer, refresh, device authorization and polling, code exchange,
+  token exchange), by PAR, and by client authentication at `/introspect` and `/revoke`, answering
+  as for an unknown client. Previously only `/authorize` checked the status. Archival now also
+  revokes the client's refresh tokens (grant families), as deletion already did.
+- **Outstanding `client_credentials` tokens die with their client** — archiving or deleting a
+  client immediately invalidates the access tokens it obtained through `client_credentials` or
+  jwt-bearer, instead of leaving them valid until expiry. Restoring the client does not
+  resurrect them.
+- **Public-client refresh tokens are bound to their client** — a refresh request that names a
+  `client_id` other than the one the refresh token was issued to is refused (`invalid_client`).
+- **RFC 8693 token exchange has a per-client policy** — the exchanging client must be an active,
+  confidential client whose `grant_types` include
+  `urn:ietf:params:oauth:grant-type:token-exchange` (else `invalid_client` /
+  `unauthorized_client`); public clients can no longer exchange. `audience` and `resource` must be
+  an audience the subject token already carries or a protected resource registered in the realm
+  (else `invalid_target`); they are no longer copied into `aud` verbatim.
+- **DCR `authenticated` mode requires a real initial access token** — `POST /register` and
+  `POST /realms/{realm}/register` now require a bearer token carrying `hearth.clients.admin` (or
+  `hearth.admin`); an ordinary user or `client_credentials` token is refused with
+  `403 insufficient_scope`. DCR remains disabled by default.
+- **REST role privilege ceiling** — `POST /admin/roles` and `PATCH /admin/roles/{id}` refuse (403)
+  a caller without `hearth.admin` who defines a role granting a permission it does not hold, as
+  gRPC already did. Both REST and gRPC now also apply the ceiling to `parent_roles`.
+- **Introspection of user tokens is audience-restricted** — a user access token without `azp`
+  can now be introspected only by a client its `aud` names, the client it was issued to, the
+  client that obtained it by token exchange, or a declared resource server
+  (`access_token_authorization: introspection|decision`). Other clients get `{"active": false}`
+  and no longer receive live roles and permissions.
+- **Single-use guards are atomic** — a JAR request object `jti`, an RFC 8693 `actor_token` `jti`
+  and a PAR `request_uri` can no longer be used more than once by concurrent requests.
+- **gRPC `TokenExchange` fails closed** — a storage error while loading the client now refuses the
+  authorization-code exchange instead of skipping client authentication.
+- **SCIM admin-principal guard fails closed** — when the RBAC lookup fails, SCIM provisioning-token
+  replace, patch and delete of a user answer `503` instead of treating the user as a non-admin.
+- **A second factor you hold now binds on every login path.** A session is refused for a user who
+  holds TOTP, SMS OTP, email OTP or a passkey unless the login proved one. A magic link (browser or
+  the `/token` magic-link grant), a federated or SAML login, and a password login for a
+  passkey-only user used to sign such users in without asking for it (GA audit B4, B5).
+  - Browser magic-link redemption now sends the user to their factor's challenge.
+  - The `/token` magic-link grant answers `403 HEARTH_MFA_REQUIRED` for a user who holds a factor.
+  - The password-grant (ROPC) engine path answers `StepUpChallengeRequired` for such users even
+    from a recognised device.
+- **Passkeys count as a second factor.** After a correct password, a user who holds a passkey is
+  asked for it on the new `/ui/mfa-passkey-challenge` page. Forced TOTP enrolment is offered only
+  to a user who holds no factor at all. Before, a stolen password let an attacker enrol their own
+  TOTP on a passkey-only account (GA audit B5).
+- **Client `mfa_required` and realm `mfa_required_roles` now check what the session proved.** The
+  factor the account holds is no longer enough. A session that proved no second factor is revoked,
+  and the client receives `error=login_required`. Sessions now record the proof they were opened
+  with. Sessions created before this upgrade count as unproved (GA audit B5).
+- **Pending required actions are enforced on every login path.** This covers passkey login,
+  browser magic link, the `/token` magic-link grant (`required_actions_pending`), federated and
+  SAML login, and the step-up MFA grant (GA audit M11).
+- **Realm `cidr_policy` applies to every session.** The step-up grant, magic links, passkey login,
+  federation, SAML and confirm-link now honour it, not only the password form (GA audit M13).
+- **Email OTP abuse limits.**
+  - Email OTP issuance is throttled per address: 5 sends per 15 minutes, like SMS.
+  - Re-rendering `/ui/mfa-otp-challenge` no longer sends a new code. Use `?resend=1`, which the
+    page's "Send a new code" link now does.
+  - Failed SMS and email OTP attempts share the per-user MFA failure budget: 5 failures, then a
+    5-minute lockout (GA audit M12).
+- **Magic-link request hardening.** `POST /v1/{realm}/auth/magic-link` now counts every request
+  against the per-IP login limiter. It applies the outbound-email caps, and mails a link only to
+  an existing account or to an address the realm's registration policy would admit. The response
+  is still `202` in every case (GA audit L17).
+- **Required-action tokens are single-use.** A completed `UPDATE_PASSWORD` token can no longer be
+  replayed (GA audit L18).
+- **Registration checks the breach list before creating the account.** A breached password no
+  longer leaves a pending account behind, and it is refused the same way for registered and
+  unregistered addresses (GA audit L15).
+- **Unknown-account logins cost the realm's Argon2 parameters.** This applies to the web login
+  form and the step-up grant. Realms with a raised KDF cost no longer leak account existence by
+  timing (GA audit L14).
+- **Recovery-code checks on `/ui/mfa-challenge` run inside the KDF admission gate.** They are shed
+  with `503 Retry-After` under load (GA audit L16).
+- **Secrets no longer print through `Debug`.** This covers login, registration, reset and
+  change-password forms, token-endpoint requests, grant requests, token pairs, stored TOTP state,
+  SMTP, SendGrid, Postmark, Mailgun, Mailtrap, Twilio and SNS configs, and webhook subscriptions
+  (GA audit L20).
+- **Email addresses are masked in logs.** This covers admin, onboarding, organisation-invitation,
+  backup-import, reconcile and migration log lines, and email/SMS delivery-failure errors
+  (GA audit L21).
+- **Connection-slot exhaustion closed** — one unauthenticated client could hold every connection slot with requests it never finished. New `operational` keys: `header_read_timeout_secs` (10; also closes idle HTTP/1.1 keep-alives and connections that never send a request), `tls_handshake_timeout_secs` (10), `max_connections_per_ip` (64 per IPv4 address or IPv6 /64; `server.trusted_proxies` exempt; 0 = off) and `http2_keepalive_interval_secs` (30). They apply to the HTTP(S), HTTP→HTTPS redirect and gRPC listeners (GA audit B6).
+- **gRPC management API served over TLS** — when `server.tls_cert_path` is set, the gRPC listener now uses the same certificate (and mTLS/`security.tls` settings) as HTTPS. Before this it was always plaintext. Outside `--dev`, a non-loopback gRPC listener without a certificate is refused unless the new `server.grpc_allow_plaintext: true` is set (GA audit M14).
+- **Tokens no longer logged from request URLs** — the per-request tracing span (and OTLP export) recorded the full query string, including setup, password-reset, magic-link, invitation and verification tokens and federation `code`/`state`. Only the path and parameter names are recorded now (GA audit M16).
+- **`X-Forwarded-Proto` honoured only from `server.trusted_proxies`** — with `trust_forwarded_proto: true` the header used to be accepted from any peer, so a client bypassing the proxy could decide whether its cookies were `Secure` and whether HSTS was sent (GA audit L4).
+
+- **A session revocation can no longer be undone by a racing refresh** — `revoke_session` and the
+  refresh path each read, changed and wrote the session row with nothing serialising them, so a
+  refresh that had read the live row wrote it back un-revoked after the revocation (`/revoke`
+  answered 200, the session stayed live). Separately, a session write re-inserted the session into
+  the in-process cache after its storage write, so a revocation landing in between left the node
+  serving a session storage called revoked. Session-row writes are now serialised per session and
+  the cache is refilled from storage under the cache generation guard (GA audit B7).
+- **A restore no longer revives revoked sessionless tokens** — backups now carry
+  `revocations.ndjson` (revoked access-token JTIs with their expiry, blocked DPoP key thumbprints,
+  revoked AAT JTIs) and a restore re-applies them. Previously a `client_credentials` or agent token
+  revoked before the backup validated again after a restore. The restore report and
+  `hearth backup restore` summary gain a `revocations` count (GA audit M3).
+- **A retiring signing key in an archive is checked by the kid its key material produces** — a key
+  the realm had purged (revoking rotation) could be restored under a different `key_id` label; a
+  label that does not match the material is now refused (PR #358 follow-up).
+- **Storage: a transient SST open failure during a WAL rotation no longer resurrects deleted data**
+  — the rotation flush skipped any SST it could not reopen and published the partial reader list, so
+  a hidden tombstone exposed the deleted value (a revoked session, a deleted user) and a compaction
+  could make that permanent. The rotation now fails (and does not truncate the WAL segment) under the
+  same strict policy as every other flush (GA audit B8).
+
+- **Dependency advisories cleared:** OpenTelemetry crates upgraded to 0.32 (`opentelemetry_sdk`
+  0.32.1 fixes GHSA-w9wp-h8wv-79jx); `rust_decimal` 1.43 removes the never-compiled `rkyv` 0.7
+  (RUSTSEC-2026-0235) from `Cargo.lock`; Go SDK builds with `toolchain go1.26.6` and takes
+  `quic-go` 0.59.1, `x/crypto` 0.56.0, `x/text` 0.41.0; Rust SDK takes `rustls` 0.23.45; docs site,
+  TypeScript SDK and release tooling lockfiles refreshed (semantic-release 25). The unused root
+  `pnpm-lock.yaml` is deleted.
+
+### Changed
+- **Default grant types are now `["authorization_code", "refresh_token"]`** for a client
+  registered without `grant_types` (admin REST, gRPC, `hearth.yaml` applications without
+  `grant_types`, Auth0/Keycloak migration). A client that lists its grant types gets exactly those:
+  one registered with `["authorization_code"]` alone no longer receives refresh tokens. Client
+  records written before this release keep receiving refresh tokens until their grant types are
+  next edited; backups taken before this release restore with `refresh_token` added. Dynamic
+  Client Registration keeps the RFC 7591 default (`["authorization_code"]`).
+- **The device grant requires `urn:ietf:params:oauth:grant-type:device_code`** in the client's
+  `grant_types`. Breaking for a client that ran device flows without declaring it: add the grant.
+- `hearth.yaml` applications may now declare the `urn:ietf:params:oauth:grant-type:token-exchange`
+  and `urn:ietf:params:oauth:grant-type:jwt-bearer` grant types (both grants check `grant_types`;
+  config validation used to reject them).
+- The admin console's "new application" and onboarding forms tick the refresh-token grant by
+  default, and editing an application keeps grants the form has no toggle for (jwt-bearer,
+  token-exchange).
+- A device-flow poll for a client deleted after the flow started is now refused
+  (`invalid_client`) instead of being issued tokens under a first-party fallback.
+
+- **`email.transport: log` refused in production** — the `log` transport (the default) drops every message, including the system realm's admin password-reset mail. Production validation now refuses it unless the new `email.allow_log_transport_in_production: true` is set; startup then warns. Previously only realms declared in YAML were checked (GA audit M15).
+- **`${VAR}` substitution escapes values for their YAML context** — values are escaped inside quotes, and an unsafe unquoted value is emitted as a quoted string. A value that cannot be placed safely is reported as an error in production instead of being spliced raw, and an apostrophe in a plain value no longer breaks comment detection (GA audit OPS-12).
+- **`serve --dev` refuses a production data directory** — production starts now write `.hearth-production` into `storage.data_dir`, and `--dev` refuses to open a directory holding it (GA audit OPS-13).
+- **Shutdown drains every listener at once** — HTTP(S), redirect, gRPC and the Raft peer server all start draining at SIGTERM/SIGINT and share one `shutdown_timeout_secs` deadline. Previously gRPC drained after HTTP, taking up to twice as long, and the Raft peer server was never stopped (GA audit L24).
+
+- Documentation: a storage write that returns an error has an unknown outcome (it may already have
+  been persisted by a concurrent flush); the storage module docs and ARCHITECTURE.md §6.1 no longer
+  claim otherwise (GA audit F10). The backup guide and the `backup create`/`restore` disclosure now
+  say that sessionless tokens survive a restore until their `exp`.
+- **Rust SDK:** the optional `actix-web` dependency (feature `actix-middleware`) is now declared
+  with `default-features = false`, so the SDK no longer switches on actix-web's HTTP/2,
+  compression and cookie features in your application. Enable them on your own `actix-web`
+  dependency if you rely on them.
+- **Load-test harness:** `hearth-loadtest run` (and `make loadtest`) now exits `3` when
+  `report.json` says `"pass": false` because of a latency-budget breach, and `1` when a journey
+  exceeds the error budget. `--latency-advisory` / `HEARTH_LOADTEST_LATENCY_ADVISORY=true` restores
+  exit `0` for latency-only failures; `make loadtest-smoke` sets it (M20).
+- **Licence:** `LICENSE` is now the verbatim Apache License 2.0 text (it was a reworded copy that
+  GitHub could not identify). The project licence is unchanged in intent (B11).
+
+- **Go and TypeScript SDKs: client registration accepts a trust level.** `RegisterClientRequest.TrustLevel`
+  (Go, `hearth.TrustLevelFirstParty` / `hearth.TrustLevelThirdParty`) and `RegisterClientParams.trustLevel`
+  (TypeScript, `"first_party"` / `"third_party"`) are sent as `trust_level`. When omitted, the server
+  default (third-party) applies. Needed because the bearer-token `POST /authorize` now issues a code only
+  for a client that needs no consent or holds a recorded consent (GA audit B2).
+
+### Fixed
+- The magic-link grant answered `token_type: "DPoP"` when the request carried a DPoP proof, but
+  its tokens are never sender-constrained; it now answers `Bearer` (GA audit L7).
+- `POST /realms/{realm}/authorize` rejected every valid DPoP proof: it checked `htu` against the
+  path with the `/realms/{realm}` prefix stripped (GA audit L8).
+- `hearth backup restore --mode` rejects unknown values. A typo such as `overwirte` used to run a `skip` restore silently (GA audit OPS-17).
+- A non-UTF-8 `HEARTH_KEK` is now an error in both validation and startup. Validation used to accept it while startup ignored it (GA audit OPS-11).
+- The dev-mode banner no longer claims the setup token is truncated, and the production startup panel points at `<data_dir>/.setup_token` instead of the unread `HEARTH_SETUP_TOKEN` (GA audit L6, L25).
+- Shipped deploy files:
+  - Helm `values-prod.yaml` now starts: keys and the SMTP password come from Secrets, and ingress TLS uses a `trusted_proxies` placeholder.
+  - The PodDisruptionBudget no longer blocks node drains.
+  - Probes and the Docker `HEALTHCHECK` work with direct TLS (`HEARTH_HEALTHCHECK_URL`).
+  - Compose drops the unread `HEARTH_BIND_ADDRESS`.
+  - Default logging is `info`.
+  - The systemd unit gains `EnvironmentFile`, `CAP_NET_BIND_SERVICE` and `LimitNPROC=4096` (GA audit M18).
+- **Concurrent writes to one key are replayed in the order the node served them** — the memtable
+  and the WAL could order two writes to the same key differently, so a crash and restart could
+  bring back the older value (for example un-revoke a session). Writes are now applied to the
+  memtable inside the WAL critical section that orders them (GA audit M1).
+- **An acknowledged split-commit batch (login session + audit event) survives a WAL rotation** —
+  `enqueue_batch` queued its record before applying it to the memtable, so a group-commit leader
+  could make it durable and rotate past it first; the batch was acknowledged and lost at the next
+  crash (GA audit M2).
+- **The WAL group-commit leader returns after at most 16 batches** — under sustained writes the
+  leader's own request never returned (it kept committing other writers' batches) and held the
+  backup barrier's read side meanwhile; it now hands leadership to a waiting writer (GA audit M4).
+- **A backup export no longer blocks every write while it writes the archive** — the export held
+  the storage write barrier through encryption, compression and archive I/O; it now holds it only
+  for the consistent read pass (the realm's sections are held in memory between the two steps)
+  (GA audit M4).
+- **A WAL record that authenticates but does not decode now refuses the start** instead of being
+  treated as a torn tail and discarded together with every acknowledged record after it (for
+  example after a binary downgrade) (GA audit L22).
+- **Cluster (experimental): a quiet realm's revoked signing key no longer stays trusted on other
+  nodes** — the hot path's signing-key reconciliation now has a debounce window per realm instead of
+  one shared window, and followers apply a replicated signing-key epoch row as soon as it arrives
+  (GA audit M5).
+
+- **Security scanners ran on no code PR that also touched a `.md` file:** CI's `docs-only` routing
+  is now true only when every changed file is documentation, so Trivy, osv-scanner and CodeQL run
+  on every code change (M19).
+- CodeQL jobs failed on every run (`init` and `analyze` pinned to different CodeQL versions); all
+  `github/codeql-action` steps now share one pin, enforced in CI.
+- SDK publishing: npm publishes no longer fail with `EBADENGINE` (npm pinned to 11.x), PyPI
+  publishes no longer fail on Metadata-Version 2.5 (`gh-action-pypi-publish` v1.14.2), and the
+  Kotlin build now publishes all three modules with sources/javadoc jars and transfers the upload
+  to the Central Publisher Portal.
+
+### Removed
+- The `RUSTSEC-2023-0071` (`rsa`) exception from the server's advisory configuration and
+  `SECURITY.md`: `rsa` is not a server dependency (L1).
+
+(Documentation corrections — README, SECURITY.md, VERSIONING.md, upgrading/clustering/SDK guides —
+are doc-only and need no CHANGELOG entry under CLAUDE.md's rules; list them in the release notes if
+wanted: in-place rollback across releases is **not** safe, restore from backup instead; multi-node
+clustering is not supported for production.)
+
 <!-- GA software-blocker fixes (branch fix/ga-software-blockers). -->
 
 ### Security
