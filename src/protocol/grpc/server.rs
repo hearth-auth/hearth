@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
-use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use tracing::{debug, info};
 
@@ -161,6 +160,9 @@ impl GrpcState {
 /// Max decoded message size (1 MiB), matches the HTTP `BODY_LIMIT_DEFAULT`.
 const MAX_DECODING_MESSAGE_SIZE: usize = 1024 * 1024;
 
+/// How long a gRPC peer has to acknowledge an HTTP/2 keep-alive `PING`.
+const GRPC_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Error returned when gRPC reflection would be enabled in production without
 /// the explicit `--allow-reflection-in-prod` override (A-43).
 ///
@@ -296,6 +298,30 @@ pub async fn serve<F>(
     addr: SocketAddr,
     state: GrpcState,
     reflection_enabled: bool,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    shutdown: F,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let listener = TcpListener::bind(addr).await?;
+    serve_on(listener, state, reflection_enabled, tls, shutdown).await
+}
+
+/// Serves gRPC on a pre-bound `listener` until `shutdown` resolves.
+///
+/// Variant of [`serve`] for callers that need the assigned port first (tests
+/// bind `127.0.0.1:0`).
+///
+/// # Errors
+///
+/// Returns an error when the reflection service cannot be built or the
+/// server fails.
+pub async fn serve_on<F>(
+    listener: TcpListener,
+    state: GrpcState,
+    reflection_enabled: bool,
+    tls: Option<tokio_rustls::TlsAcceptor>,
     shutdown: F,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
@@ -307,10 +333,17 @@ where
     use crate::protocol::proto::identity::v1::o_auth_service_server::OAuthServiceServer;
     use crate::protocol::proto::rbac::v1::rbac_admin_service_server::RbacAdminServiceServer;
 
-    let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
     info!(address = %local, "gRPC listener bound");
-    let incoming = TcpListenerStream::new(listener);
+    // M14 + B6: TLS (with the HTTPS certificate) and connection limits.
+    let (stop_accepting, stop_rx) = tokio::sync::watch::channel(());
+    let tls_enabled = tls.is_some();
+    let incoming = super::incoming::GrpcIncoming::start(listener, tls, stop_rx);
+    info!(address = %local, tls = tls_enabled, "gRPC listener accepting");
+    let shutdown = async move {
+        shutdown.await;
+        drop(stop_accepting);
+    };
 
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
@@ -358,8 +391,14 @@ where
     // covers every gRPC method on every service.
     let shaper = Arc::clone(&state.request_shaper);
     let rate_layer = tonic::service::InterceptorLayer::new(grpc_rate_limit_interceptor(shaper));
+    let limits = crate::protocol::http::limits::server_limits();
     let router = Server::builder()
         .timeout(Duration::from_secs(60))
+        // B6: the same HTTP/2 caps and keep-alive as the HTTP listeners.
+        .max_concurrent_streams(limits.http2_max_concurrent_streams)
+        .http2_max_pending_accept_reset_streams(Some(limits.http2_max_pending_reset_streams))
+        .http2_keepalive_interval(limits.http2_keepalive_interval)
+        .http2_keepalive_timeout(Some(GRPC_HTTP2_KEEPALIVE_TIMEOUT))
         .layer(rate_layer)
         .add_service(health_service)
         .add_optional_service(reflection)

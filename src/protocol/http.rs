@@ -29,6 +29,7 @@ mod advanced;
 mod agents;
 mod approval;
 mod auth;
+pub(crate) mod conn_guard;
 mod health;
 pub mod limits;
 mod mfa;

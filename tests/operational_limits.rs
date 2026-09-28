@@ -36,6 +36,7 @@ fn install_limits() {
         queue_depth: 64,
         http2_max_concurrent_streams: TEST_MAX_CONCURRENT_STREAMS,
         http2_max_pending_reset_streams: 3,
+        ..ServerLimits::default()
     });
 }
 

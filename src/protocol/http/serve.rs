@@ -1,5 +1,23 @@
 //! HTTP/HTTPS server startup and shutdown helpers.
+//!
+//! # Connection hardening (GA audit 2026-09-28 B6)
+//!
+//! Every listener here — plaintext, TLS and the HTTP→HTTPS redirect — runs the
+//! same accept loop, [`accept_until`], so a limit cannot land on one listener
+//! and miss another. Before it, one unauthenticated client held every
+//! connection slot: 1100 sockets that each sent a partial request made
+//! `/health` time out, and after 40 s the server had closed none of them.
+//! Each accepted connection now passes, in order:
+//!
+//! 1. the per-address cap (`operational.max_connections_per_ip`), checked
+//!    synchronously in the accept loop so a refused connection costs no task;
+//! 2. the admission gate (`operational.max_connections` / `queue_depth`);
+//! 3. on TLS, a handshake deadline (`operational.tls_handshake_timeout_secs`);
+//! 4. a first-bytes deadline and hyper's HTTP/1 header-read timeout
+//!    (`operational.header_read_timeout_secs`), which also bounds idle
+//!    keep-alive connections; HTTP/2 connections get keep-alive pings.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,12 +25,21 @@ use std::time::Duration;
 use axum::extract::ConnectInfo;
 use axum::http::StatusCode;
 use axum::Router;
+use hyper_util::server::graceful::{GracefulShutdown, Watcher};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing::{debug, error, warn};
 
-use super::limits::{apply_request_timeout, connection_gate, server_limits};
+use super::conn_guard::FirstBytesDeadline;
+use super::limits::{
+    apply_request_timeout, connection_gate, per_ip_limiter, server_limits, ConnectionGate,
+    ServerLimits,
+};
 use super::state::AppState;
+
+/// How long an HTTP/2 peer has to acknowledge a keep-alive `PING`.
+const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub async fn serve(
     addr: SocketAddr,
@@ -52,10 +79,9 @@ pub async fn serve_router(
 /// This loop applies the same limits as
 /// [`serve_tls_router`] — the request deadline from
 /// `operational.request_timeout_secs`, the admission cap from
-/// `operational.max_connections` / `operational.queue_depth`, and the HTTP/2
-/// rapid-reset caps from `security.http2.*`. It used to call `axum::serve`,
-/// which applies no HTTP/2 configuration at all, so the caps existed on the TLS
-/// listener only (audit 2026-08-28 §4.12#20).
+/// `operational.max_connections` / `operational.queue_depth`, the connection
+/// hardening described in the module docs, and the HTTP/2 rapid-reset caps
+/// from `security.http2.*`.
 ///
 /// # Shutdown
 ///
@@ -79,74 +105,24 @@ pub async fn serve_router_on(
         %local_addr,
         request_timeout_secs = limits.request_timeout.as_secs(),
         max_connections = limits.max_connections,
+        max_connections_per_ip = limits.max_connections_per_ip,
+        header_read_timeout_secs = limits.header_read_timeout.as_secs(),
         "HTTP server listening"
     );
 
     let app = apply_request_timeout(app);
-    let gate = connection_gate();
-    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
-    let mut shutdown = std::pin::pin!(shutdown);
-
-    loop {
-        tokio::select! {
-            result = listener.accept() => {
-                let (stream, peer_addr) = match result {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        error!(error = %e, "failed to accept TCP connection");
-                        continue;
-                    }
-                };
-
-                let app = app.clone();
-                let gate = Arc::clone(&gate);
-                let watcher = graceful.watcher();
-
-                tokio::spawn(async move {
-                    // Admission happens inside the task so a saturated server
-                    // still drains its accept backlog instead of wedging the
-                    // listener.
-                    let Some(_permit) = gate.admit().await else {
-                        debug!(
-                            peer = %peer_addr,
-                            "refusing connection: operational.max_connections + \
-                             operational.queue_depth exhausted"
-                        );
-                        drop(stream);
-                        return;
-                    };
-
-                    let io = hyper_util::rt::TokioIo::new(stream);
-                    // Matches what `into_make_service_with_connect_info` did on
-                    // this path before, so handlers still see the real peer via
-                    // `PeerAddr` / `ConnectInfo<SocketAddr>` (HEA-2164).
-                    let service = hyper_util::service::TowerToHyperService::new(
-                        app.layer(axum::Extension(ConnectInfo::<SocketAddr>(peer_addr)))
-                            .into_service(),
-                    );
-
-                    let mut builder = hyper_util::server::conn::auto::Builder::new(
-                        hyper_util::rt::TokioExecutor::new(),
-                    );
-                    builder
-                        .http2()
-                        .max_concurrent_streams(limits.http2_max_concurrent_streams)
-                        .max_pending_accept_reset_streams(Some(
-                            limits.http2_max_pending_reset_streams,
-                        ));
-
-                    let conn = builder.serve_connection_with_upgrades(io, service).into_owned();
-                    if let Err(e) = watcher.watch(conn).await {
-                        debug!(peer = %peer_addr, error = %e, "connection error");
-                    }
-                });
-            }
-            () = &mut shutdown => {
-                info!("HTTP server shutting down, draining in-flight requests");
-                break;
-            }
-        }
-    }
+    let graceful = GracefulShutdown::new();
+    accept_until(
+        &listener,
+        &app,
+        None,
+        &connection_gate(),
+        true,
+        &graceful,
+        shutdown,
+    )
+    .await;
+    info!("HTTP server shutting down, draining in-flight requests");
 
     graceful.shutdown().await;
     info!("HTTP server drained all in-flight requests");
@@ -190,8 +166,7 @@ pub async fn serve_tls(
 ///
 /// It used to `break` and return `Ok(())` on the signal instead, abandoning
 /// every spawned connection task. An in-flight request was cut off mid-response
-/// and the process still exited 0 (audit 2026-08-28 §4.11#9). The plaintext
-/// path never had this defect: `axum::serve` drains for it.
+/// and the process still exited 0 (audit 2026-08-28 §4.11#9).
 ///
 /// # Errors
 ///
@@ -213,94 +188,34 @@ pub async fn serve_tls_router(
         %local_addr,
         request_timeout_secs = limits.request_timeout.as_secs(),
         max_connections = limits.max_connections,
+        max_connections_per_ip = limits.max_connections_per_ip,
+        header_read_timeout_secs = limits.header_read_timeout.as_secs(),
+        tls_handshake_timeout_secs = limits.tls_handshake_timeout.as_secs(),
         "HTTPS server listening"
     );
 
     let app = apply_request_timeout(app);
-    let gate = connection_gate();
     // Watches every accepted connection so the drain below can both signal
     // them to finish and wait for them.
-    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    let graceful = GracefulShutdown::new();
 
     let mut shutdown_rx = shutdown;
-    loop {
-        tokio::select! {
-            result = listener.accept() => {
-                let (stream, peer_addr) = match result {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        error!(error = %e, "failed to accept TCP connection");
-                        continue;
-                    }
-                };
-
-                let acceptor = tls_acceptor.clone();
-                let app = app.clone();
-                let gate = Arc::clone(&gate);
-                // A watcher, not the whole handle: the TLS handshake happens
-                // inside the spawned task, and a handshake that never completes
-                // must not hold the drain open.
-                let watcher = graceful.watcher();
-
-                tokio::spawn(async move {
-                    // Admission before the handshake: an unadmitted connection
-                    // must not consume a TLS handshake's worth of CPU.
-                    let Some(_permit) = gate.admit().await else {
-                        debug!(
-                            peer = %peer_addr,
-                            "refusing connection: operational.max_connections + \
-                             operational.queue_depth exhausted"
-                        );
-                        drop(stream);
-                        return;
-                    };
-                    let tls_stream = match acceptor.accept(stream).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            debug!(peer = %peer_addr, error = %e, "TLS handshake failed");
-                            return;
-                        }
-                    };
-
-                    let io = hyper_util::rt::TokioIo::new(tls_stream);
-                    // Mirror what `into_make_service_with_connect_info` does on the
-                    // plaintext path: layer `ConnectInfo<SocketAddr>` onto the router
-                    // before calling `into_service`. This ensures every handler sees
-                    // the real peer address via `PeerAddr` / `ConnectInfo<SocketAddr>`
-                    // rather than the FALLBACK_PEER sentinel (127.0.0.1).
-                    let service = hyper_util::service::TowerToHyperService::new(
-                        app.layer(axum::Extension(ConnectInfo::<SocketAddr>(peer_addr)))
-                            .into_service(),
-                    );
-
-                    // A-39: HTTP/2 rapid-reset defense (CVE-2023-44487).
-                    // Cap concurrent streams and RST_STREAM budget to limit
-                    // the amplification factor of rapid-reset attacks.
-                    let mut builder = hyper_util::server::conn::auto::Builder::new(
-                        hyper_util::rt::TokioExecutor::new(),
-                    );
-                    builder
-                        .http2()
-                        .max_concurrent_streams(limits.http2_max_concurrent_streams)
-                        .max_pending_accept_reset_streams(Some(
-                            limits.http2_max_pending_reset_streams,
-                        ));
-
-                    let conn = builder.serve_connection(io, service).into_owned();
-                    if let Err(e) = watcher.watch(conn).await {
-                        debug!(peer = %peer_addr, error = %e, "connection error");
-                    }
-                });
-            }
-            _ = shutdown_rx.changed() => {
-                info!(
-                    drain_deadline_secs = drain_timeout.as_secs(),
-                    "HTTPS server shutting down, draining in-flight requests"
-                );
-                break;
-            }
-        }
-    }
+    accept_until(
+        &listener,
+        &app,
+        Some(&tls_acceptor),
+        &connection_gate(),
+        false,
+        &graceful,
+        async move {
+            let _ = shutdown_rx.changed().await;
+        },
+    )
+    .await;
+    info!(
+        drain_deadline_secs = drain_timeout.as_secs(),
+        "HTTPS server shutting down, draining in-flight requests"
+    );
 
     // Signal every watched connection to finish, then wait for them.
     tokio::select! {
@@ -321,6 +236,168 @@ pub async fn serve_tls_router(
     }
 }
 
+/// Accepts connections on `listener` until `shutdown` resolves, serving each
+/// on its own task behind the per-address cap, `gate`, and (with `tls`) a
+/// handshake deadline.
+///
+/// Every connection is registered with `graceful`; the caller drains it.
+async fn accept_until(
+    listener: &TcpListener,
+    app: &Router,
+    tls: Option<&tokio_rustls::TlsAcceptor>,
+    gate: &Arc<ConnectionGate>,
+    upgrades: bool,
+    graceful: &GracefulShutdown,
+    shutdown: impl Future<Output = ()>,
+) {
+    let limits = server_limits();
+    let per_ip = per_ip_limiter();
+    let mut shutdown = std::pin::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                let (stream, peer_addr) = match result {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        error!(error = %e, "failed to accept TCP connection");
+                        continue;
+                    }
+                };
+
+                // Synchronous and first: a client already at its allowance
+                // costs neither a task nor a place in the admission queue.
+                let Some(ip_guard) = per_ip.try_acquire(peer_addr.ip()) else {
+                    debug!(
+                        peer = %peer_addr,
+                        "refusing connection: operational.max_connections_per_ip reached"
+                    );
+                    drop(stream);
+                    continue;
+                };
+
+                let app = app.clone();
+                let gate = Arc::clone(gate);
+                let tls = tls.cloned();
+                let limits = limits.clone();
+                // A watcher, not the whole handle: the TLS handshake happens
+                // inside the spawned task, and a handshake that never completes
+                // must not hold the drain open.
+                let watcher = graceful.watcher();
+
+                tokio::spawn(async move {
+                    // Held for the connection's lifetime.
+                    let _ip_guard = ip_guard;
+                    // Admission happens inside the task so a saturated server
+                    // still drains its accept backlog instead of wedging the
+                    // listener — and before the handshake, so an unadmitted
+                    // connection does not consume a TLS handshake's worth of CPU.
+                    let Some(_permit) = gate.admit().await else {
+                        debug!(
+                            peer = %peer_addr,
+                            "refusing connection: operational.max_connections + \
+                             operational.queue_depth exhausted"
+                        );
+                        drop(stream);
+                        return;
+                    };
+
+                    let Some(acceptor) = tls else {
+                        serve_connection(stream, peer_addr, app, &limits, upgrades, watcher).await;
+                        return;
+                    };
+                    // B6: the handshake used to be awaited with no deadline
+                    // while holding the permit taken above.
+                    let tls_stream = match tokio::time::timeout(
+                        limits.tls_handshake_timeout,
+                        acceptor.accept(stream),
+                    )
+                    .await
+                    {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(e)) => {
+                            debug!(peer = %peer_addr, error = %e, "TLS handshake failed");
+                            return;
+                        }
+                        Err(_elapsed) => {
+                            debug!(
+                                peer = %peer_addr,
+                                "TLS handshake exceeded operational.tls_handshake_timeout_secs"
+                            );
+                            return;
+                        }
+                    };
+                    serve_connection(tls_stream, peer_addr, app, &limits, upgrades, watcher).await;
+                });
+            }
+            () = &mut shutdown => break,
+        }
+    }
+}
+
+/// Serves HTTP/1.1 and HTTP/2 on one admitted connection until it closes.
+async fn serve_connection<IO>(
+    io: IO,
+    peer_addr: SocketAddr,
+    app: Router,
+    limits: &ServerLimits,
+    upgrades: bool,
+    watcher: Watcher,
+) where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let io = hyper_util::rt::TokioIo::new(FirstBytesDeadline::new(io, limits.header_read_timeout));
+    // Layer `ConnectInfo<SocketAddr>` onto the router so every handler sees the
+    // real peer via `PeerAddr` / `ConnectInfo<SocketAddr>` rather than the
+    // FALLBACK_PEER sentinel (HEA-2164).
+    let service = hyper_util::service::TowerToHyperService::new(
+        app.layer(axum::Extension(ConnectInfo::<SocketAddr>(peer_addr)))
+            .into_service(),
+    );
+
+    let builder = connection_builder(limits);
+    let result = if upgrades {
+        watcher
+            .watch(
+                builder
+                    .serve_connection_with_upgrades(io, service)
+                    .into_owned(),
+            )
+            .await
+    } else {
+        watcher
+            .watch(builder.serve_connection(io, service).into_owned())
+            .await
+    };
+    if let Err(e) = result {
+        debug!(peer = %peer_addr, error = %e, "connection error");
+    }
+}
+
+/// The hyper connection builder every listener uses.
+fn connection_builder(
+    limits: &ServerLimits,
+) -> hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor> {
+    let mut builder =
+        hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+    // B6: hyper applies no header-read timeout without a timer. The timeout
+    // also closes an HTTP/1.1 keep-alive connection left idle that long.
+    builder
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(limits.header_read_timeout);
+    // A-39: HTTP/2 rapid-reset defense (CVE-2023-44487) — cap concurrent
+    // streams and the RST_STREAM budget. Keep-alive pings drop dead peers.
+    builder
+        .http2()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .max_concurrent_streams(limits.http2_max_concurrent_streams)
+        .max_pending_accept_reset_streams(Some(limits.http2_max_pending_reset_streams))
+        .keep_alive_interval(limits.http2_keepalive_interval)
+        .keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT);
+    builder
+}
+
 /// Starts an HTTP server that redirects all requests to HTTPS via 301.
 ///
 /// Accepts connections on the given pre-bound `listener` and responds to every
@@ -330,6 +407,10 @@ pub async fn serve_tls_router(
 /// The caller is responsible for binding the listener; this function does not
 /// call `bind()` internally so callers can detect the assigned port before
 /// invoking this function.
+///
+/// The redirect listener runs the same hardened accept loop as the others
+/// (B6), with an admission gate of its own so a flood on port 80 cannot take
+/// the HTTPS listener's slots.
 pub async fn serve_redirect(
     listener: TcpListener,
     https_port: u16,
@@ -366,9 +447,14 @@ pub async fn serve_redirect(
     let local_addr = listener.local_addr()?;
     info!(%local_addr, "HTTP→HTTPS redirect server listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    let limits = server_limits();
+    let gate = Arc::new(ConnectionGate::new(
+        limits.max_connections,
+        limits.queue_depth,
+    ));
+    let graceful = GracefulShutdown::new();
+    accept_until(&listener, &app, None, &gate, false, &graceful, shutdown).await;
+    graceful.shutdown().await;
 
     Ok(())
 }

@@ -2997,6 +2997,15 @@ async fn run_serve(
         queue_depth: config.operational.queue_depth,
         http2_max_concurrent_streams: config.security.http2.max_concurrent_streams,
         http2_max_pending_reset_streams: config.security.http2.max_pending_reset_streams,
+        // B6 (GA audit 2026-09-28): one client held every connection slot with
+        // unfinished requests. These bound how long a connection may sit
+        // without a complete request, and how many one address may hold.
+        header_read_timeout: Duration::from_secs(config.operational.header_read_timeout_secs),
+        tls_handshake_timeout: Duration::from_secs(config.operational.tls_handshake_timeout_secs),
+        max_connections_per_ip: config.operational.max_connections_per_ip,
+        per_ip_exempt: app_state.trusted_proxies.clone(),
+        http2_keepalive_interval: (config.operational.http2_keepalive_interval_secs > 0)
+            .then(|| Duration::from_secs(config.operational.http2_keepalive_interval_secs)),
     }) {
         warn!("server limits were already installed; the first installation stands");
     }
@@ -3004,6 +3013,9 @@ async fn run_serve(
         request_timeout_secs = config.operational.request_timeout_secs,
         max_connections = config.operational.max_connections,
         queue_depth = config.operational.queue_depth,
+        header_read_timeout_secs = config.operational.header_read_timeout_secs,
+        tls_handshake_timeout_secs = config.operational.tls_handshake_timeout_secs,
+        max_connections_per_ip = config.operational.max_connections_per_ip,
         http2_max_concurrent_streams = config.security.http2.max_concurrent_streams,
         http2_max_pending_reset_streams = config.security.http2.max_pending_reset_streams,
         "operational + HTTP/2 limits installed"
@@ -3065,7 +3077,8 @@ async fn run_serve(
                 let _ = shutdown_rx.await;
             };
             if let Err(e) =
-                protocol::grpc::serve(grpc_addr, grpc_state, reflection_enabled, shutdown).await
+                protocol::grpc::serve(grpc_addr, grpc_state, reflection_enabled, None, shutdown)
+                    .await
             {
                 error!(error = %e, "gRPC server exited with error");
             }

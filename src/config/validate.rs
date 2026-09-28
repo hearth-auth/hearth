@@ -473,6 +473,20 @@ impl Config {
                 reason: "must be greater than 0".to_string(),
             });
         }
+        // B6: a zero budget would close every connection before its first
+        // request, and "no timeout" is exactly the defect being closed.
+        if self.operational.header_read_timeout_secs == 0 {
+            issues.push(ValidationIssue {
+                field: "operational.header_read_timeout_secs".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
+        }
+        if self.operational.tls_handshake_timeout_secs == 0 {
+            issues.push(ValidationIssue {
+                field: "operational.tls_handshake_timeout_secs".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
+        }
 
         validate_oidc_all(&self.oidc, self.dev_mode, &mut issues);
         validate_token_all(&self.token, &mut issues);
@@ -3812,5 +3826,33 @@ realms:
             msg.contains("sp_certificate_pem"),
             "the error must name the offending key: {msg}"
         );
+    }
+
+    // ── GA audit 2026-09-28 B6: connection budgets ──────────────────────────
+
+    #[test]
+    fn zero_connection_budgets_are_refused() {
+        let mut config = Config::dev();
+        config.operational.header_read_timeout_secs = 0;
+        config.operational.tls_handshake_timeout_secs = 0;
+        let fields: Vec<String> = config.validate_all().into_iter().map(|i| i.field).collect();
+        for field in [
+            "operational.header_read_timeout_secs",
+            "operational.tls_handshake_timeout_secs",
+        ] {
+            assert!(
+                fields.iter().any(|f| f == field),
+                "{field} = 0 must be refused; issues: {fields:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_connection_budgets_have_safe_defaults() {
+        let config = Config::from_yaml_str_unchecked("{}").expect("empty config parses");
+        assert_eq!(config.operational.header_read_timeout_secs, 10);
+        assert_eq!(config.operational.tls_handshake_timeout_secs, 10);
+        assert_eq!(config.operational.max_connections_per_ip, 64);
+        assert_eq!(config.operational.http2_keepalive_interval_secs, 30);
     }
 }

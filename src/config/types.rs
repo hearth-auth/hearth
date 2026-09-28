@@ -450,9 +450,48 @@ pub struct OperationalConfig {
     /// Internal work queue depth.
     #[serde(default = "OperationalConfig::default_queue_depth")]
     pub queue_depth: u32,
+    /// Seconds a client has to send a complete set of request headers (and,
+    /// on a new connection, its first bytes) before the connection is closed.
+    ///
+    /// Also bounds how long an idle HTTP/1.1 keep-alive connection is held.
+    /// Without it a client that opens a socket and never finishes a request
+    /// holds a connection slot forever.
+    #[serde(default = "OperationalConfig::default_header_read_timeout_secs")]
+    pub header_read_timeout_secs: u64,
+    /// Seconds a client has to complete the TLS handshake before the
+    /// connection is closed. Applies to the HTTPS and gRPC listeners.
+    #[serde(default = "OperationalConfig::default_tls_handshake_timeout_secs")]
+    pub tls_handshake_timeout_secs: u64,
+    /// Maximum concurrent connections from one client address (one IPv4
+    /// address, or one IPv6 `/64`). `0` disables the cap. Peers listed in
+    /// `server.trusted_proxies` are exempt, because every client behind a
+    /// reverse proxy shares the proxy's address.
+    #[serde(default = "OperationalConfig::default_max_connections_per_ip")]
+    pub max_connections_per_ip: u32,
+    /// Seconds between HTTP/2 keep-alive `PING`s. A peer that does not
+    /// acknowledge a ping within 20 seconds is disconnected. `0` disables
+    /// keep-alive pings.
+    #[serde(default = "OperationalConfig::default_http2_keepalive_interval_secs")]
+    pub http2_keepalive_interval_secs: u64,
 }
 
 impl OperationalConfig {
+    const fn default_header_read_timeout_secs() -> u64 {
+        10
+    }
+
+    const fn default_tls_handshake_timeout_secs() -> u64 {
+        10
+    }
+
+    const fn default_max_connections_per_ip() -> u32 {
+        64
+    }
+
+    const fn default_http2_keepalive_interval_secs() -> u64 {
+        30
+    }
+
     const fn default_request_timeout_secs() -> u64 {
         30
     }
@@ -477,6 +516,10 @@ impl Default for OperationalConfig {
             shutdown_timeout_secs: Self::default_shutdown_timeout_secs(),
             max_connections: Self::default_max_connections(),
             queue_depth: Self::default_queue_depth(),
+            header_read_timeout_secs: Self::default_header_read_timeout_secs(),
+            tls_handshake_timeout_secs: Self::default_tls_handshake_timeout_secs(),
+            max_connections_per_ip: Self::default_max_connections_per_ip(),
+            http2_keepalive_interval_secs: Self::default_http2_keepalive_interval_secs(),
         }
     }
 }
