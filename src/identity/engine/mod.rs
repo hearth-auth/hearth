@@ -895,6 +895,15 @@ pub struct EmbeddedIdentityEngine {
     // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
     // INVARIANT: inner (per-code) guard held only across the sync load + validate + delete window; no .await in scope.
     code_exchange_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-`(realm, session)` advisory lock serialising every
+    /// read-modify-write of a session row (audit GA 2026-09-28 B7).
+    ///
+    /// `refresh_session` and `revoke_session` each load the row, change it and
+    /// write it back. Unserialised, a refresh that loaded the live row before
+    /// a revocation wrote it back un-revoked afterwards. Held only across the
+    /// synchronous load → modify → persist (cache update included); never
+    /// across an `.await`, and never while taking a grant-family lock.
+    session_row_locks: advisory_lock::AdvisoryLockMap,
     /// Per-`(realm, fid)` advisory lock serializing grant-family rotation.
     ///
     /// Without it, `rotate_grant_family` is an unsynchronised read-modify-write:
@@ -1371,6 +1380,7 @@ impl EmbeddedIdentityEngine {
             txn_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
             code_exchange_locks: Mutex::new(HashMap::new()),
+            session_row_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
             grant_family_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside otp_redemption_lock() before returning the inner Arc.
@@ -1799,6 +1809,7 @@ impl EmbeddedIdentityEngine {
             txn_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
             code_exchange_locks: Mutex::new(HashMap::new()),
+            session_row_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
             grant_family_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside otp_redemption_lock() before returning the inner Arc.
@@ -3946,7 +3957,9 @@ impl EmbeddedIdentityEngine {
         self.storage
             .put_batch(realm_id, &batch)
             .map_err(Self::storage_err)?;
-        // Update cache after the storage write succeeds.
+        // Update the cache after the storage write succeeds. The insert reads
+        // the row back rather than trusting `session`, so a revocation that
+        // lands in between is never overwritten in the cache.
         if session.is_valid(self.clock.now()) {
             self.session_cache_insert(realm_id, session);
         } else {
@@ -3957,20 +3970,26 @@ impl EmbeddedIdentityEngine {
 
     // ===== Session cache helpers (S12-F1) =====
 
-    /// Inserts or updates a session in the in-process cache.
+    /// Warms the in-process cache for a session its caller has just written.
+    ///
+    /// The session is re-read from storage and inserted through the
+    /// generation-guarded [`Self::session_cache_fill`], never inserted as
+    /// passed: a revocation landing between the caller's storage write and
+    /// this insert has already evicted the key, and inserting the caller's
+    /// live copy afterwards resurrected the session in the cache while storage
+    /// said revoked (audit GA 2026-09-28 B7). A row that is no longer valid,
+    /// or that cannot be read, is evicted instead.
     ///
     /// Silently skips at capacity so the storage fallback stays available.
     fn session_cache_insert(&self, realm_id: &RealmId, session: &Session) {
-        if self.session_cache.load().len() >= SESSION_CACHE_MAX {
-            return;
+        let gen_before_read = self.session_cache_gen.load(Ordering::SeqCst);
+        let now = self.clock.now();
+        match self.load_session_raw(realm_id, session.id()) {
+            Ok(Some(stored)) if stored.is_valid(now) && !stored.is_policy_expired(now) => {
+                self.session_cache_fill(realm_id, &Arc::new(stored), gen_before_read);
+            }
+            _ => self.session_cache_invalidate(realm_id, session.id()),
         }
-        let key = (realm_id.clone(), session.id().clone());
-        let val = Arc::new(session.clone());
-        self.session_cache.rcu(|map| {
-            let mut m = HashMap::clone(map);
-            m.insert(key.clone(), Arc::clone(&val));
-            m
-        });
     }
 
     /// Cache-miss fill of a session read from storage, discarded if any
@@ -4161,6 +4180,10 @@ impl EmbeddedIdentityEngine {
 
     /// Evicts a policy-expired session (A-18). Marks revoked, evicts from
     /// cache, bumps SV, and emits `SessionEvicted` audit.
+    ///
+    /// Does not take the session row lock: `refresh_session` calls it while
+    /// holding that lock, and the write it makes is a revocation, which a
+    /// concurrent writer holding the lock can only reinforce.
     fn evict_session_by_policy(
         &self,
         realm_id: &RealmId,
@@ -5480,6 +5503,19 @@ impl EmbeddedIdentityEngine {
     /// presented (audit 2026-08-28 §4.3#4).
     fn code_exchange_lock(&self, code_hash: &str) -> advisory_lock::AdvisoryLock<'_> {
         advisory_lock::AdvisoryLock::acquire(&self.code_exchange_locks, code_hash)
+    }
+
+    /// Returns the advisory lock serialising read-modify-writes of one
+    /// session row (see the `session_row_locks` field).
+    ///
+    /// Not reentrant. The entry is reclaimed when the last holder drops it.
+    fn session_row_lock(
+        &self,
+        realm_id: &RealmId,
+        session_id: &SessionId,
+    ) -> advisory_lock::AdvisoryLock<'_> {
+        let key = format!("{}:{}", realm_id.as_uuid(), session_id.as_uuid());
+        advisory_lock::AdvisoryLock::acquire(&self.session_row_locks, &key)
     }
 
     /// Returns the per-`(realm_id, fid)` advisory lock serializing grant-family
@@ -8406,12 +8442,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
-        let mut session = self
-            .load_session_raw(realm_id, session_id)?
-            .ok_or(IdentityError::SessionNotFound)?;
-
-        session.revoke();
-        self.persist_session(realm_id, &session)?;
+        let session = {
+            // Serialise the row's read-modify-write against a racing refresh
+            // (audit GA 2026-09-28 B7). Released before the grant-family
+            // cascade below, which takes the family locks a refresh holds
+            // while it waits for this one.
+            let row_lock = self.session_row_lock(realm_id, session_id);
+            // INVARIANT: guard held only across the sync load + revoke + persist; no .await in scope.
+            let _row = row_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut session = self
+                .load_session_raw(realm_id, session_id)?
+                .ok_or(IdentityError::SessionNotFound)?;
+            session.revoke();
+            self.persist_session(realm_id, &session)?;
+            session
+        };
 
         // Cascade: revoke all refresh-token grant families issued under this session.
         //
@@ -8493,6 +8540,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         session_id: &SessionId,
     ) -> Result<Session, IdentityError> {
+        // Serialise the row's read-modify-write against a racing revocation:
+        // a refresh that loaded the live row used to write it back un-revoked
+        // after the revocation's write (audit GA 2026-09-28 B7).
+        let row_lock = self.session_row_lock(realm_id, session_id);
+        // INVARIANT: guard held only across the sync load + check + persist; no .await in scope.
+        let row = row_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut session = self
             .load_session_raw(realm_id, session_id)?
             .ok_or(IdentityError::SessionNotFound)?;
@@ -8508,6 +8563,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         session.refresh(now, self.config.session.ttl_micros);
         self.persist_session(realm_id, &session)?;
+        drop(row);
 
         self.record_audit(
             realm_id,
@@ -17952,6 +18008,8 @@ mod tests {
     mod secret_compare;
     /// A session-cache fill never resurrects a session revoked while it ran.
     mod session_fill_race;
+    /// A session revocation is never undone by a racing refresh or create.
+    mod session_rmw_race;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.
