@@ -921,13 +921,15 @@ fn complete_login(
     // factor — this used to send every non-TOTP user on an `mfa_required`
     // realm to TOTP enrolment. The MFA pending cookie carries the proven
     // identity across the hop, exactly as the direct login does.
-    match super::second_factor::second_factor_step(state, &realm, &user) {
+    let first = auth::FirstFactor::Credential;
+    match super::second_factor::second_factor_step(state, &realm, &user, first) {
         Ok(Some(step)) => {
             let mut response = super::second_factor::redirect_to_second_factor(
                 state,
                 realm_id,
                 user_id,
                 step,
+                first,
                 Some(return_to),
                 secure,
             );
@@ -1022,6 +1024,17 @@ fn await_email_verification(
     );
     let mut response = Redirect::to(&format!("{action_prefix}/register/sent")).into_response();
     super::handlers::append_cookie(&mut response, &clear_bind);
+    // This browser performed the federated login: a verification completed
+    // here keeps the account's federated link; one completed anywhere else
+    // activates the account without it (GA audit round 3, G-3).
+    super::handlers::append_cookie(
+        &mut response,
+        &super::link_token::federated_origin_cookie(
+            &state.cookie_secret,
+            &token,
+            state.is_secure_request(headers),
+        ),
+    );
     response
 }
 

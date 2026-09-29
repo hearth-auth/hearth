@@ -47,7 +47,7 @@ use subtle::ConstantTimeEq;
 
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{ClientId, RealmId, Timestamp, UserId};
-use crate::identity::IdentityError;
+use crate::identity::{IdentityError, MfaProof};
 
 use super::auth::{CookieSecret, UiSession};
 use super::authorize_gate::{
@@ -202,6 +202,9 @@ impl SmsMfaState {
             response_mode: parse_response_mode(self.response_mode.as_deref())?,
             resource: self.resource.clone(),
             via_par: self.via_par,
+            // Not carried in the challenge state: the caller sets it from
+            // the session completing the challenge.
+            mfa_proof: MfaProof::None,
         })
     }
 }
@@ -321,6 +324,9 @@ pub fn sms_mfa_challenge_check(
         response_mode,
         resource: q.resource.clone(),
         via_par,
+        // The gate only stores the request for the challenge; the session
+        // completing it supplies the proof.
+        mfa_proof: MfaProof::None,
     };
     sms_mfa_challenge_gate(state, realm, user_id, &params, secure)
 }
@@ -698,8 +704,13 @@ pub async fn sms_challenge_post(
 
             // A device approval: the factor is proved, approve the code.
             if let Some(user_code) = sms_state.device_user_code.as_deref() {
-                let mut response =
-                    super::handlers::finish_device_approval(&state, &realm, &user_id, user_code);
+                let mut response = super::handlers::finish_device_approval(
+                    &state,
+                    &realm,
+                    &user_id,
+                    user_code,
+                    session.mfa_proof,
+                );
                 append_cookie(&mut response, &clear);
                 return response;
             }
@@ -708,10 +719,13 @@ pub async fn sms_challenge_post(
             // after this one — consent / `prompt`, then issuance with the
             // request's response mode. This used to issue the code directly,
             // skipping the consent prompt and dropping `response_mode`.
-            let Some(params) = sms_state.authorize_params() else {
+            let Some(mut params) = sms_state.authorize_params() else {
                 tracing::warn!("sms_challenge_post: challenge state carries unparseable params");
                 return handlers_common::server_error();
             };
+            // The code carries what this session proved (GA audit round 3,
+            // D-7).
+            params.mfa_proof = session.mfa_proof;
             let now = Timestamp::from_micros(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

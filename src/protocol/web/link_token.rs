@@ -139,6 +139,60 @@ pub fn confirmed_token(
     read(headers).filter(|t| binding_matches(&state.cookie_secret, t, link_binding))
 }
 
+/// Cookie a federated just-in-time login leaves in the browser that performed
+/// it when the account it created waits for email verification (GA audit
+/// round 3, G-3). Its value is [`keyed_binding`] of the mailed verification
+/// token; the verification `POST` that finds it keeps the account's federated
+/// link, and one completed in any other browser activates the account
+/// without it ([`verification_origin`]).
+pub const FEDERATED_ORIGIN_COOKIE: &str = "hearth_fed_origin";
+
+/// Lifetime of [`FEDERATED_ORIGIN_COOKIE`]: the verification link's (24 h).
+pub const FEDERATED_ORIGIN_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// Domain separator of the [`FEDERATED_ORIGIN_COOKIE`] binding.
+const FEDERATED_ORIGIN_PURPOSE: &str = "hearth-federated-origin";
+
+/// `Set-Cookie` value that marks this browser as the one whose federated
+/// login was sent the verification `token`.
+#[must_use]
+pub fn federated_origin_cookie(secret: &CookieSecret, token: &str, secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    let binding = keyed_binding(secret, FEDERATED_ORIGIN_PURPOSE, token);
+    format!(
+        "{FEDERATED_ORIGIN_COOKIE}={binding}; HttpOnly; Path=/ui; SameSite=Lax; \
+         Max-Age={FEDERATED_ORIGIN_TTL_SECS}{secure_attr}"
+    )
+}
+
+/// `Set-Cookie` value that clears [`FEDERATED_ORIGIN_COOKIE`].
+#[must_use]
+pub fn clear_federated_origin_cookie(secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!("{FEDERATED_ORIGIN_COOKIE}=; HttpOnly; Path=/ui; SameSite=Lax; Max-Age=0{secure_attr}")
+}
+
+/// Whether the browser spending the verification `token` is the one whose
+/// federated login it was mailed to: it holds [`FEDERATED_ORIGIN_COOKIE`]
+/// bound to exactly this token (compared in constant time).
+#[must_use]
+pub fn verification_origin(
+    secret: &CookieSecret,
+    headers: &HeaderMap,
+    token: &str,
+) -> crate::identity::VerificationOrigin {
+    let held = cookie_value_from_headers(headers, FEDERATED_ORIGIN_COOKIE)
+        .filter(|v| !v.is_empty())
+        .is_some_and(|v| {
+            ct_eq_secret_str(&keyed_binding(secret, FEDERATED_ORIGIN_PURPOSE, token), v)
+        });
+    if held {
+        crate::identity::VerificationOrigin::FederatedLoginBrowser
+    } else {
+        crate::identity::VerificationOrigin::Elsewhere
+    }
+}
+
 /// Middleware for a route an emailed link lands on. See the module docs.
 pub async fn stash(State(state): State<Arc<WebState>>, req: Request, next: Next) -> Response {
     // Nested routers strip their prefix from `req.uri()`; the cookie path and

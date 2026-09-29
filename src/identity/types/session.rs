@@ -16,6 +16,15 @@ use crate::core::{SessionId, Timestamp, UserId};
 /// realm's `mfa_required_roles` — can ask what the session *proved* rather
 /// than what the account holds. Stored records encode the variant by its
 /// position, so new variants MUST be appended, never inserted.
+///
+/// There is no "inherited" proof. A session derived from another one — the
+/// session behind a completed required-action flow (GA audit round 3, D-1),
+/// an authorization-code exchange or a device grant (D-7) — records the proof
+/// the authentication behind it actually made. The `Inherited` variant that
+/// satisfied every gate whatever had been proved is gone; a record written
+/// with it decodes as [`MfaProof::PasskeyPossession`], and one written with
+/// the old position of `PasskeyPossession` falls back to the legacy record
+/// ([`MfaProof::None`]) — neither proves more than it did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MfaProof {
     /// No second factor was proved in this authentication.
@@ -39,17 +48,6 @@ pub enum MfaProof {
     /// This is the only proof a realm with `webauthn_required: true` accepts
     /// from a fresh authentication.
     ProvedWebAuthn,
-    /// This session derives from an earlier authentication that already passed
-    /// the realm's MFA gate: an authorization code or an approved device code.
-    /// Those artefacts can only be minted for a principal who already holds a
-    /// session, and a session can only be created by a path that satisfied
-    /// this same gate.
-    ///
-    /// Use it only where that upstream gate can be named in a comment. A
-    /// browser required-action flow does NOT qualify: its RA token is minted
-    /// before any session exists, by whichever login reached the gate, so it
-    /// carries the proof that login made (GA audit round 3, D-1).
-    Inherited,
     /// A WebAuthn (passkey) ceremony that proved user *presence* only.
     ///
     /// Possession of one enrolled passkey and nothing else: one factor. It
@@ -65,7 +63,7 @@ pub enum MfaProof {
 impl MfaProof {
     /// Returns whether this proof satisfies a realm's `mfa_required` policy.
     pub fn satisfies_mfa_required(self) -> bool {
-        matches!(self, Self::Proved | Self::ProvedWebAuthn | Self::Inherited)
+        matches!(self, Self::Proved | Self::ProvedWebAuthn)
     }
 
     /// Returns whether this proof satisfies a realm's `webauthn_required`
@@ -76,16 +74,8 @@ impl MfaProof {
     /// (audit 2026-08-28 §4.18#3, task 25.26). Only a WebAuthn assertion that
     /// proved user verification counts here; a TOTP code, a recovery code or
     /// an OTP does not, however many passkeys the account holds.
-    ///
-    /// [`MfaProof::Inherited`] passes for the same reason it passes
-    /// `mfa_required`: the artefact behind it (an authorization code, an
-    /// approved device code) can only be minted for a principal who already
-    /// holds a session, and a session on this realm can only be created by a
-    /// path that cleared this same gate. Its two constructors are the code
-    /// and device-code exchanges; refusing it here would refuse every token
-    /// grant on a `webauthn_required` realm.
     pub fn satisfies_webauthn_required(self) -> bool {
-        matches!(self, Self::ProvedWebAuthn | Self::Inherited)
+        matches!(self, Self::ProvedWebAuthn)
     }
 }
 
@@ -398,7 +388,6 @@ mod tests {
             Just(MfaProof::None),
             Just(MfaProof::Proved),
             Just(MfaProof::ProvedWebAuthn),
-            Just(MfaProof::Inherited),
             Just(MfaProof::PasskeyPossession),
         ]
     }

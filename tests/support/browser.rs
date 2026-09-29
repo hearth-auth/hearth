@@ -28,6 +28,8 @@ struct Cookie {
 pub struct Browser {
     app: axum::Router,
     jar: Vec<Cookie>,
+    /// Headers sent with every request (e.g. `User-Agent`).
+    headers: Vec<(String, String)>,
 }
 
 impl Browser {
@@ -36,7 +38,14 @@ impl Browser {
         Self {
             app,
             jar: Vec::new(),
+            headers: Vec::new(),
         }
+    }
+
+    /// Sends `name: value` with every later request, as a browser sends its
+    /// `User-Agent`.
+    pub fn set_header(&mut self, name: &str, value: &str) {
+        self.headers.push((name.to_string(), value.to_string()));
     }
 
     /// Stores a `Set-Cookie` line as if `request_path` had returned it.
@@ -145,6 +154,9 @@ impl Browser {
         let path = uri.split('?').next().unwrap_or(uri).to_string();
         if let Some(cookies) = self.cookie_header(&path) {
             req = req.header(header::COOKIE, cookies);
+        }
+        for (name, value) in &self.headers {
+            req = req.header(name.as_str(), value.as_str());
         }
         let resp = self
             .app

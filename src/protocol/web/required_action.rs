@@ -50,6 +50,7 @@ use crate::identity::error::IdentityError;
 use crate::identity::ra_token::{self, OidcParams};
 use crate::identity::RequiredAction;
 use crate::identity::{CleartextPassword, MfaProof, SessionContext, UpdateUserRequest};
+use crate::protocol::client_info::PeerAddr;
 use crate::protocol::web::auth::{issue_auth_cookies, IssuedCookies};
 
 use super::authorize_gate::{refuse_if_silent, run_authorize_gates, AuthorizeParams, Gate};
@@ -161,6 +162,7 @@ pub(super) fn required_action_intercept(
         user_id,
         actions,
         params.to_oidc_params(),
+        None,
         now,
     ) {
         Ok(t) => t,
@@ -180,9 +182,12 @@ pub(super) fn required_action_intercept(
 /// The user's pending required actions: the stored list plus the
 /// dynamically injected enrolment requirements.
 ///
-/// * `Ok(None)` — the user does not exist, so nothing is stored for them.
-///   Every caller's next step (session creation, code exchange) refuses a
-///   missing user, so this is not the place to decide it.
+/// * `Ok(None)` — the user does not exist, or cannot sign in (disabled, or
+///   still waiting for email verification). No required-action session is
+///   minted for such an account (GA audit round 3, D-11): it let a disabled
+///   or unverified account holder who knew the password change it, bind a
+///   phone and send SMS. Every caller's next step (session creation, code
+///   exchange) refuses the account with its usual answer.
 /// * `Err(response)` — a lookup failed. The actions (or the realm's
 ///   enrolment requirements) are unknown, so the caller must refuse: reading
 ///   the fault as "nothing pending" skipped the actions.
@@ -193,8 +198,8 @@ fn pending_required_actions(
     client_id: Option<&str>,
 ) -> Result<Option<Vec<RequiredAction>>, Response> {
     let user = match state.identity.get_user(realm, user_id) {
-        Ok(Some(u)) => u,
-        Ok(None) => return Ok(None),
+        Ok(Some(u)) if u.status() == crate::identity::UserStatus::Active => u,
+        Ok(_) => return Ok(None),
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -346,6 +351,7 @@ pub fn required_action_check_browser(
         actions,
         return_to.map(str::to_string),
         mfa_proof,
+        None,
         now,
     ) {
         Ok(t) => t,
@@ -425,10 +431,15 @@ fn owed_factor_or_refusal(
     ) else {
         return handlers_common::server_error();
     };
-    match super::second_factor::second_factor_step(state, &realm_record, &user) {
+    // Only the passkey is routed to, and the passkey proves nothing an
+    // earlier factor proved, so what proved this login's first factor does
+    // not change the answer; recording it as an inbox keeps the email OTP
+    // out of reach of the pending cookie issued here all the same.
+    let first = super::auth::FirstFactor::Inbox;
+    match super::second_factor::second_factor_step(state, &realm_record, &user, first) {
         Ok(Some(step @ super::second_factor::SecondFactorStep::Passkey)) => {
             super::second_factor::redirect_to_second_factor(
-                state, realm, user_id, step, return_to, secure,
+                state, realm, user_id, step, first, return_to, secure,
             )
         }
         Ok(_) => forbidden_page(),
@@ -437,6 +448,16 @@ fn owed_factor_or_refusal(
             handlers_common::server_error()
         }
     }
+}
+
+/// The client context of a required-action request (address, user agent),
+/// recorded on the session the flow may end in.
+pub(super) fn client_context(
+    state: &WebState,
+    headers: &HeaderMap,
+    peer_addr: std::net::SocketAddr,
+) -> SessionContext {
+    crate::protocol::client_info::build_session_context(headers, peer_addr, &state.trusted_proxies)
 }
 
 /// The bare `403` page for a login this flow refuses.
@@ -460,6 +481,7 @@ pub fn resume_browser_flow(
     user_sub: &str,
     return_to: Option<String>,
     mfa_proof: MfaProof,
+    client: &SessionContext,
     secure: bool,
 ) -> Response {
     let clear_cookie = ra_token::clear_ra_session_cookie(secure);
@@ -476,9 +498,12 @@ pub fn resume_browser_flow(
     // `Inherited`, which satisfies `webauthn_required`, so a TOTP code plus
     // any pending action opened a session on a passkey-only realm (GA audit
     // round 3, D-1).
+    // The client completing the flow — its address, which the realm's
+    // network policy is checked against, and its user agent, shown in the
+    // user's session list. The session used to record neither.
     let ctx = SessionContext {
         mfa_proof,
-        ..SessionContext::default()
+        ..client.clone()
     };
     let session = match state.identity.create_session(realm, &user_id, &ctx) {
         Ok(s) => s,
@@ -568,7 +593,9 @@ pub fn resume_oidc_flow(
 /// to the next action page.  (AC-3: sequential multi-action flow)
 ///
 /// Exactly one of `oidc_params` or `browser_return_to` should be `Some` —
-/// whichever was set when the RA flow was originally initiated.
+/// whichever was set when the RA flow was originally initiated. `flow` is
+/// the flow's id ([`ra_token::RaClaims::flow`]), which the new token keeps.
+#[allow(clippy::too_many_arguments)]
 pub fn next_required_action(
     state: &Arc<WebState>,
     realm: &RealmId,
@@ -577,6 +604,7 @@ pub fn next_required_action(
     oidc_params: Option<OidcParams>,
     browser_return_to: Option<String>,
     mfa_proof: MfaProof,
+    flow: &str,
     secure: bool,
     now: Timestamp,
 ) -> Response {
@@ -591,7 +619,7 @@ pub fn next_required_action(
     let token = if let Some(oidc) = oidc_params {
         match state
             .identity
-            .generate_ra_token(realm, &user_id, remaining, oidc, now)
+            .generate_ra_token(realm, &user_id, remaining, oidc, Some(flow), now)
         {
             Ok(t) => t,
             Err(e) => {
@@ -606,6 +634,7 @@ pub fn next_required_action(
             remaining,
             browser_return_to,
             mfa_proof,
+            Some(flow),
             now,
         ) {
             Ok(t) => t,
@@ -920,7 +949,11 @@ struct VerifyEmailExpiredTemplate {
 /// clears the VERIFY_EMAIL action and advances the OIDC flow without sending
 /// another email (AC-8 / OQ-3 resolution).
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
-pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+pub async fn verify_email_page(
+    State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
+    headers: HeaderMap,
+) -> Response {
     let Some(token) = read_ra_cookie(&headers) else {
         return handlers_common::bad_request("No active required-action session");
     };
@@ -997,6 +1030,7 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
             &realm,
             claims,
             RequiredAction::VerifyEmail,
+            &client_context(&state, &headers, peer_addr),
             secure,
             now,
         );
@@ -1100,6 +1134,7 @@ pub async fn verify_email_confirm(
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn verify_email_confirm_submit(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(form): Form<super::handlers::LinkConfirmForm>,
 ) -> Response {
@@ -1189,6 +1224,7 @@ pub async fn verify_email_confirm_submit(
                     &realm,
                     claims,
                     RequiredAction::VerifyEmail,
+                    &client_context(&state, &headers, peer_addr),
                     secure,
                     now,
                 )
@@ -1211,12 +1247,14 @@ fn advance_flow(
     realm: &RealmId,
     claims: ra_token::RaClaims,
     done: RequiredAction,
+    client: &SessionContext,
     secure: bool,
     now: Timestamp,
 ) -> Response {
     let remaining: Vec<RequiredAction> = claims
         .pending_actions
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|a| *a != done)
         .collect();
     if !remaining.is_empty() {
@@ -1228,9 +1266,20 @@ fn advance_flow(
             claims.oidc_params,
             claims.browser_return_to,
             claims.mfa_proof,
+            &claims.flow,
             secure,
             now,
         );
+    }
+    // The flow ends here — in a session or an authorization code — and it
+    // ends once. A copy of any of its RA cookies used to end it again: the
+    // "already satisfied" pages lead straight here, and every replay minted
+    // another session (GA audit round 3, D-2).
+    if let Err(e) = state.identity.consume_required_action_flow(realm, &claims) {
+        tracing::info!(error = %e, "required actions: this flow has already ended");
+        let mut response = forbidden_page();
+        append_cookie(&mut response, &ra_token::clear_ra_session_cookie(secure));
+        return response;
     }
     if claims.browser_return_to.is_some() {
         resume_browser_flow(
@@ -1239,12 +1288,21 @@ fn advance_flow(
             &claims.sub,
             claims.browser_return_to,
             claims.mfa_proof,
+            client,
             secure,
         )
     } else if let Some(oidc_params) = claims.oidc_params {
         resume_oidc_flow(state, realm, &claims.sub, oidc_params, secure)
     } else {
-        resume_browser_flow(state, realm, &claims.sub, None, claims.mfa_proof, secure)
+        resume_browser_flow(
+            state,
+            realm,
+            &claims.sub,
+            None,
+            claims.mfa_proof,
+            client,
+            secure,
+        )
     }
 }
 
@@ -1295,6 +1353,7 @@ fn skip_satisfied_action(
     claims: ra_token::RaClaims,
     action: RequiredAction,
     reason: &'static str,
+    client: &SessionContext,
     secure: bool,
     now: Timestamp,
 ) -> Response {
@@ -1312,7 +1371,7 @@ fn skip_satisfied_action(
     }) {
         tracing::warn!(error = %e, "skip_satisfied_action: audit append failed");
     }
-    advance_flow(state, realm, claims, action, secure, now)
+    advance_flow(state, realm, claims, action, client, secure, now)
 }
 
 fn render_verify_email_expired(state: &Arc<WebState>) -> Response {
@@ -1370,6 +1429,7 @@ pub async fn update_password_page(
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn update_password_submit(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(form): Form<UpdatePasswordForm>,
 ) -> Response {
@@ -1554,6 +1614,7 @@ pub async fn update_password_submit(
         &realm,
         claims,
         RequiredAction::UpdatePassword,
+        &client_context(&state, &headers, peer_addr),
         secure,
         now,
     )
@@ -1678,6 +1739,7 @@ pub struct EnrollPhoneOtpVerifyForm {
 /// Renders the phone-number input form.
 pub async fn enroll_phone_otp_page(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
 ) -> Response {
     // Verify the RA session token, exactly as the email twin does — cookie
@@ -1702,6 +1764,7 @@ pub async fn enroll_phone_otp_page(
                 claims,
                 RequiredAction::EnrollPhoneOtp,
                 "phone_already_verified",
+                &client_context(&state, &headers, peer_addr),
                 secure,
                 now,
             );
@@ -1834,6 +1897,7 @@ pub async fn enroll_phone_otp_send(
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn enroll_phone_otp_verify_submit(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(form): Form<EnrollPhoneOtpVerifyForm>,
 ) -> Response {
@@ -1957,6 +2021,7 @@ pub async fn enroll_phone_otp_verify_submit(
         &realm,
         claims,
         RequiredAction::EnrollPhoneOtp,
+        &client_context(&state, &headers, peer_addr),
         secure,
         now,
     )
@@ -2222,6 +2287,7 @@ pub struct EnrollEmailOtpVerifyForm {
 /// from the RA token subject and shows a "Send code to my email" button.
 pub async fn enroll_email_otp_page(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
 ) -> Response {
     let Some(token) = read_ra_cookie(&headers) else {
@@ -2257,6 +2323,7 @@ pub async fn enroll_email_otp_page(
             claims,
             RequiredAction::EnrollEmailOtp,
             "email_otp_already_enabled",
+            &client_context(&state, &headers, peer_addr),
             secure,
             now,
         );
@@ -2338,6 +2405,7 @@ pub async fn enroll_email_otp_send(
 #[allow(clippy::too_many_lines)]
 pub async fn enroll_email_otp_verify_submit(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(form): Form<EnrollEmailOtpVerifyForm>,
 ) -> Response {
@@ -2448,6 +2516,7 @@ pub async fn enroll_email_otp_verify_submit(
         &realm,
         claims,
         RequiredAction::EnrollEmailOtp,
+        &client_context(&state, &headers, peer_addr),
         secure,
         now,
     )
@@ -2685,6 +2754,7 @@ fn enroll_mfa_gate(
     user_id: &UserId,
     claims: ra_token::RaClaims,
     headers: &HeaderMap,
+    client: &SessionContext,
     now: Timestamp,
 ) -> Option<Response> {
     match enroll_mfa_status(state, realm, user_id) {
@@ -2696,6 +2766,7 @@ fn enroll_mfa_gate(
             claims,
             RequiredAction::EnrollMfa,
             "mfa_already_enrolled",
+            client,
             state.is_secure_request(headers),
             now,
         )),
@@ -2714,7 +2785,11 @@ fn enroll_mfa_gate(
 /// generate a fresh TOTP secret, and renders the QR code + recovery codes.
 /// Each GET generates a new pending enrollment (idempotent from the user's
 /// perspective; the previous pending secret is overwritten).
-pub async fn enroll_mfa_page(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+pub async fn enroll_mfa_page(
+    State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
+    headers: HeaderMap,
+) -> Response {
     let Some(token_str) = read_ra_cookie(&headers) else {
         return handlers_common::bad_request("No active required-action session");
     };
@@ -2743,7 +2818,16 @@ pub async fn enroll_mfa_page(State(state): State<Arc<WebState>>, headers: Header
     };
     let user_id = UserId::new(user_uuid);
 
-    if let Some(resp) = enroll_mfa_gate(&state, &realm, &user_id, claims.clone(), &headers, now) {
+    let client = client_context(&state, &headers, peer_addr);
+    if let Some(resp) = enroll_mfa_gate(
+        &state,
+        &realm,
+        &user_id,
+        claims.clone(),
+        &headers,
+        &client,
+        now,
+    ) {
         return resp;
     }
 
@@ -2792,6 +2876,7 @@ pub async fn enroll_mfa_page(State(state): State<Arc<WebState>>, headers: Header
                 claims,
                 RequiredAction::EnrollMfa,
                 "mfa_already_enrolled",
+                &client_context(&state, &headers, peer_addr),
                 secure,
                 now,
             )
@@ -2815,6 +2900,7 @@ pub async fn enroll_mfa_page(State(state): State<Arc<WebState>>, headers: Header
 #[allow(clippy::too_many_lines)]
 pub async fn enroll_mfa_submit(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(form): Form<EnrollMfaForm>,
 ) -> Response {
@@ -2921,6 +3007,7 @@ pub async fn enroll_mfa_submit(
         &realm,
         claims,
         RequiredAction::EnrollMfa,
+        &client_context(&state, &headers, peer_addr),
         secure,
         now,
     )
