@@ -1173,3 +1173,156 @@ fn shared_ui_csp_still_applies_to_ordinary_pages() {
         "a page with no policy of its own must still get the shared strict CSP, got: {csp}"
     );
 }
+
+// ============================================================================
+// GA sweep 3, G-1 (IdP side) — a signed request carries exactly one enveloped
+// signature.
+//
+// `verify_signed_element` is shared with the SP assertion consumer. It
+// verified only the first direct-child `<ds:Signature>` while the
+// canonicalizer removed every one of them from the digest, and
+// `parse_authn_request` / `parse_logout_request` read `ID`, `Issuer` and
+// `NameID` from anywhere in the document. A second `<ds:Signature>` appended
+// to a request the SP genuinely signed therefore rewrote the request Hearth
+// answered — its `ID` becomes the `InResponseTo` Hearth signs.
+// ============================================================================
+
+/// Appends a second `<ds:Signature>` carrying `inner` just before `close_tag`
+/// (the signed root element's end tag).
+fn with_second_signature(signed: &[u8], close_tag: &str, inner: &str) -> Vec<u8> {
+    let s = std::str::from_utf8(signed).expect("signed request is utf8");
+    assert!(s.contains(close_tag), "{close_tag} not present");
+    let extra = format!(
+        r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">{inner}</ds:Signature>"#
+    );
+    s.replacen(close_tag, &format!("{extra}{close_tag}"), 1)
+        .into_bytes()
+}
+
+#[test]
+fn idp_sso_refuses_signed_authn_request_carrying_a_second_signature() {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    use hearth::identity::federation::saml::sign_element;
+    use hearth::identity::tokens::RsaSigningKey;
+
+    let (app, identity, realm_id) = build_app_full();
+    let sp_key = RsaSigningKey::generate("wants-signed-sp", 365).expect("sp key");
+    register_signing_sp(
+        identity.as_ref(),
+        &realm_id,
+        "wants-signed",
+        "https://wants-signed.example",
+        Some(cert_der_to_pem(sp_key.cert_der())),
+    );
+    let cookie = authenticated_cookie(identity.as_ref(), &realm_id, "sso-xsw@demo.test");
+
+    // Control: the SP's genuinely signed request is served.
+    let control = authn_request_xml("_ar_control", "https://wants-signed.example");
+    let control = sign_element(control.as_bytes(), "_ar_control", &sp_key).expect("sign");
+    let (status, body) = post_sso(&app, &cookie, &B64.encode(&control));
+    assert_eq!(status, 200, "control must be served, got {status}: {body}");
+    assert!(body.contains("SAMLResponse"), "control must be answered");
+
+    // Attack: the same shape, plus a second signature holding a forged request.
+    let signed = authn_request_xml("_ar_xsw", "https://wants-signed.example");
+    let signed = sign_element(signed.as_bytes(), "_ar_xsw", &sp_key).expect("sign");
+    let attack = with_second_signature(
+        &signed,
+        "</samlp:AuthnRequest>",
+        concat!(
+            r#"<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" "#,
+            r#"ID="_forged_request" Version="2.0" IssueInstant="2023-11-14T22:13:20Z">"#,
+            "</samlp:AuthnRequest>",
+        ),
+    );
+    let (status, body) = post_sso(&app, &cookie, &B64.encode(&attack));
+    assert!(
+        !body.contains("SAMLResponse"),
+        "an AuthnRequest carrying two signatures must not be answered; got {status}"
+    );
+    assert_eq!(status, 403, "expected 403, got {status}: {body}");
+}
+
+#[test]
+fn idp_slo_refuses_signed_logout_request_carrying_a_second_signature() {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    use hearth::core::Timestamp;
+    use hearth::identity::federation::saml::{
+        build_logout_request_xml, sign_element, BuildLogoutRequestParams,
+    };
+    use hearth::identity::tokens::RsaSigningKey;
+
+    let (app, identity, realm_id) = build_app_full();
+    let sp_key = RsaSigningKey::generate("test-sp", 365).expect("sp key");
+    identity
+        .register_saml_sp(
+            &realm_id,
+            &SamlServiceProvider {
+                sp_key: "slo-sp".to_string(),
+                entity_id: "https://slo-sp.example".to_string(),
+                acs_url: "https://slo-sp.example/acs".to_string(),
+                slo_url: Some("https://slo-sp.example/slo".to_string()),
+                sp_certificate_pem: Some(cert_der_to_pem(sp_key.cert_der())),
+                sign_assertions: true,
+                sign_responses: true,
+                want_authn_requests_signed: true,
+                nameid_format: SamlNameIdFormat::EmailAddress,
+                attribute_map: BTreeMap::new(),
+            },
+        )
+        .expect("register sp");
+
+    let signed_request = |id: &str| {
+        let xml = build_logout_request_xml(&BuildLogoutRequestParams {
+            id,
+            destination: "https://hearth.example/ui/realms/demo/saml/slo-idp",
+            issue_instant: Timestamp::from_micros(1_700_000_000 * 1_000_000),
+            issuer: "https://slo-sp.example",
+            name_id: "user@slo-sp.example",
+            name_id_format: SamlNameIdFormat::EmailAddress.as_uri(),
+            session_index: None,
+        });
+        sign_element(xml.as_bytes(), id, &sp_key).expect("sign request")
+    };
+    let post_slo = |xml: &[u8]| {
+        let form = format!("SAMLRequest={}", urlencoding_lite(&B64.encode(xml)));
+        let resp = send(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/ui/realms/demo/saml/slo-idp")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        );
+        (resp.status().as_u16(), body_string(resp))
+    };
+
+    // Control: the SP's genuinely signed LogoutRequest is answered.
+    let (status, body) = post_slo(&signed_request("_lo_control"));
+    assert_eq!(
+        status, 200,
+        "control must be answered, got {status}: {body}"
+    );
+    assert!(body.contains("SAMLResponse"), "control must be answered");
+
+    // Attack: a second signature holding a forged request ID and subject.
+    let attack = with_second_signature(
+        &signed_request("_lo_xsw"),
+        "</samlp:LogoutRequest>",
+        concat!(
+            r#"<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" "#,
+            r#"xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_forged_logout" "#,
+            r#"Version="2.0" IssueInstant="2023-11-14T22:13:20Z">"#,
+            "<saml:NameID>ceo@slo-sp.example</saml:NameID></samlp:LogoutRequest>",
+        ),
+    );
+    let (status, body) = post_slo(&attack);
+    assert!(
+        !body.contains("SAMLResponse"),
+        "a LogoutRequest carrying two signatures must not be answered; got {status}"
+    );
+    assert_eq!(status, 403, "expected 403, got {status}: {body}");
+}
