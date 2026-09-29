@@ -1448,6 +1448,14 @@ impl RbacEngine for EmbeddedRbacEngine {
         Ok(())
     }
 
+    fn get_assignment(
+        &self,
+        realm_id: &RealmId,
+        assignment_id: &AssignmentId,
+    ) -> Result<Option<RoleAssignment>, RbacError> {
+        self.load_assignment(realm_id, assignment_id)
+    }
+
     fn list_user_assignments(
         &self,
         realm_id: &RealmId,

@@ -1680,6 +1680,22 @@ pub trait IdentityEngine: Send + Sync {
 
     // ===== Organizations =====
 
+    /// Creates an organization on behalf of SCIM: as
+    /// [`IdentityEngine::create_organization`], and the organization carries
+    /// the durable "provisioned by SCIM" marker
+    /// ([`Organization::scim_provisioned`]). Only SCIM's `POST /Groups` calls
+    /// it; a realm's provisioning token may modify or delete only marked
+    /// organizations.
+    ///
+    /// # Errors
+    ///
+    /// As [`IdentityEngine::create_organization`].
+    fn create_scim_organization(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateOrganizationRequest,
+    ) -> Result<Organization, IdentityError>;
+
     /// Creates a new organization within a realm.
     ///
     /// Validates the slug, checks uniqueness, and persists the org record

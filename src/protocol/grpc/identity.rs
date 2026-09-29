@@ -330,6 +330,21 @@ impl IdentityAdminService for IdentityAdminSvc {
             .identity
             .delete_realm(&realm_id)
             .map_err(identity_to_status)?;
+        // The same event REST `DELETE /admin/realms/{id}` records. Scoped to
+        // the SYSTEM realm: appending under the realm just deleted would
+        // re-create `audit:*` keys in a key space the cascade must leave
+        // empty (GA audit round 3).
+        crate::protocol::audit_log::record(
+            self.state.audit.as_ref(),
+            &crate::audit::CreateAuditEvent {
+                realm_id: crate::identity::keys::system_realm_id(),
+                actor: auth.user_id.as_uuid().to_string(),
+                action: crate::audit::AuditAction::RealmDeleted,
+                resource_type: "realm".to_string(),
+                resource_id: realm_id.as_uuid().to_string(),
+                metadata: Some(serde_json::json!({"via": "grpc"})),
+            },
+        );
         Ok(Response::new(pb::Empty {}))
     }
 

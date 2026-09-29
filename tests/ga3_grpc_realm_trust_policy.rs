@@ -46,6 +46,11 @@ fn make_svc(h: &common::TestHarness) -> IdentityAdminSvc {
 
 /// A system-realm `realm.admin` (holds `hearth.admin`) and its token.
 fn system_admin_token(h: &common::TestHarness) -> String {
+    system_admin(h).1
+}
+
+/// A system-realm `realm.admin`: `(user id, token)`.
+fn system_admin(h: &common::TestHarness) -> (hearth::core::UserId, String) {
     let sys = system_realm();
     h.rbac().seed_realm(&sys).expect("seed system rbac");
     let user = h
@@ -78,11 +83,13 @@ fn system_admin_token(h: &common::TestHarness) -> String {
         .identity()
         .create_session(&sys, user.id(), &SessionContext::default())
         .expect("session");
-    h.identity()
+    let token = h
+        .identity()
         .issue_tokens(&sys, user.id(), session.id())
         .expect("issue tokens")
         .access_token()
-        .to_string()
+        .to_string();
+    (user.id().clone(), token)
 }
 
 fn tenant_realm(h: &common::TestHarness) -> RealmId {
@@ -241,4 +248,54 @@ async fn get_realm_permitted_when_ungoverned_or_granted() {
             .into_inner();
         assert_eq!(realm.id, target.as_uuid().to_string());
     }
+}
+
+/// gRPC `DeleteRealm` writes the audit event REST `DELETE /admin/realms/{id}`
+/// writes: `realm_deleted`, in the system realm (the deleted realm's own key
+/// space must stay empty), attributed to the caller.
+#[tokio::test]
+async fn grpc_delete_realm_is_audited_like_rest() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let svc = make_svc(&h);
+    let (operator_id, token) = system_admin(&h);
+    let target = tenant_realm(&h);
+    h.identity()
+        .update_realm(
+            &target,
+            &UpdateRealmRequest {
+                status: Some(RealmStatus::Archived),
+                ..UpdateRealmRequest::default()
+            },
+        )
+        .expect("archive realm");
+
+    svc.delete_realm(grpc_req(
+        &token,
+        pb::DeleteRealmRequest {
+            id: target.as_uuid().to_string(),
+        },
+    ))
+    .await
+    .expect("DeleteRealm on an archived realm");
+
+    let events = h
+        .audit()
+        .query(&hearth::audit::AuditQuery {
+            realm_id: system_realm(),
+            start_time: None,
+            end_time: None,
+            actor: Some(operator_id.as_uuid().to_string()),
+            action: Some(hearth::audit::AuditAction::RealmDeleted),
+            limit: None,
+            agent_id: None,
+            tool: None,
+        })
+        .expect("audit query");
+    let deleted: Vec<_> = events
+        .iter()
+        .filter(|e| e.action == hearth::audit::AuditAction::RealmDeleted)
+        .collect();
+    assert_eq!(deleted.len(), 1, "one realm_deleted event: {events:?}");
+    assert_eq!(deleted[0].resource_id, target.as_uuid().to_string());
+    assert_eq!(deleted[0].resource_type, "realm");
 }

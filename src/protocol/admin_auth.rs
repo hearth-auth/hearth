@@ -564,55 +564,59 @@ pub enum UserCeilingError {
     Unresolved,
 }
 
+/// Most organizations one user's ceiling check resolves. A user in more
+/// organizations than this is refused (fail closed) rather than half-checked.
+const MAX_CEILING_ORGS: usize = 1_000;
+
+/// Most users one group-ceiling check visits (members of the group and of every
+/// group nested in it). A larger group is refused (fail closed).
+const MAX_CEILING_GROUP_MEMBERS: usize = 10_000;
+
+/// Page size for the membership listings the ceiling walks.
+const CEILING_PAGE: usize = 200;
+
 /// The privilege ceiling on user administration: an admin may not modify,
-/// re-email, reset, disable or delete a user who holds an admin-grade
-/// permission the admin lacks (see [`admin_ceiling_gap`] for the rule).
+/// re-email, reset, disable, delete, demote or sign out a user who holds an
+/// admin-grade permission the admin lacks (see [`admin_ceiling_gap`] for the
+/// rule).
 ///
 /// `actor_permissions` is the actor's permission set (token claims); a SCIM
 /// provisioning token passes an empty set, so it may act on no admin
-/// principal at all. `realm_id` is the realm the target user lives in, which is
-/// where its permissions are resolved.
+/// principal at all. `realm_id` is the realm the target user lives in.
 ///
-/// Every user-administration surface calls this one function: REST
-/// `/admin/users*` and `/admin/realms/{id}/users/{id}/required-actions`, gRPC
-/// `UpdateUser` / `DeleteUser`, and SCIM `/Users`. Without it a
-/// `hearth.users.admin` sub-admin could rewrite a superuser's email and reset
-/// the password, and so take over `hearth.admin` (GA audit round 3). The web
-/// console admits only `hearth.admin`, which satisfies the ceiling by
-/// construction.
+/// The target's admin permissions are its realm-level set **plus** every
+/// organization-scoped set: a user may hold `hearth.admin` only through an
+/// organization role or grant, and an admin token issued in that
+/// organization's context carries it. Each organization the user belongs to
+/// is resolved (at most [`MAX_CEILING_ORGS`]).
+///
+/// Every user-administration surface calls this function (or
+/// [`check_group_admin_ceiling`] / [`check_assignment_admin_ceiling`] for
+/// operations that affect a group's members): REST `/admin/users*`,
+/// `/admin/realms/{id}/users/{id}/required-actions`, session and consent
+/// revocation, role unassignment, group-member removal and group deletion;
+/// the gRPC twins; and SCIM `/Users`. Without it a sub-admin could rewrite a
+/// superuser's email and reset the password, or strip their role (GA audit
+/// round 3). The web console admits only `hearth.admin`, which satisfies the
+/// ceiling by construction.
 ///
 /// # Errors
 ///
 /// [`UserCeilingError::Exceeded`] when the target outranks the actor;
-/// [`UserCeilingError::Unresolved`] when the RBAC read fails.
+/// [`UserCeilingError::Unresolved`] when a read fails or a bound is hit.
 pub fn check_user_admin_ceiling(
+    identity: &dyn crate::identity::IdentityEngine,
     rbac: &dyn crate::rbac::RbacEngine,
     realm_id: &RealmId,
     target: &UserId,
     actor_permissions: &[String],
 ) -> Result<(), UserCeilingError> {
-    // A superuser clears the ceiling whatever the target holds: skip the read.
+    // A superuser clears the ceiling whatever the target holds: skip the reads.
     if actor_permissions.iter().any(|p| p == SUPERUSER_PERMISSION) {
         return Ok(());
     }
-    let resolved = rbac
-        .resolve_permissions(target, realm_id, None, None)
-        .map_err(|e| {
-            tracing::warn!(
-                realm_id = %realm_id,
-                error = %e,
-                "admin ceiling could not resolve the target's permissions; refusing"
-            );
-            UserCeilingError::Unresolved
-        })?;
-    let gap = admin_ceiling_gap(
-        actor_permissions,
-        resolved
-            .permissions
-            .iter()
-            .map(crate::rbac::Permission::as_str),
-    );
-    match gap {
+    let held = target_admin_permissions(identity, rbac, realm_id, target)?;
+    match admin_ceiling_gap(actor_permissions, held.iter().map(String::as_str)) {
         None => Ok(()),
         Some(missing) => {
             tracing::warn!(
@@ -621,6 +625,197 @@ pub fn check_user_admin_ceiling(
                 "user administration refused: the target holds an admin permission the actor lacks"
             );
             Err(UserCeilingError::Exceeded)
+        }
+    }
+}
+
+/// The admin-grade permissions `target` holds anywhere in `realm_id`:
+/// realm-level, and in each organization it belongs to.
+fn target_admin_permissions(
+    identity: &dyn crate::identity::IdentityEngine,
+    rbac: &dyn crate::rbac::RbacEngine,
+    realm_id: &RealmId,
+    target: &UserId,
+) -> Result<std::collections::BTreeSet<String>, UserCeilingError> {
+    let unresolved = |what: &str, e: &dyn std::fmt::Display| {
+        tracing::warn!(
+            realm_id = %realm_id,
+            error = %e,
+            "admin ceiling could not resolve the target's {what}; refusing"
+        );
+        UserCeilingError::Unresolved
+    };
+    let mut held = std::collections::BTreeSet::new();
+    let mut collect = |org: Option<&crate::core::OrganizationId>| {
+        let resolved = rbac
+            .resolve_permissions(target, realm_id, org, None)
+            .map_err(|e| unresolved("permissions", &e))?;
+        held.extend(
+            resolved
+                .permissions
+                .iter()
+                .map(crate::rbac::Permission::as_str)
+                .filter(|p| is_admin_permission(p))
+                .map(str::to_string),
+        );
+        Ok::<(), UserCeilingError>(())
+    };
+    collect(None)?;
+
+    let mut cursor: Option<String> = None;
+    let mut seen = 0usize;
+    loop {
+        let page = identity
+            .list_user_organizations(realm_id, target, cursor.as_deref(), CEILING_PAGE)
+            .map_err(|e| unresolved("organizations", &e))?;
+        for membership in &page.items {
+            seen += 1;
+            if seen > MAX_CEILING_ORGS {
+                tracing::warn!(
+                    realm_id = %realm_id,
+                    "admin ceiling: the target belongs to too many organizations; refusing"
+                );
+                return Err(UserCeilingError::Unresolved);
+            }
+            collect(Some(membership.org_id()))?;
+        }
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    Ok(held)
+}
+
+/// The privilege ceiling for an operation that affects every member of a
+/// group — removing the group's role, deleting the group, or removing the
+/// group from a parent group: [`check_user_admin_ceiling`] on each user that
+/// is a member of `group`, directly or through nested groups.
+///
+/// # Errors
+///
+/// As [`check_user_admin_ceiling`]; also `Unresolved` when the group has more
+/// than [`MAX_CEILING_GROUP_MEMBERS`] members.
+pub fn check_group_admin_ceiling(
+    identity: &dyn crate::identity::IdentityEngine,
+    rbac: &dyn crate::rbac::RbacEngine,
+    realm_id: &RealmId,
+    group: &crate::rbac::GroupId,
+    actor_permissions: &[String],
+) -> Result<(), UserCeilingError> {
+    use crate::rbac::GroupMember;
+
+    if actor_permissions.iter().any(|p| p == SUPERUSER_PERMISSION) {
+        return Ok(());
+    }
+    let mut queue = vec![group.clone()];
+    let mut visited_groups = std::collections::HashSet::new();
+    let mut visited_users = std::collections::HashSet::new();
+    while let Some(gid) = queue.pop() {
+        if !visited_groups.insert(gid.clone()) {
+            continue;
+        }
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = rbac
+                .list_group_members(realm_id, &gid, cursor.as_deref(), CEILING_PAGE)
+                .map_err(|e| {
+                    tracing::warn!(
+                        realm_id = %realm_id,
+                        error = %e,
+                        "admin ceiling could not list group members; refusing"
+                    );
+                    UserCeilingError::Unresolved
+                })?;
+            for member in page.items {
+                match member {
+                    GroupMember::User(user) => {
+                        if visited_users.insert(user.clone()) {
+                            if visited_users.len() > MAX_CEILING_GROUP_MEMBERS {
+                                tracing::warn!(
+                                    realm_id = %realm_id,
+                                    "admin ceiling: the group has too many members; refusing"
+                                );
+                                return Err(UserCeilingError::Unresolved);
+                            }
+                            check_user_admin_ceiling(
+                                identity,
+                                rbac,
+                                realm_id,
+                                &user,
+                                actor_permissions,
+                            )?;
+                        }
+                    }
+                    GroupMember::Group(child) => queue.push(child),
+                }
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The privilege ceiling for removing `member` from a group: the user itself,
+/// or every user of a nested group.
+///
+/// # Errors
+///
+/// As [`check_user_admin_ceiling`] / [`check_group_admin_ceiling`].
+pub fn check_member_admin_ceiling(
+    identity: &dyn crate::identity::IdentityEngine,
+    rbac: &dyn crate::rbac::RbacEngine,
+    realm_id: &RealmId,
+    member: &crate::rbac::GroupMember,
+    actor_permissions: &[String],
+) -> Result<(), UserCeilingError> {
+    match member {
+        crate::rbac::GroupMember::User(user) => {
+            check_user_admin_ceiling(identity, rbac, realm_id, user, actor_permissions)
+        }
+        crate::rbac::GroupMember::Group(group) => {
+            check_group_admin_ceiling(identity, rbac, realm_id, group, actor_permissions)
+        }
+    }
+}
+
+/// The privilege ceiling for unassigning a role: the assignment's subject (a
+/// user, or every member of a group) must not out-rank the actor. An unknown
+/// assignment passes, so the unassignment itself answers "not found".
+///
+/// # Errors
+///
+/// As [`check_user_admin_ceiling`] / [`check_group_admin_ceiling`].
+pub fn check_assignment_admin_ceiling(
+    identity: &dyn crate::identity::IdentityEngine,
+    rbac: &dyn crate::rbac::RbacEngine,
+    realm_id: &RealmId,
+    assignment: &crate::rbac::AssignmentId,
+    actor_permissions: &[String],
+) -> Result<(), UserCeilingError> {
+    use crate::rbac::Subject;
+
+    if actor_permissions.iter().any(|p| p == SUPERUSER_PERMISSION) {
+        return Ok(());
+    }
+    let found = rbac.get_assignment(realm_id, assignment).map_err(|e| {
+        tracing::warn!(
+            realm_id = %realm_id,
+            error = %e,
+            "admin ceiling could not load the assignment; refusing"
+        );
+        UserCeilingError::Unresolved
+    })?;
+    match found.map(|a| a.subject) {
+        None => Ok(()),
+        Some(Subject::User(user)) => {
+            check_user_admin_ceiling(identity, rbac, realm_id, &user, actor_permissions)
+        }
+        Some(Subject::Group(group)) => {
+            check_group_admin_ceiling(identity, rbac, realm_id, &group, actor_permissions)
         }
     }
 }
