@@ -3881,13 +3881,21 @@ impl EmbeddedIdentityEngine {
             ClaimTarget::UserInfo,
         );
 
+        let email = custom
+            .get("email")
+            .and_then(|value| value.as_str().map(str::to_string));
+        // The account's own verification state, released with the address it
+        // describes (AUTHZ_EXPANSION "Verification attestation": always
+        // sourced from canonical user state). This asserted `true` for every
+        // token carrying the `email` scope, so an operator-created, SCIM or
+        // federated account's unproven address reached relying parties as
+        // verified (GA audit round 3, B-8).
+        let email_verified = email.as_ref().map(|_| user.email_verified());
         Ok(crate::identity::oidc::UserInfoResponse {
             // `claims` is an `Arc<TokenClaims>` (HEA-1771); clone the owned field.
             sub: claims.sub.clone(),
-            email: custom
-                .get("email")
-                .and_then(|value| value.as_str().map(str::to_string)),
-            email_verified: scope_set.contains("email").then_some(true),
+            email,
+            email_verified,
             name: custom
                 .get("name")
                 .and_then(|value| value.as_str().map(str::to_string)),
