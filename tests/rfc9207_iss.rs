@@ -132,11 +132,12 @@ async fn iss_is_present_in_authorization_response() {
 }
 
 // ---------------------------------------------------------------------------
-// ISS-02: iss matches the global OIDC discovery document's issuer
+// ISS-02: iss matches the realm's OIDC discovery document issuer — the
+// document an RP of this realm uses (and the issuer of its tokens).
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn iss_matches_global_oidc_discovery_issuer() {
+async fn iss_matches_realm_oidc_discovery_issuer() {
     let env = setup().await;
 
     let resp = env
@@ -145,7 +146,11 @@ async fn iss_matches_global_oidc_discovery_issuer() {
         .authorize(&env.realm, &auth_request(&env))
         .expect("authorize");
 
-    let discovery = env.harness.identity().oidc_discovery();
+    let discovery = env
+        .harness
+        .identity()
+        .realm_oidc_discovery(&env.realm)
+        .expect("realm discovery");
 
     assert_eq!(
         resp.iss(),

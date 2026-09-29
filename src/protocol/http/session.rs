@@ -173,10 +173,10 @@ async fn end_session(
 
     // Serve front-channel logout page (with iframes) or redirect directly.
     if !result.frontchannel_targets.is_empty() {
-        let sid = result.session_id.as_uuid().to_string();
+        // FCL §2: `iss` and `sid` are the values of the session's ID tokens.
+        let sid = result.session_id.to_string();
         let issuer_enc =
-            form_urlencoded::byte_serialize(state.identity.oidc_discovery().issuer.as_bytes())
-                .collect::<String>();
+            form_urlencoded::byte_serialize(result.issuer.as_bytes()).collect::<String>();
         let sid_enc = form_urlencoded::byte_serialize(sid.as_bytes()).collect::<String>();
 
         let iframes: Vec<String> = result
