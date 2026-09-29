@@ -43,7 +43,9 @@ impl OAuthService for OAuthSvc {
 
         let realm_id = extract_realm_id(req.metadata())?;
         // HEA-1721: authenticate the caller; their token's `sub` is the authoritative user identity.
-        let (authenticated_user_id, bearer_session) =
+        // The token's claims go to the engine, which judges the client it was
+        // issued to (GA audit 3 B-1) and the factor its session proved.
+        let (authenticated_user_id, bearer) =
             extract_grpc_user_auth(req.metadata(), &realm_id, self.state.identity.as_ref())?;
         let body = req.into_inner();
 
@@ -87,7 +89,7 @@ impl OAuthService for OAuthSvc {
             .state
             .identity
             // No consent screen over gRPC (GA audit B2).
-            .authorize_non_interactive(&realm_id, &domain_req, &bearer_session)
+            .authorize_non_interactive(&realm_id, &domain_req, &bearer)
             .map_err(identity_to_status)?;
         Ok(Response::new(pb::AuthorizationResponse::from(&resp)))
     }
@@ -370,12 +372,15 @@ impl OAuthService for OAuthSvc {
             .to_string();
         // RFC 9449 §7.2: a `cnf`-bound token cannot prove possession over gRPC
         // (no DPoP proof channel), so it gets no decision — fail-closed, as
-        // `POST /oauth/authorize` answers a DPoP failure (GA audit B2).
+        // `POST /oauth/authorize` answers a DPoP failure (GA audit B2). A token
+        // `validate_token` refuses gets none either: only checking `cnf` on
+        // success let a bound token that fails validation for another reason
+        // skip the binding check (GA audit 3 C-9), where HTTP denies it.
         if self
             .state
             .identity
             .validate_token(&realm_id, &token)
-            .is_ok_and(|claims| claims.cnf.is_some())
+            .map_or(true, |claims| claims.cnf.is_some())
         {
             return Ok(Response::new(pb::TokenDecisionResponse { allowed: false }));
         }

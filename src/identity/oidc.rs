@@ -2085,6 +2085,26 @@ pub struct DecidePermissionResponse {
     pub allowed: bool,
 }
 
+/// The RBAC authority an access token carries when it is resolved live —
+/// by an `introspection` or `decision` resource server, or
+/// `GET /v1/me/permissions` (GA audit 3 B-2 / C-8).
+///
+/// It is what an `embedded` token issued to the same client for the same
+/// grant would carry, resolved at the time of the call: the token client's
+/// claim profile applies (a third-party client gets no `roles`, `groups` or
+/// `permissions` unless the realm releases them to it), every
+/// permission-bearing scope of the token narrows the permissions, and a
+/// delegated (`act`) token is capped at the permissions fixed at exchange.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiveTokenAuthority {
+    /// Role names released to the token's client.
+    pub roles: Vec<String>,
+    /// Group slugs released to the token's client.
+    pub groups: Vec<String>,
+    /// Effective permissions of the token.
+    pub permissions: Vec<String>,
+}
+
 // ===== UserInfo (OIDC Core §5.3) =====
 
 /// Response from the `UserInfo` endpoint (OIDC Core §5.3).

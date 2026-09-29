@@ -11,6 +11,12 @@ use axum::extract::ConnectInfo;
 use axum::http::HeaderMap;
 
 use crate::core::TrustedProxies;
+
+/// The key every per-IP rate limiter counts a client under — IPv4 per
+/// address, IPv6 per `/64` (GA sweep 3, E-3). Defined in `core` so the
+/// identity and abuse layers apply the same mapping; re-exported here beside
+/// [`extract_client_ip`], whose output it keys.
+pub(crate) use crate::core::rate_limit_key;
 use crate::identity::SessionContext;
 
 /// Fallback peer address when [`ConnectInfo`] is not available — e.g. tests

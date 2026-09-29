@@ -5,11 +5,23 @@
 //!
 //! [`TokenRateLimiter`] tracks per-`(realm, client_id)` request counts on the
 //! OAuth token, introspection, and device-authorization endpoints.
+//!
+//! The module also holds the admission rules every admin surface (REST, gRPC,
+//! SCIM) shares, so the surfaces cannot drift apart: [`ADMIN_PERMISSIONS`],
+//! [`grants_admin_permission`] and [`REALMS_ARE_YAML_MANAGED`].
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
-use crate::core::{ClientId, RealmId, UserId};
+use crate::core::{rate_limit_key_str, ClientId, ExpiringMap, RealmId, UserId};
+
+/// Most tracker entries any one limiter in this module holds at once.
+///
+/// Every limiter used to keep a `HashMap` entry per key forever — the JWKS
+/// limiter per client address, the token limiter per attacker-chosen client id
+/// and per anonymous address (GA sweep 3, E-2). Entries now expire with their
+/// window and the map is hard-capped.
+pub const LIMITER_CAPACITY: usize = 100_000;
 
 /// Default maximum admin API requests per minute per user.
 ///
@@ -20,11 +32,54 @@ pub const ADMIN_RATE_LIMIT: u32 = 100;
 /// Rate limit window in microseconds (1 minute).
 pub const ADMIN_RATE_WINDOW_MICROS: i64 = 60 * 1_000_000;
 
-/// Per-request rate tracker entry (shared by both limiters).
+/// Per-request rate tracker entry (shared by every limiter here).
 #[derive(Debug, Clone)]
 struct RateTracker {
     count: u32,
     window_start_micros: i64,
+}
+
+/// One limiter's trackers: keyed by bucket name, timed in microseconds.
+type TrackerMap = ExpiringMap<String, RateTracker, i64>;
+
+/// A tracker map whose idle entries are swept once per `window_micros`.
+fn tracker_map(window_micros: i64) -> Mutex<TrackerMap> {
+    let sweep = Duration::from_micros(u64::try_from(window_micros).unwrap_or(1).max(1));
+    Mutex::new(ExpiringMap::new(LIMITER_CAPACITY, sweep))
+}
+
+/// Counts one request for `key` in a fixed window of `window_micros` that
+/// restarts once more than `window_micros` has passed since it opened.
+///
+/// Returns the count including this request and the window's start.
+fn count_request(
+    trackers: &Mutex<TrackerMap>,
+    key: String,
+    now_micros: i64,
+    window_micros: i64,
+) -> (u32, i64) {
+    trackers
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .upsert(
+            key,
+            now_micros,
+            || RateTracker {
+                count: 0,
+                window_start_micros: now_micros,
+            },
+            |tracker| {
+                if now_micros - tracker.window_start_micros > window_micros {
+                    tracker.count = 0;
+                    tracker.window_start_micros = now_micros;
+                }
+                tracker.count = tracker.count.saturating_add(1);
+                (
+                    (tracker.count, tracker.window_start_micros),
+                    tracker.window_start_micros.saturating_add(window_micros),
+                )
+            },
+        )
 }
 
 /// Thread-safe rate limiter shared across protocol surfaces.
@@ -33,7 +88,7 @@ struct RateTracker {
 /// performs a cheap increment under the lock.
 #[derive(Debug)]
 pub struct AdminRateLimiter {
-    trackers: Mutex<HashMap<String, RateTracker>>,
+    trackers: Mutex<TrackerMap>,
     /// Maximum requests allowed per window per admin user.
     ///
     /// `0` means **unlimited** — [`check`](Self::check) always returns
@@ -82,7 +137,7 @@ impl AdminRateLimiter {
     #[must_use]
     pub fn with_limit(limit: u32) -> Self {
         Self {
-            trackers: Mutex::new(HashMap::new()),
+            trackers: tracker_map(ADMIN_RATE_WINDOW_MICROS),
             limit,
         }
     }
@@ -96,23 +151,8 @@ impl AdminRateLimiter {
             return RateLimitOutcome::Allowed;
         }
         let key = user_id.as_uuid().to_string();
-        let mut trackers = self
-            .trackers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let tracker = trackers.entry(key).or_insert(RateTracker {
-            count: 0,
-            window_start_micros: now_micros,
-        });
-
-        if now_micros - tracker.window_start_micros > ADMIN_RATE_WINDOW_MICROS {
-            tracker.count = 0;
-            tracker.window_start_micros = now_micros;
-        }
-
-        tracker.count += 1;
-        if tracker.count > self.limit {
+        let (count, _) = count_request(&self.trackers, key, now_micros, ADMIN_RATE_WINDOW_MICROS);
+        if count > self.limit {
             RateLimitOutcome::Exceeded
         } else {
             RateLimitOutcome::Allowed
@@ -162,7 +202,7 @@ pub const EXPORT_RATE_WINDOW_MICROS: i64 = 3_600 * 1_000_000;
 /// infrequent and the lock is held only for a counter increment.
 #[derive(Debug)]
 pub struct ExportRateLimiter {
-    trackers: Mutex<HashMap<String, RateTracker>>,
+    trackers: Mutex<TrackerMap>,
     /// Maximum exports allowed per window per admin user.
     ///
     /// `0` means **unlimited**. Set from `security.backup.export_rate_limit`
@@ -207,7 +247,7 @@ impl ExportRateLimiter {
     #[must_use]
     pub fn with_limit(limit: u32) -> Self {
         Self {
-            trackers: Mutex::new(HashMap::new()),
+            trackers: tracker_map(EXPORT_RATE_WINDOW_MICROS),
             limit,
         }
     }
@@ -221,23 +261,8 @@ impl ExportRateLimiter {
             return ExportRateLimitOutcome::Allowed;
         }
         let key = user_id.as_uuid().to_string();
-        let mut trackers = self
-            .trackers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let tracker = trackers.entry(key).or_insert(RateTracker {
-            count: 0,
-            window_start_micros: now_micros,
-        });
-
-        if now_micros - tracker.window_start_micros > EXPORT_RATE_WINDOW_MICROS {
-            tracker.count = 0;
-            tracker.window_start_micros = now_micros;
-        }
-
-        tracker.count += 1;
-        if tracker.count > self.limit {
+        let (count, _) = count_request(&self.trackers, key, now_micros, EXPORT_RATE_WINDOW_MICROS);
+        if count > self.limit {
             ExportRateLimitOutcome::Exceeded
         } else {
             ExportRateLimitOutcome::Allowed
@@ -255,7 +280,7 @@ impl ExportRateLimiter {
 /// each request holds the lock only long enough to increment a counter.
 #[derive(Debug)]
 pub struct TokenRateLimiter {
-    trackers: Mutex<HashMap<String, RateTracker>>,
+    trackers: Mutex<TrackerMap>,
     /// Maximum requests allowed per window per `(realm, client)` pair.
     ///
     /// `0` means **unlimited**. Set from
@@ -296,7 +321,7 @@ impl TokenRateLimiter {
     #[must_use]
     pub fn with_limit(limit: u32) -> Self {
         Self {
-            trackers: Mutex::new(HashMap::new()),
+            trackers: tracker_map(TOKEN_RATE_WINDOW_MICROS),
             limit,
         }
     }
@@ -321,9 +346,12 @@ impl TokenRateLimiter {
     /// only identity available to bucket it under. The `ip:` prefix keeps
     /// these buckets disjoint from the client-UUID buckets used by
     /// [`Self::check`] (audit 2026-08-28 §4.16#8).
+    ///
+    /// The address is bucketed under [`rate_limit_key_str`]: an IPv6 caller is
+    /// one bucket per `/64`, not one per address (GA sweep 3, E-3).
     #[must_use]
     pub fn anonymous_ip_bucket(client_ip: &str) -> String {
-        format!("ip:{client_ip}")
+        format!("ip:{}", rate_limit_key_str(client_ip))
     }
 
     /// Records a request against an arbitrary bucket within a realm.
@@ -342,24 +370,10 @@ impl TokenRateLimiter {
             return TokenRateLimitOutcome::Allowed;
         }
         let key = format!("{}:{}", realm_id.as_uuid(), bucket);
-        let mut trackers = self
-            .trackers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let tracker = trackers.entry(key).or_insert(RateTracker {
-            count: 0,
-            window_start_micros: now_micros,
-        });
-
-        if now_micros - tracker.window_start_micros > TOKEN_RATE_WINDOW_MICROS {
-            tracker.count = 0;
-            tracker.window_start_micros = now_micros;
-        }
-
-        tracker.count += 1;
-        if tracker.count > self.limit {
-            let elapsed = now_micros - tracker.window_start_micros;
+        let (count, window_start_micros) =
+            count_request(&self.trackers, key, now_micros, TOKEN_RATE_WINDOW_MICROS);
+        if count > self.limit {
+            let elapsed = now_micros - window_start_micros;
             let remaining_micros = TOKEN_RATE_WINDOW_MICROS - elapsed;
             let retry_after_secs =
                 u32::try_from((remaining_micros / 1_000_000).max(1)).unwrap_or(60);
@@ -399,7 +413,7 @@ pub struct JwksRateLimiter {
     /// §4.13#7). Set from `security.jwks_rps_limit`, whose documented default
     /// is 60.
     rps_limit: u32,
-    trackers: Mutex<HashMap<String, RateTracker>>,
+    trackers: Mutex<TrackerMap>,
 }
 
 impl Default for JwksRateLimiter {
@@ -432,11 +446,14 @@ impl JwksRateLimiter {
     pub fn with_rps_limit(rps_limit: u32) -> Self {
         Self {
             rps_limit,
-            trackers: Mutex::new(HashMap::new()),
+            trackers: tracker_map(JWKS_RATE_WINDOW_MICROS),
         }
     }
 
     /// Records a request from `ip` and returns `true` when the request is allowed.
+    ///
+    /// `ip` is bucketed under [`rate_limit_key_str`]: an IPv6 caller is one
+    /// bucket per `/64` (GA sweep 3, E-3).
     ///
     /// `now_micros` is the current Unix timestamp in microseconds; pass a fixed
     /// value in tests to drive time deterministically.
@@ -444,21 +461,70 @@ impl JwksRateLimiter {
         if self.rps_limit == 0 {
             return true;
         }
-        let mut trackers = self
-            .trackers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let tracker = trackers.entry(ip.to_string()).or_insert(RateTracker {
-            count: 0,
-            window_start_micros: now_micros,
-        });
-        if now_micros - tracker.window_start_micros > JWKS_RATE_WINDOW_MICROS {
-            tracker.count = 0;
-            tracker.window_start_micros = now_micros;
-        }
-        tracker.count += 1;
-        tracker.count <= self.rps_limit
+        let (count, _) = count_request(
+            &self.trackers,
+            rate_limit_key_str(ip),
+            now_micros,
+            JWKS_RATE_WINDOW_MICROS,
+        );
+        count <= self.rps_limit
     }
+}
+
+/// The refusal every admin surface returns for a realm create or update.
+///
+/// Realms are declared in `hearth.yaml` and reconciled from it, so no API
+/// writes them: REST `POST /admin/realms` and `PATCH /admin/realms/{id}`
+/// answer `405`, gRPC `CreateRealm` and `UpdateRealm` answer
+/// `FAILED_PRECONDITION`, all with this message. gRPC `UpdateRealm` used to
+/// replace the realm's whole config with the three fields its proto carries
+/// plus defaults, silently dropping the MFA, CIDR, lockout, SCIM-token and
+/// webhook settings until the next reload (GA audit round 3, G-7).
+pub const REALMS_ARE_YAML_MANAGED: &str =
+    "Realms are managed via hearth.yaml. Remove this endpoint from your client.";
+
+/// The full-superuser admin permission. It opens every admin surface and
+/// satisfies every per-endpoint sub-permission check.
+pub const SUPERUSER_PERMISSION: &str = "hearth.admin";
+
+/// Every admin-grade permission. Holding any one of them admits a token to the
+/// administrative plane: REST `extract_admin_auth`, gRPC `authenticate_admin`
+/// and the SCIM admin-JWT fallback all test against this list, and each
+/// endpoint then narrows to the one sub-permission it needs.
+///
+/// The same list is the set of principals a SCIM provisioning token may not
+/// modify or delete. That guard used to carry its own copy, which covered two
+/// of the five, so a provisioning token could take over any realm, clients or
+/// agents sub-admin (GA audit round 3, G-6). Both now read this constant.
+///
+/// `hearth.export` is deliberately absent: it never admits a caller on its
+/// own, since every export and restore endpoint also demands one of these.
+pub const ADMIN_PERMISSIONS: &[&str] = &[
+    SUPERUSER_PERMISSION,
+    "hearth.users.admin",
+    "hearth.clients.admin",
+    "hearth.realm.admin",
+    "hearth.agents.admin",
+];
+
+/// Returns whether `permission` is admin-grade, i.e. one of
+/// [`ADMIN_PERMISSIONS`].
+#[must_use]
+pub fn is_admin_permission(permission: &str) -> bool {
+    ADMIN_PERMISSIONS.contains(&permission)
+}
+
+/// Returns whether `permissions` satisfies an admin endpoint that requires the
+/// sub-permission `required`. [`SUPERUSER_PERMISSION`] always does; otherwise
+/// `required` itself must be present.
+///
+/// This is the one per-endpoint rule shared by REST
+/// (`require_admin_permission`), gRPC (`grpc_require_permission`) and SCIM.
+#[must_use]
+pub fn grants_admin_permission(permissions: &[String], required: &str) -> bool {
+    permissions
+        .iter()
+        .any(|p| p == SUPERUSER_PERMISSION || p == required)
 }
 
 /// Returns whether an access token may be used against an administrative
@@ -913,5 +979,174 @@ mod tests {
         for i in 0..(JWKS_RATE_LIMIT_PER_SEC * 10) {
             assert!(limiter.check("7.7.7.7", 0), "request {i} must be allowed");
         }
+    }
+
+    // ── GA sweep 3 E-2: tracker maps shrink after expiry and are capped ─────
+
+    fn held(trackers: &Mutex<TrackerMap>) -> usize {
+        trackers.lock().expect("tracker lock").len()
+    }
+
+    #[test]
+    fn jwks_trackers_are_swept_after_their_window() {
+        let limiter = JwksRateLimiter::new();
+        for i in 0..5_000u32 {
+            assert!(limiter.check(&std::net::Ipv4Addr::from(i).to_string(), 0));
+        }
+        assert_eq!(held(&limiter.trackers), 5_000);
+        assert!(limiter.check("198.51.100.1", 3 * JWKS_RATE_WINDOW_MICROS));
+        assert_eq!(
+            held(&limiter.trackers),
+            1,
+            "expired per-IP windows are dropped"
+        );
+    }
+
+    #[test]
+    fn token_trackers_are_swept_after_their_window() {
+        let limiter = TokenRateLimiter::new();
+        let realm = realm();
+        for _ in 0..3_000 {
+            let client = ClientId::new(Uuid::new_v4());
+            assert_eq!(
+                limiter.check(&realm, &client, 0),
+                TokenRateLimitOutcome::Allowed
+            );
+        }
+        assert_eq!(held(&limiter.trackers), 3_000);
+        let later = 2 * TOKEN_RATE_WINDOW_MICROS + 1;
+        assert_eq!(
+            limiter.check(&realm, &client(), later),
+            TokenRateLimitOutcome::Allowed
+        );
+        assert_eq!(held(&limiter.trackers), 1);
+    }
+
+    #[test]
+    fn token_trackers_are_hard_capped_under_invented_client_ids() {
+        let limiter = TokenRateLimiter::new();
+        let realm = realm();
+        for i in 0..(LIMITER_CAPACITY + 2_000) {
+            let _ = limiter.check_bucket(&realm, &format!("c{i}"), 0);
+        }
+        assert!(held(&limiter.trackers) <= LIMITER_CAPACITY);
+    }
+
+    #[test]
+    fn admin_and_export_trackers_are_swept_after_their_window() {
+        let admin = AdminRateLimiter::new();
+        let export = ExportRateLimiter::new();
+        for _ in 0..2_000 {
+            let u = UserId::new(Uuid::new_v4());
+            assert_eq!(admin.check(&u, 0), RateLimitOutcome::Allowed);
+            assert_eq!(export.check(&u, 0), ExportRateLimitOutcome::Allowed);
+        }
+        assert_eq!(held(&admin.trackers), 2_000);
+        assert_eq!(held(&export.trackers), 2_000);
+        let _ = admin.check(&user(), 2 * ADMIN_RATE_WINDOW_MICROS + 1);
+        let _ = export.check(&user(), 2 * EXPORT_RATE_WINDOW_MICROS + 1);
+        assert_eq!(held(&admin.trackers), 1);
+        assert_eq!(held(&export.trackers), 1);
+    }
+
+    // ── GA sweep 3 E-3: IPv6 callers are one bucket per /64 ─────────────────
+
+    #[test]
+    fn jwks_counts_an_ipv6_slash64_as_one_caller() {
+        let limiter = JwksRateLimiter::with_rps_limit(2);
+        assert!(limiter.check("2001:db8:0:1::1", 0));
+        assert!(limiter.check("2001:db8:0:1::2", 0));
+        assert!(
+            !limiter.check("2001:db8:0:1::3", 0),
+            "a third address in the same /64 exceeds the shared budget"
+        );
+        assert!(
+            limiter.check("2001:db8:0:2::1", 0),
+            "another /64 is another caller"
+        );
+    }
+
+    #[test]
+    fn anonymous_token_bucket_is_per_slash64() {
+        assert_eq!(
+            TokenRateLimiter::anonymous_ip_bucket("2001:db8:0:1::1"),
+            TokenRateLimiter::anonymous_ip_bucket("2001:db8:0:1:ffff::9"),
+        );
+        assert_ne!(
+            TokenRateLimiter::anonymous_ip_bucket("2001:db8:0:1::1"),
+            TokenRateLimiter::anonymous_ip_bucket("2001:db8:0:2::1"),
+        );
+        assert_eq!(
+            TokenRateLimiter::anonymous_ip_bucket("203.0.113.5"),
+            "ip:203.0.113.5"
+        );
+    }
+
+    // --- Admin permission set (GA audit round 3, G-6) ---
+
+    /// Every seeded `hearth.admin` / `hearth.*.admin` permission is admin-grade.
+    /// A future `hearth.<x>.admin` added to the seed but not to
+    /// `ADMIN_PERMISSIONS` would be unreachable on the admin plane AND left
+    /// unprotected from SCIM provisioning tokens; this fails first.
+    #[test]
+    fn every_seeded_admin_permission_is_admin_grade() {
+        let seeded_admin: Vec<&str> = crate::rbac::SEED_PERMISSIONS
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|n| {
+                let parts: Vec<&str> = n.split('.').collect();
+                *n == SUPERUSER_PERMISSION || matches!(parts.as_slice(), ["hearth", _, "admin"])
+            })
+            .collect();
+        assert_eq!(seeded_admin.len(), ADMIN_PERMISSIONS.len());
+        for name in seeded_admin {
+            assert!(
+                is_admin_permission(name),
+                "{name} missing from ADMIN_PERMISSIONS"
+            );
+        }
+    }
+
+    /// The converse: nothing in the list is a typo the seed never grants.
+    #[test]
+    fn every_admin_permission_is_seeded() {
+        for name in ADMIN_PERMISSIONS {
+            assert!(
+                crate::rbac::seed_permission_description(name).is_some(),
+                "{name} is not a seeded permission"
+            );
+        }
+    }
+
+    #[test]
+    fn non_admin_permissions_are_not_admin_grade() {
+        for name in [
+            "hearth.export",
+            "hearth.sv_feed",
+            "realm.admin",
+            "user.write",
+            "",
+        ] {
+            assert!(!is_admin_permission(name), "{name} must not be admin-grade");
+        }
+    }
+
+    #[test]
+    fn grants_admin_permission_requires_superuser_or_the_named_permission() {
+        let perms = |ps: &[&str]| ps.iter().map(|p| (*p).to_string()).collect::<Vec<_>>();
+
+        assert!(grants_admin_permission(
+            &perms(&["hearth.users.admin"]),
+            "hearth.users.admin"
+        ));
+        assert!(grants_admin_permission(
+            &perms(&["hearth.admin"]),
+            "hearth.users.admin"
+        ));
+        assert!(!grants_admin_permission(
+            &perms(&["hearth.clients.admin", "hearth.realm.admin"]),
+            "hearth.users.admin"
+        ));
+        assert!(!grants_admin_permission(&[], "hearth.users.admin"));
     }
 }

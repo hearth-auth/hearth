@@ -101,11 +101,11 @@ pub use oidc::{
     ClientTrustLevel, CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     GeneratedClientSecret, IdTokenSigningAlg, IntrospectionResponse, JarClaims, JwtBearerRequest,
-    OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest,
-    PasswordGrantResponse, PushedAuthorizationRequest, PushedAuthorizationResponse,
-    RefreshBindContext, RegisterClientRequest, ResponseMode, StepUpMfaGrantRequest,
-    TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
-    UserInfoResponse,
+    LiveTokenAuthority, OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse,
+    PasswordGrantRequest, PasswordGrantResponse, PushedAuthorizationRequest,
+    PushedAuthorizationResponse, RefreshBindContext, RegisterClientRequest, ResponseMode,
+    StepUpMfaGrantRequest, TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest,
+    UpdateClientRequest, UserInfoResponse,
 };
 pub use session_version::{SessionVersionStore, SvDeltaEntry, SvDeltaResponse, SvSnapshotResponse};
 pub use sms::{
@@ -716,19 +716,24 @@ pub trait IdentityEngine: Send + Sync {
     /// JSON `POST /authorize`, `POST /realms/{realm}/authorize` and gRPC
     /// `Authorize`, which mint a code from a bearer token alone.
     ///
-    /// Issues only when the client does not require consent or a recorded
-    /// consent covers every requested scope — the browser consent gate's
-    /// rule — and otherwise fails with [`IdentityError::ConsentRequired`]
-    /// (GA audit B2). For a client or role that demands a second factor,
-    /// `session_id` — the session behind the caller's bearer token — must
-    /// have proved one, or the call fails with [`IdentityError::MfaRequired`]
-    /// (the browser MFA-use gate's rule, GA audit B5). [`Self::authorize`] is
-    /// for callers that have already run those gates interactively.
+    /// `bearer` is the validated claims of the caller's bearer token, which
+    /// must belong to `request.user_id` and name a session. A token issued
+    /// to a client (RFC 9068 `client_id`) may authorize that client only; a
+    /// first-party session token (no `client_id`) a first-party client only.
+    /// Anything else fails with [`IdentityError::ClientMismatch`] (GA audit 3
+    /// B-1). Issues only when the client does not require consent or a
+    /// recorded consent covers every requested scope — the browser consent
+    /// gate's rule — and otherwise fails with
+    /// [`IdentityError::ConsentRequired`] (GA audit B2). For a client or role
+    /// that demands a second factor, the token's session must have proved
+    /// one, or the call fails with [`IdentityError::MfaRequired`] (the
+    /// browser MFA-use gate's rule, GA audit B5). [`Self::authorize`] is for
+    /// callers that have already run those gates interactively.
     fn authorize_non_interactive(
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
-        session_id: &SessionId,
+        bearer: &TokenClaims,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     /// Exchanges an authorization code for access, ID, and refresh tokens.
@@ -971,15 +976,40 @@ pub trait IdentityEngine: Send + Sync {
     /// Evaluates whether the bearer token holder has a specific permission
     /// (`POST /oauth/authorize` — decision endpoint, HEA-922).
     ///
-    /// Validates the token (signature, expiry, session, revocation), resolves
-    /// the subject's live RBAC permissions, and returns `allowed: true` only
-    /// when the resolved set contains the requested permission.  Fail-closed:
-    /// any validation or resolution error returns `allowed: false`.
+    /// Validates the token exactly as [`Self::validate_token`] does
+    /// (signature, expiry, session, revocation, audience cutoff, DPoP key
+    /// blocklist), refuses a `resource` the token's `aud` does not name
+    /// (RFC 8707), resolves the token's [`Self::live_token_authority`], and
+    /// returns `allowed: true` only when it contains the requested
+    /// permission. Fail-closed: any validation or resolution error returns
+    /// `allowed: false`.
     fn decide_token_permission(
         &self,
         realm_id: &RealmId,
         request: &oidc::DecidePermissionRequest,
     ) -> Result<oidc::DecidePermissionResponse, IdentityError>;
+
+    /// Resolves the live RBAC authority of a validated user access token
+    /// (GA audit 3 B-2 / C-8) — what an `embedded` token issued to the same
+    /// client for the same grant would carry, resolved now.
+    ///
+    /// The client the token was issued to (RFC 9068 `client_id`; none means
+    /// a first-party session token) selects the claim profile, so a
+    /// third-party client gets no roles, groups or permissions by default.
+    /// The token's permission-bearing scopes narrow the permissions (OIDC
+    /// scopes carry none and do not widen), `narrow_scope` — the caller's own
+    /// optional filter — narrows them further, and a delegated (`act`) token
+    /// is capped at the permissions it carries. A token whose subject, user
+    /// or client is unknown resolves to no authority.
+    ///
+    /// `claims` MUST already be validated by the caller.
+    fn live_token_authority(
+        &self,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+        org_id: Option<&crate::core::OrganizationId>,
+        narrow_scope: Option<&str>,
+    ) -> Result<oidc::LiveTokenAuthority, IdentityError>;
 
     // ===== MFA / TOTP (Step 23) =====
 

@@ -13,8 +13,9 @@ use crate::abuse::{MAX_SCIM_OPERATIONS, SCIM_MAX_SCAN_LIMIT};
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{RealmId, UserId};
 use crate::identity::{CreateUserRequest, UpdateUserRequest, User, UserStatus};
+use crate::protocol::admin_auth::is_admin_permission;
 use crate::protocol::http::AppState;
-use crate::protocol::scim::auth::authenticate;
+use crate::protocol::scim::auth::{authenticate, ScimResource};
 use crate::protocol::scim::error::{from_identity_error, ScimError};
 use crate::protocol::scim::etag::{check_if_match, resource_response};
 use crate::protocol::scim::filter::{self, FilterExpr};
@@ -147,11 +148,16 @@ fn audit(
 }
 
 /// Refuses (`403`, with `refusal` as the detail) when the target user holds
-/// admin-level permissions (`hearth.admin` or `hearth.users.admin`).
+/// any admin-grade permission
+/// ([`crate::protocol::admin_auth::ADMIN_PERMISSIONS`]).
 ///
 /// SCIM provisioning tokens are narrowed-scope service accounts and must not
 /// be able to modify or delete principals that hold admin authority, as that
-/// would enable realm takeover via a compromised integration token.
+/// would enable realm takeover via a compromised integration token. The
+/// protected set is the admin plane's own admission list: this guard used to
+/// carry a two-entry copy (`hearth.admin`, `hearth.users.admin`), so a
+/// provisioning token could rewrite the email of — and so take over — any
+/// realm, clients or agents sub-admin (GA audit round 3, G-6).
 ///
 /// Fails CLOSED on an RBAC read error (GA audit L13): the error is a `503`
 /// the caller returns instead of mutating. It used to answer "not an admin",
@@ -165,7 +171,6 @@ fn admin_principal_guard(
     user_id: &UserId,
     refusal: &str,
 ) -> Result<(), Response> {
-    const PROTECTED: &[&str] = &["hearth.admin", "hearth.users.admin"];
     match state
         .rbac
         .resolve_permissions(user_id, realm_id, None, None)
@@ -174,7 +179,7 @@ fn admin_principal_guard(
             if resolved
                 .permissions
                 .iter()
-                .any(|p: &Permission| PROTECTED.contains(&p.as_str())) =>
+                .any(|p: &Permission| is_admin_permission(p.as_str())) =>
         {
             Err(ScimError::forbidden(refusal.to_string()).into_response())
         }
@@ -202,7 +207,7 @@ pub async fn create_user(
     headers: HeaderMap,
     Json(body): Json<ScimUser>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -312,7 +317,7 @@ pub async fn get_user(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -359,7 +364,7 @@ pub async fn list_users(
     headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -430,7 +435,7 @@ pub async fn replace_user(
     Path(id): Path<String>,
     Json(body): Json<ScimUser>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -544,7 +549,7 @@ pub async fn patch_user(
     Path(id): Path<String>,
     Json(body): Json<PatchRequest>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -702,7 +707,7 @@ pub async fn delete_user(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };

@@ -61,11 +61,51 @@
 //! an internal fault.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
+
+use crate::core::{rate_limit_key, ExpiringMap, LimiterClock};
+
+/// Most windows any one map in this module holds at once (GA sweep 3, E-2).
+///
+/// Each map is keyed by something a caller can invent — a source address, a
+/// username, a recipient — and used to keep an entry per key forever.
+pub const DETECTOR_CAPACITY: usize = 65_536;
+
+/// One detector dimension: a bounded, swept map of distinct-count windows.
+type WindowMap<K> = Mutex<ExpiringMap<K, DistinctWindow>>;
+
+/// An empty dimension whose closed windows are swept once per `window`.
+fn window_map<K: Eq + Hash>(window: Duration) -> WindowMap<K> {
+    Mutex::new(ExpiringMap::new(
+        DETECTOR_CAPACITY,
+        window.max(Duration::from_secs(1)),
+    ))
+}
+
+/// Records `item` in `key`'s window at `now` (creating the window with
+/// `window` / `threshold` when absent) and returns `judge` of the result.
+fn record_in<K: Eq + Hash, R>(
+    map: &WindowMap<K>,
+    key: K,
+    item: u64,
+    now: Instant,
+    (window, threshold): (Duration, usize),
+    judge: impl FnOnce(&DistinctWindow) -> R,
+) -> R {
+    map.lock().unwrap_or_else(PoisonError::into_inner).upsert(
+        key,
+        now,
+        || DistinctWindow::new(window, threshold),
+        |w| {
+            w.record(item, now);
+            (judge(w), w.expires_at(now))
+        },
+    )
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DistinctWindow — two-bucket rotating distinct counter
@@ -113,6 +153,13 @@ impl DistinctWindow {
             half_window: window / 2,
             max_per_bucket: threshold.saturating_mul(2).max(4),
         }
+    }
+
+    /// When the window stops carrying information: a full window after the
+    /// current bucket started, [`maybe_rotate`](Self::maybe_rotate) clears
+    /// both buckets.
+    fn expires_at(&self, now: Instant) -> Instant {
+        self.bucket_start.unwrap_or(now).plus(self.full_window)
     }
 
     /// Records `item_hash` at time `now`.  Rotates buckets if necessary.
@@ -246,10 +293,13 @@ pub enum DetectorOutcome {
 /// Thread-safe; share via `Arc<DistributedAttackDetector>`.
 pub struct DistributedAttackDetector {
     config: DetectorConfig,
-    /// username-per-IP dimension: IP → distinct username hashes.
-    username_per_ip: Mutex<HashMap<u64, DistinctWindow>>,
-    /// IP-per-username dimension: username hash → distinct IP hashes.
-    ip_per_username: Mutex<HashMap<u64, DistinctWindow>>,
+    /// `false` for [`Self::disabled`]: nothing is recorded.
+    enabled: bool,
+    /// username-per-IP dimension: client (IPv4, IPv6 `/64`) hash → distinct
+    /// username hashes.
+    username_per_ip: WindowMap<u64>,
+    /// IP-per-username dimension: username hash → distinct client hashes.
+    ip_per_username: WindowMap<u64>,
 }
 
 impl DistributedAttackDetector {
@@ -257,22 +307,29 @@ impl DistributedAttackDetector {
     #[must_use]
     pub fn new(config: DetectorConfig) -> Self {
         Self {
+            username_per_ip: window_map(config.window),
+            ip_per_username: window_map(config.window),
+            enabled: true,
             config,
-            username_per_ip: Mutex::new(HashMap::new()),
-            ip_per_username: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Creates a no-op detector that always returns [`DetectorOutcome::Allow`].
+    /// Creates a no-op detector that always returns [`DetectorOutcome::Allow`]
+    /// and records nothing.
     ///
-    /// Use when `security.distributed_attack_detector.enabled = false`.
+    /// Use when `security.distributed_attack_detector.enabled = false`. It
+    /// used to record every login's (IP, username) pair anyway, in maps that
+    /// were never pruned (GA sweep 3, E-2).
     #[must_use]
     pub fn disabled() -> Self {
-        Self::new(DetectorConfig {
-            username_per_ip_threshold: usize::MAX,
-            ip_per_username_threshold: usize::MAX,
-            ..DetectorConfig::default()
-        })
+        Self {
+            enabled: false,
+            ..Self::new(DetectorConfig {
+                username_per_ip_threshold: usize::MAX,
+                ip_per_username_threshold: usize::MAX,
+                ..DetectorConfig::default()
+            })
+        }
     }
 
     /// Evaluates a credential-check attempt from `peer_ip` against `username`.
@@ -295,23 +352,24 @@ impl DistributedAttackDetector {
         username: &str,
         now: Instant,
     ) -> DetectorOutcome {
-        let ip_hash = hash_one(&peer_ip);
+        if !self.enabled {
+            return DetectorOutcome::Allow;
+        }
+        // A client is an IPv4 address or an IPv6 /64 (GA sweep 3, E-3).
+        let ip_hash = hash_one(&rate_limit_key(peer_ip));
         let username_hash = hash_one(&username);
         let username_threshold = self.config.username_per_ip_threshold;
         let ip_threshold = self.config.ip_per_username_threshold;
 
         // ── Dimension 1: distinct usernames per IP ──────────────────────────
-        let username_over = {
-            let mut map = self
-                .username_per_ip
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let window = map
-                .entry(ip_hash)
-                .or_insert_with(|| DistinctWindow::new(self.config.window, username_threshold));
-            window.record(username_hash, now);
-            window.exceeds_threshold(username_threshold)
-        };
+        let username_over = record_in(
+            &self.username_per_ip,
+            ip_hash,
+            username_hash,
+            now,
+            (self.config.window, username_threshold),
+            |w| w.exceeds_threshold(username_threshold),
+        );
 
         if username_over {
             return DetectorOutcome::Challenge {
@@ -320,17 +378,14 @@ impl DistributedAttackDetector {
         }
 
         // ── Dimension 2: distinct IPs per username ──────────────────────────
-        let ip_over = {
-            let mut map = self
-                .ip_per_username
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let window = map
-                .entry(username_hash)
-                .or_insert_with(|| DistinctWindow::new(self.config.window, ip_threshold));
-            window.record(ip_hash, now);
-            window.exceeds_threshold(ip_threshold)
-        };
+        let ip_over = record_in(
+            &self.ip_per_username,
+            username_hash,
+            ip_hash,
+            now,
+            (self.config.window, ip_threshold),
+            |w| w.exceeds_threshold(ip_threshold),
+        );
 
         if ip_over {
             return DetectorOutcome::Challenge {
@@ -437,10 +492,12 @@ pub enum VolumeShieldOutcome {
 /// ```
 pub struct OutboundVolumeShield {
     config: VolumeShieldConfig,
+    /// `false` for [`Self::disabled`]: nothing is recorded.
+    enabled: bool,
     /// realm_id → distinct email-recipient-address hashes.
-    email_per_realm: Mutex<HashMap<String, DistinctWindow>>,
+    email_per_realm: WindowMap<String>,
     /// realm_id → distinct SMS-recipient (E.164) hashes.
-    sms_per_realm: Mutex<HashMap<String, DistinctWindow>>,
+    sms_per_realm: WindowMap<String>,
 }
 
 impl OutboundVolumeShield {
@@ -448,24 +505,29 @@ impl OutboundVolumeShield {
     #[must_use]
     pub fn new(config: VolumeShieldConfig) -> Self {
         Self {
+            email_per_realm: window_map(config.window),
+            sms_per_realm: window_map(config.window),
+            enabled: true,
             config,
-            email_per_realm: Mutex::new(HashMap::new()),
-            sms_per_realm: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Creates a no-op shield that always returns [`VolumeShieldOutcome::Allow`].
+    /// Creates a no-op shield that always returns [`VolumeShieldOutcome::Allow`]
+    /// and records nothing.
     ///
     /// Use when `security.outbound_volume_shield.enabled = false`.
     #[must_use]
     pub fn disabled() -> Self {
-        Self::new(VolumeShieldConfig {
-            email_soft_cap: usize::MAX,
-            email_hard_cap: usize::MAX,
-            sms_soft_cap: usize::MAX,
-            sms_hard_cap: usize::MAX,
-            ..VolumeShieldConfig::default()
-        })
+        Self {
+            enabled: false,
+            ..Self::new(VolumeShieldConfig {
+                email_soft_cap: usize::MAX,
+                email_hard_cap: usize::MAX,
+                sms_soft_cap: usize::MAX,
+                sms_hard_cap: usize::MAX,
+                ..VolumeShieldConfig::default()
+            })
+        }
     }
 
     /// Checks and records an outbound email send for `realm_id` to `recipient`.
@@ -486,26 +548,29 @@ impl OutboundVolumeShield {
         now: Instant,
     ) -> VolumeShieldOutcome {
         // Hash the recipient so we never store PII in memory.
+        if !self.enabled {
+            return VolumeShieldOutcome::Allow;
+        }
         let recipient_hash = hash_one(&recipient);
         let soft = self.config.email_soft_cap;
         let hard = self.config.email_hard_cap;
 
-        let mut map = self
-            .email_per_realm
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let window = map
-            .entry(realm_id.to_owned())
-            .or_insert_with(|| DistinctWindow::new(self.config.window, hard));
-        window.record(recipient_hash, now);
-
-        if window.exceeds_threshold(hard) {
-            VolumeShieldOutcome::HardCap
-        } else if window.exceeds_threshold(soft) {
-            VolumeShieldOutcome::SoftCap
-        } else {
-            VolumeShieldOutcome::Allow
-        }
+        record_in(
+            &self.email_per_realm,
+            realm_id.to_owned(),
+            recipient_hash,
+            now,
+            (self.config.window, hard),
+            |window| {
+                if window.exceeds_threshold(hard) {
+                    VolumeShieldOutcome::HardCap
+                } else if window.exceeds_threshold(soft) {
+                    VolumeShieldOutcome::SoftCap
+                } else {
+                    VolumeShieldOutcome::Allow
+                }
+            },
+        )
     }
 
     /// Checks and records an outbound SMS send for `realm_id` to `recipient`
@@ -524,26 +589,29 @@ impl OutboundVolumeShield {
         recipient: &str,
         now: Instant,
     ) -> VolumeShieldOutcome {
+        if !self.enabled {
+            return VolumeShieldOutcome::Allow;
+        }
         let recipient_hash = hash_one(&recipient);
         let soft = self.config.sms_soft_cap;
         let hard = self.config.sms_hard_cap;
 
-        let mut map = self
-            .sms_per_realm
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let window = map
-            .entry(realm_id.to_owned())
-            .or_insert_with(|| DistinctWindow::new(self.config.window, hard));
-        window.record(recipient_hash, now);
-
-        if window.exceeds_threshold(hard) {
-            VolumeShieldOutcome::HardCap
-        } else if window.exceeds_threshold(soft) {
-            VolumeShieldOutcome::SoftCap
-        } else {
-            VolumeShieldOutcome::Allow
-        }
+        record_in(
+            &self.sms_per_realm,
+            realm_id.to_owned(),
+            recipient_hash,
+            now,
+            (self.config.window, hard),
+            |window| {
+                if window.exceeds_threshold(hard) {
+                    VolumeShieldOutcome::HardCap
+                } else if window.exceeds_threshold(soft) {
+                    VolumeShieldOutcome::SoftCap
+                } else {
+                    VolumeShieldOutcome::Allow
+                }
+            },
+        )
     }
 }
 
@@ -669,10 +737,12 @@ pub enum CrossRealmOutcome {
 /// ```
 pub struct CrossRealmAggregationCap {
     config: CrossRealmAggCapConfig,
+    /// `false` for [`Self::disabled`]: nothing is recorded.
+    enabled: bool,
     /// email-address hash → distinct realm-ID hashes in the rolling window.
-    email_realm_windows: Mutex<HashMap<u64, DistinctWindow>>,
+    email_realm_windows: WindowMap<u64>,
     /// E.164-phone hash → distinct realm-ID hashes in the rolling window.
-    phone_realm_windows: Mutex<HashMap<u64, DistinctWindow>>,
+    phone_realm_windows: WindowMap<u64>,
 }
 
 impl CrossRealmAggregationCap {
@@ -680,25 +750,30 @@ impl CrossRealmAggregationCap {
     #[must_use]
     pub fn new(config: CrossRealmAggCapConfig) -> Self {
         Self {
+            email_realm_windows: window_map(config.window),
+            phone_realm_windows: window_map(config.window),
+            enabled: true,
             config,
-            email_realm_windows: Mutex::new(HashMap::new()),
-            phone_realm_windows: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Creates a no-op cap that always returns [`CrossRealmOutcome::Allow`].
+    /// Creates a no-op cap that always returns [`CrossRealmOutcome::Allow`]
+    /// and records nothing.
     ///
     /// Use when `security.cross_realm_aggregation_cap.enabled = false`.
     #[must_use]
     pub fn disabled() -> Self {
-        Self::new(CrossRealmAggCapConfig {
-            alert_threshold: usize::MAX,
-            email_realm_soft_cap: usize::MAX,
-            email_realm_hard_cap: usize::MAX,
-            sms_realm_soft_cap: usize::MAX,
-            sms_realm_hard_cap: usize::MAX,
-            ..CrossRealmAggCapConfig::default()
-        })
+        Self {
+            enabled: false,
+            ..Self::new(CrossRealmAggCapConfig {
+                alert_threshold: usize::MAX,
+                email_realm_soft_cap: usize::MAX,
+                email_realm_hard_cap: usize::MAX,
+                sms_realm_soft_cap: usize::MAX,
+                sms_realm_hard_cap: usize::MAX,
+                ..CrossRealmAggCapConfig::default()
+            })
+        }
     }
 
     /// Checks and records an outbound email send from `realm_id` to `recipient`.
@@ -718,31 +793,34 @@ impl CrossRealmAggregationCap {
         recipient: &str,
         now: Instant,
     ) -> CrossRealmOutcome {
+        if !self.enabled {
+            return CrossRealmOutcome::Allow;
+        }
         let recipient_hash = hash_one(&recipient);
         let realm_hash = hash_one(&realm_id);
         let soft = self.config.email_realm_soft_cap;
         let hard = self.config.email_realm_hard_cap;
         let alert = self.config.alert_threshold;
 
-        let mut map = self
-            .email_realm_windows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let window = map
-            .entry(recipient_hash)
-            .or_insert_with(|| DistinctWindow::new(self.config.window, hard));
-        window.record(realm_hash, now);
-
-        let realm_count = window.count();
-        if window.exceeds_threshold(hard) {
-            CrossRealmOutcome::HardCap { realm_count }
-        } else if window.exceeds_threshold(soft) {
-            CrossRealmOutcome::SoftCap { realm_count }
-        } else if window.exceeds_threshold(alert) {
-            CrossRealmOutcome::MultiRealmAlert { realm_count }
-        } else {
-            CrossRealmOutcome::Allow
-        }
+        record_in(
+            &self.email_realm_windows,
+            recipient_hash,
+            realm_hash,
+            now,
+            (self.config.window, hard),
+            |window| {
+                let realm_count = window.count();
+                if window.exceeds_threshold(hard) {
+                    CrossRealmOutcome::HardCap { realm_count }
+                } else if window.exceeds_threshold(soft) {
+                    CrossRealmOutcome::SoftCap { realm_count }
+                } else if window.exceeds_threshold(alert) {
+                    CrossRealmOutcome::MultiRealmAlert { realm_count }
+                } else {
+                    CrossRealmOutcome::Allow
+                }
+            },
+        )
     }
 
     /// Checks and records an outbound SMS send from `realm_id` to `recipient`
@@ -761,31 +839,34 @@ impl CrossRealmAggregationCap {
         recipient: &str,
         now: Instant,
     ) -> CrossRealmOutcome {
+        if !self.enabled {
+            return CrossRealmOutcome::Allow;
+        }
         let recipient_hash = hash_one(&recipient);
         let realm_hash = hash_one(&realm_id);
         let soft = self.config.sms_realm_soft_cap;
         let hard = self.config.sms_realm_hard_cap;
         let alert = self.config.alert_threshold;
 
-        let mut map = self
-            .phone_realm_windows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let window = map
-            .entry(recipient_hash)
-            .or_insert_with(|| DistinctWindow::new(self.config.window, hard));
-        window.record(realm_hash, now);
-
-        let realm_count = window.count();
-        if window.exceeds_threshold(hard) {
-            CrossRealmOutcome::HardCap { realm_count }
-        } else if window.exceeds_threshold(soft) {
-            CrossRealmOutcome::SoftCap { realm_count }
-        } else if window.exceeds_threshold(alert) {
-            CrossRealmOutcome::MultiRealmAlert { realm_count }
-        } else {
-            CrossRealmOutcome::Allow
-        }
+        record_in(
+            &self.phone_realm_windows,
+            recipient_hash,
+            realm_hash,
+            now,
+            (self.config.window, hard),
+            |window| {
+                let realm_count = window.count();
+                if window.exceeds_threshold(hard) {
+                    CrossRealmOutcome::HardCap { realm_count }
+                } else if window.exceeds_threshold(soft) {
+                    CrossRealmOutcome::SoftCap { realm_count }
+                } else if window.exceeds_threshold(alert) {
+                    CrossRealmOutcome::MultiRealmAlert { realm_count }
+                } else {
+                    CrossRealmOutcome::Allow
+                }
+            },
+        )
     }
 }
 
@@ -1171,5 +1252,103 @@ mod tests {
             CrossRealmOutcome::Allow,
             "email cap must not bleed into SMS counter"
         );
+    }
+
+    // ── GA sweep 3 E-2 (same class): the maps are bounded and swept ─────────
+
+    /// The detector is built `disabled()` by default and still ran on every
+    /// login, recording each (IP, username) pair in two maps that were never
+    /// pruned — anonymous, unbounded growth by inventing usernames.
+    #[test]
+    fn disabled_detector_records_nothing() {
+        let det = DistributedAttackDetector::disabled();
+        let now = Instant::now();
+        for i in 0..1_000u32 {
+            let peer = IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i));
+            assert_eq!(
+                det.check_with_time(peer, &uname(i), now),
+                DetectorOutcome::Allow
+            );
+        }
+        assert_eq!(det.username_per_ip.lock().expect("lock").len(), 0);
+        assert_eq!(det.ip_per_username.lock().expect("lock").len(), 0);
+    }
+
+    #[test]
+    fn detector_windows_are_swept_after_they_close() {
+        let window = Duration::from_secs(60);
+        let det = DistributedAttackDetector::new(DetectorConfig {
+            window,
+            ..DetectorConfig::default()
+        });
+        let t0 = Instant::now();
+        for i in 0..3_000u32 {
+            let peer = IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i));
+            let _ = det.check_with_time(peer, &uname(i), t0);
+        }
+        assert_eq!(det.username_per_ip.lock().expect("lock").len(), 3_000);
+        let _ = det.check_with_time(ip(1), &uname(1), t0 + 3 * window);
+        assert_eq!(det.username_per_ip.lock().expect("lock").len(), 1);
+        assert_eq!(det.ip_per_username.lock().expect("lock").len(), 1);
+    }
+
+    /// E-3: rotating addresses inside one /64 is one source spraying usernames.
+    #[test]
+    fn detector_counts_an_ipv6_slash64_as_one_source() {
+        let det = DistributedAttackDetector::new(DetectorConfig {
+            username_per_ip_threshold: 3,
+            ip_per_username_threshold: 100,
+            ..DetectorConfig::default()
+        });
+        let now = Instant::now();
+        for i in 1..=3u16 {
+            let peer = IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 5, 0, 0, 0, i));
+            assert_eq!(
+                det.check_with_time(peer, &uname(u32::from(i)), now),
+                DetectorOutcome::Allow
+            );
+        }
+        let peer = IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 5, 0, 0, 0, 99));
+        assert!(
+            matches!(
+                det.check_with_time(peer, &uname(4), now),
+                DetectorOutcome::Challenge { .. }
+            ),
+            "a fourth username from the same /64 crosses the threshold"
+        );
+    }
+
+    #[test]
+    fn disabled_shield_and_cross_realm_cap_record_nothing() {
+        let shield = OutboundVolumeShield::disabled();
+        let cap = CrossRealmAggregationCap::disabled();
+        let now = Instant::now();
+        for i in 0..500u32 {
+            let to = format!("r{i}@example.test");
+            let _ = shield.check_email_with_time("realm", &to, now);
+            let _ = cap.check_email_with_time("realm", &to, now);
+            let _ = cap.check_sms_with_time("realm", &format!("+1555{i:07}"), now);
+        }
+        assert_eq!(shield.email_per_realm.lock().expect("lock").len(), 0);
+        assert_eq!(cap.email_realm_windows.lock().expect("lock").len(), 0);
+        assert_eq!(cap.phone_realm_windows.lock().expect("lock").len(), 0);
+    }
+
+    /// One entry per distinct recipient ever mailed, never pruned: every
+    /// registration / reset / magic-link request to a new address added one.
+    #[test]
+    fn cross_realm_windows_are_swept_after_they_close() {
+        let window = Duration::from_secs(60);
+        let cap = CrossRealmAggregationCap::new(CrossRealmAggCapConfig {
+            window,
+            ..CrossRealmAggCapConfig::default()
+        });
+        let t0 = Instant::now();
+        for i in 0..3_000u32 {
+            let _ = cap.check_email_with_time("realm", &format!("r{i}@example.test"), t0);
+        }
+        assert_eq!(cap.email_realm_windows.lock().expect("lock").len(), 3_000);
+        let _ = cap.check_email_with_time("realm", "late@example.test", t0 + 3 * window);
+        assert_eq!(cap.email_realm_windows.lock().expect("lock").len(), 1);
     }
 }

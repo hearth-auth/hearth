@@ -8,7 +8,8 @@
 //! - Element sorting (attributes alphabetical by fully-qualified name).
 //! - Namespace declarations emitted only when "visibly utilized" on an
 //!   element or its attributes.
-//! - The enveloped-signature transform (strip a `<ds:Signature>` child).
+//! - The enveloped-signature transform: remove the ONE `<ds:Signature>`
+//!   the verifier is checking (see [`EnvelopedSignature`]).
 //! - Proper escape of text and attribute content per c14n rules.
 //!
 //! NOT supported:
@@ -31,18 +32,45 @@ use super::xml::{
 use crate::identity::error::IdentityError;
 use crate::identity::federation::saml::SamlError;
 
+/// What the enveloped-signature transform removes from the canonical form.
+///
+/// XML-DSIG's enveloped-signature transform removes exactly one element: the
+/// `<ds:Signature>` that contains the transform — the signature being
+/// verified. Removing any other element hides it from the digest while every
+/// parser still sees it. Hearth used to remove *every* direct-child
+/// `<ds:Signature>`, so a second one appended to a signed assertion could
+/// carry forged SAML elements under an unchanged digest (GA audit 3, G-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvelopedSignature {
+    /// No transform: every node is canonicalized. Used when signing (the
+    /// signature does not exist yet) and for `<ds:SignedInfo>`.
+    Keep,
+    /// Remove exactly one element: the `<ds:Signature>` that is a direct child
+    /// of the root and whose start tag begins at this byte offset of the
+    /// input. Canonicalization fails if that element is not there or is not a
+    /// `<ds:Signature>`.
+    RemoveAt(usize),
+}
+
 /// Canonicalizes the element subtree contained in `xml`, applying the
 /// exclusive C14N 1.0 rules.
 ///
-/// When `strip_signature` is true, any `<ds:Signature>` element that is
-/// a direct or indirect descendant is dropped (the enveloped-signature
-/// transform). Nested `<Signature>` inside a deeper `<Assertion>` are
-/// NOT dropped — only the one at the root of the canonicalized subtree.
+/// `enveloped` selects the one `<ds:Signature>` (if any) the
+/// enveloped-signature transform removes. Every other `<ds:Signature>` —
+/// a second direct child, or one inside a nested `<Assertion>` — is
+/// canonicalized like any other element and so stays covered by the digest.
 ///
 /// `xml` MUST contain exactly one top-level element (the signed element
 /// extracted via `xml::find_element_range`).
-pub fn canonicalize(xml: &[u8], strip_signature: bool) -> Result<Vec<u8>, IdentityError> {
-    canonicalize_with_inherited(xml, strip_signature, &BTreeMap::new())
+///
+/// # Errors
+///
+/// Returns a parse error on malformed input, `SamlError::UnsupportedAlgorithm`
+/// on a `DOCTYPE`, and `SamlError::Signature` when
+/// [`EnvelopedSignature::RemoveAt`] does not name a direct-child
+/// `<ds:Signature>`.
+pub fn canonicalize(xml: &[u8], enveloped: EnvelopedSignature) -> Result<Vec<u8>, IdentityError> {
+    canonicalize_with_inherited(xml, enveloped, &BTreeMap::new())
 }
 
 /// Canonicalizes with a known "declared but not emitted" namespace context.
@@ -60,10 +88,14 @@ pub fn canonicalize(xml: &[u8], strip_signature: bool) -> Result<Vec<u8>, Identi
 /// AND not already emitted on a canonical ancestor". A prefix declared
 /// in source but not on a canonical ancestor of the current
 /// canonicalization IS emitted.
+///
+/// # Errors
+///
+/// As [`canonicalize`].
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub fn canonicalize_with_inherited(
     xml: &[u8],
-    strip_signature: bool,
+    enveloped: EnvelopedSignature,
     declared_inherited: &BTreeMap<Vec<u8>, Vec<u8>>,
 ) -> Result<Vec<u8>, IdentityError> {
     let mut reader = Reader::from_reader(xml);
@@ -81,9 +113,18 @@ pub fn canonicalize_with_inherited(
     let mut declared_stack: Vec<BTreeMap<Vec<u8>, Vec<u8>>> = vec![declared_inherited.clone()];
     let mut skip_depth: Option<i32> = None;
     let mut depth: i32 = 0;
+    // The byte offset of the one `<ds:Signature>` to remove, and whether it
+    // was found. A requested removal that never happens means the caller's
+    // idea of "the verified signature" does not match this document.
+    let remove_at = match enveloped {
+        EnvelopedSignature::Keep => None,
+        EnvelopedSignature::RemoveAt(offset) => Some(offset),
+    };
+    let mut removed = false;
     // Track the visible prefixes used on the current element so namespace
     // decls can be emitted on the output tag in exclusive form.
     loop {
+        let pos_before = reader.buffer_position() as usize;
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 depth += 1;
@@ -98,13 +139,17 @@ pub fn canonicalize_with_inherited(
                     }
                 }
 
-                let (is_sig_at_root, rendered) =
+                let (is_signature, rendered) =
                     process_start(&e, &mut emitted_stack, &mut declared_stack, false)?;
-                if strip_signature && depth == 2 && is_sig_at_root {
-                    // Enveloped-signature transform: drop the <Signature>
-                    // subtree. depth==2 because root is depth 1; Signature
-                    // is direct child at depth 2.
+                if depth == 2 && remove_at == Some(pos_before) {
+                    // Enveloped-signature transform: drop the verified
+                    // <Signature> subtree — and only that one. depth==2
+                    // because root is depth 1; Signature is a direct child.
+                    if !is_signature {
+                        return Err(IdentityError::Saml(SamlError::Signature));
+                    }
                     skip_depth = Some(depth);
+                    removed = true;
                 } else {
                     out.extend_from_slice(rendered.as_bytes());
                 }
@@ -118,10 +163,14 @@ pub fn canonicalize_with_inherited(
                         continue;
                     }
                 }
-                let (is_sig_at_root, rendered) =
+                let (is_signature, rendered) =
                     process_start(&e, &mut emitted_stack, &mut declared_stack, true)?;
-                if strip_signature && depth == 2 && is_sig_at_root {
-                    // Nothing to emit.
+                if depth == 2 && remove_at == Some(pos_before) {
+                    // The verified (empty) <Signature>: nothing to emit.
+                    if !is_signature {
+                        return Err(IdentityError::Saml(SamlError::Signature));
+                    }
+                    removed = true;
                 } else {
                     out.extend_from_slice(rendered.as_bytes());
                 }
@@ -198,6 +247,9 @@ pub fn canonicalize_with_inherited(
         buf.clear();
     }
 
+    if remove_at.is_some() && !removed {
+        return Err(IdentityError::Saml(SamlError::Signature));
+    }
     Ok(out)
 }
 
@@ -366,7 +418,7 @@ mod tests {
     #[test]
     fn canon_preserves_simple_element() {
         let xml = br#"<root xmlns="http://example.com/ns">hello</root>"#;
-        let out = canonicalize(xml, false).expect("canon");
+        let out = canonicalize(xml, EnvelopedSignature::Keep).expect("canon");
         let s = std::str::from_utf8(&out).expect("utf8");
         assert_eq!(s, r#"<root xmlns="http://example.com/ns">hello</root>"#);
     }
@@ -374,7 +426,7 @@ mod tests {
     #[test]
     fn canon_sorts_attributes() {
         let xml = br#"<root z="1" a="2" m="3"/>"#;
-        let out = canonicalize(xml, false).expect("canon");
+        let out = canonicalize(xml, EnvelopedSignature::Keep).expect("canon");
         let s = std::str::from_utf8(&out).expect("utf8");
         assert_eq!(s, r#"<root a="2" m="3" z="1"></root>"#);
     }
@@ -382,15 +434,26 @@ mod tests {
     #[test]
     fn canon_escapes_text() {
         let xml = br"<root>a&amp;b&lt;c</root>";
-        let out = canonicalize(xml, false).expect("canon");
+        let out = canonicalize(xml, EnvelopedSignature::Keep).expect("canon");
         let s = std::str::from_utf8(&out).expect("utf8");
         assert_eq!(s, r"<root>a&amp;b&lt;c</root>");
     }
 
+    /// Byte offset of the `nth` (0-based) occurrence of `needle` in `xml`.
+    fn offset_of(xml: &[u8], needle: &str, nth: usize) -> usize {
+        let s = std::str::from_utf8(xml).expect("utf8");
+        s.match_indices(needle)
+            .nth(nth)
+            .unwrap_or_else(|| panic!("occurrence {nth} of {needle:?} not present"))
+            .0
+    }
+
+    const ONE_SIGNATURE: &[u8] = br#"<Response xmlns="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><Issuer>x</Issuer><ds:Signature><ds:SignedInfo></ds:SignedInfo></ds:Signature><Status/></Response>"#;
+
     #[test]
     fn canon_strips_envelope_signature() {
-        let xml = br#"<Response xmlns="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><Issuer>x</Issuer><ds:Signature><ds:SignedInfo></ds:SignedInfo></ds:Signature><Status/></Response>"#;
-        let out = canonicalize(xml, true).expect("canon");
+        let at = offset_of(ONE_SIGNATURE, "<ds:Signature", 0);
+        let out = canonicalize(ONE_SIGNATURE, EnvelopedSignature::RemoveAt(at)).expect("canon");
         let s = std::str::from_utf8(&out).expect("utf8");
         assert!(
             !s.contains("Signature"),
@@ -398,5 +461,84 @@ mod tests {
         );
         assert!(s.contains("Issuer"));
         assert!(s.contains("Status"));
+    }
+
+    /// `Keep` canonicalizes the signature like any other element — the
+    /// signer's view, before the signature exists.
+    #[test]
+    fn canon_keep_leaves_a_signature_in_place() {
+        let out = canonicalize(ONE_SIGNATURE, EnvelopedSignature::Keep).expect("canon");
+        let s = std::str::from_utf8(&out).expect("utf8");
+        assert!(s.contains("<ds:Signature"), "Keep must not strip: {s}");
+    }
+
+    /// G-1: the transform removes ONE signature — the verified one. A second
+    /// direct-child `<ds:Signature>` stays in the canonical form, so anything
+    /// hidden in it changes the digest.
+    #[test]
+    fn canon_removes_only_the_named_signature() {
+        let xml = br#"<Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="a1"><ds:Signature><ds:SignedInfo>real</ds:SignedInfo></ds:Signature><Subject>mallory</Subject><ds:Signature><Subject>ceo</Subject></ds:Signature></Assertion>"#;
+        let at = offset_of(xml, "<ds:Signature", 0);
+        let out = canonicalize(xml, EnvelopedSignature::RemoveAt(at)).expect("canon");
+        let s = std::str::from_utf8(&out).expect("utf8");
+        assert!(
+            !s.contains("real"),
+            "the named signature must be removed: {s}"
+        );
+        assert!(
+            s.contains("<Subject>ceo</Subject>"),
+            "a second signature must stay covered by the digest: {s}"
+        );
+    }
+
+    /// The second signature can be the one named — position is irrelevant —
+    /// and then the first one is the one that stays.
+    #[test]
+    fn canon_removal_follows_the_offset_not_the_position() {
+        let xml = br#"<Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="a1"><ds:Signature>first</ds:Signature><Subject>s</Subject><ds:Signature>second</ds:Signature></Assertion>"#;
+        let at = offset_of(xml, "<ds:Signature", 1);
+        let out = canonicalize(xml, EnvelopedSignature::RemoveAt(at)).expect("canon");
+        let s = std::str::from_utf8(&out).expect("utf8");
+        assert!(s.contains("first") && !s.contains("second"), "{s}");
+    }
+
+    /// An offset that names something other than a direct-child
+    /// `<ds:Signature>` is a caller/document mismatch and fails closed.
+    #[test]
+    fn canon_refuses_an_offset_that_is_not_a_signature() {
+        let at = offset_of(ONE_SIGNATURE, "<Issuer", 0);
+        let err = canonicalize(ONE_SIGNATURE, EnvelopedSignature::RemoveAt(at))
+            .expect_err("an offset naming <Issuer> must be refused");
+        assert!(
+            matches!(err, IdentityError::Saml(SamlError::Signature)),
+            "wrong error: {err:?}"
+        );
+    }
+
+    /// An offset that matches no element at all fails closed rather than
+    /// silently canonicalizing with nothing removed.
+    #[test]
+    fn canon_refuses_an_offset_that_matches_nothing() {
+        let at = offset_of(ONE_SIGNATURE, "<ds:Signature", 0) + 1;
+        let err = canonicalize(ONE_SIGNATURE, EnvelopedSignature::RemoveAt(at))
+            .expect_err("an offset inside a tag must be refused");
+        assert!(
+            matches!(err, IdentityError::Saml(SamlError::Signature)),
+            "wrong error: {err:?}"
+        );
+    }
+
+    /// A `<ds:Signature>` below the root's direct children is never the
+    /// enveloped one, even when the offset names it.
+    #[test]
+    fn canon_refuses_an_offset_naming_a_nested_signature() {
+        let xml = br#"<Response xmlns="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><Wrap><ds:Signature>deep</ds:Signature></Wrap></Response>"#;
+        let at = offset_of(xml, "<ds:Signature", 0);
+        let err = canonicalize(xml, EnvelopedSignature::RemoveAt(at))
+            .expect_err("a nested signature is not the enveloped one");
+        assert!(
+            matches!(err, IdentityError::Saml(SamlError::Signature)),
+            "wrong error: {err:?}"
+        );
     }
 }
