@@ -141,9 +141,10 @@ enum AdminAction {
     ///
     /// The command opens the data directory itself, so `hearth serve` must be
     /// stopped on this node while it runs; start it again afterwards and use
-    /// the token within `--ttl`. Single-node stores only: on a cluster node the
-    /// session and audit record it writes would exist on that node alone,
-    /// outside Raft, so a data directory holding `raft.db` is refused.
+    /// the token within `--ttl`. On a cluster node the session and audit
+    /// record it writes would exist on that node alone, outside Raft, so a
+    /// data directory holding `raft.db` is refused unless
+    /// `--sole-cluster-node` says why that is safe.
     Token {
         /// Email of the operator account in the system realm. It must hold
         /// `hearth.admin` (the `realm.admin` role).
@@ -164,6 +165,15 @@ enum AdminAction {
         /// the key.
         #[arg(long, short)]
         config: Option<PathBuf>,
+
+        /// Accept a cluster node's data directory. Only for a node that next
+        /// starts as its cluster's ONLY member, with every other node
+        /// rejoining empty and receiving a snapshot of this store (the
+        /// disaster-recovery rebuild). Anywhere else the session and audit
+        /// record exist on this node alone and fork the replicated audit
+        /// chain.
+        #[arg(long)]
+        sole_cluster_node: bool,
     },
 }
 
@@ -816,7 +826,14 @@ async fn main() {
                     ttl,
                     data_dir,
                     config,
-                } => match run_admin_token(&user, &ttl, data_dir.as_deref(), config.as_deref()) {
+                    sole_cluster_node,
+                } => match run_admin_token(
+                    &user,
+                    &ttl,
+                    data_dir.as_deref(),
+                    config.as_deref(),
+                    sole_cluster_node,
+                ) {
                     Ok(()) => 0,
                     Err(e) => {
                         tracing::error!("error: {e}");
@@ -4667,6 +4684,7 @@ fn run_admin_token(
     ttl: &str,
     data_dir: Option<&std::path::Path>,
     config_path: Option<&std::path::Path>,
+    sole_cluster_node: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use hearth::identity::{HOST_ADMIN_TOKEN_MAX_TTL, HOST_ADMIN_TOKEN_MIN_TTL};
     use std::io::Write as _;
@@ -4714,13 +4732,15 @@ fn run_admin_token(
     }
     // A cluster node's store must not be written outside Raft: the session
     // would exist on this node only, and the audit record would fork the
-    // system realm's replicated audit chain on it.
-    if data_dir.join("raft.db").exists() {
+    // system realm's replicated audit chain on it. The one exception is a
+    // node every other node will copy through a snapshot.
+    if data_dir.join("raft.db").exists() && !sole_cluster_node {
         return Err(format!(
             "'{}' is a cluster node's data directory (it holds raft.db). `hearth admin token` \
              writes a session and an audit record straight into the store, outside Raft: they \
-             would exist on this node only and fork the replicated audit chain. It supports \
-             single-node stores only",
+             would exist on this node only and fork the replicated audit chain. Pass \
+             --sole-cluster-node only when this node next starts as the cluster's only member \
+             and every other node rejoins empty from its snapshot",
             data_dir.display()
         )
         .into());

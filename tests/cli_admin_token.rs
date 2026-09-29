@@ -340,26 +340,54 @@ fn admin_token_refuses_a_data_directory_a_running_server_holds() {
 
 /// A cluster node's store is refused: the session and audit record the command
 /// writes would exist on that node only, outside Raft, and fork the replicated
-/// system-realm audit chain.
+/// system-realm audit chain. `--sole-cluster-node` accepts it for the one case
+/// where that cannot happen — the node restarts as its cluster's only member
+/// and every other node rejoins empty from its snapshot (disaster recovery).
 #[test]
-fn admin_token_refuses_a_cluster_node_data_directory() {
+fn admin_token_refuses_a_cluster_node_data_directory_unless_it_will_run_alone() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().join("data");
     seed_store(&data_dir);
     std::fs::write(data_dir.join("raft.db"), b"").expect("mark as a cluster node");
+    let config = write_config(dir.path(), &data_dir);
 
     let run = hearth(&[
         os("admin"),
         os("token"),
         os("--config"),
-        write_config(dir.path(), &data_dir).as_os_str(),
+        config.as_os_str(),
         os("--user"),
         os(OPERATOR),
     ]);
     assert_ne!(run.code, Some(0), "must refuse a cluster node's store");
     assert!(run.stdout.trim().is_empty(), "no token: {}", run.stdout);
     let all = format!("{}{}", run.stdout, run.stderr);
-    assert!(all.contains("cluster"), "the refusal must say why: {all}");
+    assert!(
+        all.contains("cluster") && all.contains("--sole-cluster-node"),
+        "the refusal must say why, and name the override: {all}"
+    );
+
+    let run = hearth(&[
+        os("admin"),
+        os("token"),
+        os("--config"),
+        config.as_os_str(),
+        os("--user"),
+        os(OPERATOR),
+        os("--sole-cluster-node"),
+    ]);
+    assert_eq!(
+        run.code,
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        run.stdout,
+        run.stderr
+    );
+    let token = run.stdout.trim();
+    let e = open(&data_dir);
+    e.identity
+        .validate_token(&system_realm(), token)
+        .expect("the token minted for the sole node validates");
 }
 
 /// Only an operator account holding `hearth.admin` gets a token, and only a
