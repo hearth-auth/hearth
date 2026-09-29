@@ -229,6 +229,30 @@ pub trait IdentityEngine: Send + Sync {
         request: &UpdateRealmRequest,
     ) -> Result<Realm, IdentityError>;
 
+    /// Suspends (`suspended = true`) or reinstates a realm — the
+    /// incident-response freeze control.
+    ///
+    /// Suspension reuses [`RealmStatus::Suspended`]: every token of the realm
+    /// stops validating, its sessions are revoked, and no new session starts
+    /// until the realm is reinstated. Only an `Active` or `Suspended` realm
+    /// moves; the check runs under the realm-ops lock. The `RealmUpdated`
+    /// audit event is attributed to `audit_ctx` and carries
+    /// `previous_status` / `status`. YAML reconciliation never clears a
+    /// suspension (it only unarchives).
+    ///
+    /// Returns the status the realm had before, and the updated realm.
+    ///
+    /// # Errors
+    ///
+    /// `SystemRealmProtected` for the system realm, `RealmNotFound`,
+    /// `RealmArchived` for an archived or deleting realm.
+    fn set_realm_suspended(
+        &self,
+        realm_id: &RealmId,
+        suspended: bool,
+        audit_ctx: &AuditContext,
+    ) -> Result<(RealmStatus, Realm), IdentityError>;
+
     /// Deletes a realm and all associated data.
     ///
     /// Cascading deletion removes all users, sessions, credentials,
