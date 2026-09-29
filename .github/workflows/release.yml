@@ -252,6 +252,16 @@ jobs:
         continue-on-error: true
         run: bash scripts/check-slsa-generator-pin.sh
 
+      # The bench gate builds a second, release-profile target tree. On the
+      # v2.0.0 tag it died with "No space left on device" next to the debug
+      # tree the suite left behind. Nothing after Step 1 reads target/debug
+      # (the summary reads nextest.log), so drop it before the release build.
+      - name: Free the debug target before the release-profile bench build
+        if: always()
+        run: |
+          rm -rf target/debug
+          df -h .
+
       # ── Advisory gate ─────────────────────────────────────────────────────
       - name: "Step 7 — Benchmark gate (make bench-gate, advisory)"
         id: bench
