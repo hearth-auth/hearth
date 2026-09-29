@@ -22,7 +22,7 @@ use crate::identity::{
     CreateOrganizationRequest, Organization, OrganizationRole, UpdateOrganizationRequest,
 };
 use crate::protocol::http::AppState;
-use crate::protocol::scim::auth::{authenticate, ScimAuth};
+use crate::protocol::scim::auth::{authenticate, ScimAuth, ScimResource};
 use crate::protocol::scim::error::{from_identity_error, ScimError};
 use crate::protocol::scim::etag::{check_if_match, resource_response};
 use crate::protocol::scim::filter::{self, FilterExpr};
@@ -194,7 +194,7 @@ pub async fn create_group(
     headers: HeaderMap,
     Json(body): Json<ScimGroup>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -283,7 +283,7 @@ pub async fn get_group(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -324,7 +324,7 @@ pub async fn list_groups(
     headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -390,7 +390,7 @@ pub async fn replace_group(
     Path(id): Path<String>,
     Json(body): Json<ScimGroup>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -478,7 +478,7 @@ pub async fn patch_group(
     Path(id): Path<String>,
     Json(body): Json<PatchRequest>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -592,7 +592,7 @@ pub async fn delete_group(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
