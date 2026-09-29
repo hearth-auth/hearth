@@ -6922,6 +6922,10 @@ impl EmbeddedIdentityEngine {
                 &[
                     keys::encode_user_id(user_id),
                     keys::encode_user_email(user.email()),
+                    // The required-action generation (GA audit round 3, D-2)
+                    // names the user too; with the record gone no RA token
+                    // for it validates anyway.
+                    keys::encode_ra_generation(user_id),
                 ],
             )
             .map_err(Self::storage_err)?;
