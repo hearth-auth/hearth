@@ -242,6 +242,19 @@ async fn check_step_up(
             }
             return Err(resp);
         }
+        Err(StepUpError::Locked) => {
+            return Err(form_page(
+                state,
+                session,
+                StatusCode::TOO_MANY_REQUESTS,
+                Some(
+                    "Too many failed attempts. Your account is locked for a few minutes; \
+                     try again later."
+                        .to_string(),
+                ),
+                ttl,
+            ));
+        }
         Err(StepUpError::SecondFactorNotEnrolled) => {
             "Your account has no second factor. Enrol an authenticator app or a passkey on \
              your account page, then create the token."

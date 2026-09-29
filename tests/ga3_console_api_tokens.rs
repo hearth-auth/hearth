@@ -22,9 +22,10 @@ use hearth::core::{Clock, FakeClock, RealmId, SessionId, SystemClock, UserId};
 use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
 use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::{
-    AuthenticationOptions, CleartextPassword, CreateRealmRequest, CreateUserRequest,
-    CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, MfaProof,
-    RegistrationOptions, SessionContext, UpdateUserRequest, UserStatus,
+    verify_step_up, AuthenticationOptions, CleartextPassword, CreateRealmRequest,
+    CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
+    IdentityError, KdfGateConfig, MfaProof, RegistrationOptions, SessionContext, StepUpError,
+    StepUpProof, UpdateUserRequest, UserStatus,
 };
 use hearth::protocol::web::{self, CookieSecret, WebState};
 use hearth::rbac::{AssignRoleRequest, EmbeddedRbacEngine, RbacEngine, Scope, Subject};
@@ -782,4 +783,179 @@ async fn a_passkey_counts_only_with_user_verification() {
         assert_eq!(shown_token(&page).is_some(), verified, "UV={verified}");
     }
     assert_eq!(issued_events(&rig).len(), 1, "only the UV assertion minted");
+}
+
+// ─── attempt limits (GA audit 3 DOC-2, round 3) ─────────────────────────────
+
+/// The login lockout window of the default `IdentityConfig` (5 failures,
+/// 5 minutes) — also the TOTP guess-budget window.
+const LOCKOUT_MICROS: i64 = 5 * 60 * 1_000_000;
+
+/// A six-digit code that is none of the codes the account's TOTP secret
+/// accepts around `unix_secs` (the validator allows one step of drift).
+fn wrong_totp_code(secret_base32: &str, unix_secs: u64) -> String {
+    let accepted: Vec<String> = [unix_secs - 30, unix_secs, unix_secs + 30]
+        .iter()
+        .map(|t| totp_code(secret_base32, *t))
+        .collect();
+    (0u32..4)
+        .map(|n| format!("{n:06}"))
+        .find(|c| !accepted.contains(c))
+        .expect("a code outside three accepted ones")
+}
+
+/// Wrong step-up passwords spend the account's login lockout budget: after
+/// five, the right password and a right code are refused (429, no token) —
+/// and so is the account's login password check — until the window passes.
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_step_up_passwords_lock_the_account_until_the_window_passes() {
+    let rig = build_rig();
+    let op = totp_operator(&rig, "ops@hearth.example");
+    let sys = system_realm();
+    let secret = op.totp_secret.clone().expect("totp");
+
+    for attempt in 0..5 {
+        let code = totp_code(&secret, rig.now_secs());
+        let wrong = format!("wrong-password-number-{attempt}");
+        let page = post_form(
+            &rig,
+            Some(op.cookie()),
+            &[
+                ("_csrf", CSRF),
+                ("ttl_minutes", "15"),
+                ("password", &wrong),
+                ("totp_code", &code),
+            ],
+        )
+        .await;
+        assert_eq!(page.status, StatusCode::FORBIDDEN, "attempt {attempt}");
+    }
+
+    let page = mint_with_totp(&rig, &op, "15").await;
+    assert_eq!(
+        page.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a locked account is refused even with the right password: {}",
+        page.body
+    );
+    assert!(
+        page.body.contains("Too many failed attempts"),
+        "the page says why: {}",
+        page.body
+    );
+    assert!(!carries_a_jwt(&page.body));
+    assert!(issued_events(&rig).is_empty());
+
+    // It is the login lockout, not a second counter: login's password check
+    // is refused too, and so is the enrolment step-up.
+    assert!(matches!(
+        rig.identity.verify_password(
+            &sys,
+            &op.id,
+            &CleartextPassword::from_string(PASSWORD.to_string())
+        ),
+        Err(IdentityError::RateLimited)
+    ));
+    assert!(matches!(
+        verify_step_up(
+            &rig.identity,
+            &sys,
+            &op.id,
+            StepUpProof::Password(CleartextPassword::from_string(PASSWORD.to_string())),
+        )
+        .await,
+        Err(StepUpError::Locked)
+    ));
+
+    rig.clock.advance(LOCKOUT_MICROS + 1_000_000);
+    let page = mint_with_totp(&rig, &op, "15").await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(shown_token(&page).is_some(), "the window has passed");
+}
+
+/// Wrong step-up TOTP codes spend the account's TOTP guess budget, the one
+/// login's second-factor check draws from: after five, a right code is
+/// refused on both surfaces until the window passes.
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_step_up_totp_codes_spend_the_totp_guess_budget() {
+    let rig = build_rig();
+    let op = totp_operator(&rig, "ops@hearth.example");
+    let sys = system_realm();
+    let secret = op.totp_secret.clone().expect("totp");
+
+    for attempt in 0..5 {
+        let wrong = wrong_totp_code(&secret, rig.now_secs());
+        let page = post_form(
+            &rig,
+            Some(op.cookie()),
+            &[
+                ("_csrf", CSRF),
+                ("ttl_minutes", "15"),
+                ("password", PASSWORD),
+                ("totp_code", &wrong),
+            ],
+        )
+        .await;
+        assert_eq!(page.status, StatusCode::FORBIDDEN, "attempt {attempt}");
+    }
+
+    let page = mint_with_totp(&rig, &op, "15").await;
+    assert_eq!(
+        page.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a spent TOTP budget refuses the right code: {}",
+        page.body
+    );
+    assert!(!carries_a_jwt(&page.body));
+    assert!(matches!(
+        rig.identity
+            .verify_totp(&sys, &op.id, &totp_code(&secret, rig.now_secs())),
+        Err(IdentityError::RateLimited)
+    ));
+    assert!(issued_events(&rig).is_empty());
+
+    rig.clock.advance(LOCKOUT_MICROS + 1_000_000);
+    let page = mint_with_totp(&rig, &op, "15").await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(shown_token(&page).is_some(), "the window has passed");
+}
+
+/// A system-realm step-up draws from the admin-reserved KDF gate, as the
+/// admin console login does: a tenant-login flood that fills the shared gate
+/// must not shed the operator's step-up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_operator_step_up_runs_on_the_admin_kdf_gate() {
+    // First call wins the process-global OnceLock; nextest runs this test in
+    // its own process, so the one-permit bound is deterministic.
+    let installed = hearth::identity::init_gate(KdfGateConfig {
+        max_in_flight: 1,
+        max_queue_wait: std::time::Duration::from_millis(40),
+        retry_after: std::time::Duration::from_secs(2),
+    });
+    assert!(installed, "no earlier gate() call in this process");
+    let rig = build_rig();
+    let op = totp_operator(&rig, "ops@hearth.example");
+
+    // Hold the shared gate's only permit; the signal fires from inside the
+    // gated closure, so once it arrives the gate is provably full.
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let holder = tokio::spawn(async move {
+        let _ = hearth::identity::gate()
+            .run(move || {
+                let _ = tx.send(());
+                std::thread::sleep(std::time::Duration::from_millis(1500)); // AUDIT: justified-sleep: holds the shared gate's only KDF permit while the step-up runs
+            })
+            .await;
+    });
+    rx.await.expect("holder acquired the only permit");
+
+    let page = mint_with_totp(&rig, &op, "15").await;
+    assert_eq!(
+        page.status,
+        StatusCode::OK,
+        "the operator step-up must not queue behind tenant logins: {}",
+        page.body
+    );
+    assert!(shown_token(&page).is_some());
+    holder.await.expect("holder");
 }

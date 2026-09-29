@@ -23,6 +23,26 @@ pub struct BulkResult<T> {
     pub result: Result<T, String>,
 }
 
+/// Where an email-verification link is completed, as far as the federated
+/// links of a `PendingVerification` account are concerned (GA audit round 3,
+/// G-3).
+///
+/// A federated just-in-time account on an address the upstream did not
+/// verify waits for the address owner. The mail that asks them to verify is
+/// unsolicited when someone else's upstream identity named their address, so
+/// the link that created the account survives verification only when the
+/// same browser that performed the federated login completes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerificationOrigin {
+    /// The browser that performed the federated login which created the
+    /// account (it holds the binding that login set): the account's
+    /// federated links are kept.
+    FederatedLoginBrowser,
+    /// Any other browser or caller: a `PendingVerification` account is
+    /// activated WITHOUT its federated links, and each removal is audited.
+    Elsewhere,
+}
+
 /// The lifecycle status of a user account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UserStatus {

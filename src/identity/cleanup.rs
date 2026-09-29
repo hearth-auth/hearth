@@ -920,6 +920,7 @@ mod tests {
             nonce: None,
             resource: None,
             amr_values: Vec::new(),
+            mfa_proof: crate::identity::MfaProof::None,
         };
         let key = keys::encode_oauth_code("hash1");
         s.put(&realm, &key, &serde_json::to_vec(&code).expect("serialize"))
@@ -950,6 +951,7 @@ mod tests {
             nonce: None,
             resource: None,
             amr_values: Vec::new(),
+            mfa_proof: crate::identity::MfaProof::None,
         };
         let key = keys::encode_oauth_code("hash2");
         s.put(&realm, &key, &serde_json::to_vec(&code).expect("serialize"))
@@ -980,6 +982,7 @@ mod tests {
             expires_at: Timestamp::from_micros(T0 + TEN_MINUTES),
             interval: 5,
             last_polled_at: None,
+            mfa_proof: crate::identity::MfaProof::None,
         };
 
         let dc_key = keys::encode_device_code("dch1");
@@ -1016,6 +1019,7 @@ mod tests {
             expires_at: Timestamp::from_micros(T0 + ONE_HOUR),
             interval: 5,
             last_polled_at: None,
+            mfa_proof: crate::identity::MfaProof::None,
         };
 
         let dc_key = keys::encode_device_code("dch2");
@@ -1260,6 +1264,7 @@ mod tests {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                mfa_proof: crate::identity::MfaProof::None,
             };
             let key = keys::encode_oauth_code(&format!("expired_hash_{i}"));
             s.put(&realm, &key, &serde_json::to_vec(&code).expect("serialize"))

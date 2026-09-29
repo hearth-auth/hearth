@@ -1432,6 +1432,12 @@ pub(crate) struct StoredAuthorizationCode {
     /// Propagated verbatim to both access and ID token claims at exchange time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) amr_values: Vec<String>,
+    /// What the session that authorized this code proved about a second
+    /// factor. The session the exchange opens records exactly this — never
+    /// more (GA audit round 3, D-7). A code written without it (or minted
+    /// with no session behind it) carries [`crate::identity::MfaProof::None`].
+    #[serde(default)]
+    pub(crate) mfa_proof: crate::identity::MfaProof,
 }
 
 /// Context from the refresh request used to detect binding drift (A-49).
@@ -1883,6 +1889,11 @@ pub(crate) struct StoredDeviceCode {
     pub(crate) interval: i64,
     /// Last time the device polled (for rate limiting).
     pub(crate) last_polled_at: Option<Timestamp>,
+    /// What the session that approved the device proved about a second
+    /// factor; the device's token session records exactly this (GA audit
+    /// round 3, D-7). [`crate::identity::MfaProof::None`] until approved.
+    #[serde(default)]
+    pub(crate) mfa_proof: crate::identity::MfaProof,
 }
 
 // ===== Grant Family (Refresh Token Rotation) =====
@@ -2409,6 +2420,7 @@ mod tests {
             nonce: Some("test-nonce-abc".to_string()),
             resource: None,
             amr_values: Vec::new(),
+            mfa_proof: crate::identity::MfaProof::None,
         };
 
         let json = serde_json::to_string(&code).expect("serialize");

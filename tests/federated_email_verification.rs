@@ -62,6 +62,7 @@ impl EmailSender for CapturingMail {
 struct FedRig {
     app: axum::Router,
     identity: Arc<dyn IdentityEngine>,
+    audit: Arc<dyn hearth::audit::AuditEngine>,
     realm_id: RealmId,
     idp_id: IdpId,
     outbox: Arc<Outbox>,
@@ -148,7 +149,7 @@ fn build_fed_rig(stub: Arc<StubFederationTransport>) -> FedRig {
     let state = WebState::new(
         Arc::clone(&identity),
         rbac,
-        audit,
+        Arc::clone(&audit),
         onboarding,
         CookieSecret::from_bytes(COOKIE_SECRET),
         Some(email),
@@ -158,6 +159,7 @@ fn build_fed_rig(stub: Arc<StubFederationTransport>) -> FedRig {
     FedRig {
         app: web::router(state),
         identity,
+        audit,
         realm_id,
         idp_id,
         outbox,
@@ -357,20 +359,168 @@ fn jit_with_an_unverified_upstream_email_waits_for_the_address_owner() {
         "the account waits for its address to be verified"
     );
     assert!(!user.email_verified());
-    let token = verification_token_sent_to(&rig, "victim@corp.example")
-        .expect("the address owner is sent the verification link");
+    assert!(
+        verification_token_sent_to(&rig, "victim@corp.example").is_some(),
+        "the address owner is sent the verification link"
+    );
+}
 
-    // The address owner verifies; from then on the federated login works.
-    rig.identity
-        .verify_email_token(&rig.realm_id, &token)
-        .expect("verify");
-    seed_state(&rig, "st-again", "nonce-st-unverified");
-    let resp = callback(&rig, "st-again");
+/// The cookies a response set (`name=value`), leaving out the ones it
+/// cleared — what a browser would send back on its next request.
+fn cookie_jar(resp: &axum::http::Response<Body>) -> Vec<String> {
+    set_cookies(resp)
+        .iter()
+        .filter(|c| !c.contains("Max-Age=0"))
+        .filter_map(|c| c.split(';').next())
+        .filter(|pair| pair.split_once('=').is_some_and(|(_, v)| !v.is_empty()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Spends `token` on the verification page's `POST`, from a browser holding
+/// `jar` (plus the link cookie the emailed link stashed).
+fn verify_in_browser(rig: &FedRig, token: &str, jar: &[String]) -> axum::http::Response<Body> {
+    let binding = web::link_token::link_binding(&CookieSecret::from_bytes(COOKIE_SECRET), token);
+    let mut cookies = vec![format!("{}={token}", web::link_token::LINK_TOKEN_COOKIE)];
+    cookies.extend(jar.iter().cloned());
+    send(
+        &rig.app,
+        Request::builder()
+            .method("POST")
+            .uri("/ui/realms/demo/verify-email")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", cookies.join("; "))
+            .body(Body::from(format!("link_binding={binding}&_csrf=")))
+            .unwrap(),
+    )
+}
+
+/// A JIT login on an unverified upstream address: returns the account, the
+/// verification token mailed to it, and the cookies the login left in the
+/// browser that performed it.
+fn pending_jit_account(
+    rig: &FedRig,
+    stub: &StubFederationTransport,
+    state: &str,
+    external_sub: &str,
+    email: &str,
+) -> (hearth::identity::User, String, Vec<String>) {
+    stub_upstream_login(rig, stub, state, external_sub, email, false);
+    let resp = callback(rig, state);
+    assert!(!issues_a_session(&resp), "control: the JIT login waits");
+    let jar = cookie_jar(&resp);
+    let user = linked_user(rig, external_sub);
+    assert_eq!(user.status(), UserStatus::PendingVerification);
+    let token = verification_token_sent_to(rig, email).expect("verification link mailed");
+    (user, token, jar)
+}
+
+/// G-3 leftover (owner decision "bind to originating browser"): the address
+/// owner verifying in the browser that performed the federated login keeps
+/// the federated link, and the next federated login signs in.
+#[test]
+fn verifying_in_the_browser_that_signed_in_keeps_the_federated_link() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_fed_rig(Arc::clone(&stub));
+    let (user, token, jar) =
+        pending_jit_account(&rig, &stub, "st-same", "ext-same", "same@corp.example");
+
+    let resp = verify_in_browser(&rig, &token, &jar);
+    assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp));
+
+    let linked = linked_user(&rig, "ext-same");
+    assert_eq!(linked.id(), user.id(), "the link survives verification");
+    assert_eq!(linked.status(), UserStatus::Active);
+    assert!(linked.email_verified());
+
+    seed_state(&rig, "st-same-again", "nonce-st-same");
+    let resp = callback(&rig, "st-same-again");
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     assert!(
         issues_a_session(&resp),
         "a verified account signs in through its link (location {:?})",
         resp.headers().get("location")
+    );
+}
+
+/// G-3 leftover: the unsolicited verification mail completed in any other
+/// browser — the address owner's, who never used that upstream identity —
+/// activates the account WITHOUT the federated link, audited, so the
+/// upstream identity that pre-created the account cannot reach it.
+#[test]
+fn verifying_in_another_browser_activates_the_account_without_the_federated_link() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_fed_rig(Arc::clone(&stub));
+    let (user, token, _attacker_jar) =
+        pending_jit_account(&rig, &stub, "st-other", "ext-other", "owner@corp.example");
+
+    // The address owner's own browser: none of the JIT login's cookies.
+    let resp = verify_in_browser(&rig, &token, &[]);
+    assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp));
+
+    let account = rig
+        .identity
+        .get_user(&rig.realm_id, user.id())
+        .expect("get user")
+        .expect("user");
+    assert_eq!(
+        account.status(),
+        UserStatus::Active,
+        "the owner's account is active"
+    );
+    assert!(account.email_verified());
+    assert_eq!(
+        rig.identity
+            .find_user_by_external_identity(&rig.realm_id, &rig.idp_id, "ext-other")
+            .expect("lookup"),
+        None,
+        "the upstream identity that pre-created the account is no longer linked"
+    );
+    assert!(
+        rig.identity
+            .list_external_identities_for_user(&rig.realm_id, user.id())
+            .expect("list")
+            .is_empty(),
+        "the account holds no federated link"
+    );
+    let unlinked = rig
+        .audit
+        .query(&hearth::audit::AuditQuery {
+            realm_id: rig.realm_id.clone(),
+            start_time: None,
+            end_time: None,
+            actor: None,
+            action: Some(hearth::audit::AuditAction::FederationAccountUnlinked),
+            limit: None,
+            agent_id: None,
+            tool: None,
+        })
+        .expect("audit query");
+    assert!(
+        unlinked
+            .iter()
+            .any(|e| e.resource_id == rig.idp_id.as_uuid().to_string()),
+        "the removal is audited: {unlinked:?}"
+    );
+
+    // The upstream identity logs in again: it does not reach the account.
+    seed_state(&rig, "st-other-again", "nonce-st-other");
+    let _ = callback(&rig, "st-other-again");
+    let reached = rig
+        .identity
+        .find_user_by_external_identity(&rig.realm_id, &rig.idp_id, "ext-other")
+        .expect("lookup");
+    assert_ne!(
+        reached.as_ref(),
+        Some(user.id()),
+        "a later federated login by that upstream identity does not reach the account"
+    );
+    assert!(
+        rig.identity
+            .list_external_identities_for_user(&rig.realm_id, user.id())
+            .expect("list")
+            .is_empty(),
+        "the later login did not re-link the account"
     );
 }
 

@@ -33,8 +33,8 @@ use crate::protocol::client_info::{build_session_context, PeerAddr};
 
 use super::auth::{
     clear_mfa_pending_cookie, cookie_value_from_headers, issue_auth_cookies,
-    issue_mfa_pending_cookie, parse_mfa_pending_cookie, revoke_prior_session_cookie, IssuedCookies,
-    MfaPending, MFA_PENDING_COOKIE,
+    issue_mfa_pending_cookie_after, parse_mfa_pending_cookie, revoke_prior_session_cookie,
+    FirstFactor, IssuedCookies, MfaPending, MFA_PENDING_COOKIE,
 };
 use super::handlers::{append_cookie, otp_factor_for, OtpFactor, PasskeyLoginCompleteBody};
 use super::templates::{render, Flash};
@@ -68,7 +68,9 @@ impl SecondFactorStep {
 
 /// The factor a login that ALREADY used a passkey still owes: TOTP, then an
 /// OTP. The passkey itself is not offered again — proving the same
-/// credential twice is still one factor.
+/// credential twice is still one factor. For the same reason an email OTP is
+/// never the second factor of a login whose first was a magic link
+/// (`first`, GA audit round 3, D-4): both prove the same inbox.
 ///
 /// # Errors
 ///
@@ -77,15 +79,19 @@ pub(super) fn non_passkey_factor_step(
     state: &Arc<WebState>,
     realm: &Realm,
     user: &User,
+    first: FirstFactor,
 ) -> Result<Option<SecondFactorStep>, IdentityError> {
     if state.identity.mfa_enabled(realm.id(), user.id())? {
         return Ok(Some(SecondFactorStep::Totp));
     }
-    Ok(otp_factor_for(state, realm, user).map(SecondFactorStep::Otp))
+    Ok(otp_factor_for(state, realm, user, first).map(SecondFactorStep::Otp))
 }
 
 /// Decides what `user` owes after a first factor that is not a passkey — a
-/// password, a magic link, a federated login.
+/// password, a magic link, a federated login. `first` says which: after a
+/// magic link an email OTP does not count (see [`non_passkey_factor_step`]).
+/// A user whose only factor is then out of reach owes nothing here, and the
+/// engine refuses the session (the factor they hold was not proved).
 ///
 /// `Ok(None)` means nothing is owed here. A realm that requires MFA but does
 /// not offer TOTP also answers `None`: the required-action gate injects the
@@ -103,12 +109,13 @@ pub(super) fn second_factor_step(
     state: &Arc<WebState>,
     realm: &Realm,
     user: &User,
+    first: FirstFactor,
 ) -> Result<Option<SecondFactorStep>, IdentityError> {
     let holds_passkey = state.identity.has_passkey_factor(realm.id(), user.id())?;
     if holds_passkey && realm.config().webauthn_required.unwrap_or(false) {
         return Ok(Some(SecondFactorStep::Passkey));
     }
-    if let Some(step) = non_passkey_factor_step(state, realm, user)? {
+    if let Some(step) = non_passkey_factor_step(state, realm, user, first)? {
         return Ok(Some(step));
     }
     if holds_passkey {
@@ -130,17 +137,25 @@ pub(super) fn second_factor_step(
     Ok(None)
 }
 
-/// Issues the MFA pending cookie for `user_id` and redirects to `step`.
+/// Issues the MFA pending cookie for `user_id` (recording what proved its
+/// first factor) and redirects to `step`.
 pub(super) fn redirect_to_second_factor(
     state: &Arc<WebState>,
     realm_id: &RealmId,
     user_id: &UserId,
     step: SecondFactorStep,
+    first: FirstFactor,
     return_to: Option<&str>,
     secure: bool,
 ) -> Response {
-    let cookie =
-        issue_mfa_pending_cookie(&state.cookie_secret, realm_id, user_id, return_to, secure);
+    let cookie = issue_mfa_pending_cookie_after(
+        &state.cookie_secret,
+        realm_id,
+        user_id,
+        return_to,
+        first,
+        secure,
+    );
     state.set_current_realm(realm_id.clone());
     tracing::debug!(
         step = step.path(),
@@ -172,7 +187,7 @@ fn pending_passkey_login(
     // same passkey again here would count one factor twice. So the passkey is
     // accepted only when it is the step this user owes after a first factor
     // that is not a passkey.
-    match second_factor_step(state, &realm, &user) {
+    match second_factor_step(state, &realm, &user, pending.first_factor) {
         Ok(Some(SecondFactorStep::Passkey)) => Ok((realm, user)),
         Ok(_) => Err(json_error(
             StatusCode::FORBIDDEN,

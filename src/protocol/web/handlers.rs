@@ -610,6 +610,7 @@ pub(super) fn otp_factor_for(
     state: &Arc<WebState>,
     realm: &crate::identity::Realm,
     user: &crate::identity::User,
+    first: super::auth::FirstFactor,
 ) -> Option<OtpFactor> {
     // An ABSENT `mfa_methods` restricts nothing — that is the semantics
     // `EmbeddedIdentityEngine::require_mfa_method` enforces, and the same rule
@@ -619,7 +620,9 @@ pub(super) fn otp_factor_for(
     let methods = realm.config().mfa_methods.clone();
     let offers = |name: &str| methods.as_ref().is_none_or(|m| m.iter().any(|x| x == name));
     let holds_sms = offers("sms") && user.phone_verified();
-    let holds_email = offers("email_otp") && user.email_otp_enabled();
+    // An email OTP proves the inbox a magic link already proved: after a
+    // magic link it is not a second factor at all (GA audit round 3, D-4).
+    let holds_email = offers("email_otp") && user.email_otp_enabled() && first.allows_email_otp();
     let sms_deliverable = state.sms.is_some() && state.sms_otp_hmac_key.is_some();
     let email_deliverable = state.email.is_some();
     // Prefer a factor we can actually send a code for.
@@ -739,7 +742,7 @@ pub async fn mfa_otp_challenge_form(
     ) else {
         return Redirect::to("/ui/login").into_response();
     };
-    let Some(factor) = otp_factor_for(&state, &realm, &user) else {
+    let Some(factor) = otp_factor_for(&state, &realm, &user, pending.first_factor) else {
         // The factor went away between login and here — start over rather
         // than silently dropping the second-factor requirement.
         return Redirect::to("/ui/login").into_response();
@@ -913,7 +916,7 @@ pub async fn mfa_otp_challenge_submit(
     ) else {
         return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
     };
-    if otp_factor_for(&state, &realm, &user) != Some(factor) {
+    if otp_factor_for(&state, &realm, &user, pending.first_factor) != Some(factor) {
         return Redirect::to("/ui/mfa-otp-challenge").into_response();
     }
 
@@ -1523,15 +1526,27 @@ fn verify_email_impl(
     };
     let product_name = state.product_name.clone();
     let logo_url = state.logo_url.clone();
+    // A pending federated account keeps its federated link only when the
+    // browser that performed the federated login completes this (GA audit
+    // round 3, G-3).
+    let origin = link_token::verification_origin(&state.cookie_secret, headers, &token);
 
     link_token::mark_spent(
-        match state.identity.verify_email_token(realm.id(), &token) {
+        match state
+            .identity
+            .verify_email_token_from(realm.id(), &token, origin)
+        {
             Ok(_) => {
                 let login_url = format!("{action_prefix}/login");
                 let mut tmpl = VerifyOkTemplate::new(login_url, product_name, logo_url);
                 tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
                 tmpl.inline_theme_css = state.inline_theme_css();
-                render(&tmpl)
+                let mut response = render(&tmpl);
+                append_cookie(
+                    &mut response,
+                    &link_token::clear_federated_origin_cookie(state.is_secure_request(headers)),
+                );
+                response
             }
             Err(IdentityError::VerificationTokenInvalid) => {
                 let tmpl = VerifyInvalidTemplate::new(
@@ -2245,7 +2260,12 @@ fn login_finish(
     // Neither branch decides whether the policy is met: the engine gate reads
     // factor use from `SessionContext::mfa_proof` (§4.18#3).
     let secure = state.is_secure_request(&headers);
-    let step = match super::second_factor::second_factor_step(&state, &realm, &user) {
+    let step = match super::second_factor::second_factor_step(
+        &state,
+        &realm,
+        &user,
+        super::auth::FirstFactor::Credential,
+    ) {
         Ok(step) => step,
         Err(e) => {
             // A factor lookup failed: the factors are unknown, so refuse
@@ -2291,6 +2311,7 @@ fn login_finish(
                 realm.id(),
                 user.id(),
                 other,
+                super::auth::FirstFactor::Credential,
                 return_to.as_deref(),
                 secure,
             );
@@ -2658,7 +2679,12 @@ fn passkey_second_factor_gate(
             return Some(refuse());
         }
     };
-    let owed = match super::second_factor::non_passkey_factor_step(state, realm, &user) {
+    let owed = match super::second_factor::non_passkey_factor_step(
+        state,
+        realm,
+        &user,
+        super::auth::FirstFactor::Credential,
+    ) {
         Ok(step) => step,
         Err(e) => {
             // The user's factors are unknown: refuse rather than skip one.
@@ -2673,6 +2699,7 @@ fn passkey_second_factor_gate(
             realm.id(),
             user_id,
             step,
+            super::auth::FirstFactor::Credential,
             None, // no return_to for passkey flow
             secure,
         );
@@ -3171,7 +3198,7 @@ fn forced_enrolment_refusal(
     ) else {
         return Some(Redirect::to("/ui/login").into_response());
     };
-    match super::second_factor::second_factor_step(state, &realm, &user) {
+    match super::second_factor::second_factor_step(state, &realm, &user, pending.first_factor) {
         Ok(Some(super::second_factor::SecondFactorStep::EnrolTotp)) => None,
         Ok(Some(step)) => Some(Redirect::to(step.path()).into_response()),
         Ok(None) => Some(Redirect::to("/ui/login").into_response()),
@@ -4803,13 +4830,16 @@ fn magic_link_redeem_impl(
             return internal_error_response();
         }
     };
-    match super::second_factor::second_factor_step(&state, &realm, &user) {
+    // The link proves the inbox: an email OTP cannot be its second factor.
+    let first = super::auth::FirstFactor::Inbox;
+    match super::second_factor::second_factor_step(&state, &realm, &user, first) {
         Ok(Some(step)) => {
             return super::second_factor::redirect_to_second_factor(
                 &state,
                 realm.id(),
                 &user_id,
                 step,
+                first,
                 None,
                 secure,
             );
@@ -6156,7 +6186,13 @@ pub async fn device_approve_submit(
         return sms_response;
     }
 
-    finish_device_approval(&state, &session.realm_id, &session.user_id, &code)
+    finish_device_approval(
+        &state,
+        &session.realm_id,
+        &session.user_id,
+        &code,
+        session.mfa_proof,
+    )
 }
 
 /// Approves device user code `code` for `user_id` once every gate has passed,
@@ -6170,12 +6206,18 @@ pub(super) fn finish_device_approval(
     realm: &RealmId,
     user_id: &crate::core::UserId,
     code: &str,
+    mfa_proof: MfaProof,
 ) -> Response {
     let guard_key = format!("{}:{}", realm.as_uuid(), user_id.as_uuid());
     if let Err(resp) = record_device_consent(state, realm, user_id, code) {
         return resp;
     }
-    match state.identity.approve_device(realm, code, user_id) {
+    // The device's token session records what the approving session proved
+    // (GA audit round 3, D-7).
+    match state
+        .identity
+        .approve_device_from_session(realm, code, user_id, mfa_proof)
+    {
         Ok(()) => {
             state.device_approval_guard.record_success(&guard_key);
             Redirect::to("/ui/device?flash=approved").into_response()

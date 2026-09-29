@@ -140,7 +140,7 @@ pub use types::{
     RegistrationPolicy, RequiredAction, ScimMappingExport, ScimMappingKind, Session,
     SessionContext, SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest,
     UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
-    WebAuthnAttestationPolicy, Webhook,
+    VerificationOrigin, WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
     AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
@@ -276,13 +276,16 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Signs with the realm's Ed25519 key. The `pending_actions` list is
     /// embedded in the token verbatim — callers are responsible for sorting by
-    /// priority before calling this function.
+    /// priority before calling this function. `flow` continues an existing
+    /// flow ([`ra_token::RaClaims::flow`]); `None` starts a new one. The token
+    /// records the user's current required-action generation.
     fn generate_ra_token(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         pending_actions: Vec<RequiredAction>,
         oidc_params: ra_token::OidcParams,
+        flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
 
@@ -293,6 +296,8 @@ pub trait IdentityEngine: Send + Sync {
     /// cookie and redirecting to `return_to` (or `/ui` when `None`).
     /// `mfa_proof` is what the login has proved so far; the session created
     /// when the flow ends records it (see [`ra_token::RaClaims::mfa_proof`]).
+    /// `flow` as for [`Self::generate_ra_token`].
+    #[allow(clippy::too_many_arguments)]
     fn generate_browser_ra_token(
         &self,
         realm_id: &RealmId,
@@ -300,19 +305,34 @@ pub trait IdentityEngine: Send + Sync {
         pending_actions: Vec<RequiredAction>,
         return_to: Option<String>,
         mfa_proof: MfaProof,
+        flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
 
     /// Validates a Required-Action session JWT using the realm's public key.
     ///
-    /// Checks signature, `alg`/`typ` headers, and expiry. Returns the decoded
-    /// claims on success.
+    /// Checks signature, `alg`/`typ` headers and expiry, and that the token
+    /// was minted under the user's current required-action generation:
+    /// revoking any of the user's sessions ends every flow under way
+    /// ([`ra_token::RaTokenError::Revoked`], GA audit round 3, D-2). Returns
+    /// the decoded claims on success.
     fn validate_ra_token(
         &self,
         realm_id: &RealmId,
         token: &str,
         now: Timestamp,
     ) -> Result<ra_token::RaClaims, ra_token::RaTokenError>;
+
+    /// Ends the required-action flow `claims` belongs to, once: the first
+    /// call succeeds, and every later call for the same flow — a replayed
+    /// copy of any of the flow's tokens — fails with
+    /// [`IdentityError::InvalidToken`] (GA audit round 3, D-2). Callers claim
+    /// the flow before the session or authorization code it ends in.
+    fn consume_required_action_flow(
+        &self,
+        realm_id: &RealmId,
+        claims: &ra_token::RaClaims,
+    ) -> Result<(), IdentityError>;
 
     /// Rotates the Ed25519 signing key for a realm.
     ///
@@ -787,10 +807,27 @@ pub trait IdentityEngine: Send + Sync {
     /// Validates the client, redirect URI, response type, and state parameter.
     /// Generates a cryptographically random authorization code, stores it
     /// (hashed), and returns the code with the echoed state.
+    ///
+    /// The code records no second-factor proof, so the session its exchange
+    /// opens proves none ([`MfaProof::None`]); a code minted for a browser
+    /// session goes through [`Self::authorize_from_session`].
     fn authorize(
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
+    ) -> Result<AuthorizationResponse, IdentityError>;
+
+    /// [`Self::authorize`] for a code minted from a browser session whose
+    /// login proved `mfa_proof`. The code records it, and the session its
+    /// exchange opens records exactly that proof — never more (GA audit
+    /// round 3, D-7). The exchange used to open every token session as
+    /// `MfaProof::Inherited`, which every later second-factor gate read as
+    /// proved.
+    fn authorize_from_session(
+        &self,
+        realm_id: &RealmId,
+        request: &AuthorizationRequest,
+        mfa_proof: MfaProof,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     /// [`Self::authorize`] for a surface that cannot show a consent screen —
@@ -966,12 +1003,26 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Approves a device authorization by user code.
     ///
-    /// Transitions the device code status from `Pending` to `Approved`.
+    /// Transitions the device code status from `Pending` to `Approved`. The
+    /// device's token session proves no second factor ([`MfaProof::None`]);
+    /// an approval from a browser session goes through
+    /// [`Self::approve_device_from_session`].
     fn approve_device(
         &self,
         realm_id: &RealmId,
         user_code: &str,
         user_id: &UserId,
+    ) -> Result<(), IdentityError>;
+
+    /// [`Self::approve_device`] from a browser session whose login proved
+    /// `mfa_proof`: the device's token session records exactly that proof
+    /// (GA audit round 3, D-7).
+    fn approve_device_from_session(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+        user_id: &UserId,
+        mfa_proof: MfaProof,
     ) -> Result<(), IdentityError>;
 
     /// Returns the pending device authorization a user code names — the
@@ -1484,7 +1535,29 @@ pub trait IdentityEngine: Send + Sync {
     /// Returns `Err(VerificationTokenInvalid)` if the token is not found,
     /// expired, or already used. Intentionally vague for enumeration
     /// resistance.
-    fn verify_email_token(&self, realm_id: &RealmId, token: &str) -> Result<UserId, IdentityError>;
+    ///
+    /// Completed from no particular browser ([`VerificationOrigin::Elsewhere`]):
+    /// a `PendingVerification` account is activated without its federated
+    /// links. See [`Self::verify_email_token_from`].
+    fn verify_email_token(&self, realm_id: &RealmId, token: &str) -> Result<UserId, IdentityError> {
+        self.verify_email_token_from(realm_id, token, VerificationOrigin::Elsewhere)
+    }
+
+    /// [`Self::verify_email_token`], completed from `origin`.
+    ///
+    /// A `PendingVerification` account keeps its federated links only when
+    /// `origin` is [`VerificationOrigin::FederatedLoginBrowser`]; otherwise
+    /// every link is removed (audited as `federation_account_unlinked`)
+    /// before the account is activated, so an upstream identity that named
+    /// someone else's address at just-in-time provisioning never reaches the
+    /// account its owner activates (GA audit round 3, G-3). An account that
+    /// is not pending keeps its links either way.
+    fn verify_email_token_from(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        origin: VerificationOrigin,
+    ) -> Result<UserId, IdentityError>;
 
     // ===== A-19: Email-change re-verification flow =====
 
