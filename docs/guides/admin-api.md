@@ -534,7 +534,9 @@ To provision a realm:
 
 1. Add an entry under `realms:` in `hearth.yaml`.
 2. Restart Hearth (or send `SIGHUP` for a hot reload). The reconciler creates the realm on first startup.
-3. To suspend a realm, change its `status:` key to `suspended` in `hearth.yaml` and reload.
+3. There is no realm-suspension control: `hearth.yaml` has no realm `status:` key, and neither
+   REST nor gRPC writes realm status (gRPC `CreateRealm` / `UpdateRealm` answer
+   `FAILED_PRECONDITION` with the same message as the REST `405`).
 4. To permanently delete a realm, remove it from `hearth.yaml` and restart. Hearth archives it automatically. Then call `DELETE /admin/realms/{id}` to purge the archived realm's data.
 
 → See [Configuration reference](../specs/CONFIGURATION.md#realmsname) for the full `realms.<name>` YAML schema.

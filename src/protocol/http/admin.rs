@@ -1407,7 +1407,7 @@ async fn admin_create_realm() -> impl IntoResponse {
         StatusCode::METHOD_NOT_ALLOWED,
         Json(serde_json::json!({
             "error": "method_not_allowed",
-            "message": "Realms are managed via hearth.yaml. Remove this endpoint from your client."
+            "message": crate::protocol::admin_auth::REALMS_ARE_YAML_MANAGED
         })),
     )
 }
@@ -1463,7 +1463,7 @@ async fn admin_update_realm(Path(_id): Path<String>) -> impl IntoResponse {
         StatusCode::METHOD_NOT_ALLOWED,
         Json(serde_json::json!({
             "error": "method_not_allowed",
-            "message": "Realms are managed via hearth.yaml. Remove this endpoint from your client."
+            "message": crate::protocol::admin_auth::REALMS_ARE_YAML_MANAGED
         })),
     )
 }

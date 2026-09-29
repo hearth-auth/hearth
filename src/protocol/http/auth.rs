@@ -102,19 +102,13 @@ pub(crate) fn extract_admin_auth(
 
     // Check admin role via the token's `permissions` claim (§ 5.2).
     // Accepts hearth.admin (full superuser) or any granular sub-permission
-    // (hearth.users.admin, hearth.clients.admin, hearth.realm.admin). Sub-admins
-    // pass this outer gate but are still checked per-handler via
-    // require_admin_permission(). hearth.admin bypasses all per-handler checks.
-    let is_admin = claims.permissions.iter().any(|p| {
-        matches!(
-            p.as_str(),
-            "hearth.admin"
-                | "hearth.users.admin"
-                | "hearth.clients.admin"
-                | "hearth.realm.admin"
-                | "hearth.agents.admin"
-        )
-    });
+    // (`ADMIN_PERMISSIONS`). Sub-admins pass this outer gate but are still
+    // checked per-handler via require_admin_permission(). hearth.admin
+    // bypasses all per-handler checks.
+    let is_admin = claims
+        .permissions
+        .iter()
+        .any(|p| crate::protocol::admin_auth::is_admin_permission(p));
     // A token held by a third-party client never administers the realm, even
     // when a claim profile releases admin permissions to it (GA audit B1).
     if !is_admin
@@ -400,11 +394,7 @@ pub(crate) fn require_admin_permission(
     auth: &AdminAuth,
     required: &str,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let permitted = auth
-        .permissions
-        .iter()
-        .any(|p| p == "hearth.admin" || p == required);
-    if !permitted {
+    if !crate::protocol::admin_auth::grants_admin_permission(&auth.permissions, required) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
