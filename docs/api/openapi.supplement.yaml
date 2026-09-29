@@ -312,11 +312,12 @@ paths:
     post:
       summary: Begin WebAuthn credential registration
       description: >
-        Requires a step-up proof. An access token alone is one factor, so
-        enrolling with it would turn a stolen token into a permanent
-        credential. Supply exactly one of `password`, `totp_code`, or
-        `assertion`. An account that holds none of those credentials needs no
-        proof.
+        First-party tokens only: a token issued to a third-party client is
+        refused with 403 `forbidden`. Requires a step-up proof. An access
+        token alone is one factor, so enrolling with it would turn a stolen
+        token into a permanent credential. Supply exactly one of `password`,
+        `totp_code`, or `assertion`. An account that holds none of those
+        credentials needs no proof.
       operationId: webauthnRegisterBegin
       tags: [Auth]
       security:
@@ -365,6 +366,7 @@ paths:
           description: PublicKeyCredentialCreationOptions JSON
         "403":
           description: >
+            `forbidden` — the token was issued to a third-party client; or
             `step_up_required` — no step-up proof was supplied, or it did not
             verify.
         "503":
@@ -375,6 +377,9 @@ paths:
   /webauthn/register/complete:
     post:
       summary: Complete WebAuthn credential registration
+      description: >-
+        First-party tokens only: a token issued to a third-party client is
+        refused with 403.
       operationId: webauthnRegisterComplete
       tags: [Auth]
       security:
@@ -388,6 +393,8 @@ paths:
       responses:
         "200":
           description: Credential stored
+        "403":
+          description: The token was issued to a third-party client
 
   /webauthn/auth/begin:
     post:
