@@ -10165,6 +10165,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.decide_token_permission_inner(realm_id, request)
     }
 
+    fn live_token_authority(
+        &self,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+        org_id: Option<&crate::core::OrganizationId>,
+        narrow_scope: Option<&str>,
+    ) -> Result<crate::identity::oidc::LiveTokenAuthority, IdentityError> {
+        self.live_token_authority_inner(realm_id, claims, org_id, narrow_scope)
+    }
+
     // ===== MFA / TOTP (Step 23) =====
 
     fn enroll_totp(

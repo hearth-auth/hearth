@@ -77,6 +77,29 @@ pub trait RbacEngine: Send + Sync {
         requested_scope: Option<&str>,
     ) -> Result<ResolvedPermissions, RbacError>;
 
+    /// Resolves the permissions an access token that was granted
+    /// `granted_scopes` carries, re-evaluated now — the live
+    /// (`introspection` / `decision` / `GET /v1/me/permissions`) twin of
+    /// issuance-time scope narrowing (GA audit 3 C-8).
+    ///
+    /// The result is the user's effective set intersected with the union of
+    /// what every permission-bearing scope admits: a raw permission scope
+    /// (`docs.view`) admits that permission, and a scope registered in the
+    /// realm's scope registry with a non-empty permission list admits those
+    /// permissions. OIDC standard scopes, non-narrowing registry entries and
+    /// scopes the realm registry does not know (a protected resource's MCP
+    /// scope) admit nothing and narrow nothing; with no permission-bearing
+    /// scope the full effective set is returned. Unlike
+    /// [`Self::resolve_permissions`], one non-narrowing scope never voids the
+    /// narrowing of the others. Token-size caps apply as for issuance.
+    fn resolve_for_granted_scopes(
+        &self,
+        user_id: &UserId,
+        realm_id: &RealmId,
+        org_id: Option<&OrganizationId>,
+        granted_scopes: &[String],
+    ) -> Result<ResolvedPermissions, RbacError>;
+
     /// Resolves the effective permission set using the full scope-resolution
     /// pipeline described in `AUTHZ_EXPANSION.md` §"Resolution rule".
     ///

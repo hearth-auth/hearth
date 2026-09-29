@@ -23,8 +23,8 @@ use super::now_micros;
 use super::{
     check_anonymous_token_rate_limit, check_token_rate_limit, extract_bearer_token,
     extract_realm_id, extract_user_auth, identity_error_response, identity_error_to_response,
-    kdf_shed_json_response, make_ip_rate_limit_response, proto_to_rest_json,
-    rbac_error_to_response, resolve_realm_by_name, validate_user_token_with_dpop, AppState,
+    kdf_shed_json_response, make_ip_rate_limit_response, proto_to_rest_json, resolve_realm_by_name,
+    validate_user_token_with_dpop, AppState,
 };
 
 /// Registers global OAuth/OIDC routes.
@@ -3533,18 +3533,14 @@ async fn me_permissions(
         Err(e) => return e.into_response(),
     };
 
-    let uuid_str = claims.sub.strip_prefix("user_").unwrap_or(&claims.sub);
-    let user_uuid: uuid::Uuid = match uuid_str.parse() {
-        Ok(u) => u,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "invalid_token"})),
-            )
-                .into_response();
-        }
-    };
-    let user_id = UserId::new(user_uuid);
+    // Only a user's token has a user to answer for.
+    if claims.sub.parse::<UserId>().is_err() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid_token"})),
+        )
+            .into_response();
+    }
 
     // A suspended or archived organisation grants nothing: drop the org
     // context so only realm-scoped authority is reported
@@ -3565,25 +3561,27 @@ async fn me_permissions(
         });
     let scope = params.get("scope").cloned();
 
-    let resolved =
-        match state
-            .rbac
-            .resolve_permissions(&user_id, &realm_id, org_id.as_ref(), scope.as_deref())
-        {
-            Ok(r) => r,
-            Err(e) => return rbac_error_to_response(&e).into_response(),
-        };
+    // The TOKEN's live authority, not the user's (GA audit 3 B-2/B-5): a
+    // third-party client's token reads only what the claim profile releases
+    // to that client — by default no roles, groups or permissions — and a
+    // scoped or delegated token no more than it carries. `scope` narrows it
+    // further.
+    let authority = match state.identity.live_token_authority(
+        &realm_id,
+        &claims,
+        org_id.as_ref(),
+        scope.as_deref(),
+    ) {
+        Ok(a) => a,
+        Err(e) => return identity_error_to_response(&e).into_response(),
+    };
 
     (
         StatusCode::OK,
         Json(MePermissionsResponse {
-            roles: resolved.roles,
-            groups: resolved.groups,
-            permissions: resolved
-                .permissions
-                .into_iter()
-                .map(|p| p.into_string())
-                .collect(),
+            roles: authority.roles,
+            groups: authority.groups,
+            permissions: authority.permissions,
             scope,
         }),
     )

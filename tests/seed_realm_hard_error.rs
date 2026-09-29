@@ -59,6 +59,17 @@ impl RbacEngine for FailSeedRbac {
             .resolve_permissions(user_id, realm_id, org_id, requested_scope)
     }
 
+    fn resolve_for_granted_scopes(
+        &self,
+        user_id: &UserId,
+        realm_id: &RealmId,
+        org_id: Option<&OrganizationId>,
+        granted_scopes: &[String],
+    ) -> Result<ResolvedPermissions, RbacError> {
+        self.inner
+            .resolve_for_granted_scopes(user_id, realm_id, org_id, granted_scopes)
+    }
+
     fn resolve_with_scopes(
         &self,
         user_id: &UserId,

@@ -372,12 +372,15 @@ impl OAuthService for OAuthSvc {
             .to_string();
         // RFC 9449 §7.2: a `cnf`-bound token cannot prove possession over gRPC
         // (no DPoP proof channel), so it gets no decision — fail-closed, as
-        // `POST /oauth/authorize` answers a DPoP failure (GA audit B2).
+        // `POST /oauth/authorize` answers a DPoP failure (GA audit B2). A token
+        // `validate_token` refuses gets none either: only checking `cnf` on
+        // success let a bound token that fails validation for another reason
+        // skip the binding check (GA audit 3 C-9), where HTTP denies it.
         if self
             .state
             .identity
             .validate_token(&realm_id, &token)
-            .is_ok_and(|claims| claims.cnf.is_some())
+            .map_or(true, |claims| claims.cnf.is_some())
         {
             return Ok(Response::new(pb::TokenDecisionResponse { allowed: false }));
         }
