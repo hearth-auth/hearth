@@ -666,6 +666,8 @@ hearth backup sign    -i <archive> --key-file <key.pem> [-o <archive>]
 hearth backup keygen  -o <key.pem>
 hearth rbac orphans list  [--realm <name|uuid>] [--data-dir <path>]
 hearth rbac orphans purge [--realm <name|uuid>] [--data-dir <path>] [--dry-run]
+hearth admin token --user <email> [--ttl <1m..1h>] [--data-dir <path>] [--config <hearth.yaml>]
+                   [--sole-cluster-node]
 hearth completions <bash|elvish|fish|powershell|zsh>
 ```
 
@@ -676,7 +678,8 @@ Run `hearth <command> --help` for the authoritative flag list; the block above i
 - **`app create`** registers an OAuth 2.0 client by POSTing to `/clients` on a running Hearth server. The server URL must be reachable over HTTP. `--token` is **mandatory** — client registration is a privileged operation, so pass an admin bearer token carrying `hearth.clients.admin` (or `hearth.admin`); in dev mode, the `access_token` from `POST /admin/bootstrap`.
 - **`migrate keycloak` / `migrate auth0`** import a realm export directly into the embedded store. Both operate on the data directory offline (no running server needed) — see [Migrating from Keycloak](#migrating-from-keycloak).
 - **`config validate`** parses the YAML and validates every realm's permission registry without starting the server; exits 1 on any error. It does **not** check the `HEARTH_*` environment prerequisites — a config it accepts can still be refused by `serve` (for example when `HEARTH_MASTER_KEY` is unset on a fresh production data directory).
-- **`backup` / `rbac orphans` / `migrate`** all take `--data-dir` and open the store directly, so the server **must be stopped first** — the data directory carries an exclusive `LOCK`. See the [Backup guide](docs/guides/backup.md).
+- **`admin token`** prints a short-lived token for the system realm (the nil UUID) for an operator-console account holding `hearth.admin` — the production source of the `$SYSTEM_TOKEN` the realm and cluster admin API need. The token goes to stdout only and its issuance is audited. A cluster node's data directory is refused; see [System-realm tokens](docs/guides/clustering.md#system-realm-tokens).
+- **`backup` / `rbac orphans` / `migrate` / `admin token`** all open the store directly, so the server **must be stopped first** — the data directory carries an exclusive `LOCK`. See the [Backup guide](docs/guides/backup.md).
 
 ---
 
