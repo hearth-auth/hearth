@@ -14,11 +14,19 @@ permission the admin lacks: `hearth.admin` outranks every sub-admin, and a sub-a
 another user only when it holds every admin permission (`hearth.admin`, `hearth.users.admin`,
 `hearth.clients.admin`, `hearth.realm.admin`, `hearth.agents.admin`) that user holds. A refused
 call answers `403` with `"error_description": "the target user holds admin permissions the caller
-lacks"`, and `503` when the target's permissions cannot be resolved. The rule covers
-`PATCH`/`DELETE /admin/users/{id}`, `DELETE /admin/users/{id}/device-fingerprints`, the `disable`
-operation of `POST /admin/users/bulk` (a batch naming any such user is refused whole),
-`PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`, the gRPC `UpdateUser` /
-`DeleteUser` RPCs and SCIM `/scim/v2/Users`.
+lacks"`, and `503` when the target's permissions cannot be resolved. A user's admin permissions
+include those it holds only through an organization-scoped role or grant. The rule covers:
+
+- modification: `PATCH`/`DELETE /admin/users/{id}`, `DELETE /admin/users/{id}/device-fingerprints`,
+  the `disable` operation of `POST /admin/users/bulk` (a batch naming any such user is refused
+  whole), `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`, gRPC `UpdateUser` /
+  `DeleteUser`, SCIM `/scim/v2/Users`;
+- demotion: `DELETE /admin/assignments/{id}` (for a group assignment, every member of the group
+  and of groups nested in it), `DELETE /admin/groups/{id}/members/{member_id}`,
+  `DELETE /admin/groups/{id}`, gRPC `UnassignUserRole`, `UnassignGroupRole`,
+  `RevokeUserPermission`, `RemoveAdditionalRole`, `RemoveGroupMember`, `DeleteGroup`;
+- sign-out and consents: `DELETE /admin/sessions/{id}`, `POST /admin/sessions/{id}/sv-bump`,
+  `DELETE /admin/users/{id}/consents/{client_id}`, gRPC `RevokeConsent`.
 
 ### List users
 

@@ -84,6 +84,12 @@ pub struct ScimAuth {
     /// fallback carries the token's permissions, so a sub-admin may act only
     /// on same-or-lower users, exactly as on REST `/admin/users*`.
     pub actor_permissions: Vec<String>,
+    /// `true` when the caller is the realm's SCIM provisioning token, `false`
+    /// on the admin-JWT fallback. The token may modify or delete only the
+    /// organizations SCIM created
+    /// ([`crate::identity::Organization::scim_provisioned`]); admin-token
+    /// callers keep their admin rights.
+    pub provisioning_token: bool,
 }
 
 /// Authenticate and authorize a SCIM request for `resource` using the
@@ -114,6 +120,7 @@ pub fn authenticate(
             actor: format!("scim_token:{}", realm_id.as_uuid()),
             realm_id,
             actor_permissions: Vec::new(),
+            provisioning_token: true,
         })
     } else {
         // No SCIM token configured: fall back to admin JWT.
@@ -133,6 +140,7 @@ pub fn authenticate(
             actor: admin.user_id.as_uuid().to_string(),
             realm_id,
             actor_permissions: admin.permissions,
+            provisioning_token: false,
         })
     }
 }

@@ -174,6 +174,7 @@ fn admin_principal_guard(
     refusal: &str,
 ) -> Result<(), Response> {
     check_user_admin_ceiling(
+        state.identity.as_ref(),
         state.rbac.as_ref(),
         &auth.realm_id,
         user_id,

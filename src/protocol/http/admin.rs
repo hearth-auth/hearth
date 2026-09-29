@@ -32,8 +32,8 @@ use tracing::error;
 #[cfg(feature = "dev-endpoints")]
 use super::extract_realm_id;
 use super::{
-    check_export_capability, check_export_rate_limit, emit_export_watermark, extract_admin_auth,
-    identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
+    ceiling_refusal, check_export_capability, check_export_rate_limit, emit_export_watermark,
+    extract_admin_auth, identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
     require_admin_permission, require_any_admin_permission, require_superuser,
     require_user_admin_ceiling, AdminAuth, AppState, BACKUP_RESTORE_BODY_LIMIT,
 };
@@ -3031,6 +3031,9 @@ async fn admin_revoke_user_consent(
     };
     let user_id = UserId::new(uuid_u);
     let client_id = crate::core::ClientId::new(uuid_c);
+    if let Err(e) = require_user_admin_ceiling(&state, &auth, &auth.realm_id, &user_id) {
+        return e.into_response();
+    }
     match state
         .identity
         .revoke_consent(&auth.realm_id, &user_id, &client_id)
@@ -4325,6 +4328,17 @@ async fn admin_delete_group(
         Ok(g) => g,
         Err(e) => return e.into_response(),
     };
+    // Deleting the group strips its roles from every member: the ceiling
+    // applies to each (GA audit round 3).
+    if let Err(e) = crate::protocol::admin_auth::check_group_admin_ceiling(
+        state.identity.as_ref(),
+        state.rbac.as_ref(),
+        &auth.realm_id,
+        &group_id,
+        &auth.permissions,
+    ) {
+        return ceiling_refusal(e).into_response();
+    }
     match state.rbac.delete_group(&auth.realm_id, &group_id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => rbac_error_to_response(&e).into_response(),
@@ -4456,6 +4470,17 @@ async fn admin_remove_group_member(
                 .into_response();
         }
     };
+    // Removing a member strips the group's roles from it (and, for a nested
+    // group, from its members): the ceiling applies (GA audit round 3).
+    if let Err(e) = crate::protocol::admin_auth::check_member_admin_ceiling(
+        state.identity.as_ref(),
+        state.rbac.as_ref(),
+        &auth.realm_id,
+        &member,
+        &auth.permissions,
+    ) {
+        return ceiling_refusal(e).into_response();
+    }
     match state
         .rbac
         .remove_group_member(&auth.realm_id, &group_id, &member)
@@ -4631,6 +4656,17 @@ async fn admin_unassign_role(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // Unassigning demotes the subject (a user, or every member of a group):
+    // the ceiling applies (GA audit round 3).
+    if let Err(e) = crate::protocol::admin_auth::check_assignment_admin_ceiling(
+        state.identity.as_ref(),
+        state.rbac.as_ref(),
+        &auth.realm_id,
+        &aid,
+        &auth.permissions,
+    ) {
+        return ceiling_refusal(e).into_response();
+    }
     match state.rbac.unassign_role(&auth.realm_id, &aid) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => rbac_error_to_response(&e).into_response(),
@@ -5716,6 +5752,23 @@ async fn admin_backup_restore(
 
 // === RP-Initiated Logout (OIDC RPL §2 + OIDC BCL §2.5) ===
 
+/// The privilege ceiling for a session-level action (revoke, sv-bump): the
+/// session's owner must not out-rank the caller. An unknown, expired or
+/// revoked session passes, so the action itself answers.
+fn require_session_owner_ceiling(
+    state: &AppState,
+    auth: &AdminAuth,
+    session_id: &crate::core::SessionId,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    match state.identity.get_session(&auth.realm_id, session_id) {
+        Ok(Some(session)) => {
+            require_user_admin_ceiling(state, auth, &auth.realm_id, session.user_id())
+        }
+        Ok(None) => Ok(()),
+        Err(e) => Err(identity_error_to_response(&e)),
+    }
+}
+
 /// `GET /realms/{realm}/end_session` — realm-path-scoped RP-initiated logout.
 ///
 /// Identical to [`end_session`] but resolves the realm from the URL path
@@ -5744,6 +5797,9 @@ async fn admin_sv_bump_session(
         }
     };
     let session_id = crate::core::SessionId::new(uuid);
+    if let Err(e) = require_session_owner_ceiling(&state, &auth, &session_id) {
+        return e.into_response();
+    }
 
     let result = tokio::task::spawn_blocking({
         let identity = Arc::clone(&state.identity);
@@ -5924,6 +5980,9 @@ async fn admin_revoke_session(
             .into_response();
     };
     let session_id = crate::core::SessionId::new(uuid);
+    if let Err(e) = require_session_owner_ceiling(&state, &auth, &session_id) {
+        return e.into_response();
+    }
     match state.identity.revoke_session(&auth.realm_id, &session_id) {
         Ok(()) => {
             crate::protocol::audit_log::record(
