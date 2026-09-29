@@ -114,6 +114,7 @@ impl IdentityError {
             Self::KdfOverloaded { .. } => Some("HEARTH_RATE_LIMITED"),
 
             Self::ConsentRequired => Some("HEARTH_CONSENT_REQUIRED"),
+            Self::ClientMismatch => Some("HEARTH_CLIENT_MISMATCH"),
             Self::ConsentTicketNotFound | Self::ConsentTicketExpired => {
                 Some("HEARTH_CONSENT_TICKET_INVALID")
             }

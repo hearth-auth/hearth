@@ -5,10 +5,14 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use hearth::abuse::shaper::{RequestShaper, ShaperConfig, ShaperOutcome};
+use hearth::abuse::shaper::{RealmKey, RequestShaper, ShaperConfig, ShaperOutcome};
 
 fn ip(b: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(10, 0, 0, b))
+}
+
+fn realm(name: &str) -> Option<RealmKey> {
+    Some(RealmKey::from_path_name(name).expect("well-formed realm name"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -24,13 +28,13 @@ fn a2_ip_rate_limit_enforced() {
     });
     for i in 0..5 {
         assert_eq!(
-            shaper.check(ip(1), ""),
+            shaper.check(ip(1), None),
             ShaperOutcome::Allow,
             "request {i} must be allowed"
         );
     }
     assert_eq!(
-        shaper.check(ip(1), ""),
+        shaper.check(ip(1), None),
         ShaperOutcome::IpLimited,
         "6th request from same IP must be rate-limited"
     );
@@ -44,10 +48,10 @@ fn a2_realm_rate_limit_enforced() {
         realm_rps: Some(3),
     });
     for _ in 0..3 {
-        assert_eq!(shaper.check(ip(1), "my-realm"), ShaperOutcome::Allow);
+        assert_eq!(shaper.check(ip(1), realm("my-realm")), ShaperOutcome::Allow);
     }
     assert_eq!(
-        shaper.check(ip(2), "my-realm"),
+        shaper.check(ip(2), realm("my-realm")),
         ShaperOutcome::RealmLimited,
         "4th request to same realm from different IP must still be realm-limited"
     );
@@ -62,12 +66,12 @@ fn a2_different_ips_independent() {
     });
     // Exhaust IP 1.
     for _ in 0..2 {
-        assert_eq!(shaper.check(ip(1), ""), ShaperOutcome::Allow);
+        assert_eq!(shaper.check(ip(1), None), ShaperOutcome::Allow);
     }
-    assert_eq!(shaper.check(ip(1), ""), ShaperOutcome::IpLimited);
+    assert_eq!(shaper.check(ip(1), None), ShaperOutcome::IpLimited);
     // IP 2 is unaffected.
     assert_eq!(
-        shaper.check(ip(2), ""),
+        shaper.check(ip(2), None),
         ShaperOutcome::Allow,
         "different IP must not share rate-limit counter"
     );
@@ -78,7 +82,10 @@ fn a2_different_ips_independent() {
 fn a2_disabled_shaper_allows_all() {
     let shaper = RequestShaper::disabled();
     for _ in 0..100_000 {
-        assert_eq!(shaper.check(ip(1), "any-realm"), ShaperOutcome::Allow);
+        assert_eq!(
+            shaper.check(ip(1), realm("any-realm")),
+            ShaperOutcome::Allow
+        );
     }
 }
 
@@ -89,10 +96,13 @@ fn a2_different_realms_independent() {
         ip_rps: None,
         realm_rps: Some(1),
     });
-    assert_eq!(shaper.check(ip(1), "realm-a"), ShaperOutcome::Allow);
-    assert_eq!(shaper.check(ip(1), "realm-a"), ShaperOutcome::RealmLimited);
+    assert_eq!(shaper.check(ip(1), realm("realm-a")), ShaperOutcome::Allow);
     assert_eq!(
-        shaper.check(ip(1), "realm-b"),
+        shaper.check(ip(1), realm("realm-a")),
+        ShaperOutcome::RealmLimited
+    );
+    assert_eq!(
+        shaper.check(ip(1), realm("realm-b")),
         ShaperOutcome::Allow,
         "realm-b must be independent of realm-a"
     );

@@ -114,6 +114,9 @@ impl fmt::Display for IdentityError {
                 write!(f, "self-service registration requires a valid invitation")
             }
             Self::ConsentRequired => write!(f, "user consent is required"),
+            Self::ClientMismatch => {
+                write!(f, "the bearer token was not issued to the requested client")
+            }
             Self::ConsentTicketNotFound => write!(f, "consent ticket not found"),
             Self::ConsentTicketExpired => write!(f, "consent ticket expired"),
             Self::ConsentScopeNotRequested => {

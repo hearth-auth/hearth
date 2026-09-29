@@ -2443,8 +2443,16 @@ impl EmbeddedIdentityEngine {
 
     // ===== Per-IP login rate limiting helpers =====
 
+    /// The per-IP login tracker key. The address is bucketed under
+    /// [`crate::core::rate_limit_key_str`] — IPv6 per `/64` — so a host that
+    /// rotates through its `/64` does not get a fresh budget per address
+    /// (GA sweep 3, E-3).
     fn ip_login_tracker_key(realm_id: &RealmId, ip: &str) -> String {
-        format!("login-ip:{}:{ip}", realm_id.as_uuid())
+        format!(
+            "login-ip:{}:{}",
+            realm_id.as_uuid(),
+            crate::core::rate_limit_key_str(ip)
+        )
     }
 
     /// Returns the remaining window microseconds for an IP that has already hit
@@ -3071,13 +3079,15 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        // IP bucket (skipped if caller has no IP)
+        // IP bucket (skipped if caller has no IP). IPv6 is bucketed per /64
+        // (GA sweep 3, E-3).
         if let Some(ip) = client_ip {
+            let ip_key = crate::core::rate_limit_key_str(ip);
             let trackers = self
                 .registration_ip_rate_trackers
                 .lock()
                 .expect("registration ip tracker lock");
-            if let Some(tracker) = trackers.get(ip) {
+            if let Some(tracker) = trackers.get(&ip_key) {
                 if tracker.failed_count >= Self::REGISTRATION_IP_MAX_REQUESTS
                     && now - tracker.last_failure_micros < Self::REGISTRATION_RATE_WINDOW_MICROS
                 {
@@ -3130,11 +3140,12 @@ impl EmbeddedIdentityEngine {
         }
 
         if let Some(ip) = client_ip {
+            let ip_key = crate::core::rate_limit_key_str(ip);
             let mut trackers = self
                 .registration_ip_rate_trackers
                 .lock()
                 .expect("registration ip tracker lock");
-            let tracker = trackers.entry(ip.to_string()).or_insert(AttemptTracker {
+            let tracker = trackers.entry(ip_key).or_insert(AttemptTracker {
                 failed_count: 0,
                 last_failure_micros: now,
             });
@@ -3272,6 +3283,34 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)
     }
 
+    /// The checks every non-admin account creation passes before it writes:
+    /// the system realm is reserved for Hearth admins and must be reached only
+    /// through `create_admin_user`, which also provisions the `realm.admin`
+    /// RBAC assignment atomically (without this guard an operator could
+    /// create a non-admin account in the system realm and gain a session
+    /// bound to it but without the admin role — harmless today, but a trap
+    /// for future refactors); the realm must be active; and the realm's user
+    /// quota (A-24) must have room.
+    fn check_user_creation(
+        &self,
+        realm_id: &RealmId,
+        operation: &'static str,
+    ) -> Result<(), IdentityError> {
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected { operation });
+        }
+        self.require_active_realm(realm_id)?;
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_users {
+                    let prefix = keys::user_id_scan_prefix();
+                    self.check_resource_quota(realm_id, "users", &prefix, max)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Creates a user with an explicit initial status, bypassing the
     /// engine-wide `default_status`. Used by self-service registration
     /// (always `PendingVerification`) while ordinary `create_user` continues
@@ -3281,6 +3320,20 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &CreateUserRequest,
         status: UserStatus,
+        audit_ctx: Option<&AuditContext>,
+    ) -> Result<User, IdentityError> {
+        self.create_user_record(realm_id, request, status, false, audit_ctx)
+    }
+
+    /// [`Self::create_user_with_status`], also recording whether the email
+    /// address is already verified — written with the record, so the account
+    /// never exists with the wrong verification state.
+    fn create_user_record(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateUserRequest,
+        status: UserStatus,
+        email_verified: bool,
         audit_ctx: Option<&AuditContext>,
     ) -> Result<User, IdentityError> {
         let email = validation::validate_email(&request.email)?;
@@ -3360,6 +3413,9 @@ impl EmbeddedIdentityEngine {
             if !request.attributes.is_empty() {
                 user.set_attributes(request.attributes.clone());
             }
+        }
+        if email_verified {
+            user.set_email_verified(true);
         }
 
         let user_bytes = Self::serialize_user(&user)?;
@@ -6681,6 +6737,12 @@ impl EmbeddedIdentityEngine {
                     .map_err(Self::storage_err)?;
 
                 user.set_email(normalized);
+                // The new address is unproven: whoever changed it (an
+                // operator, SCIM) has not shown that the user receives mail
+                // there. `/userinfo` reports this flag as `email_verified`
+                // (GA audit round 3, B-8); the self-service change flow
+                // (`confirm_email_change`) proves the address and sets it.
+                user.set_email_verified(false);
                 email_changed = true;
             }
         }
@@ -8073,7 +8135,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         pending_actions: Vec<crate::identity::types::RequiredAction>,
         return_to: Option<String>,
-        webauthn_verified: bool,
+        mfa_proof: crate::identity::MfaProof,
         now: Timestamp,
     ) -> Result<String, IdentityError> {
         let key = self.get_or_load_realm_signing_key(realm_id)?;
@@ -8082,7 +8144,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             &realm_id.as_uuid().to_string(),
             pending_actions,
             return_to,
-            webauthn_verified,
+            mfa_proof,
             &key,
             now,
         )
@@ -8252,29 +8314,26 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &CreateUserRequest,
     ) -> Result<User, IdentityError> {
-        // The system realm is reserved for Hearth admins and must be
-        // reached only through `create_admin_user`, which also provisions
-        // the `realm.admin` RBAC assignment atomically. Without this
-        // guard an operator could create a non-admin account in the
-        // system realm and gain a session bound to it but without the
-        // admin role — harmless today (the permission check would reject
-        // the session) but a trap for future refactors.
-        if keys::is_system_realm(realm_id) {
-            return Err(IdentityError::SystemRealmProtected {
-                operation: "create_user",
-            });
-        }
-        self.require_active_realm(realm_id)?;
-        // A-24: enforce per-realm user quota before writing.
-        if let Ok(Some(realm)) = self.get_realm(realm_id) {
-            if let Some(quotas) = &realm.config().quotas {
-                if let Some(max) = quotas.max_users {
-                    let prefix = keys::user_id_scan_prefix();
-                    self.check_resource_quota(realm_id, "users", &prefix, max)?;
-                }
-            }
-        }
+        self.check_user_creation(realm_id, "create_user")?;
         self.create_user_with_status(realm_id, request, self.config.default_status, None)
+    }
+
+    fn provision_federated_user(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateUserRequest,
+        email_verified: bool,
+    ) -> Result<User, IdentityError> {
+        self.check_user_creation(realm_id, "provision_federated_user")?;
+        // An address the upstream did not vouch for is unproven: the account
+        // waits for its owner to verify it, exactly like self-registration
+        // (GA audit round 3, G-3).
+        let status = if email_verified {
+            self.config.default_status
+        } else {
+            UserStatus::PendingVerification
+        };
+        self.create_user_record(realm_id, request, status, email_verified, None)
     }
 
     fn create_admin_user(&self, request: &CreateUserRequest) -> Result<User, IdentityError> {
@@ -10031,9 +10090,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
-        session_id: &SessionId,
+        bearer: &TokenClaims,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        self.authorize_inner(realm_id, request, Some(session_id))
+        self.authorize_inner(realm_id, request, Some(bearer))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -10243,6 +10302,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Ok(crate::identity::oidc::DecidePermissionResponse { allowed: false });
         }
         self.decide_token_permission_inner(realm_id, request)
+    }
+
+    fn live_token_authority(
+        &self,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+        org_id: Option<&crate::core::OrganizationId>,
+        narrow_scope: Option<&str>,
+    ) -> Result<crate::identity::oidc::LiveTokenAuthority, IdentityError> {
+        self.live_token_authority_inner(realm_id, claims, org_id, narrow_scope)
     }
 
     // ===== MFA / TOTP (Step 23) =====

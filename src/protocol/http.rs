@@ -12,7 +12,8 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{ConnectInfo, DefaultBodyLimit, MatchedPath, Request, State};
+use axum::extract::rejection::RawPathParamsRejection;
+use axum::extract::{ConnectInfo, DefaultBodyLimit, MatchedPath, RawPathParams, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -20,7 +21,7 @@ use axum::Router;
 use tower_http::trace::{DefaultOnResponse, MakeSpan, TraceLayer};
 use tracing::Level;
 
-use crate::abuse::shaper::ShaperOutcome;
+use crate::abuse::shaper::{RealmKey, ShaperOutcome};
 
 // ── Sub-modules ──────────────────────────────────────────────────────────────
 
@@ -181,13 +182,19 @@ pub(crate) fn kdf_shed_json_response(retry_after: std::time::Duration) -> Respon
 ///
 /// Must be applied via [`Router::route_layer`] so that [`MatchedPath`] is
 /// already populated by the router before this middleware runs.
+///
+/// Every label value comes from a closed set, never from the request (GA
+/// sweep 3, E-6). A histogram keeps each label combination for the life of the
+/// process, and `route_layer` also wraps a matched path's `405` fallback, so
+/// the raw method used to mint one series per invented method. The route is
+/// the matched *template*; where none exists it is the fixed `"unmatched"`,
+/// not the raw URI path.
 pub(crate) async fn track_metrics(request: Request, next: Next) -> Response {
-    let path = request
-        .extensions()
-        .get::<MatchedPath>()
-        .map(|mp| mp.as_str().to_owned())
-        .unwrap_or_else(|| request.uri().path().to_owned());
-    let method = request.method().as_str().to_owned();
+    let path = request.extensions().get::<MatchedPath>().map_or_else(
+        || UNMATCHED_ROUTE_LABEL.to_owned(),
+        |mp| mp.as_str().to_owned(),
+    );
+    let method = method_label(request.method());
 
     let start = Instant::now();
     let response = next.run(request).await;
@@ -196,10 +203,29 @@ pub(crate) async fn track_metrics(request: Request, next: Next) -> Response {
     let status = response.status().as_u16().to_string();
     crate::metrics::metrics()
         .http_request_duration_seconds
-        .with_label_values(&[&method, &path, &status])
+        .with_label_values(&[method, &path, &status])
         .observe(elapsed);
 
     response
+}
+
+/// The `route` label for a request that matched no route template.
+const UNMATCHED_ROUTE_LABEL: &str = "unmatched";
+
+/// The `method` label value for `method`: the standard methods Hearth routes
+/// by name, and `"OTHER"` for everything else — extension methods are
+/// arbitrary tokens of any length (GA sweep 3, E-6).
+pub(crate) fn method_label(method: &axum::http::Method) -> &'static str {
+    match method.as_str() {
+        "GET" => "GET",
+        "POST" => "POST",
+        "PUT" => "PUT",
+        "PATCH" => "PATCH",
+        "DELETE" => "DELETE",
+        "HEAD" => "HEAD",
+        "OPTIONS" => "OPTIONS",
+        _ => "OTHER",
+    }
 }
 
 /// Refuses a dev-only endpoint whenever the connecting peer is not loopback
@@ -418,14 +444,23 @@ async fn require_bearer_token(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-/// A-2: Global HTTP per-IP rate-limit middleware.
+/// A-2: Global HTTP per-IP + per-realm rate-limit middleware.
 ///
 /// Applied to every matched route via [`Router::route_layer`] so 404 paths
 /// do not consume shaper budget.  Returns `429 Too Many Requests` with a
 /// `Retry-After: 1` hint when the per-IP (or per-realm) sliding-window limit
 /// is exceeded.  The shaper is shared with the gRPC surface via `Arc` so
 /// a caller cannot evade the limit by switching protocols.
-async fn http_rate_limit(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+///
+/// The realm dimension is keyed by [`shaper_realm_key`]. It used to be the
+/// constant `""` for every request, which made the per-realm budget one
+/// server-wide budget (GA sweep 3, E-1).
+async fn http_rate_limit(
+    State(state): State<Arc<AppState>>,
+    path_params: Result<RawPathParams, RawPathParamsRejection>,
+    req: Request,
+    next: Next,
+) -> Response {
     if is_shaper_exempt(&req) {
         return next.run(req).await;
     }
@@ -442,8 +477,9 @@ async fn http_rate_limit(State(state): State<Arc<AppState>>, req: Request, next:
         &state.trusted_proxies,
     );
     let ip: IpAddr = ip_str.parse().unwrap_or_else(|_| peer.ip());
+    let realm = shaper_realm_key(&req, path_params.as_ref().ok());
 
-    match state.request_shaper.check(ip, "") {
+    match state.request_shaper.check(ip, realm) {
         ShaperOutcome::Allow => next.run(req).await,
         // Tagged with its source so a shed request can be attributed to the
         // shaper rather than to one of the endpoint limiters (HEA-2010).
@@ -457,6 +493,49 @@ async fn http_rate_limit(State(state): State<Arc<AppState>>, req: Request, next:
         )
             .into_response(),
     }
+}
+
+/// The realm a request is counted against in the shaper's per-realm dimension.
+///
+/// * A route under `/realms/{name}/…`, `/ui/realms/{name}/…` or
+///   `/v1/{realm}/…` names its realm in the path; the path is authoritative
+///   (see [`realm_path_header_agreement`]).
+/// * Any other route names a realm only through a UUID `X-Realm-ID` header —
+///   the admin API, SCIM, the agent routes.
+/// * Everything else names no realm (`/health`, root discovery, the console)
+///   and is limited per IP only. It used to share one `""` bucket with every
+///   other such request (GA sweep 3, E-1).
+///
+/// `/admin/realms/{id}` is deliberately not a path realm: there the path names
+/// the realm being *administered*; the caller's realm is `X-Realm-ID`.
+fn shaper_realm_key(req: &Request, path_params: Option<&RawPathParams>) -> Option<RealmKey> {
+    let path_realm_param = req
+        .extensions()
+        .get::<MatchedPath>()
+        .and_then(|matched| path_realm_param(matched.as_str()));
+    if let Some(param) = path_realm_param {
+        // A path realm route: the path decides, whatever the header says.
+        return path_params?
+            .iter()
+            .find(|(name, _)| *name == param)
+            .and_then(|(_, value)| RealmKey::from_path_name(value));
+    }
+    req.headers()
+        .get("x-realm-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(RealmKey::from_id_header)
+}
+
+/// The name of the path parameter that carries the realm, when the matched
+/// route template is one of the realm-scoped families.
+fn path_realm_param(matched: &str) -> Option<&str> {
+    let mut segments = matched.strip_prefix('/')?.split('/');
+    let candidate = match segments.next()? {
+        "realms" | "v1" => segments.next()?,
+        "ui" if segments.next()? == "realms" => segments.next()?,
+        _ => return None,
+    };
+    candidate.strip_prefix('{')?.strip_suffix('}')
 }
 
 /// `true` when a matched route is exempt from the per-IP request shaper.

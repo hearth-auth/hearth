@@ -186,6 +186,9 @@ pub const CONSENT_TICKET_INVALID: &str = "HEARTH_CONSENT_TICKET_INVALID";
 pub const CONSENT_SCOPE_NOT_REQUESTED: &str = "HEARTH_CONSENT_SCOPE_NOT_REQUESTED";
 /// No consent record exists for this client.
 pub const CONSENT_NOT_FOUND: &str = "HEARTH_CONSENT_NOT_FOUND";
+/// A non-interactive authorization request named a client the bearer token
+/// was not issued to.
+pub const CLIENT_MISMATCH: &str = "HEARTH_CLIENT_MISMATCH";
 
 // ── Federation ─────────────────────────────────────────────────────────────────
 
@@ -484,6 +487,7 @@ mod tests {
             CONSENT_TICKET_INVALID,
             CONSENT_SCOPE_NOT_REQUESTED,
             CONSENT_NOT_FOUND,
+            CLIENT_MISMATCH,
             FEDERATION_UNKNOWN_CONNECTOR,
             FEDERATION_INVALID_STATE,
             FEDERATION_UPSTREAM_ERROR,

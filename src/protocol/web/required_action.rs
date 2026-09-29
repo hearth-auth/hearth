@@ -49,7 +49,7 @@ use crate::core::{ClientId, FormSecret, RealmId, Timestamp, UserId};
 use crate::identity::error::IdentityError;
 use crate::identity::ra_token::{self, OidcParams};
 use crate::identity::RequiredAction;
-use crate::identity::{CleartextPassword, SessionContext, UpdateUserRequest};
+use crate::identity::{CleartextPassword, MfaProof, SessionContext, UpdateUserRequest};
 use crate::protocol::web::auth::{issue_auth_cookies, IssuedCookies};
 
 use super::authorize_gate::{refuse_if_silent, run_authorize_gates, AuthorizeParams, Gate};
@@ -262,6 +262,22 @@ fn pending_required_actions(
 /// "nothing pending". A user that does not exist returns `None`;
 /// `create_session` refuses it (`UserNotFound`).
 ///
+/// `ctx` is the context of the login that reached this gate, built from its
+/// request. Its `mfa_proof` — what that authentication proved — is carried
+/// in the RA session token, and the session created when the flow ends
+/// records it ([`resume_browser_flow`]). A flow that cannot end in a session
+/// is not started (GA audit round 3, D-1): starting it let whoever relayed a
+/// password and a TOTP code enrol a phone of their own on the account before
+/// the login was refused.
+///
+/// * The realm's `cidr_policy` refuses the client address (`403`). The
+///   session the flow ends in is created without one, which the policy
+///   reads as "nothing to refuse", so the flow must not start from a network
+///   the policy turns away.
+/// * The proof does not meet the realm's `mfa_required` / `webauthn_required`
+///   policy and no pending action can raise it: the login is sent to the
+///   passkey it owes, or refused.
+///
 /// Unlike the OIDC intercept, this generates an RA token without
 /// OIDC params; flow resumption creates a session cookie and redirects to
 /// `return_to` once all actions are complete.
@@ -270,6 +286,7 @@ pub fn required_action_check_browser(
     realm: &RealmId,
     user_id: &UserId,
     return_to: Option<&str>,
+    ctx: &SessionContext,
     headers: &HeaderMap,
     now: Timestamp,
 ) -> Option<Response> {
@@ -286,6 +303,40 @@ pub fn required_action_check_browser(
         return None;
     }
 
+    let secure = state.is_secure_request(headers);
+    if let Err(e) = state
+        .identity
+        .check_realm_network_policy(realm, ctx.ip_address.as_deref())
+    {
+        tracing::info!(
+            error = %e,
+            realm_id = %realm.as_uuid(),
+            "required actions: the realm's network policy refuses this login"
+        );
+        return Some(forbidden_page());
+    }
+    let mfa_proof = ctx.mfa_proof;
+    let realm_config = match state.identity.get_realm(realm) {
+        Ok(r) => r.map(|r| r.config().clone()),
+        Err(e) => {
+            tracing::warn!(error = %e, "required_action_check_browser: realm lookup failed");
+            return Some(handlers_common::server_error());
+        }
+    };
+    if let Some(config) = realm_config.as_ref() {
+        let reachable = best_reachable_proof(mfa_proof, &actions, config);
+        if !realm_policy_admits(config, reachable) {
+            tracing::info!(
+                realm_id = %realm.as_uuid(),
+                "required actions: this login cannot meet the realm's second-factor policy; \
+                 not starting the flow"
+            );
+            return Some(owed_factor_or_refusal(
+                state, realm, user_id, return_to, secure,
+            ));
+        }
+    }
+
     actions.sort_by_key(|a| a.priority());
     let first = actions[0];
 
@@ -294,7 +345,7 @@ pub fn required_action_check_browser(
         user_id,
         actions,
         return_to.map(str::to_string),
-        false,
+        mfa_proof,
         now,
     ) {
         Ok(t) => t,
@@ -304,7 +355,6 @@ pub fn required_action_check_browser(
         }
     };
 
-    let secure = state.is_secure_request(headers);
     let cookie = ra_token::ra_session_cookie(&token, secure);
     let path = format!("/required-action/{}", first.as_path_segment());
     let mut response = Redirect::to(&path).into_response();
@@ -312,16 +362,104 @@ pub fn required_action_check_browser(
     Some(response)
 }
 
+/// The strongest proof a browser required-action flow that starts from
+/// `proof` with `actions` pending can end with: a passkey registration (the
+/// `ENROLL_MFA` page registers one in a realm that offers passkeys) records
+/// [`MfaProof::ProvedWebAuthn`]; any enrolment raises a login that proved
+/// nothing to [`MfaProof::Proved`] (see [`ra_token::RaClaims`]). An upper
+/// bound — an action can be skipped as already satisfied — so the session
+/// the flow ends in is still checked by the engine.
+fn best_reachable_proof(
+    proof: MfaProof,
+    actions: &[RequiredAction],
+    config: &crate::identity::RealmConfig,
+) -> MfaProof {
+    let offers_passkeys = config
+        .mfa_methods
+        .as_ref()
+        .is_none_or(|m| m.iter().any(|x| x == "webauthn"));
+    if offers_passkeys && actions.contains(&RequiredAction::EnrollMfa) {
+        return MfaProof::ProvedWebAuthn;
+    }
+    let enrols_a_factor = actions.iter().any(|a| {
+        matches!(
+            a,
+            RequiredAction::EnrollMfa
+                | RequiredAction::EnrollPhoneOtp
+                | RequiredAction::EnrollEmailOtp
+        )
+    });
+    if enrols_a_factor && proof == MfaProof::None {
+        return MfaProof::Proved;
+    }
+    proof
+}
+
+/// Whether the realm's second-factor policy admits a session with `proof` —
+/// the same two predicates `create_session` applies.
+fn realm_policy_admits(config: &crate::identity::RealmConfig, proof: MfaProof) -> bool {
+    let mfa_ok = !config.mfa_required.unwrap_or(false) || proof.satisfies_mfa_required();
+    let webauthn_ok =
+        !config.webauthn_required.unwrap_or(false) || proof.satisfies_webauthn_required();
+    mfa_ok && webauthn_ok
+}
+
+/// The answer to a browser login whose proof the realm's policy refuses:
+/// the passkey challenge when the user holds a passkey that can meet it
+/// (with a fresh MFA pending cookie — the RA token or the spent pending
+/// cookie behind this call proved the first factor), otherwise `403`.
+///
+/// Only the passkey is offered: it is the one factor that can raise a proof
+/// to what `webauthn_required` asks for, and any other factor the user holds
+/// was already routed to before the flow started.
+fn owed_factor_or_refusal(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    return_to: Option<&str>,
+    secure: bool,
+) -> Response {
+    let (Ok(Some(realm_record)), Ok(Some(user))) = (
+        state.identity.get_realm(realm),
+        state.identity.get_user(realm, user_id),
+    ) else {
+        return handlers_common::server_error();
+    };
+    match super::second_factor::second_factor_step(state, &realm_record, &user) {
+        Ok(Some(step @ super::second_factor::SecondFactorStep::Passkey)) => {
+            super::second_factor::redirect_to_second_factor(
+                state, realm, user_id, step, return_to, secure,
+            )
+        }
+        Ok(_) => forbidden_page(),
+        Err(e) => {
+            tracing::warn!(error = %e, "required actions: second-factor lookup failed");
+            handlers_common::server_error()
+        }
+    }
+}
+
+/// The bare `403` page for a login this flow refuses.
+fn forbidden_page() -> Response {
+    let mut page = handlers_common::ForbiddenTemplate::new(None);
+    page.chrome = false;
+    super::templates::render_status(&page, StatusCode::FORBIDDEN)
+}
+
 /// Clears the RA cookie, creates a session, and redirects to the original
 /// destination for the **direct browser login path**.
 ///
 /// Called when all required actions have been completed on the browser path.
+/// The session records `mfa_proof` — what the login proved, as carried in
+/// the RA token — so the engine's `mfa_required` / `webauthn_required` gates
+/// judge the login by the factor it actually proved. A proof they refuse
+/// sends the login to the passkey it owes, or refuses it.
 pub fn resume_browser_flow(
     state: &Arc<WebState>,
     realm: &RealmId,
     user_sub: &str,
     return_to: Option<String>,
-    webauthn_verified: bool,
+    mfa_proof: MfaProof,
     secure: bool,
 ) -> Response {
     let clear_cookie = ra_token::clear_ra_session_cookie(secure);
@@ -331,22 +469,25 @@ pub fn resume_browser_flow(
     };
     let user_id = UserId::new(user_uuid);
 
-    // The MFA proof is inherited: the RA session cookie backing this call is
-    // only minted by `required_action_check_browser`, which the login and MFA
-    // challenge handlers call *after* the realm's `mfa_required` gate has been
-    // satisfied (audit 2026-08-28 §4.18#3). When this flow registered a
-    // user-verified passkey, the login has just proved exactly that factor:
-    // record it as such, which is what a `webauthn_required` realm asks for.
+    // Never `Inherited`: the RA token records what the authentication that
+    // started this flow proved, raised only by a factor the flow proved
+    // itself (a user-verified passkey registration, or a first factor
+    // enrolled by a user who held none). The flow used to resume with
+    // `Inherited`, which satisfies `webauthn_required`, so a TOTP code plus
+    // any pending action opened a session on a passkey-only realm (GA audit
+    // round 3, D-1).
     let ctx = SessionContext {
-        mfa_proof: if webauthn_verified {
-            crate::identity::MfaProof::ProvedWebAuthn
-        } else {
-            crate::identity::MfaProof::Inherited
-        },
+        mfa_proof,
         ..SessionContext::default()
     };
     let session = match state.identity.create_session(realm, &user_id, &ctx) {
         Ok(s) => s,
+        Err(IdentityError::MfaRequired) => {
+            let mut response =
+                owed_factor_or_refusal(state, realm, &user_id, return_to.as_deref(), secure);
+            append_cookie(&mut response, &clear_cookie);
+            return response;
+        }
         Err(e) => {
             tracing::warn!(error = %e, "resume_browser_flow: create_session failed");
             return handlers_common::server_error();
@@ -435,7 +576,7 @@ pub fn next_required_action(
     mut remaining: Vec<RequiredAction>,
     oidc_params: Option<OidcParams>,
     browser_return_to: Option<String>,
-    webauthn_verified: bool,
+    mfa_proof: MfaProof,
     secure: bool,
     now: Timestamp,
 ) -> Response {
@@ -464,7 +605,7 @@ pub fn next_required_action(
             &user_id,
             remaining,
             browser_return_to,
-            webauthn_verified,
+            mfa_proof,
             now,
         ) {
             Ok(t) => t,
@@ -1086,7 +1227,7 @@ fn advance_flow(
             remaining,
             claims.oidc_params,
             claims.browser_return_to,
-            claims.webauthn_verified,
+            claims.mfa_proof,
             secure,
             now,
         );
@@ -1097,20 +1238,13 @@ fn advance_flow(
             realm,
             &claims.sub,
             claims.browser_return_to,
-            claims.webauthn_verified,
+            claims.mfa_proof,
             secure,
         )
     } else if let Some(oidc_params) = claims.oidc_params {
         resume_oidc_flow(state, realm, &claims.sub, oidc_params, secure)
     } else {
-        resume_browser_flow(
-            state,
-            realm,
-            &claims.sub,
-            None,
-            claims.webauthn_verified,
-            secure,
-        )
+        resume_browser_flow(state, realm, &claims.sub, None, claims.mfa_proof, secure)
     }
 }
 
@@ -1815,6 +1949,9 @@ pub async fn enroll_phone_otp_verify_submit(
         tracing::warn!(error = %e, "enroll_phone_otp_verify_submit: audit append failed");
     }
 
+    // The user proved the phone just enrolled; see `record_enrolled_factor`.
+    let mut claims = claims;
+    claims.record_enrolled_factor();
     advance_flow(
         &state,
         &realm,
@@ -2303,6 +2440,9 @@ pub async fn enroll_email_otp_verify_submit(
         tracing::warn!(error = %e, "enroll_email_otp_verify_submit: audit append failed");
     }
 
+    // The user proved the inbox just enrolled; see `record_enrolled_factor`.
+    let mut claims = claims;
+    claims.record_enrolled_factor();
     advance_flow(
         &state,
         &realm,
@@ -2772,6 +2912,9 @@ pub async fn enroll_mfa_submit(
     }) {
         tracing::warn!(error = %e, "enroll_mfa_submit: audit append failed");
     }
+    // The user proved the TOTP just enrolled; see `record_enrolled_factor`.
+    let mut claims = claims;
+    claims.record_enrolled_factor();
     let secure = state.is_secure_request(&headers);
     advance_flow(
         &state,

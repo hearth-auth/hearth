@@ -1,11 +1,8 @@
 //! `<LogoutRequest>` and `<LogoutResponse>` construction and parsing.
 
-use quick_xml::events::Event;
-use quick_xml::Reader;
-
 use super::authn_request::format_xsd_datetime;
 use super::xml::{
-    attr, escape_attr, escape_text, is_element, ns, parse_err, resolve_entity_ref, unescape_text,
+    attr, escape_attr, escape_text, is_element, ns, parse_err, walk_outside_signatures, XmlStep,
 };
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
@@ -97,10 +94,29 @@ pub fn build_logout_response_xml(p: &BuildLogoutResponseParams<'_>) -> String {
     )
 }
 
+/// Parses a SAML `<LogoutRequest>`.
+///
+/// Reads the request's attributes from the root element only and `<Issuer>`,
+/// `<NameID>` and `<SessionIndex>` from the root's direct children only,
+/// through [`walk_outside_signatures`] — nothing inside a `<ds:Signature>` is
+/// ever read (GA audit 3, G-1). A second `<Issuer>` or `<NameID>` is
+/// rejected; of several `<SessionIndex>` elements (which the schema allows)
+/// the first is kept.
+///
+/// # Errors
+///
+/// Returns a parse error on malformed XML, a `DOCTYPE`, a duplicate field, a
+/// root that is not a `<LogoutRequest>`, or a missing `ID` / `IssueInstant` /
+/// `Issuer` / `NameID`.
 pub fn parse_logout_request(xml: &[u8]) -> Result<LogoutRequest, IdentityError> {
-    let mut reader = Reader::from_reader(xml);
-    reader.config_mut().expand_empty_elements = false;
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Capture {
+        Issuer,
+        NameId,
+        SessionIndex,
+    }
 
+    let mut is_request = false;
     let mut id: Option<String> = None;
     let mut issue_instant: Option<String> = None;
     let mut destination: Option<String> = None;
@@ -108,68 +124,63 @@ pub fn parse_logout_request(xml: &[u8]) -> Result<LogoutRequest, IdentityError> 
     let mut name_id: Option<String> = None;
     let mut name_id_format: Option<String> = None;
     let mut session_index: Option<String> = None;
-
-    enum Capture {
-        Issuer,
-        NameId,
-        SessionIndex,
-    }
+    let (mut seen_issuer, mut seen_name_id, mut seen_session_index) = (false, false, false);
     let mut capture: Option<Capture> = None;
 
-    let mut buf = Vec::new();
-    loop {
-        let ev = reader.read_event_into(&mut buf);
-        match ev {
-            Ok(Event::Start(ref e) | Event::Empty(ref e)) => {
+    walk_outside_signatures(xml, |step| {
+        match step {
+            XmlStep::Open {
+                element: e,
+                depth: 1,
+            } => {
                 if is_element(e, ns::SAMLP, "LogoutRequest") {
+                    is_request = true;
                     id = attr(e, "ID");
                     issue_instant = attr(e, "IssueInstant");
                     destination = attr(e, "Destination");
-                } else if is_element(e, ns::SAML, "Issuer") {
+                }
+            }
+            XmlStep::Open {
+                element: e,
+                depth: 2,
+            } if is_request => {
+                if is_element(e, ns::SAML, "Issuer") {
+                    if std::mem::replace(&mut seen_issuer, true) {
+                        return Err(parse_err("duplicate <saml:Issuer> in LogoutRequest"));
+                    }
                     capture = Some(Capture::Issuer);
                 } else if is_element(e, ns::SAML, "NameID") {
+                    if std::mem::replace(&mut seen_name_id, true) {
+                        return Err(parse_err("duplicate <saml:NameID> in LogoutRequest"));
+                    }
                     name_id_format = attr(e, "Format");
                     capture = Some(Capture::NameId);
-                } else if is_element(e, ns::SAMLP, "SessionIndex") {
+                } else if is_element(e, ns::SAMLP, "SessionIndex")
+                    && !std::mem::replace(&mut seen_session_index, true)
+                {
                     capture = Some(Capture::SessionIndex);
                 }
             }
-            Ok(Event::Text(t)) => {
-                if let Some(cap) = capture.as_ref() {
-                    let val = unescape_text(&t)
-                        .map(|s| s.into_owned())
-                        .unwrap_or_default();
-                    let slot = match cap {
-                        Capture::Issuer => &mut issuer,
-                        Capture::NameId => &mut name_id,
-                        Capture::SessionIndex => &mut session_index,
-                    };
-                    slot.get_or_insert_with(String::new).push_str(&val);
-                }
-            }
-            Ok(Event::GeneralRef(r)) => {
+            XmlStep::Text { text, depth: 2 } => {
                 // quick-xml 0.41 emits `&amp;`-style references as separate
-                // events; accumulate the resolved character into the value
-                // being captured so escaped content is preserved.
-                if let Some(cap) = capture.as_ref() {
-                    let resolved = resolve_entity_ref(&r)?;
-                    let slot = match cap {
-                        Capture::Issuer => &mut issuer,
-                        Capture::NameId => &mut name_id,
-                        Capture::SessionIndex => &mut session_index,
-                    };
-                    slot.get_or_insert_with(String::new).push_str(&resolved);
-                }
+                // events; accumulate each resolved piece into the value.
+                let slot = match capture {
+                    Some(Capture::Issuer) => &mut issuer,
+                    Some(Capture::NameId) => &mut name_id,
+                    Some(Capture::SessionIndex) => &mut session_index,
+                    None => return Ok(()),
+                };
+                slot.get_or_insert_with(String::new).push_str(text);
             }
-            Ok(Event::End(_)) => capture = None,
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(parse_err(format!("LogoutRequest parse: {e}"))),
-            Ok(Event::DocType(_)) => return Err(parse_err("DOCTYPE declarations are rejected")),
+            XmlStep::Close { depth: 2 } => capture = None,
             _ => {}
         }
-        buf.clear();
-    }
+        Ok(())
+    })?;
 
+    if !is_request {
+        return Err(parse_err("root element is not a LogoutRequest"));
+    }
     Ok(LogoutRequest {
         id: id.ok_or_else(|| parse_err("LogoutRequest missing ID"))?,
         issue_instant: issue_instant.ok_or_else(|| parse_err("missing IssueInstant"))?,
@@ -181,53 +192,84 @@ pub fn parse_logout_request(xml: &[u8]) -> Result<LogoutRequest, IdentityError> 
     })
 }
 
+/// Parses a SAML `<LogoutResponse>`.
+///
+/// Root attributes, the root's `<Issuer>` and the top-level
+/// `<Status>/<StatusCode>` only, read through [`walk_outside_signatures`]
+/// (GA audit 3, G-1). A second `<Issuer>` or top-level `<StatusCode>` is
+/// rejected.
+///
+/// # Errors
+///
+/// Returns a parse error on malformed XML, a `DOCTYPE`, a duplicate field, a
+/// root that is not a `<LogoutResponse>`, or a missing `ID` / `IssueInstant` /
+/// `StatusCode`.
 pub fn parse_logout_response(xml: &[u8]) -> Result<LogoutResponse, IdentityError> {
-    let mut reader = Reader::from_reader(xml);
-    reader.config_mut().expand_empty_elements = false;
-
+    let mut is_response = false;
     let mut id: Option<String> = None;
     let mut in_response_to: Option<String> = None;
     let mut issue_instant: Option<String> = None;
     let mut destination: Option<String> = None;
     let mut issuer: Option<String> = None;
     let mut status_code: Option<String> = None;
+    let (mut seen_issuer, mut seen_status, mut seen_status_code) = (false, false, false);
     let mut in_issuer = false;
+    let mut in_status = false;
 
-    let mut buf = Vec::new();
-    loop {
-        let ev = reader.read_event_into(&mut buf);
-        match ev {
-            Ok(Event::Start(ref e) | Event::Empty(ref e)) => {
+    walk_outside_signatures(xml, |step| {
+        match step {
+            XmlStep::Open {
+                element: e,
+                depth: 1,
+            } => {
                 if is_element(e, ns::SAMLP, "LogoutResponse") {
+                    is_response = true;
                     id = attr(e, "ID");
                     in_response_to = attr(e, "InResponseTo");
                     issue_instant = attr(e, "IssueInstant");
                     destination = attr(e, "Destination");
-                } else if is_element(e, ns::SAMLP, "StatusCode") {
-                    status_code = attr(e, "Value");
-                } else if is_element(e, ns::SAML, "Issuer") {
+                }
+            }
+            XmlStep::Open {
+                element: e,
+                depth: 2,
+            } if is_response => {
+                if is_element(e, ns::SAML, "Issuer") {
+                    if std::mem::replace(&mut seen_issuer, true) {
+                        return Err(parse_err("duplicate <saml:Issuer> in LogoutResponse"));
+                    }
                     in_issuer = true;
+                } else if is_element(e, ns::SAMLP, "Status") {
+                    if std::mem::replace(&mut seen_status, true) {
+                        return Err(parse_err("duplicate <samlp:Status> in LogoutResponse"));
+                    }
+                    in_status = true;
                 }
             }
-            Ok(Event::Text(t)) if in_issuer => {
-                if let Ok(s) = unescape_text(&t) {
-                    issuer.get_or_insert_with(String::new).push_str(&s);
+            XmlStep::Open {
+                element: e,
+                depth: 3,
+            } if in_status && is_element(e, ns::SAMLP, "StatusCode") => {
+                if std::mem::replace(&mut seen_status_code, true) {
+                    return Err(parse_err("duplicate <samlp:StatusCode> in Status"));
                 }
+                status_code = attr(e, "Value");
             }
-            Ok(Event::GeneralRef(r)) if in_issuer => {
-                issuer
-                    .get_or_insert_with(String::new)
-                    .push_str(&resolve_entity_ref(&r)?);
+            XmlStep::Text { text, depth: 2 } if in_issuer => {
+                issuer.get_or_insert_with(String::new).push_str(text);
             }
-            Ok(Event::End(_)) => in_issuer = false,
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(parse_err(format!("LogoutResponse parse: {e}"))),
-            Ok(Event::DocType(_)) => return Err(parse_err("DOCTYPE declarations are rejected")),
+            XmlStep::Close { depth: 2 } => {
+                in_issuer = false;
+                in_status = false;
+            }
             _ => {}
         }
-        buf.clear();
-    }
+        Ok(())
+    })?;
 
+    if !is_response {
+        return Err(parse_err("root element is not a LogoutResponse"));
+    }
     Ok(LogoutResponse {
         id: id.ok_or_else(|| parse_err("LogoutResponse missing ID"))?,
         in_response_to,
@@ -257,6 +299,94 @@ mod tests {
         assert_eq!(parsed.id, "_lo1");
         assert_eq!(parsed.name_id, "alice@example.com");
         assert_eq!(parsed.session_index.as_deref(), Some("sess1"));
+    }
+
+    fn sample_logout_request() -> String {
+        build_logout_request_xml(&BuildLogoutRequestParams {
+            id: "_real",
+            destination: "https://idp.example/slo",
+            issue_instant: Timestamp::from_micros(1_700_000_000 * 1_000_000),
+            issuer: "https://sp.example",
+            name_id: "alice@example.com",
+            name_id_format: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+            session_index: Some("sess1"),
+        })
+    }
+
+    /// GA audit 3, G-1: a `<ds:Signature>` carrying a forged request is
+    /// invisible to the parser.
+    #[test]
+    fn parse_logout_request_never_reads_inside_a_signature() {
+        let xml = sample_logout_request().replacen(
+            "</samlp:LogoutRequest>",
+            concat!(
+                r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">"#,
+                r#"<samlp:LogoutRequest ID="_forged" IssueInstant="2099-01-01T00:00:00Z"/>"#,
+                "<saml:Issuer>https://evil.example</saml:Issuer>",
+                "<saml:NameID>ceo@example.com</saml:NameID></ds:Signature>",
+                "</samlp:LogoutRequest>",
+            ),
+            1,
+        );
+        let parsed = parse_logout_request(xml.as_bytes()).expect("parse");
+        assert_eq!(parsed.id, "_real");
+        assert_eq!(parsed.issuer, "https://sp.example");
+        assert_eq!(parsed.name_id, "alice@example.com");
+    }
+
+    /// A second `<Issuer>` or `<NameID>` used to be concatenated onto the
+    /// first; both are refused.
+    #[test]
+    fn parse_logout_request_rejects_duplicate_fields() {
+        let cases = [
+            (
+                "</saml:Issuer>",
+                "</saml:Issuer><saml:Issuer>https://evil.example</saml:Issuer>",
+            ),
+            (
+                "</saml:NameID>",
+                "</saml:NameID><saml:NameID>ceo@example.com</saml:NameID>",
+            ),
+        ];
+        for (anchor, replacement) in cases {
+            let xml = sample_logout_request().replacen(anchor, replacement, 1);
+            let err = parse_logout_request(xml.as_bytes())
+                .err()
+                .unwrap_or_else(|| panic!("{anchor}: duplicate must be rejected"));
+            assert!(
+                matches!(&err, IdentityError::Saml(crate::identity::federation::saml::SamlError::Parse { reason }) if reason.contains("duplicate")),
+                "{anchor}: wrong error: {err:?}"
+            );
+        }
+    }
+
+    /// A signature-hidden `<StatusCode>` does not replace the real one.
+    #[test]
+    fn parse_logout_response_never_reads_inside_a_signature() {
+        let xml = build_logout_response_xml(&BuildLogoutResponseParams {
+            id: "_lr1",
+            in_response_to: "_lo1",
+            destination: "https://idp.example/slo",
+            issue_instant: Timestamp::from_micros(1_700_000_000 * 1_000_000),
+            issuer: "https://sp.example",
+            success: false,
+        })
+        .replacen(
+            "</samlp:LogoutResponse>",
+            concat!(
+                r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">"#,
+                r#"<samlp:Status><samlp:StatusCode "#,
+                r#"Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>"#,
+                "</ds:Signature></samlp:LogoutResponse>",
+            ),
+            1,
+        );
+        let parsed = parse_logout_response(xml.as_bytes()).expect("parse");
+        assert!(
+            !parsed.status_code.ends_with(":Success"),
+            "the hidden Success status was read: {}",
+            parsed.status_code
+        );
     }
 
     #[test]

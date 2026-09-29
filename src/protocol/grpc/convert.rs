@@ -62,6 +62,7 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::RegistrationDomainNotAllowed { .. }
         | IdentityError::RegistrationRequiresInvitation
         | IdentityError::ConsentRequired
+        | IdentityError::ClientMismatch
         | IdentityError::LastOwner
         | IdentityError::NotAMember
         | IdentityError::UserNotVerified
@@ -345,14 +346,21 @@ pub const CLIENT_SECRET_META_KEY: &str = "x-hearth-client-secret";
 ///
 /// Reads the `authorization` metadata key (`Bearer <token>`), validates the JWT
 /// for the given realm, and returns the authenticated [`UserId`] with the
-/// session behind the token (whose proved factor `Authorize` judges, GA audit
-/// B2/B5). Returns `UNAUTHENTICATED` if the header is absent, malformed, or
-/// carries an invalid, sessionless or DPoP-bound token.
+/// token's validated claims — `Authorize` has the engine judge the client the
+/// token was issued to (GA audit 3 B-1) and the factor its session proved
+/// (GA audit B2/B5). Returns `UNAUTHENTICATED` if the header is absent,
+/// malformed, or carries an invalid, sessionless or DPoP-bound token.
 pub fn extract_grpc_user_auth(
     md: &MetadataMap,
     realm_id: &RealmId,
     identity: &dyn crate::identity::IdentityEngine,
-) -> Result<(crate::core::UserId, crate::core::SessionId), Status> {
+) -> Result<
+    (
+        crate::core::UserId,
+        std::sync::Arc<crate::identity::TokenClaims>,
+    ),
+    Status,
+> {
     let raw = md
         .get("authorization")
         .ok_or_else(|| Status::unauthenticated("missing authorization header"))?
@@ -378,11 +386,10 @@ pub fn extract_grpc_user_auth(
     let user_id = uuid::Uuid::parse_str(sub_str)
         .map(crate::core::UserId::new)
         .map_err(|_| Status::unauthenticated("invalid token subject"))?;
-    let session_id = claims
-        .sid
-        .parse::<crate::core::SessionId>()
-        .map_err(|_| Status::unauthenticated("invalid token session"))?;
-    Ok((user_id, session_id))
+    if claims.sid.parse::<crate::core::SessionId>().is_err() {
+        return Err(Status::unauthenticated("invalid token session"));
+    }
+    Ok((user_id, claims))
 }
 
 /// Extracts and verifies OAuth client credentials from gRPC request metadata.

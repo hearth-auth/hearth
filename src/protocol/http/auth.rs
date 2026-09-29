@@ -795,6 +795,7 @@ pub(crate) fn identity_error_to_response(
             (StatusCode::FORBIDDEN, "invitation required")
         }
         IdentityError::ConsentRequired => (StatusCode::FORBIDDEN, "consent required"),
+        IdentityError::ClientMismatch => (StatusCode::FORBIDDEN, "client mismatch"),
         IdentityError::ConsentTicketNotFound | IdentityError::ConsentTicketExpired => {
             (StatusCode::BAD_REQUEST, "consent ticket invalid")
         }
@@ -1138,25 +1139,29 @@ pub(crate) fn extract_user_auth(
     user_auth_claims(headers, state, realm_id, htm, htu).map(|(user_id, _)| user_id)
 }
 
-/// [`extract_user_auth`] that also returns the session behind the bearer
-/// token, for a surface that must judge what that session proved (the
-/// non-interactive `/authorize`, GA audit B2/B5). A token whose `sid` names
-/// no session (a sessionless token) is refused.
+/// [`extract_user_auth`] that also returns the bearer token's validated
+/// claims, for a surface the engine must judge by the token itself: the
+/// non-interactive `/authorize` checks the client the token was issued to
+/// (GA audit 3 B-1) and the factor its session proved (GA audit B2/B5). A
+/// token whose `sid` names no session (a sessionless token) is refused.
 pub(crate) fn extract_user_session_auth(
     headers: &HeaderMap,
     state: &AppState,
     realm_id: &RealmId,
     htm: &str,
     htu: &str,
-) -> Result<(UserId, crate::core::SessionId), (StatusCode, Json<serde_json::Value>)> {
+) -> Result<
+    (UserId, std::sync::Arc<crate::identity::TokenClaims>),
+    (StatusCode, Json<serde_json::Value>),
+> {
     let (user_id, claims) = user_auth_claims(headers, state, realm_id, htm, htu)?;
-    let session_id = claims.sid.parse::<crate::core::SessionId>().map_err(|_| {
-        (
+    if claims.sid.parse::<crate::core::SessionId>().is_err() {
+        return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid_token"})),
-        )
-    })?;
-    Ok((user_id, session_id))
+        ));
+    }
+    Ok((user_id, claims))
 }
 
 /// Validates the bearer token (with its DPoP binding) and parses its user.

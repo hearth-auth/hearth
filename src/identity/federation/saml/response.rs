@@ -1,12 +1,11 @@
 //! `<Response>` and `<Assertion>` XML construction, parsing, and validation.
 
-use quick_xml::events::Event;
-use quick_xml::Reader;
-use std::collections::BTreeMap;
+use quick_xml::events::BytesStart;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::authn_request::{format_xsd_datetime, parse_xsd_datetime};
 use super::xml::{
-    attr, escape_attr, escape_text, is_element, ns, parse_err, resolve_entity_ref, unescape_text,
+    attr, escape_attr, escape_text, is_element, ns, parse_err, walk_outside_signatures, XmlStep,
 };
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
@@ -145,71 +144,194 @@ pub fn build_response_xml(b: &ResponseBuilder<'_>) -> String {
 }
 
 /// Parses a SAML `<Response>` and its `<Assertion>` children.
-#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
+///
+/// Structural, not positional-by-name: every field is read only from the
+/// place the SAML 2.0 core schema defines for it (`Response/Assertion/
+/// Subject/NameID`, `Response/Assertion/Conditions`, …), decided from the
+/// element's parent. An element with a SAML name anywhere else — inside an
+/// `<AttributeValue>`, inside `<Advice>`, or at the wrong level — is ignored
+/// rather than overwriting the real field.
+///
+/// Signature-wrapping hardening (GA audit 3, G-1):
+/// - The document is read through [`walk_outside_signatures`], so nothing
+///   inside a `<ds:Signature>` — the region the enveloped-signature transform
+///   removes from the digest — is ever read.
+/// - Inside one `<Assertion>`, a second `<Issuer>`, `<Subject>`, subject
+///   `<NameID>`, `<Conditions>`, or a second `<Attribute>` with the same
+///   `Name`, is rejected rather than resolved last-write-wins. At the
+///   `<Response>` level a second `<Issuer>`, `<Status>` or top-level
+///   `<StatusCode>` is rejected likewise.
+///
+/// # Errors
+///
+/// Returns [`SamlError::Parse`] on malformed XML, a `DOCTYPE`, more than
+/// `MAX_SAML_XML_EVENTS` events, a duplicate field as above, or a Response
+/// missing its `ID`, `IssueInstant` or `StatusCode`.
 pub fn parse_response(xml: &[u8]) -> Result<SamlResponse, IdentityError> {
-    let mut reader = Reader::from_reader(xml);
-    reader.config_mut().expand_empty_elements = false;
-
-    let mut buf = Vec::new();
-    let mut response_id: Option<String> = None;
-    let mut in_response_to: Option<String> = None;
-    let mut issue_instant: Option<String> = None;
-    let mut destination: Option<String> = None;
-    let mut response_issuer: Option<String> = None;
-    let mut status_code: Option<String> = None;
-    let mut assertions: Vec<Assertion> = Vec::new();
-
-    let mut state = ParseState::Root;
-    let mut current: Option<Assertion> = None;
-    // True while inside a `<SubjectConfirmation Method="…:cm:bearer">`. A
-    // `<SubjectConfirmationData>` is only recorded when this is set AND we are
-    // inside an `<Assertion>` — see `Assertion::bearer_confirmations`.
-    let mut in_bearer_confirmation = false;
-    let mut attr_name: Option<String> = None;
-    let mut attr_values: Vec<String> = Vec::new();
-    let mut capturing_text: Option<TextTarget> = None;
-    // Text content is accumulated here across `Text`/`GeneralRef` events and
-    // committed to `capturing_text`'s target when the element closes. quick-xml
-    // 0.41 tokenizes `&amp;`-style references into standalone `GeneralRef`
-    // events, so a single value may span several events.
-    let mut text_buf = String::new();
-
-    // A-35: cap XML event count to prevent resource exhaustion from
-    // crafted responses with thousands of elements (no DTD required).
-    let mut event_count: usize = 0;
-
-    loop {
-        let ev = reader.read_event_into(&mut buf);
-        event_count += 1;
-        if event_count > crate::abuse::MAX_SAML_XML_EVENTS {
-            return Err(parse_err("SAML response exceeds maximum XML event limit"));
+    let mut parser = ResponseParser::default();
+    walk_outside_signatures(xml, |step| match step {
+        XmlStep::Open { element, .. } => parser.open(element),
+        XmlStep::Text { text, .. } => {
+            parser.text(text);
+            Ok(())
         }
-        match ev {
-            Ok(Event::Start(ref e) | Event::Empty(ref e)) => {
-                // A new element closes any capture window left dangling by a
-                // self-closing capturing element (which emits no `End`).
-                capturing_text = None;
-                text_buf.clear();
-                // Close the bearer-confirmation window on any element that is
-                // neither the confirmation itself nor its data child. This
-                // also covers a self-closing `<SubjectConfirmation/>`, which
-                // emits no `End` event.
-                if !is_element(e, ns::SAML, "SubjectConfirmation")
-                    && !is_element(e, ns::SAML, "SubjectConfirmationData")
-                {
-                    in_bearer_confirmation = false;
+        XmlStep::Close { .. } => {
+            parser.close();
+            Ok(())
+        }
+    })?;
+    parser.finish()
+}
+
+/// Where an element sits in a `<samlp:Response>`, decided from its parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Node {
+    /// The root `<samlp:Response>`.
+    Response,
+    /// `Response/Status`.
+    Status,
+    /// `Response/Status/StatusCode` (the top-level code only).
+    StatusCode,
+    /// `Response/Issuer`.
+    ResponseIssuer,
+    /// `Response/Assertion`.
+    Assertion,
+    /// `Assertion/Issuer`.
+    AssertionIssuer,
+    /// `Assertion/Subject`.
+    Subject,
+    /// `Assertion/Subject/NameID`.
+    NameId,
+    /// `Assertion/Subject/SubjectConfirmation`.
+    SubjectConfirmation {
+        /// `Method` is the bearer confirmation method.
+        bearer: bool,
+    },
+    /// `Assertion/Conditions`.
+    Conditions,
+    /// `Assertion/Conditions/AudienceRestriction`.
+    AudienceRestriction,
+    /// `Assertion/Conditions/AudienceRestriction/Audience`.
+    Audience,
+    /// `Assertion/AttributeStatement`.
+    AttributeStatement,
+    /// `Assertion/AttributeStatement/Attribute`.
+    Attribute,
+    /// `Assertion/AttributeStatement/Attribute/AttributeValue`.
+    AttributeValue,
+    /// Anything else. Nothing inside it is read.
+    Other,
+}
+
+impl Node {
+    /// Classifies `e` given its parent node.
+    fn classify(parent: Option<Node>, e: &BytesStart<'_>) -> Node {
+        let is = |namespace: &str, local: &str| is_element(e, namespace, local);
+        match parent {
+            None if is(ns::SAMLP, "Response") => Node::Response,
+            Some(Node::Response) if is(ns::SAMLP, "Status") => Node::Status,
+            Some(Node::Response) if is(ns::SAML, "Issuer") => Node::ResponseIssuer,
+            Some(Node::Response) if is(ns::SAML, "Assertion") => Node::Assertion,
+            Some(Node::Status) if is(ns::SAMLP, "StatusCode") => Node::StatusCode,
+            Some(Node::Assertion) if is(ns::SAML, "Issuer") => Node::AssertionIssuer,
+            Some(Node::Assertion) if is(ns::SAML, "Subject") => Node::Subject,
+            Some(Node::Assertion) if is(ns::SAML, "Conditions") => Node::Conditions,
+            Some(Node::Assertion) if is(ns::SAML, "AttributeStatement") => Node::AttributeStatement,
+            Some(Node::Subject) if is(ns::SAML, "NameID") => Node::NameId,
+            Some(Node::Subject) if is(ns::SAML, "SubjectConfirmation") => {
+                Node::SubjectConfirmation {
+                    bearer: attr(e, "Method").is_some_and(|m| m.trim() == CM_BEARER),
                 }
-                if is_element(e, ns::SAMLP, "Response") {
-                    response_id = attr(e, "ID");
-                    in_response_to = attr(e, "InResponseTo");
-                    issue_instant = attr(e, "IssueInstant");
-                    destination = attr(e, "Destination");
-                } else if is_element(e, ns::SAMLP, "StatusCode") && state == ParseState::Status {
-                    status_code = attr(e, "Value");
-                } else if is_element(e, ns::SAMLP, "Status") {
-                    state = ParseState::Status;
-                } else if is_element(e, ns::SAML, "Assertion") {
-                    current = Some(Assertion {
+            }
+            Some(Node::Conditions) if is(ns::SAML, "AudienceRestriction") => {
+                Node::AudienceRestriction
+            }
+            Some(Node::AudienceRestriction) if is(ns::SAML, "Audience") => Node::Audience,
+            Some(Node::AttributeStatement) if is(ns::SAML, "Attribute") => Node::Attribute,
+            Some(Node::Attribute) if is(ns::SAML, "AttributeValue") => Node::AttributeValue,
+            _ => Node::Other,
+        }
+    }
+
+    /// Whether the element's text content is a field value.
+    fn captures_text(self) -> bool {
+        matches!(
+            self,
+            Node::ResponseIssuer
+                | Node::AssertionIssuer
+                | Node::NameId
+                | Node::Audience
+                | Node::AttributeValue
+        )
+    }
+}
+
+/// An `<Assertion>` being parsed, with the fields that may appear only once.
+struct AssertionInProgress {
+    assertion: Assertion,
+    seen_issuer: bool,
+    seen_subject: bool,
+    seen_name_id: bool,
+    seen_conditions: bool,
+    attribute_names: BTreeSet<String>,
+}
+
+/// Rejects the second occurrence of a single-valued field.
+fn once(seen: &mut bool, what: &str) -> Result<(), IdentityError> {
+    if std::mem::replace(seen, true) {
+        return Err(parse_err(format!("duplicate {what}")));
+    }
+    Ok(())
+}
+
+/// State for [`parse_response`].
+#[derive(Default)]
+struct ResponseParser {
+    stack: Vec<Node>,
+    response_id: Option<String>,
+    in_response_to: Option<String>,
+    issue_instant: Option<String>,
+    destination: Option<String>,
+    response_issuer: Option<String>,
+    status_code: Option<String>,
+    seen_response_issuer: bool,
+    seen_status: bool,
+    seen_status_code: bool,
+    assertions: Vec<Assertion>,
+    current: Option<AssertionInProgress>,
+    // Text content is accumulated here across `Text` steps and committed to
+    // the capturing element's field when it closes. quick-xml 0.41 tokenizes
+    // `&amp;`-style references into standalone events, so a single value may
+    // span several steps.
+    text: String,
+    attr_name: Option<String>,
+    attr_values: Vec<String>,
+}
+
+impl ResponseParser {
+    fn open(&mut self, e: &BytesStart<'_>) -> Result<(), IdentityError> {
+        let node = Node::classify(self.stack.last().copied(), e);
+        if node.captures_text() {
+            self.text.clear();
+        }
+        match node {
+            Node::Response => {
+                self.response_id = attr(e, "ID");
+                self.in_response_to = attr(e, "InResponseTo");
+                self.issue_instant = attr(e, "IssueInstant");
+                self.destination = attr(e, "Destination");
+            }
+            Node::Status => once(&mut self.seen_status, "<samlp:Status> in Response")?,
+            Node::StatusCode => {
+                once(&mut self.seen_status_code, "<samlp:StatusCode> in Status")?;
+                self.status_code = attr(e, "Value");
+            }
+            Node::ResponseIssuer => {
+                once(&mut self.seen_response_issuer, "<saml:Issuer> in Response")?;
+            }
+            Node::Assertion => {
+                self.current = Some(AssertionInProgress {
+                    assertion: Assertion {
                         id: attr(e, "ID").unwrap_or_default(),
                         issuer: String::new(),
                         subject_name_id: None,
@@ -218,149 +340,142 @@ pub fn parse_response(xml: &[u8]) -> Result<SamlResponse, IdentityError> {
                         not_on_or_after: None,
                         audience: None,
                         attributes: BTreeMap::new(),
-                        in_response_to: in_response_to.clone(),
+                        in_response_to: self.in_response_to.clone(),
                         session_index: None,
-                        destination: destination.clone(),
+                        destination: self.destination.clone(),
                         bearer_confirmations: Vec::new(),
-                    });
-                    state = ParseState::Assertion;
-                } else if is_element(e, ns::SAML, "SubjectConfirmation") {
-                    in_bearer_confirmation =
-                        attr(e, "Method").is_some_and(|m| m.trim() == CM_BEARER);
-                } else if is_element(e, ns::SAML, "SubjectConfirmationData") {
-                    // Only bindings inside the assertion count. A
-                    // `<SubjectConfirmationData>` planted elsewhere in the
-                    // document is outside the signed element and is ignored.
-                    if in_bearer_confirmation {
-                        if let Some(ref mut a) = current {
-                            a.bearer_confirmations.push(BearerConfirmation {
-                                recipient: attr(e, "Recipient"),
-                                not_on_or_after: attr(e, "NotOnOrAfter")
-                                    .and_then(|s| parse_xsd_datetime(&s)),
-                                in_response_to: attr(e, "InResponseTo"),
-                            });
-                        }
-                    }
-                } else if is_element(e, ns::SAML, "Issuer") {
-                    capturing_text = Some(if matches!(state, ParseState::Assertion) {
-                        TextTarget::AssertionIssuer
-                    } else {
-                        TextTarget::ResponseIssuer
-                    });
-                } else if is_element(e, ns::SAML, "NameID") {
-                    if let Some(ref mut a) = current {
-                        a.subject_name_id_format = attr(e, "Format");
-                    }
-                    capturing_text = Some(TextTarget::SubjectNameId);
-                } else if is_element(e, ns::SAML, "Conditions") {
-                    if let Some(ref mut a) = current {
-                        a.not_before = attr(e, "NotBefore").and_then(|s| parse_xsd_datetime(&s));
-                        a.not_on_or_after =
-                            attr(e, "NotOnOrAfter").and_then(|s| parse_xsd_datetime(&s));
-                    }
-                } else if is_element(e, ns::SAML, "Audience") {
-                    capturing_text = Some(TextTarget::Audience);
-                } else if is_element(e, ns::SAML, "AuthnStatement") {
-                    if let Some(ref mut a) = current {
-                        a.session_index = attr(e, "SessionIndex");
-                    }
-                } else if is_element(e, ns::SAML, "Attribute") {
-                    attr_name = attr(e, "Name");
-                    attr_values.clear();
-                } else if is_element(e, ns::SAML, "AttributeValue") {
-                    capturing_text = Some(TextTarget::AttributeValue);
-                }
+                    },
+                    seen_issuer: false,
+                    seen_subject: false,
+                    seen_name_id: false,
+                    seen_conditions: false,
+                    attribute_names: BTreeSet::new(),
+                });
             }
-            Ok(Event::Text(t)) if capturing_text.is_some() => {
-                if let Ok(s) = unescape_text(&t) {
-                    text_buf.push_str(&s);
-                }
-            }
-            Ok(Event::GeneralRef(r)) if capturing_text.is_some() => {
-                text_buf.push_str(&resolve_entity_ref(&r)?);
-            }
-            Ok(Event::End(e)) => {
-                // Commit any captured text to its target. Empty content is not
-                // committed, matching the pre-0.41 single-`Text`-event behavior.
-                if let Some(target) = capturing_text.take() {
-                    if !text_buf.is_empty() {
-                        let val = std::mem::take(&mut text_buf);
-                        match target {
-                            TextTarget::ResponseIssuer => response_issuer = Some(val),
-                            TextTarget::AssertionIssuer => {
-                                if let Some(ref mut a) = current {
-                                    a.issuer = val;
-                                }
-                            }
-                            TextTarget::SubjectNameId => {
-                                if let Some(ref mut a) = current {
-                                    a.subject_name_id = Some(val);
-                                }
-                            }
-                            TextTarget::Audience => {
-                                if let Some(ref mut a) = current {
-                                    a.audience = Some(val);
-                                }
-                            }
-                            TextTarget::AttributeValue => attr_values.push(val),
-                        }
-                    }
-                    text_buf.clear();
-                }
-                let nm = e.name();
-                let name_bytes = nm.as_ref();
-                if name_bytes.ends_with(b":Attribute") || name_bytes == b"Attribute" {
-                    if let (Some(n), Some(a)) = (attr_name.take(), current.as_mut()) {
-                        if !attr_values.is_empty() {
-                            a.attributes.insert(n, std::mem::take(&mut attr_values));
-                        }
-                    }
-                } else if name_bytes.ends_with(b":SubjectConfirmation")
-                    || name_bytes == b"SubjectConfirmation"
-                {
-                    in_bearer_confirmation = false;
-                } else if name_bytes.ends_with(b":Assertion") || name_bytes == b"Assertion" {
-                    if let Some(a) = current.take() {
-                        assertions.push(a);
-                    }
-                    state = ParseState::Root;
-                } else if name_bytes.ends_with(b":Status") || name_bytes == b"Status" {
-                    state = ParseState::Root;
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(parse_err(format!("Response parse error: {e}"))),
-            Ok(Event::DocType(_)) => return Err(parse_err("DOCTYPE declarations are rejected")),
-            _ => {}
+            Node::Other => self.open_other(e),
+            _ => self.open_in_assertion(node, e)?,
         }
-        buf.clear();
+        self.stack.push(node);
+        Ok(())
     }
 
-    Ok(SamlResponse {
-        id: response_id.ok_or_else(|| parse_err("Response missing ID"))?,
-        in_response_to,
-        issue_instant: issue_instant.ok_or_else(|| parse_err("missing IssueInstant"))?,
-        destination,
-        issuer: response_issuer.unwrap_or_default(),
-        status_code: status_code.ok_or_else(|| parse_err("missing StatusCode"))?,
-        assertions,
-    })
-}
+    /// Elements the parser reads for an attribute but does not descend into:
+    /// `<SubjectConfirmationData>` and `<AuthnStatement>`.
+    fn open_other(&mut self, e: &BytesStart<'_>) {
+        let parent = self.stack.last().copied();
+        let Some(ref mut cur) = self.current else {
+            return;
+        };
+        let a = &mut cur.assertion;
+        match parent {
+            // Only a bearer confirmation inside this assertion's `<Subject>`
+            // counts — see `Assertion::bearer_confirmations`.
+            Some(Node::SubjectConfirmation { bearer: true })
+                if is_element(e, ns::SAML, "SubjectConfirmationData") =>
+            {
+                a.bearer_confirmations.push(BearerConfirmation {
+                    recipient: attr(e, "Recipient"),
+                    not_on_or_after: attr(e, "NotOnOrAfter").and_then(|s| parse_xsd_datetime(&s)),
+                    in_response_to: attr(e, "InResponseTo"),
+                });
+            }
+            Some(Node::Assertion) if is_element(e, ns::SAML, "AuthnStatement") => {
+                a.session_index = attr(e, "SessionIndex");
+            }
+            _ => {}
+        }
+    }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ParseState {
-    Root,
-    Status,
-    Assertion,
-}
+    fn open_in_assertion(&mut self, node: Node, e: &BytesStart<'_>) -> Result<(), IdentityError> {
+        let Some(ref mut cur) = self.current else {
+            return Ok(());
+        };
+        match node {
+            Node::AssertionIssuer => once(&mut cur.seen_issuer, "<saml:Issuer> in Assertion")?,
+            Node::Subject => once(&mut cur.seen_subject, "<saml:Subject> in Assertion")?,
+            Node::NameId => {
+                once(&mut cur.seen_name_id, "<saml:NameID> in Subject")?;
+                cur.assertion.subject_name_id_format = attr(e, "Format");
+            }
+            Node::Conditions => {
+                once(&mut cur.seen_conditions, "<saml:Conditions> in Assertion")?;
+                cur.assertion.not_before =
+                    attr(e, "NotBefore").and_then(|s| parse_xsd_datetime(&s));
+                cur.assertion.not_on_or_after =
+                    attr(e, "NotOnOrAfter").and_then(|s| parse_xsd_datetime(&s));
+            }
+            Node::Attribute => {
+                self.attr_name = attr(e, "Name");
+                self.attr_values.clear();
+                if let Some(ref name) = self.attr_name {
+                    if !cur.attribute_names.insert(name.clone()) {
+                        return Err(parse_err("duplicate <saml:Attribute> Name in Assertion"));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 
-#[derive(Debug, Clone, Copy)]
-enum TextTarget {
-    ResponseIssuer,
-    AssertionIssuer,
-    SubjectNameId,
-    Audience,
-    AttributeValue,
+    fn text(&mut self, t: &str) {
+        if self.stack.last().is_some_and(|n| n.captures_text()) {
+            self.text.push_str(t);
+        }
+    }
+
+    fn close(&mut self) {
+        let Some(node) = self.stack.pop() else {
+            return;
+        };
+        if node == Node::Assertion {
+            if let Some(c) = self.current.take() {
+                self.assertions.push(c.assertion);
+            }
+            return;
+        }
+        // Commit captured text. Empty content is not committed, matching the
+        // pre-0.41 single-`Text`-event behaviour.
+        let value = if node.captures_text() && !self.text.is_empty() {
+            Some(std::mem::take(&mut self.text))
+        } else {
+            None
+        };
+        match (node, value, self.current.as_mut()) {
+            (Node::ResponseIssuer, Some(v), _) => self.response_issuer = Some(v),
+            (Node::AssertionIssuer, Some(v), Some(c)) => c.assertion.issuer = v,
+            (Node::NameId, Some(v), Some(c)) => c.assertion.subject_name_id = Some(v),
+            (Node::Audience, Some(v), Some(c)) => c.assertion.audience = Some(v),
+            (Node::AttributeValue, Some(v), _) => self.attr_values.push(v),
+            (Node::Attribute, _, Some(c)) => {
+                let values = std::mem::take(&mut self.attr_values);
+                if let Some(name) = self.attr_name.take() {
+                    if !values.is_empty() {
+                        c.assertion.attributes.insert(name, values);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(self) -> Result<SamlResponse, IdentityError> {
+        Ok(SamlResponse {
+            id: self
+                .response_id
+                .ok_or_else(|| parse_err("Response missing ID"))?,
+            in_response_to: self.in_response_to,
+            issue_instant: self
+                .issue_instant
+                .ok_or_else(|| parse_err("missing IssueInstant"))?,
+            destination: self.destination,
+            issuer: self.response_issuer.unwrap_or_default(),
+            status_code: self
+                .status_code
+                .ok_or_else(|| parse_err("missing StatusCode"))?,
+            assertions: self.assertions,
+        })
+    }
 }
 
 /// Validates a SAML `<Response>` + `<Assertion>` for an SP.
@@ -927,6 +1042,174 @@ mod tests {
                 Err(IdentityError::Saml(SamlError::InvalidAuthnRequest { .. }))
             ),
             "two bearer SubjectConfirmations must be refused as ambiguous, got {res:?}"
+        );
+    }
+
+    // ==================================================================
+    // GA audit 3, G-1 — the parser never reads inside a `<ds:Signature>`
+    // and refuses duplicate single-valued fields.
+    // ==================================================================
+
+    /// A Response whose single assertion carries `extra` just before
+    /// `</saml:Assertion>`. Everything else matches `sample_builder`.
+    fn response_with_assertion_tail(extra: &str) -> String {
+        let xml = build_response_xml(&sample_builder());
+        assert!(xml.contains("</saml:Assertion>"));
+        xml.replacen("</saml:Assertion>", &format!("{extra}</saml:Assertion>"), 1)
+    }
+
+    /// Everything a wrapping attack would plant, inside a `<ds:Signature>`
+    /// placed after the real fields (where last-write-wins used to take it).
+    #[test]
+    fn parse_never_reads_inside_a_signature() {
+        let xml = response_with_assertion_tail(concat!(
+            r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">"#,
+            "<saml:Issuer>https://evil.example</saml:Issuer>",
+            "<saml:Subject><saml:NameID>ceo@example.com</saml:NameID></saml:Subject>",
+            r#"<saml:Conditions NotOnOrAfter="2099-01-01T00:00:00Z">"#,
+            "<saml:AudienceRestriction><saml:Audience>https://evil.example</saml:Audience>",
+            "</saml:AudienceRestriction></saml:Conditions>",
+            r#"<saml:AuthnStatement SessionIndex="evil"/>"#,
+            r#"<saml:AttributeStatement><saml:Attribute Name="mail">"#,
+            "<saml:AttributeValue>ceo@example.com</saml:AttributeValue>",
+            "</saml:Attribute></saml:AttributeStatement>",
+            "<ds:KeyInfo><saml:Subject><saml:NameID>deeper@example.com</saml:NameID>",
+            "</saml:Subject></ds:KeyInfo>",
+            "</ds:Signature>",
+        ));
+        let parsed = parse_response(xml.as_bytes()).expect("parse");
+        let a = &parsed.assertions[0];
+        assert_eq!(a.subject_name_id.as_deref(), Some("alice@example.com"));
+        assert_eq!(a.issuer, "https://idp.example");
+        assert_eq!(a.audience.as_deref(), Some("https://sp.example"));
+        assert_eq!(
+            a.not_on_or_after,
+            Some(Timestamp::from_micros(1_700_000_300 * 1_000_000))
+        );
+        assert_eq!(a.session_index.as_deref(), Some("sess1"));
+        assert!(a.attributes.is_empty(), "attributes: {:?}", a.attributes);
+    }
+
+    /// A second occurrence of a single-valued field inside one assertion is
+    /// refused rather than resolved last-write-wins.
+    #[test]
+    fn parse_rejects_duplicate_single_valued_fields() {
+        let cases = [
+            (
+                "second Subject",
+                "<saml:Subject><saml:NameID>ceo@example.com</saml:NameID></saml:Subject>",
+            ),
+            (
+                "second Issuer",
+                "<saml:Issuer>https://idp.example</saml:Issuer>",
+            ),
+            (
+                "second Conditions",
+                r#"<saml:Conditions NotOnOrAfter="2099-01-01T00:00:00Z"></saml:Conditions>"#,
+            ),
+            (
+                "same-name Attribute in a second statement",
+                concat!(
+                    r#"<saml:AttributeStatement><saml:Attribute Name="mail">"#,
+                    "<saml:AttributeValue>a@example.com</saml:AttributeValue></saml:Attribute>",
+                    r#"</saml:AttributeStatement><saml:AttributeStatement><saml:Attribute Name="mail">"#,
+                    "<saml:AttributeValue>b@example.com</saml:AttributeValue></saml:Attribute>",
+                    "</saml:AttributeStatement>",
+                ),
+            ),
+        ];
+        for (case, extra) in cases {
+            let xml = response_with_assertion_tail(extra);
+            let err = parse_response(xml.as_bytes())
+                .err()
+                .unwrap_or_else(|| panic!("{case}: must be rejected"));
+            assert!(
+                matches!(&err, IdentityError::Saml(SamlError::Parse { reason }) if reason.contains("duplicate")),
+                "{case}: wrong error: {err:?}"
+            );
+        }
+    }
+
+    /// Two `<NameID>` elements inside the one `<Subject>` are refused.
+    #[test]
+    fn parse_rejects_duplicate_subject_name_id() {
+        let xml = build_response_xml(&sample_builder()).replacen(
+            "</saml:NameID>",
+            "</saml:NameID><saml:NameID>ceo@example.com</saml:NameID>",
+            1,
+        );
+        let err = parse_response(xml.as_bytes())
+            .expect_err("two NameIDs in one Subject must be rejected");
+        assert!(
+            matches!(&err, IdentityError::Saml(SamlError::Parse { reason }) if reason.contains("NameID")),
+            "wrong error: {err:?}"
+        );
+    }
+
+    /// The same, one level up: a second Response-level `<Issuer>` or
+    /// `<Status>`.
+    #[test]
+    fn parse_rejects_duplicate_response_level_fields() {
+        let base = build_response_xml(&sample_builder());
+        let cases = [
+            (
+                "second Response Issuer",
+                "<samlp:Status>",
+                "<saml:Issuer>https://evil.example</saml:Issuer><samlp:Status>",
+            ),
+            (
+                "second Status",
+                "<saml:Assertion ",
+                concat!(
+                    "<samlp:Status><samlp:StatusCode ",
+                    r#"Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>"#,
+                    "<saml:Assertion ",
+                ),
+            ),
+        ];
+        for (case, anchor, replacement) in cases {
+            assert!(base.contains(anchor), "{case}: anchor missing");
+            let xml = base.replacen(anchor, replacement, 1);
+            let err = parse_response(xml.as_bytes())
+                .err()
+                .unwrap_or_else(|| panic!("{case}: must be rejected"));
+            assert!(
+                matches!(&err, IdentityError::Saml(SamlError::Parse { reason }) if reason.contains("duplicate")),
+                "{case}: wrong error: {err:?}"
+            );
+        }
+    }
+
+    /// A `<NameID>` that is not the Subject's — here the value of an
+    /// `eduPersonTargetedID`-style attribute — is not the subject. The old
+    /// parser took the last `<NameID>` anywhere in the assertion.
+    #[test]
+    fn parse_takes_the_subject_name_id_only_from_subject() {
+        let xml = response_with_assertion_tail(concat!(
+            r#"<saml:AttributeStatement><saml:Attribute Name="targeted-id">"#,
+            "<saml:AttributeValue><saml:NameID>opaque-123</saml:NameID></saml:AttributeValue>",
+            "</saml:Attribute></saml:AttributeStatement>",
+        ));
+        let parsed = parse_response(xml.as_bytes()).expect("parse");
+        assert_eq!(
+            parsed.assertions[0].subject_name_id.as_deref(),
+            Some("alice@example.com")
+        );
+    }
+
+    /// A second top-level element is a second document; its fields must not
+    /// be merged into the first.
+    #[test]
+    fn parse_rejects_a_second_root_element() {
+        let xml = format!(
+            "{}{}",
+            build_response_xml(&sample_builder()),
+            r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" ID="_evil"/>"#
+        );
+        let err = parse_response(xml.as_bytes()).expect_err("two root elements must be rejected");
+        assert!(
+            matches!(&err, IdentityError::Saml(SamlError::Parse { reason }) if reason.contains("root")),
+            "wrong error: {err:?}"
         );
     }
 

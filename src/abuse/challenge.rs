@@ -31,10 +31,17 @@
 //! default) all calls return [`ChallengeOutcome::Allow`].  The hard
 //! rate limiter (A-2) remains the primary defence.
 
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use crate::core::{rate_limit_key, ExpiringMap, LimiterClock};
+
+/// Most per-client challenge entries held at once (GA sweep 3, E-2).
+pub const CHALLENGE_CAPACITY: usize = 100_000;
+
+/// How often idle challenge entries are swept.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -103,21 +110,33 @@ impl IpEntry {
             challenge_until: None,
         }
     }
+
+    /// When the entry stops carrying information: the later of the end of its
+    /// counting window and the end of its challenge state.
+    fn expires_at(&self, window: Duration) -> Instant {
+        let window_end = self.window_start.plus(window);
+        self.challenge_until
+            .map_or(window_end, |until| until.max(window_end))
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IpChallengeStore
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Per-IP failed-authentication counter and challenge-state store (A-16).
+/// Per-client failed-authentication counter and challenge-state store (A-16).
 ///
 /// Shared via `Arc` across HTTP handlers so all login/registration surfaces
 /// see the same IP state.  The `Mutex` is held only for the duration of a
 /// hash-map lookup + counter update — no I/O inside the critical section.
+///
+/// Clients are counted under [`rate_limit_key`] (IPv6 per `/64`), and the
+/// entries live in a bounded [`ExpiringMap`]: an entry in challenge state
+/// expires last, so it is the last to be evicted at the cap.
 #[derive(Debug)]
 pub struct IpChallengeStore {
     config: ChallengeConfig,
-    entries: Mutex<HashMap<IpAddr, IpEntry>>,
+    entries: Mutex<ExpiringMap<IpAddr, IpEntry>>,
 }
 
 impl IpChallengeStore {
@@ -130,7 +149,7 @@ impl IpChallengeStore {
     pub fn disabled() -> Self {
         Self {
             config: ChallengeConfig::default(),
-            entries: Mutex::new(HashMap::new()),
+            entries: Mutex::new(ExpiringMap::new(CHALLENGE_CAPACITY, SWEEP_INTERVAL)),
         }
     }
 
@@ -139,7 +158,7 @@ impl IpChallengeStore {
     pub fn with_config(config: ChallengeConfig) -> Self {
         Self {
             config,
-            entries: Mutex::new(HashMap::new()),
+            entries: Mutex::new(ExpiringMap::new(CHALLENGE_CAPACITY, SWEEP_INTERVAL)),
         }
     }
 
@@ -148,17 +167,21 @@ impl IpChallengeStore {
     /// Call this at the start of every protected handler to gate the request
     /// before performing any work.
     pub fn check(&self, ip: IpAddr) -> ChallengeOutcome {
+        self.check_at(ip, Instant::now())
+    }
+
+    /// [`check`](Self::check) at an explicit time (tests drive the clock).
+    fn check_at(&self, ip: IpAddr, now: Instant) -> ChallengeOutcome {
         if self.config.threshold.is_none() {
             return ChallengeOutcome::Allow;
         }
 
-        let now = Instant::now();
         let map = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        if let Some(entry) = map.get(&ip) {
+        if let Some(entry) = map.get(&rate_limit_key(ip)) {
             if let Some(until) = entry.challenge_until {
                 if now < until {
                     return ChallengeOutcome::ChallengeRequired;
@@ -179,11 +202,15 @@ impl IpChallengeStore {
     /// counter advances regardless of whether the caller acted on the
     /// previous `check()`.
     pub fn record_failure(&self, ip: IpAddr) -> ChallengeOutcome {
+        self.record_failure_at(ip, Instant::now())
+    }
+
+    /// [`record_failure`](Self::record_failure) at an explicit time.
+    fn record_failure_at(&self, ip: IpAddr, now: Instant) -> ChallengeOutcome {
         let Some(threshold) = self.config.threshold else {
             return ChallengeOutcome::Allow;
         };
 
-        let now = Instant::now();
         let window = Duration::from_secs(self.config.window_secs);
         let ttl = Duration::from_secs(self.config.challenge_ttl_secs);
 
@@ -192,23 +219,29 @@ impl IpChallengeStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let entry = map.entry(ip).or_insert_with(|| IpEntry::new(now));
+        map.upsert(
+            rate_limit_key(ip),
+            now,
+            || IpEntry::new(now),
+            |entry| {
+                // Reset counter on window expiry.
+                if now.duration_since(entry.window_start) >= window {
+                    entry.count = 0;
+                    entry.window_start = now;
+                    entry.challenge_until = None;
+                }
 
-        // Reset counter on window expiry.
-        if now.duration_since(entry.window_start) >= window {
-            entry.count = 0;
-            entry.window_start = now;
-            entry.challenge_until = None;
-        }
+                entry.count = entry.count.saturating_add(1);
 
-        entry.count = entry.count.saturating_add(1);
-
-        if entry.count >= threshold {
-            entry.challenge_until = Some(now + ttl);
-            ChallengeOutcome::ChallengeRequired
-        } else {
-            ChallengeOutcome::Allow
-        }
+                let outcome = if entry.count >= threshold {
+                    entry.challenge_until = Some(now.plus(ttl));
+                    ChallengeOutcome::ChallengeRequired
+                } else {
+                    ChallengeOutcome::Allow
+                };
+                (outcome, entry.expires_at(window))
+            },
+        )
     }
 
     /// Clears challenge state and failure count for `ip`.
@@ -221,10 +254,8 @@ impl IpChallengeStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        if let Some(entry) = map.get_mut(&ip) {
-            entry.count = 0;
-            entry.challenge_until = None;
-        }
+        // A cleared entry carries nothing an absent one does not.
+        map.remove(&rate_limit_key(ip));
     }
 }
 
@@ -452,5 +483,72 @@ mod tests {
             "additional failures must keep IP in challenge state"
         );
         assert_eq!(store.check(ip(30)), ChallengeOutcome::ChallengeRequired);
+    }
+
+    // ── GA sweep 3 E-2: entries are swept once they carry nothing ───────────
+
+    #[test]
+    fn idle_entries_are_swept_but_challenge_state_is_kept() {
+        let store = IpChallengeStore::with_config(ChallengeConfig {
+            threshold: Some(3),
+            window_secs: 60,
+            challenge_ttl_secs: 1_800,
+        });
+        let t0 = Instant::now();
+        // One client crosses the threshold; 3 000 others fail once.
+        for _ in 0..3 {
+            store.record_failure_at(ip(1), t0);
+        }
+        for i in 0..3_000u32 {
+            store.record_failure_at(IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + i)), t0);
+        }
+        let held = || store.entries.lock().expect("challenge lock").len();
+        assert_eq!(held(), 3_001);
+
+        // Two minutes on, every plain counter's window has closed but the
+        // challenge (30 min) has not.
+        let later = t0 + Duration::from_secs(120);
+        store.record_failure_at(ip(2), later);
+        assert_eq!(
+            held(),
+            2,
+            "closed windows are dropped; the challenge is not"
+        );
+        assert_eq!(
+            store.check_at(ip(1), later),
+            ChallengeOutcome::ChallengeRequired
+        );
+    }
+
+    #[test]
+    fn entries_are_hard_capped() {
+        let store = store_with_threshold(5);
+        let t0 = Instant::now();
+        for i in 0..u32::try_from(CHALLENGE_CAPACITY + 2_000).expect("fits") {
+            store.record_failure_at(IpAddr::V4(Ipv4Addr::from(i)), t0);
+        }
+        assert!(store.entries.lock().expect("challenge lock").len() <= CHALLENGE_CAPACITY);
+    }
+
+    // ── GA sweep 3 E-3: an IPv6 /64 is one client ────────────────────────────
+
+    #[test]
+    fn two_addresses_in_one_slash64_share_challenge_state() {
+        let store = store_with_threshold(2);
+        store.record_failure("2001:db8:9:9::1".parse().expect("ip"));
+        assert_eq!(
+            store.record_failure("2001:db8:9:9::2".parse().expect("ip")),
+            ChallengeOutcome::ChallengeRequired,
+            "the second failure from the same /64 crosses the threshold"
+        );
+        assert_eq!(
+            store.check("2001:db8:9:9:ffff::".parse().expect("ip")),
+            ChallengeOutcome::ChallengeRequired
+        );
+        assert_eq!(
+            store.check("2001:db8:9:a::1".parse().expect("ip")),
+            ChallengeOutcome::Allow,
+            "another /64 is another client"
+        );
     }
 }

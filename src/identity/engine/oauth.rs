@@ -288,22 +288,50 @@ impl EmbeddedIdentityEngine {
         Ok(client)
     }
 
+    /// Ties a non-interactive authorization request to the caller's bearer
+    /// token (GA audit 3 B-1) and returns the token's session.
+    ///
+    /// The token must belong to the requesting user and name a session. A
+    /// token issued to a client (RFC 9068 `client_id`) may authorize that
+    /// client only; a token that names no client is a first-party session
+    /// token, and [`Self::authorize_inner`] allows it a first-party client
+    /// only, once the client is loaded. An unparseable claim fails closed.
+    fn bearer_session_for(
+        claims: &TokenClaims,
+        request: &AuthorizationRequest,
+    ) -> Result<SessionId, IdentityError> {
+        if Self::parse_user_id_claim(claims)? != request.user_id {
+            return Err(IdentityError::InvalidToken);
+        }
+        if let Some(raw) = claims.client_id() {
+            if raw.parse::<ClientId>().ok().as_ref() != Some(&request.client_id) {
+                return Err(IdentityError::ClientMismatch);
+            }
+        }
+        claims
+            .sid
+            .parse::<SessionId>()
+            .map_err(|_| IdentityError::InvalidToken)
+    }
+
     /// Issues an authorization code.
     ///
-    /// `bearer_session` is set by the non-interactive surfaces (JSON and gRPC
-    /// `Authorize`) to the session behind the caller's bearer token. They
-    /// cannot show a consent screen or a factor challenge, so they may issue
+    /// `bearer` is set by the non-interactive surfaces (JSON and gRPC
+    /// `Authorize`) to the validated claims of the caller's bearer token.
+    /// They cannot show a consent screen or a factor challenge, so they may
+    /// issue only for the client the token was issued to — or, for a
+    /// first-party session token, a first-party client (GA audit 3 B-1) —
     /// only when the client does not require consent or a recorded consent
     /// covers the requested scopes (GA audit B2), and — for a client or role
-    /// that demands a second factor — only when that session proved one
-    /// (GA audit B5). The browser flow passes `None`: its gates
+    /// that demands a second factor — only when the token's session proved
+    /// one (GA audit B5). The browser flow passes `None`: its gates
     /// (`authorize_gate::mfa_use_gate`, `consent_gate`) have already run.
     #[allow(clippy::too_many_lines)]
     pub(super) fn authorize_inner(
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
-        bearer_session: Option<&SessionId>,
+        bearer: Option<&TokenClaims>,
     ) -> Result<AuthorizationResponse, IdentityError> {
         use crate::identity::oidc::{CodeChallengeMethod as CCM, JarmClaims};
         use crate::identity::types::FapiProfile;
@@ -311,6 +339,17 @@ impl EmbeddedIdentityEngine {
         // Retained for potential future use; FAPI Advanced JAR enforcement
         // moved to push_authorization_request where the JTI is not yet consumed.
         let _jar_was_present = request.request.is_some();
+
+        // 0a. The bearer token of a non-interactive request (GA audit 3 B-1):
+        //     it must be the requesting user's, and a token issued to a client
+        //     may mint a code for that client only. Without this a third-party
+        //     app's token minted a code for any first-party public client —
+        //     no consent needed — and redeemed it for that client's tokens
+        //     carrying the user's full permissions. Checked before JAR, the
+        //     nonce sentinel or any other side effect.
+        let bearer_session = bearer
+            .map(|claims| Self::bearer_session_for(claims, request))
+            .transpose()?;
 
         // 0. JAR (RFC 9101): if a signed request object is present, verify it
         //    and use its claims to override the outer query parameters. This must
@@ -422,6 +461,15 @@ impl EmbeddedIdentityEngine {
         // 3a. The client must be registered for the grant (GA audit M7).
         if !client.allows_grant_type(crate::identity::oidc::GRANT_AUTHORIZATION_CODE) {
             return Err(IdentityError::UnsupportedGrantType);
+        }
+        // 3a'. A first-party session token names no client; it may authorize a
+        //      first-party client only (GA audit 3 B-1). A code for a
+        //      third-party client comes from that client's own token or the
+        //      browser consent flow, never from whichever token leaked.
+        if bearer.is_some_and(|claims| claims.client_id().is_none())
+            && client.trust_level() != crate::identity::oidc::ClientTrustLevel::FirstParty
+        {
+            return Err(IdentityError::ClientMismatch);
         }
 
         // 3b. FAPI 2.0: PAR is mandatory for FAPI2 clients (RFC 9126 §2.4).
@@ -582,7 +630,7 @@ impl EmbeddedIdentityEngine {
         //      browser `mfa_use_gate`'s rule): a client or role that demands a
         //      second factor needs a bearer session that proved one. There is
         //      no challenge to offer here, so an unproved session is refused.
-        if let Some(session_id) = bearer_session {
+        if let Some(session_id) = bearer_session.as_ref() {
             let proved = self
                 .get_session(realm_id, session_id)?
                 .filter(|s| s.user_id() == &request.user_id)
@@ -3350,38 +3398,27 @@ impl EmbeddedIdentityEngine {
             .map(|c| c.access_token_authorization())
             .unwrap_or(AccessTokenAuthorization::Embedded);
 
-        let (live_permissions, live_roles, live_groups) =
-            if authz_mode != AccessTokenAuthorization::Embedded {
-                // Parse user_id from sub — client-credential tokens use a client
-                // UUID as sub, which won't parse as a UserId; they get no live data.
-                let sub_str = &claims.sub;
-                let user_uuid_str = sub_str.strip_prefix("user_").unwrap_or(sub_str);
-                if let Ok(user_uuid) = uuid::Uuid::parse_str(user_uuid_str) {
-                    let user_id = crate::core::UserId::new(user_uuid);
-                    let org_id: Option<crate::core::OrganizationId> = self.active_org_context(
-                        realm_id,
-                        claims.oid.as_deref().and_then(|o| {
-                            uuid::Uuid::parse_str(o.strip_prefix("org_").unwrap_or(o))
-                                .ok()
-                                .map(crate::core::OrganizationId::new)
-                        }),
-                    );
-                    let resolved_live = self
-                        .rbac
-                        .resolve_permissions(&user_id, realm_id, org_id.as_ref(), None)
-                        .unwrap_or_default();
-                    let perms: Vec<String> = resolved_live
-                        .permissions
-                        .iter()
-                        .map(|p| p.as_str().to_string())
-                        .collect();
-                    (perms, resolved_live.roles, resolved_live.groups)
-                } else {
-                    (vec![], vec![], vec![])
-                }
-            } else {
-                (vec![], vec![], vec![])
-            };
+        // The live data is the TOKEN's authority, not the user's (GA audit 3
+        // B-2 / C-8): the claim profile of the client the token was issued
+        // to (a third-party client's token gets no roles, groups or
+        // permissions by default), narrowed by every permission-bearing scope
+        // and, for a delegated token, capped at what was delegated. A
+        // client-credentials token has no user and gets nothing; a resolution
+        // error releases nothing.
+        let live = if authz_mode == AccessTokenAuthorization::Embedded {
+            crate::identity::oidc::LiveTokenAuthority::default()
+        } else {
+            let org_id: Option<crate::core::OrganizationId> = self.active_org_context(
+                realm_id,
+                claims.oid.as_deref().and_then(|o| {
+                    uuid::Uuid::parse_str(o.strip_prefix("org_").unwrap_or(o))
+                        .ok()
+                        .map(crate::core::OrganizationId::new)
+                }),
+            );
+            self.live_token_authority_inner(realm_id, &claims, org_id.as_ref(), None)
+                .unwrap_or_default()
+        };
 
         // 7. Active — return metadata
         Ok(IntrospectionResponse {
@@ -3396,9 +3433,9 @@ impl EmbeddedIdentityEngine {
             iss: Some(claims.iss),
             aud: Some(claims.aud.base().to_string()),
             mode: Some(authz_mode),
-            permissions: live_permissions,
-            roles: live_roles,
-            groups: live_groups,
+            permissions: live.permissions,
+            roles: live.roles,
+            groups: live.groups,
         })
     }
 
@@ -3517,73 +3554,34 @@ impl EmbeddedIdentityEngine {
         request: &crate::identity::oidc::DecidePermissionRequest,
     ) -> Result<crate::identity::oidc::DecidePermissionResponse, IdentityError> {
         use crate::identity::oidc::DecidePermissionResponse;
-        use crate::rbac::Permission;
+        const DENY: DecidePermissionResponse = DecidePermissionResponse { allowed: false };
 
-        // Validate signature + realm binding — fail-closed on any error.
-        let Ok(claims) = self.verify_token_signature_for_realm(realm_id, &request.token) else {
-            return Ok(DecidePermissionResponse { allowed: false });
+        // The token must pass everything `validate_token` checks — signature,
+        // realm, audience, species, expiry and `nbf`, JTI revocation, session
+        // and its owner — including the two it used to skip here: the
+        // audience cutoff of a removed protected resource and the DPoP key
+        // blocklist (GA audit 3 C-9). A decision is an acceptance of the
+        // token; it must never accept one that `validate_token` refuses.
+        let Ok(claims) = self.validate_token(realm_id, &request.token) else {
+            return Ok(DENY);
         };
-        if claims.tid.parse::<RealmId>().ok().as_ref() != Some(realm_id) {
-            return Ok(DecidePermissionResponse { allowed: false });
-        }
-        if !claims.aud.contains(&self.config.token.audience) {
-            return Ok(DecidePermissionResponse { allowed: false });
-        }
 
-        // Token-species guard: authorization decisions are defined for access
-        // tokens only. `introspect_token_inner` and `userinfo_inner` both
-        // refuse a non-access token here; without the same check a refresh
-        // token — realm-signed, same `sub`/`aud` — that the token endpoint
-        // refuses would return a live `allowed: true` (audit 2026-08-28
-        // §4.2#1, §4.19#9). This also refuses the gRPC `Decide` RPC's
-        // refresh-token replay, since it routes through here.
-        if claims.token_type != "access" {
-            return Ok(DecidePermissionResponse { allowed: false });
-        }
-
-        // Expiry check. `nbf` joins it: RFC 7519 §4.1.5 says a token MUST NOT
-        // be accepted before its not-before time, and an authorization
-        // decision is an acceptance (audit 2026-08-28 §4.2#6, §4.19#10).
-        let now_secs = self.clock.now().as_micros() / 1_000_000;
-        if now_secs >= claims.exp || claims.iat > now_secs + CLOCK_SKEW_SECS {
-            return Ok(DecidePermissionResponse { allowed: false });
-        }
-        if claims
-            .nbf
-            .is_some_and(|nbf| now_secs < nbf - CLOCK_SKEW_SECS)
-        {
-            return Ok(DecidePermissionResponse { allowed: false });
-        }
-
-        // JTI revocation check on BOTH branches — a session-bound delegation
-        // token's `jti` is projected into the blocklist on revocation, and
-        // checking it only for `sid == "none"` left a revoked delegation
-        // returning `allowed: true` (audit 2026-08-28 §4.19#5).
-        if self.is_token_jti_revoked(realm_id, &claims) {
-            return Ok(DecidePermissionResponse { allowed: false });
-        }
-        if claims.sid != "none" {
-            let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
-            if let Ok(uuid) = uuid::Uuid::parse_str(sid_str) {
-                if self.get_session(realm_id, &SessionId::new(uuid))?.is_none() {
-                    return Ok(DecidePermissionResponse { allowed: false });
-                }
+        // RFC 8707 audience check (AUTHORIZATION.md §7.4.3): a resource
+        // server that names itself is answered only for a token minted for
+        // it. Dropping `resource` let a token for server A be replayed at
+        // server B (GA audit 3 C-8).
+        if let Some(resource) = request.resource.as_deref() {
+            let Ok(resource) = Uri::try_from(resource.to_string()) else {
+                return Ok(DENY);
+            };
+            if !claims.aud.contains(resource.as_str()) {
+                return Ok(DENY);
             }
         }
 
-        // Parse user from sub — client-credential tokens are never allowed
-        // through the decision endpoint (no user context to check against).
-        let sub_str = &claims.sub;
-        let user_uuid_str = sub_str.strip_prefix("user_").unwrap_or(sub_str);
-        let user_uuid = match uuid::Uuid::parse_str(user_uuid_str) {
-            Ok(u) => u,
-            Err(_) => return Ok(DecidePermissionResponse { allowed: false }),
-        };
-        let user_id = crate::core::UserId::new(user_uuid);
-
         // Validate requested permission string.
-        let Ok(permission) = Permission::new(&request.permission) else {
-            return Ok(DecidePermissionResponse { allowed: false });
+        let Ok(permission) = crate::rbac::Permission::new(&request.permission) else {
+            return Ok(DENY);
         };
 
         // Parse optional org scoping.
@@ -3596,21 +3594,133 @@ impl EmbeddedIdentityEngine {
             }),
         );
 
-        // Apply scope narrowing from the token if present.
-        let scope_str = claims.scope.as_deref();
-        let scope_single = scope_str.filter(|s| s.split_whitespace().count() == 1);
-
-        let resolved =
-            match self
-                .rbac
-                .resolve_permissions(&user_id, realm_id, org_id.as_ref(), scope_single)
-            {
-                Ok(r) => r,
-                Err(_) => return Ok(DecidePermissionResponse { allowed: false }),
-            };
-
+        // The TOKEN's live authority, not the user's (GA audit 3 B-2 / C-8):
+        // the token client's claim profile, every permission-bearing scope,
+        // and the delegated cap of an `act` token. A client-credentials token
+        // has no user and resolves to nothing. Any resolution error denies.
+        let Ok(authority) =
+            self.live_token_authority_inner(realm_id, &claims, org_id.as_ref(), None)
+        else {
+            return Ok(DENY);
+        };
         Ok(DecidePermissionResponse {
-            allowed: resolved.permissions.contains(&permission),
+            allowed: authority
+                .permissions
+                .iter()
+                .any(|p| p.as_str() == permission.as_str()),
+        })
+    }
+
+    /// Engine half of [`IdentityEngine::live_token_authority`] (GA audit 3
+    /// B-2 / C-8): what an `Embedded` token issued to the same client for the
+    /// same grant would carry, resolved now. `claims` are already validated.
+    pub(super) fn live_token_authority_inner(
+        &self,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+        org_id: Option<&crate::core::OrganizationId>,
+        narrow_scope: Option<&str>,
+    ) -> Result<crate::identity::oidc::LiveTokenAuthority, IdentityError> {
+        use crate::identity::oidc::LiveTokenAuthority;
+
+        let rbac_err = |e: RbacError| match e {
+            RbacError::TokenSizeExceeded {
+                limit,
+                limit_value,
+                actual,
+            } => IdentityError::TokenTooLarge {
+                limit: format!("access_token_{limit}"),
+                limit_value,
+                actual,
+            },
+            e => IdentityError::Internal {
+                reason: format!("rbac resolve failed: {e}"),
+            },
+        };
+
+        // A token whose subject is not a user of this realm — a
+        // client-credentials token, or a user deleted since — holds no user
+        // authority.
+        let Ok(user_id) = Self::parse_user_id_claim(claims) else {
+            return Ok(LiveTokenAuthority::default());
+        };
+        let Some(user) = self.get_user(realm_id, &user_id)? else {
+            return Ok(LiveTokenAuthority::default());
+        };
+
+        // The client the token was issued to selects the claim profile, as it
+        // did at issuance. A token that names none is a first-party session
+        // token, judged as the issuing path's first-party sentinel. A claim
+        // naming an unparseable or unknown client fails closed.
+        let issued_to = match claims.client_id() {
+            None => None,
+            Some(raw) => {
+                let Ok(client_id) = raw.parse::<ClientId>() else {
+                    return Ok(LiveTokenAuthority::default());
+                };
+                match self.get_client(realm_id, &client_id)? {
+                    Some(client) => Some(client),
+                    None => return Ok(LiveTokenAuthority::default()),
+                }
+            }
+        };
+        let sentinel = OAuthClient::new(
+            ClientId::generate(),
+            "session".to_string(),
+            Vec::new(),
+            self.clock.now(),
+        );
+        let client = issued_to.as_ref().unwrap_or(&sentinel);
+
+        // Every permission-bearing scope of the token narrows (OIDC scopes and
+        // scopes the realm registry does not know neither narrow nor widen);
+        // the caller's own filter (`/v1/me/permissions?scope=`) can only
+        // narrow further.
+        let token_scopes: Vec<String> = claims
+            .scope
+            .as_deref()
+            .map(|s| s.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default();
+        let mut resolved = self
+            .rbac
+            .resolve_for_granted_scopes(&user_id, realm_id, org_id, &token_scopes)
+            .map_err(rbac_err)?;
+        if let Some(narrow) = narrow_scope {
+            let admitted: BTreeSet<crate::rbac::Permission> = self
+                .rbac
+                .resolve_permissions(&user_id, realm_id, org_id, Some(narrow))
+                .map_err(rbac_err)?
+                .permissions
+                .into_iter()
+                .collect();
+            resolved.permissions.retain(|p| admitted.contains(p));
+        }
+
+        let granted_scopes: BTreeSet<String> = token_scopes.into_iter().collect();
+        let (mut roles, mut groups, mut permissions, _custom) = self.apply_claim_profile(
+            realm_id,
+            &user,
+            client,
+            &resolved,
+            &granted_scopes,
+            claims.oid.as_deref(),
+            ClaimTarget::AccessToken,
+        );
+
+        // A delegated token (RFC 8693 `act`) carries the intersection fixed
+        // at exchange (AUTHORIZATION.md §16): the actor never gains more than
+        // it was delegated, and roles/groups describe the subject, not the
+        // delegation — exactly as the exchanged token itself is minted.
+        if claims.act.is_some() {
+            permissions.retain(|p| claims.permissions.contains(p));
+            roles.clear();
+            groups.clear();
+        }
+
+        Ok(LiveTokenAuthority {
+            roles,
+            groups,
+            permissions,
         })
     }
 
@@ -3771,13 +3881,21 @@ impl EmbeddedIdentityEngine {
             ClaimTarget::UserInfo,
         );
 
+        let email = custom
+            .get("email")
+            .and_then(|value| value.as_str().map(str::to_string));
+        // The account's own verification state, released with the address it
+        // describes (AUTHZ_EXPANSION "Verification attestation": always
+        // sourced from canonical user state). This asserted `true` for every
+        // token carrying the `email` scope, so an operator-created, SCIM or
+        // federated account's unproven address reached relying parties as
+        // verified (GA audit round 3, B-8).
+        let email_verified = email.as_ref().map(|_| user.email_verified());
         Ok(crate::identity::oidc::UserInfoResponse {
             // `claims` is an `Arc<TokenClaims>` (HEA-1771); clone the owned field.
             sub: claims.sub.clone(),
-            email: custom
-                .get("email")
-                .and_then(|value| value.as_str().map(str::to_string)),
-            email_verified: scope_set.contains("email").then_some(true),
+            email,
+            email_verified,
             name: custom
                 .get("name")
                 .and_then(|value| value.as_str().map(str::to_string)),
