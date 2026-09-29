@@ -57,8 +57,8 @@ fn assertion(
 ) -> String {
     let now = clock.now().as_micros() / 1_000_000;
     key.issue_assertion_jwt(&JwtAssertionClaims {
-        iss: client.to_string(),
-        sub: client.to_string(),
+        iss: client.as_uuid().to_string(),
+        sub: client.as_uuid().to_string(),
         aud,
         exp: now + 60,
         jti: Some(uuid::Uuid::new_v4().to_string()),

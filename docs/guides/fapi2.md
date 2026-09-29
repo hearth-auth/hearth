@@ -323,7 +323,7 @@ with open("client.key", "rb") as f:
     private_key = load_pem_private_key(f.read(), password=None)
 
 now = int(time.time())
-client_id = "client:<your-client-uuid>"
+client_id = "<your-client-uuid>"  # exactly as registration returned it (no prefix)
 issuer = "https://auth.example.com/realms/banking"
 
 jar = jwt.encode(
@@ -503,7 +503,8 @@ curl -s -X POST "$ISSUER/realms/$REALM/token" \
 `client_assertion` is a short-lived JWT signed with the client private key (separate from the
 DPoP proof). See RFC 7523 for the assertion structure. Sign it with a key from the client's
 registered JWKS — PS256, ES256 or EdDSA, with the key's `kid` in the JWS header — and set
-`iss` = `sub` = the client id, `aud` = the realm issuer, a fresh `jti` and `exp` at most five
+`iss` = `sub` = the client id exactly as registration returned it (the bare UUID you send as
+`client_id`), `aud` = the realm issuer, a fresh `jti` and `exp` at most five
 minutes ahead. A FAPI 2.0 client is never public: without an assertion every endpoint answers
 `401 invalid_client`, including the `refresh_token` grant, which takes the same
 `client_assertion` fields. A client registered with only a `jwks_uri` cannot authenticate

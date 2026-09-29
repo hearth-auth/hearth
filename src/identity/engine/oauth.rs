@@ -38,6 +38,19 @@ use super::CLIENT_TOKEN_CUTOFF_PREFIX;
 use super::CLOCK_SKEW_SECS;
 use super::{audience_cutoff_hash_hex, AUDIENCE_CUTOFF_HASH_HEX_LEN, AUDIENCE_TOKEN_CUTOFF_PREFIX};
 
+/// The `client_id` exactly as the client knows it: the bare UUID that
+/// registration returns and the client sends as its `client_id` parameter.
+///
+/// A client-authored JWT names the client by this value — a client
+/// assertion's `iss` and `sub` (RFC 7523 §3, OIDC Core §9), a request
+/// object's `iss` and `client_id` (RFC 9101 §4). [`ClientId`]'s `Display`
+/// form (`client_<uuid>`) is Hearth's internal subject form and is never
+/// accepted there (GA audit 3 round 4). The comparison is exact: no other
+/// spelling of the same UUID (upper case, braces, `urn:uuid:`) matches.
+fn issued_client_id(client_id: &ClientId) -> String {
+    client_id.as_uuid().to_string()
+}
+
 impl EmbeddedIdentityEngine {
     // ===== Legacy OIDC RSA key material =====
 
@@ -359,14 +372,7 @@ impl EmbeddedIdentityEngine {
         let request = if let Some(ref jar_jwt) = request.request {
             let jar = self.verify_jar(realm_id, &request.client_id, jar_jwt)?;
 
-            // JAR client_id claim must match the outer client_id (RFC 9101 §4).
-            if let Some(ref jar_cid) = jar.client_id {
-                if jar_cid != &request.client_id.to_string() {
-                    return Err(IdentityError::InvalidJar {
-                        reason: "client_id in JAR claims does not match the request".to_string(),
-                    });
-                }
-            }
+            // `verify_jar` checked the JAR's `iss` and `client_id` (RFC 9101 §4).
 
             let ccm = jar.code_challenge_method.as_deref().and_then(|m| {
                 if m == "S256" {
@@ -1764,14 +1770,14 @@ impl EmbeddedIdentityEngine {
         let now_secs = now.as_micros() / 1_000_000;
 
         // iss MUST equal the client_id (RFC 7523 §3 requirement)
-        if assertion_claims.iss != request.client_id.to_string() {
+        if assertion_claims.iss != issued_client_id(&request.client_id) {
             return Err(IdentityError::JwtBearerAssertionInvalid {
                 reason: "iss claim must equal the client_id".to_string(),
             });
         }
 
         // sub MUST equal client_id (RFC 7523 §3 / OIDC Core §9)
-        if assertion_claims.sub != request.client_id.to_string() {
+        if assertion_claims.sub != issued_client_id(&request.client_id) {
             return Err(IdentityError::JwtBearerAssertionInvalid {
                 reason: "sub claim must equal the client_id".to_string(),
             });
@@ -1820,7 +1826,10 @@ impl EmbeddedIdentityEngine {
         let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
         let scope = request.scope.clone();
         let access_claims = TokenClaims {
-            sub: assertion_claims.sub,
+            // Hearth's own subject form for a client, as client_credentials
+            // mints it — not the assertion's `sub`, which is the issued
+            // client_id (the bare UUID).
+            sub: request.client_id.to_string(),
             iss: self.realm_issuer_url(realm_id),
             aud: Audience::single(self.config.token.audience.clone()),
             exp: iat + self.config.token.access_token_ttl_secs,
@@ -1894,14 +1903,14 @@ impl EmbeddedIdentityEngine {
         let claims = Self::verify_client_assertion_signature(&client, assertion)?;
 
         // iss MUST equal client_id (RFC 7523 §3)
-        if claims.iss != client_id.to_string() {
+        if claims.iss != issued_client_id(client_id) {
             return Err(IdentityError::InvalidClientAssertion {
                 reason: "iss claim must equal the client_id".to_string(),
             });
         }
 
         // sub MUST equal client_id (RFC 7523 §3 / OIDC Core §9)
-        if claims.sub != client_id.to_string() {
+        if claims.sub != issued_client_id(client_id) {
             return Err(IdentityError::InvalidClientAssertion {
                 reason: "sub claim must equal the client_id".to_string(),
             });
@@ -2147,10 +2156,19 @@ impl EmbeddedIdentityEngine {
                 reason: "invalid claims payload".to_string(),
             })?;
 
-        // 7. Validate iss == client_id.
-        if claims.iss != client_id.to_string() {
+        // 7. Validate iss == client_id, and a `client_id` claim, when present,
+        //    names the same client (RFC 9101 §4). Both in the issued form.
+        //    Every consumer of a request object (authorize, PAR, the browser
+        //    /authorize) relies on this one check.
+        let issued = issued_client_id(client_id);
+        if claims.iss != issued {
             return Err(IdentityError::InvalidJar {
                 reason: "iss claim must equal the client_id".to_string(),
+            });
+        }
+        if claims.client_id.as_deref().is_some_and(|cid| cid != issued) {
+            return Err(IdentityError::InvalidJar {
+                reason: "client_id in JAR claims does not match the request".to_string(),
             });
         }
 
@@ -2814,13 +2832,7 @@ impl EmbeddedIdentityEngine {
         ) = if let Some(ref jar_jwt) = request.request {
             let jar = self.verify_jar(realm_id, &request.client_id, jar_jwt)?;
             // JAR client_id claim must match the outer client_id.
-            if let Some(ref jar_cid) = jar.client_id {
-                if jar_cid != &request.client_id.to_string() {
-                    return Err(IdentityError::InvalidJar {
-                        reason: "client_id in JAR claims does not match the request".to_string(),
-                    });
-                }
-            }
+            // `verify_jar` checked the JAR's `iss` and `client_id` (RFC 9101 §4).
             let ccm = jar.code_challenge_method.as_deref().and_then(|m| {
                 if m == "S256" {
                     Some(CodeChallengeMethod::S256)

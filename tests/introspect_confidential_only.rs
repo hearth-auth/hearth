@@ -321,8 +321,8 @@ fn now_secs() -> i64 {
 fn assertion(key: &SigningKey, client_id: &ClientId, audience: &str) -> String {
     let now = now_secs();
     key.issue_assertion_jwt(&JwtAssertionClaims {
-        iss: client_id.to_string(),
-        sub: client_id.to_string(),
+        iss: client_id.as_uuid().to_string(),
+        sub: client_id.as_uuid().to_string(),
         aud: Audience::single(audience.to_string()),
         exp: now + 60,
         jti: Some(uuid::Uuid::new_v4().to_string()),

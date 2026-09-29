@@ -197,12 +197,10 @@ echo "    client_id=${CLIENT_ID}"
 ISSUER=$(curl -sf "${BASE}/realms/dev-realm/.well-known/openid-configuration" | jq -r .issuer)
 TOKEN_URL="${BASE}/realms/dev-realm/token"
 
-# Prints a fresh single-use private_key_jwt client assertion.
-# NOTE: Hearth currently requires `iss`/`sub` to be the PREFIXED form
-# `client_<client_id>`; the bare client_id the admin API returns (which RFC 7523
-# §3 says to use) is refused as HEARTH_INVALID_CLIENT_ASSERTION.
+# Prints a fresh single-use private_key_jwt client assertion: `iss` = `sub` =
+# the client_id exactly as registration returned it (RFC 7523 §3).
 client_assertion() {
-    node - "$CLIENT_KEY_FILE" "client_${CLIENT_ID}" "$ISSUER" <<'JSEOF'
+    node - "$CLIENT_KEY_FILE" "$CLIENT_ID" "$ISSUER" <<'JSEOF'
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const [keyFile, iss, aud] = process.argv.slice(2);
