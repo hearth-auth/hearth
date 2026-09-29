@@ -1526,15 +1526,27 @@ fn verify_email_impl(
     };
     let product_name = state.product_name.clone();
     let logo_url = state.logo_url.clone();
+    // A pending federated account keeps its federated link only when the
+    // browser that performed the federated login completes this (GA audit
+    // round 3, G-3).
+    let origin = link_token::verification_origin(&state.cookie_secret, headers, &token);
 
     link_token::mark_spent(
-        match state.identity.verify_email_token(realm.id(), &token) {
+        match state
+            .identity
+            .verify_email_token_from(realm.id(), &token, origin)
+        {
             Ok(_) => {
                 let login_url = format!("{action_prefix}/login");
                 let mut tmpl = VerifyOkTemplate::new(login_url, product_name, logo_url);
                 tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
                 tmpl.inline_theme_css = state.inline_theme_css();
-                render(&tmpl)
+                let mut response = render(&tmpl);
+                append_cookie(
+                    &mut response,
+                    &link_token::clear_federated_origin_cookie(state.is_secure_request(headers)),
+                );
+                response
             }
             Err(IdentityError::VerificationTokenInvalid) => {
                 let tmpl = VerifyInvalidTemplate::new(
@@ -6174,7 +6186,13 @@ pub async fn device_approve_submit(
         return sms_response;
     }
 
-    finish_device_approval(&state, &session.realm_id, &session.user_id, &code)
+    finish_device_approval(
+        &state,
+        &session.realm_id,
+        &session.user_id,
+        &code,
+        session.mfa_proof,
+    )
 }
 
 /// Approves device user code `code` for `user_id` once every gate has passed,
@@ -6188,12 +6206,18 @@ pub(super) fn finish_device_approval(
     realm: &RealmId,
     user_id: &crate::core::UserId,
     code: &str,
+    mfa_proof: MfaProof,
 ) -> Response {
     let guard_key = format!("{}:{}", realm.as_uuid(), user_id.as_uuid());
     if let Err(resp) = record_device_consent(state, realm, user_id, code) {
         return resp;
     }
-    match state.identity.approve_device(realm, code, user_id) {
+    // The device's token session records what the approving session proved
+    // (GA audit round 3, D-7).
+    match state
+        .identity
+        .approve_device_from_session(realm, code, user_id, mfa_proof)
+    {
         Ok(()) => {
             state.device_approval_guard.record_success(&guard_key);
             Redirect::to("/ui/device?flash=approved").into_response()

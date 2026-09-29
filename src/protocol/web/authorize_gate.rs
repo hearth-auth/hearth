@@ -38,8 +38,8 @@ use axum::response::{IntoResponse, Redirect, Response};
 use crate::core::{ClientId, RealmId, Timestamp, UserId};
 use crate::identity::ra_token::OidcParams;
 use crate::identity::{
-    canonicalize_scopes, AuthorizationRequest, CodeChallengeMethod, PendingAuthorizationRequest,
-    ResponseMode,
+    canonicalize_scopes, AuthorizationRequest, CodeChallengeMethod, MfaProof,
+    PendingAuthorizationRequest, ResponseMode,
 };
 
 use super::handlers::append_cookie;
@@ -79,6 +79,11 @@ pub(super) struct AuthorizeParams {
     pub resource: Option<String>,
     /// Whether the request came through PAR (RFC 9126).
     pub via_par: bool,
+    /// What the browser session authorizing the request proved about a
+    /// second factor. The code records it, and the token session its exchange
+    /// opens proves exactly that (GA audit round 3, D-7). Set from the
+    /// session at every entry point; `None` otherwise.
+    pub mfa_proof: MfaProof,
 }
 
 impl AuthorizeParams {
@@ -96,6 +101,7 @@ impl AuthorizeParams {
             response_type: "code".to_string(),
             response_mode: self.response_mode.as_ref().map(|m| m.as_str().to_string()),
             prompt: self.prompt.clone(),
+            mfa_proof: self.mfa_proof,
             resource: self.resource.clone(),
             via_par: self.via_par,
         }
@@ -119,6 +125,7 @@ impl AuthorizeParams {
             response_mode: parse_response_mode(p.response_mode.as_deref())?,
             resource: p.resource.clone(),
             via_par: p.via_par,
+            mfa_proof: p.mfa_proof,
         })
     }
 }
@@ -509,7 +516,10 @@ pub(super) fn issue_code(
         request: None,
         via_par: params.via_par,
     };
-    match state.identity.authorize(realm, &request) {
+    match state
+        .identity
+        .authorize_from_session(realm, &request, params.mfa_proof)
+    {
         Ok(resp) => {
             // 22.3 (audit 2026-08-28 §4.3#5): redirect to the URI the engine
             // validated and bound the code to, never to a caller-held copy.
@@ -545,6 +555,7 @@ mod tests {
             response_mode: Some(ResponseMode::Fragment),
             resource: Some("https://api.example.com".to_string()),
             via_par: true,
+            mfa_proof: MfaProof::Proved,
         }
     }
 

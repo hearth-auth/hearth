@@ -71,6 +71,11 @@ pub struct OidcParams {
     /// actions applies the same prompt semantics as a direct request.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub prompt: String,
+    /// What the browser session authorizing the request proved about a
+    /// second factor; the code issued on resume carries it into the token
+    /// session (GA audit round 3, D-7).
+    #[serde(default)]
+    pub mfa_proof: MfaProof,
     /// RFC 8707 resource indicator from a verified request object (JAR) or
     /// PAR entry. Preserved so the code issued on resume is bound to the
     /// audience the client asked for.
@@ -117,9 +122,9 @@ pub struct RaClaims {
     /// it (GA audit round 3, D-1). The flow used to resume with
     /// `MfaProof::Inherited`, which satisfies both gates, so any pending
     /// action turned a TOTP code, a UV-less passkey or the password alone into
-    /// a session the same login was refused without the detour. Never
-    /// `Inherited`: [`generate_browser`] refuses to carry it. Unused on the
-    /// OIDC path, which resumes from the session the user already holds.
+    /// a session the same login was refused without the detour. Unused on
+    /// the OIDC path, which resumes from the session the user already holds
+    /// and carries its proof in [`OidcParams::mfa_proof`].
     #[serde(default)]
     pub mfa_proof: MfaProof,
     /// Identifier of the required-action flow this token belongs to, kept by
@@ -216,8 +221,6 @@ pub fn generate(
 /// session cookie and redirecting to `return_to` (or `/ui` when `None`).
 /// `mfa_proof` is what the authentication that started the flow proved; the
 /// session created at the end records it (see [`RaClaims::mfa_proof`]).
-/// `MfaProof::Inherited` is recorded as `MfaProof::None`: it names a proof
-/// made by some earlier authentication, which this flow cannot vouch for.
 /// `flow` and `generation` are [`RaClaims::flow`] and
 /// [`RaClaims::generation`].
 #[allow(clippy::too_many_arguments)]
@@ -241,10 +244,7 @@ pub fn generate_browser(
         pending_actions,
         oidc_params: None,
         browser_return_to: return_to,
-        mfa_proof: match mfa_proof {
-            MfaProof::Inherited => MfaProof::None,
-            proved => proved,
-        },
+        mfa_proof,
         flow,
         generation,
         iat,
@@ -402,6 +402,7 @@ mod tests {
             response_type: "code".to_string(),
             response_mode: None,
             prompt: String::new(),
+            mfa_proof: MfaProof::None,
             resource: None,
             via_par: false,
         }
@@ -613,15 +614,6 @@ mod tests {
         ] {
             assert_eq!(browser_claims(proof).mfa_proof, proof);
         }
-    }
-
-    #[test]
-    fn a_browser_token_never_carries_an_inherited_proof() {
-        assert_eq!(
-            browser_claims(MfaProof::Inherited).mfa_proof,
-            MfaProof::None,
-            "a proof made by some earlier authentication is not this login's"
-        );
     }
 
     #[test]

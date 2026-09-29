@@ -138,23 +138,6 @@ async fn create_session_accepts_a_proved_factor() {
         .expect("a proved second factor must open the session");
 }
 
-/// A session derived from an earlier authentication that already passed the
-/// gate — an authorization code, a device code, a completed required action —
-/// opens without re-proving the factor.
-#[tokio::test]
-async fn create_session_accepts_an_inherited_proof() {
-    let (h, realm, user) = mfa_realm_and_user("mfa-use-inherited").await;
-    enrol_totp(&h, &realm, user.id());
-
-    let ctx = SessionContext {
-        mfa_proof: MfaProof::Inherited,
-        ..SessionContext::default()
-    };
-    h.identity()
-        .create_session(realm.id(), user.id(), &ctx)
-        .expect("an inherited proof must open the session");
-}
-
 /// A realm that does not require MFA is untouched by the gate.
 #[tokio::test]
 async fn create_session_is_unchanged_when_the_realm_does_not_require_mfa() {

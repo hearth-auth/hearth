@@ -25,8 +25,7 @@ use crate::identity::oidc::{
 use crate::identity::tokens::{self, Audience, LogoutTokenClaims, TokenClaims};
 use crate::identity::types::{
     BulkResult, ConsentListEntry, ConsentRecord, CreateUserRequest, DelegationGrantEntry,
-    PendingAuthorizationRequest, SessionContext, StoredDelegationGrant, UpdateUserRequest, User,
-    UserStatus,
+    PendingAuthorizationRequest, StoredDelegationGrant, UpdateUserRequest, User, UserStatus,
 };
 use crate::identity::validation;
 use crate::identity::IdentityEngine;
@@ -332,6 +331,7 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &AuthorizationRequest,
         bearer: Option<&TokenClaims>,
+        browser_proof: crate::identity::MfaProof,
     ) -> Result<AuthorizationResponse, IdentityError> {
         use crate::identity::oidc::{CodeChallengeMethod as CCM, JarmClaims};
         use crate::identity::types::FapiProfile;
@@ -630,15 +630,24 @@ impl EmbeddedIdentityEngine {
         //      browser `mfa_use_gate`'s rule): a client or role that demands a
         //      second factor needs a bearer session that proved one. There is
         //      no challenge to offer here, so an unproved session is refused.
-        if let Some(session_id) = bearer_session.as_ref() {
-            let proved = self
+        //      The code records what the authorizing session proved — the
+        //      bearer token's session here, the browser session otherwise —
+        //      and the exchange opens a session that proved exactly that
+        //      (GA audit round 3, D-7).
+        let code_proof = if let Some(session_id) = bearer_session.as_ref() {
+            let proof = self
                 .get_session(realm_id, session_id)?
                 .filter(|s| s.user_id() == &request.user_id)
-                .is_some_and(|s| s.mfa_proof().satisfies_mfa_required());
-            if !proved && self.client_or_role_requires_mfa(realm_id, &request.user_id, &client)? {
+                .map_or(crate::identity::MfaProof::None, |s| s.mfa_proof());
+            if !proof.satisfies_mfa_required()
+                && self.client_or_role_requires_mfa(realm_id, &request.user_id, &client)?
+            {
                 return Err(IdentityError::MfaRequired);
             }
-        }
+            proof
+        } else {
+            browser_proof
+        };
 
         // 4b. Consent scope-digest re-check.
         //
@@ -740,6 +749,7 @@ impl EmbeddedIdentityEngine {
             nonce: request.nonce.clone(),
             resource: resource.as_ref().map(|r| r.as_str().to_string()),
             amr_values: request.amr_values.clone(),
+            mfa_proof: code_proof,
         };
 
         // 9. Persist the code
@@ -1077,23 +1087,19 @@ impl EmbeddedIdentityEngine {
             self.id_token_signer(realm_id, Some(&client), std::sync::Arc::clone(&signing_key))?;
 
         // 10. Create a session for the user (OAuth code exchange — no browser context).
-        //     The MFA proof is inherited: an authorization code is minted only
-        //     for a principal holding a live session — the browser `/authorize`
+        //     A derived session: an authorization code is minted only for a
+        //     principal holding a live session — the browser `/authorize`
         //     requires a UI session, and the non-interactive surfaces (JSON and
         //     gRPC `Authorize`) require a bearer token that `validate_token`
-        //     accepts only while its session is still active. Every session
-        //     was created by a path that cleared this same `mfa_required` gate
-        //     (GA audit B2). Sessions do not record which factor they proved,
-        //     so a realm that turns `mfa_required` on is enforced from each
-        //     session's next sign-in, on both surfaces alike.
-        let session = self.create_session(
-            realm_id,
-            &stored_code.user_id,
-            &SessionContext {
-                mfa_proof: crate::identity::MfaProof::Inherited,
-                ..Default::default()
-            },
-        )?;
+        //     accepts only while its session is still active — and that
+        //     session cleared the realm's second-factor gates when it was
+        //     created (GA audit B2), so a realm that turns `mfa_required` on is
+        //     enforced from each session's next sign-in. The token session
+        //     records the proof the authorizing session made, which the code
+        //     carries; it used to record `Inherited`, which every later gate
+        //     read as a proved factor (GA audit round 3, D-7).
+        let session =
+            self.create_derived_session(realm_id, &stored_code.user_id, stored_code.mfa_proof)?;
 
         // 11. Create grant family for refresh token rotation
         let family_id = uuid::Uuid::new_v4().to_string();
@@ -2277,6 +2283,7 @@ impl EmbeddedIdentityEngine {
             ),
             interval,
             last_polled_at: None,
+            mfa_proof: crate::identity::MfaProof::None,
         };
         let stored_bytes =
             serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
@@ -2314,6 +2321,7 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         user_code: &str,
         user_id: &UserId,
+        mfa_proof: crate::identity::MfaProof,
     ) -> Result<(), IdentityError> {
         use crate::identity::oidc::DeviceCodeStatus;
 
@@ -2371,6 +2379,7 @@ impl EmbeddedIdentityEngine {
         stored.status = DeviceCodeStatus::Approved {
             user_id: user_id.clone(),
         };
+        stored.mfa_proof = mfa_proof;
         let updated_bytes =
             serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
@@ -2681,17 +2690,12 @@ impl EmbeddedIdentityEngine {
                 )?;
 
                 // Issue tokens like exchange_authorization_code (device flow — no browser context).
-                // The MFA proof is inherited: the device code reached `Approved`
-                // only because a browser user approved it from a live session,
-                // and that session passed the same `mfa_required` gate at login.
-                let session = self.create_session(
-                    realm_id,
-                    user_id,
-                    &SessionContext {
-                        mfa_proof: crate::identity::MfaProof::Inherited,
-                        ..Default::default()
-                    },
-                )?;
+                // A derived session: the device code reached `Approved` only
+                // because a browser user approved it from a live session, and
+                // that session passed the same second-factor gates at login.
+                // It records the proof that approving session made (GA audit
+                // round 3, D-7).
+                let session = self.create_derived_session(realm_id, user_id, stored.mfa_proof)?;
                 // The grant is issued TO the polling client: record it on the
                 // grant family, as the authorization-code grant does. Minting
                 // with the default (clientless) context left the family with
