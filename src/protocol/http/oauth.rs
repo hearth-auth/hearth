@@ -2156,9 +2156,9 @@ async fn authorize(
     // user identity.  The body's `user_id` field is ignored to prevent unauthenticated
     // account takeover via caller-supplied user IDs.
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    // The bearer token's session is kept: the engine judges the factor it
-    // proved (GA audit B2/B5).
-    let (authenticated_user_id, bearer_session) = match super::auth::extract_user_session_auth(
+    // The bearer token's claims are kept: the engine judges the client it was
+    // issued to (GA audit 3 B-1) and the factor its session proved (B2/B5).
+    let (authenticated_user_id, bearer) = match super::auth::extract_user_session_auth(
         &headers,
         &state,
         &realm_id,
@@ -2256,7 +2256,7 @@ async fn authorize(
     // or one the user already consented to (GA audit B2).
     match state
         .identity
-        .authorize_non_interactive(&realm_id, &request, &bearer_session)
+        .authorize_non_interactive(&realm_id, &request, &bearer)
     {
         Ok(response) => (
             StatusCode::OK,
@@ -3752,9 +3752,9 @@ async fn realm_authorize(
 
     // HEA-1721: authenticate the caller; their token's `sub` is the authoritative user identity.
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    // The bearer token's session is kept: the engine judges the factor it
-    // proved (GA audit B2/B5).
-    let (authenticated_user_id, bearer_session) = match super::auth::extract_user_session_auth(
+    // The bearer token's claims are kept: the engine judges the client it was
+    // issued to (GA audit 3 B-1) and the factor its session proved (B2/B5).
+    let (authenticated_user_id, bearer) = match super::auth::extract_user_session_auth(
         &headers,
         &state,
         &realm_id,
@@ -3781,7 +3781,7 @@ async fn realm_authorize(
     // or one the user already consented to (GA audit B2).
     match state
         .identity
-        .authorize_non_interactive(&realm_id, &request, &bearer_session)
+        .authorize_non_interactive(&realm_id, &request, &bearer)
     {
         Ok(response) => (
             StatusCode::OK,

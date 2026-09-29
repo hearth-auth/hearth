@@ -9951,9 +9951,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
-        session_id: &SessionId,
+        bearer: &TokenClaims,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        self.authorize_inner(realm_id, request, Some(session_id))
+        self.authorize_inner(realm_id, request, Some(bearer))
     }
 
     #[allow(clippy::too_many_lines)]

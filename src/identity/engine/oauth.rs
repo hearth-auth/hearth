@@ -288,22 +288,50 @@ impl EmbeddedIdentityEngine {
         Ok(client)
     }
 
+    /// Ties a non-interactive authorization request to the caller's bearer
+    /// token (GA audit 3 B-1) and returns the token's session.
+    ///
+    /// The token must belong to the requesting user and name a session. A
+    /// token issued to a client (RFC 9068 `client_id`) may authorize that
+    /// client only; a token that names no client is a first-party session
+    /// token, and [`Self::authorize_inner`] allows it a first-party client
+    /// only, once the client is loaded. An unparseable claim fails closed.
+    fn bearer_session_for(
+        claims: &TokenClaims,
+        request: &AuthorizationRequest,
+    ) -> Result<SessionId, IdentityError> {
+        if Self::parse_user_id_claim(claims)? != request.user_id {
+            return Err(IdentityError::InvalidToken);
+        }
+        if let Some(raw) = claims.client_id() {
+            if raw.parse::<ClientId>().ok().as_ref() != Some(&request.client_id) {
+                return Err(IdentityError::ClientMismatch);
+            }
+        }
+        claims
+            .sid
+            .parse::<SessionId>()
+            .map_err(|_| IdentityError::InvalidToken)
+    }
+
     /// Issues an authorization code.
     ///
-    /// `bearer_session` is set by the non-interactive surfaces (JSON and gRPC
-    /// `Authorize`) to the session behind the caller's bearer token. They
-    /// cannot show a consent screen or a factor challenge, so they may issue
+    /// `bearer` is set by the non-interactive surfaces (JSON and gRPC
+    /// `Authorize`) to the validated claims of the caller's bearer token.
+    /// They cannot show a consent screen or a factor challenge, so they may
+    /// issue only for the client the token was issued to — or, for a
+    /// first-party session token, a first-party client (GA audit 3 B-1) —
     /// only when the client does not require consent or a recorded consent
     /// covers the requested scopes (GA audit B2), and — for a client or role
-    /// that demands a second factor — only when that session proved one
-    /// (GA audit B5). The browser flow passes `None`: its gates
+    /// that demands a second factor — only when the token's session proved
+    /// one (GA audit B5). The browser flow passes `None`: its gates
     /// (`authorize_gate::mfa_use_gate`, `consent_gate`) have already run.
     #[allow(clippy::too_many_lines)]
     pub(super) fn authorize_inner(
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
-        bearer_session: Option<&SessionId>,
+        bearer: Option<&TokenClaims>,
     ) -> Result<AuthorizationResponse, IdentityError> {
         use crate::identity::oidc::{CodeChallengeMethod as CCM, JarmClaims};
         use crate::identity::types::FapiProfile;
@@ -311,6 +339,17 @@ impl EmbeddedIdentityEngine {
         // Retained for potential future use; FAPI Advanced JAR enforcement
         // moved to push_authorization_request where the JTI is not yet consumed.
         let _jar_was_present = request.request.is_some();
+
+        // 0a. The bearer token of a non-interactive request (GA audit 3 B-1):
+        //     it must be the requesting user's, and a token issued to a client
+        //     may mint a code for that client only. Without this a third-party
+        //     app's token minted a code for any first-party public client —
+        //     no consent needed — and redeemed it for that client's tokens
+        //     carrying the user's full permissions. Checked before JAR, the
+        //     nonce sentinel or any other side effect.
+        let bearer_session = bearer
+            .map(|claims| Self::bearer_session_for(claims, request))
+            .transpose()?;
 
         // 0. JAR (RFC 9101): if a signed request object is present, verify it
         //    and use its claims to override the outer query parameters. This must
@@ -422,6 +461,15 @@ impl EmbeddedIdentityEngine {
         // 3a. The client must be registered for the grant (GA audit M7).
         if !client.allows_grant_type(crate::identity::oidc::GRANT_AUTHORIZATION_CODE) {
             return Err(IdentityError::UnsupportedGrantType);
+        }
+        // 3a'. A first-party session token names no client; it may authorize a
+        //      first-party client only (GA audit 3 B-1). A code for a
+        //      third-party client comes from that client's own token or the
+        //      browser consent flow, never from whichever token leaked.
+        if bearer.is_some_and(|claims| claims.client_id().is_none())
+            && client.trust_level() != crate::identity::oidc::ClientTrustLevel::FirstParty
+        {
+            return Err(IdentityError::ClientMismatch);
         }
 
         // 3b. FAPI 2.0: PAR is mandatory for FAPI2 clients (RFC 9126 §2.4).
@@ -582,7 +630,7 @@ impl EmbeddedIdentityEngine {
         //      browser `mfa_use_gate`'s rule): a client or role that demands a
         //      second factor needs a bearer session that proved one. There is
         //      no challenge to offer here, so an unproved session is refused.
-        if let Some(session_id) = bearer_session {
+        if let Some(session_id) = bearer_session.as_ref() {
             let proved = self
                 .get_session(realm_id, session_id)?
                 .filter(|s| s.user_id() == &request.user_id)

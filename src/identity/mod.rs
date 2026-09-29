@@ -714,19 +714,24 @@ pub trait IdentityEngine: Send + Sync {
     /// JSON `POST /authorize`, `POST /realms/{realm}/authorize` and gRPC
     /// `Authorize`, which mint a code from a bearer token alone.
     ///
-    /// Issues only when the client does not require consent or a recorded
-    /// consent covers every requested scope — the browser consent gate's
-    /// rule — and otherwise fails with [`IdentityError::ConsentRequired`]
-    /// (GA audit B2). For a client or role that demands a second factor,
-    /// `session_id` — the session behind the caller's bearer token — must
-    /// have proved one, or the call fails with [`IdentityError::MfaRequired`]
-    /// (the browser MFA-use gate's rule, GA audit B5). [`Self::authorize`] is
-    /// for callers that have already run those gates interactively.
+    /// `bearer` is the validated claims of the caller's bearer token, which
+    /// must belong to `request.user_id` and name a session. A token issued
+    /// to a client (RFC 9068 `client_id`) may authorize that client only; a
+    /// first-party session token (no `client_id`) a first-party client only.
+    /// Anything else fails with [`IdentityError::ClientMismatch`] (GA audit 3
+    /// B-1). Issues only when the client does not require consent or a
+    /// recorded consent covers every requested scope — the browser consent
+    /// gate's rule — and otherwise fails with
+    /// [`IdentityError::ConsentRequired`] (GA audit B2). For a client or role
+    /// that demands a second factor, the token's session must have proved
+    /// one, or the call fails with [`IdentityError::MfaRequired`] (the
+    /// browser MFA-use gate's rule, GA audit B5). [`Self::authorize`] is for
+    /// callers that have already run those gates interactively.
     fn authorize_non_interactive(
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
-        session_id: &SessionId,
+        bearer: &TokenClaims,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     /// Exchanges an authorization code for access, ID, and refresh tokens.
