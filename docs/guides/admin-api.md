@@ -539,7 +539,18 @@ To provision a realm:
 
 → See [Configuration reference](../specs/CONFIGURATION.md#realmsname) for the full `realms.<name>` YAML schema.
 
-**Authentication:** Realm admin endpoints require the `hearth.realm.admin` permission, which is held by the system token (returned by `POST /admin/bootstrap` as `system_access_token`). A per-realm admin token cannot list or delete realms — use the system token with `X-Realm-ID: <system_realm_id>`.
+**Authentication:** Realm admin endpoints need a **system-realm** token — the system realm is the nil UUID, `00000000-0000-0000-0000-000000000000` — that carries `hearth.admin` or `hearth.realm.admin`, sent with that UUID as `X-Realm-ID`. A per-realm admin token cannot list or delete realms.
+
+In production, mint one on the host with `hearth admin token`. The command opens the data directory itself, so stop the server first (it refuses while `hearth serve` holds the directory), and run it with the same `HEARTH_MASTER_KEY` in the environment as the server:
+
+```bash
+systemctl stop hearth
+SYSTEM_TOKEN=$(hearth admin token --config /etc/hearth/hearth.yaml --user ops@example.com)
+SYSTEM_REALM_ID=00000000-0000-0000-0000-000000000000
+systemctl start hearth
+```
+
+`--user` names an operator-console account holding the `realm.admin` role. The token lives for `--ttl` (1 minute to 1 hour, default `15m`), is written to stdout only, and its issuance is recorded in the system realm's audit trail (`token_issued`, `issued_via: "hearth admin token"`). A cluster node's data directory is refused; see [System-realm tokens](./clustering.md#system-realm-tokens). In a `dev-endpoints` build running `--dev`, `POST /admin/bootstrap` returns such a token as `system_access_token`.
 
 ### List realms
 
