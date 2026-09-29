@@ -46,6 +46,7 @@ pub(crate) use super::handlers_common;
 pub(crate) use super::templates;
 
 pub mod abuse;
+pub mod api_tokens;
 pub mod approvals;
 pub mod clients;
 pub mod groups;
@@ -62,6 +63,7 @@ pub mod webhooks;
 
 // Re-export all public handlers so `web/mod.rs` keeps `admin::fn_name` paths.
 pub use abuse::*;
+pub use api_tokens::*;
 pub use approvals::*;
 pub use clients::*;
 pub use groups::*;

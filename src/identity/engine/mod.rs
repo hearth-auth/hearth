@@ -377,10 +377,10 @@ pub(super) mod approval;
 pub(crate) mod client_jwks;
 mod control;
 mod grant_family_revocation;
-mod host_admin;
 mod id_token_keys;
 mod mfa_single_use;
 pub(super) mod oauth;
+mod operator_token;
 mod retired_keys;
 mod sharded_cache;
 mod single_use;
@@ -390,9 +390,6 @@ pub(super) mod cross_realm;
 pub(super) mod spiffe;
 pub(super) mod txn;
 
-pub use host_admin::{
-    HostAdminToken, HOST_ADMIN_TOKEN_ISSUER, HOST_ADMIN_TOKEN_MAX_TTL, HOST_ADMIN_TOKEN_MIN_TTL,
-};
 use retired_keys::KeyFamily;
 use sharded_cache::ShardedEpochMap;
 
@@ -9539,6 +9536,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             session_id,
             &TokenIssuanceContext::default(),
         )
+    }
+
+    fn issue_operator_token(
+        &self,
+        user_id: &UserId,
+        ttl: std::time::Duration,
+        issuer: &crate::identity::OperatorTokenIssuer,
+    ) -> Result<crate::identity::OperatorToken, IdentityError> {
+        self.issue_operator_token_impl(user_id, ttl, issuer)
     }
 
     #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function

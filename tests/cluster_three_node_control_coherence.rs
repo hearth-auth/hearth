@@ -597,6 +597,94 @@ async fn revoking_a_sessionless_token_on_the_leader_is_prompt_and_binds_on_both_
     cluster.shutdown();
 }
 
+/// GA audit 3 DOC-2 (round 2): the admin console mints an operator token on
+/// the node it is served from. In cluster mode that token's session and audit
+/// record must go through Raft, not into the leader's local store, or the
+/// token works on one node only — and `/admin/cluster/*` calls go to any node.
+/// Both followers must validate it, and revoking its session on the leader
+/// must bind on both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn an_operator_token_minted_on_the_leader_validates_and_revokes_on_both_followers() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let cluster = ThreeNodeCluster::build(&clock).await;
+    let leader = cluster.leader();
+    let sys = RealmId::new(uuid::Uuid::nil());
+
+    leader.rbac.seed_realm(&sys).unwrap();
+    let operator = leader
+        .identity
+        .create_admin_user(&CreateUserRequest {
+            email: "ops@cluster.test".to_string(),
+            display_name: "Operator".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    let role = leader
+        .rbac
+        .get_role_by_name(&sys, "realm.admin")
+        .unwrap()
+        .expect("realm.admin seeded");
+    leader
+        .rbac
+        .assign_role(
+            &sys,
+            &AssignRoleRequest {
+                subject: Subject::User(operator.id().clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .unwrap();
+
+    let token = leader
+        .identity
+        .issue_operator_token(
+            operator.id(),
+            Duration::from_secs(15 * 60),
+            &hearth::identity::OperatorTokenIssuer::Console {
+                console_session_id: SessionId::new(uuid::Uuid::new_v4()),
+            },
+        )
+        .expect("the leader mints the token");
+    cluster.converge().await;
+
+    for node in cluster.followers() {
+        let claims = node
+            .identity
+            .validate_token(&sys, token.access_token())
+            .unwrap_or_else(|e| {
+                panic!(
+                    "node {} rejects an operator token minted on the leader: {e:?} — its \
+                     session did not replicate",
+                    node.id()
+                )
+            });
+        assert!(claims.permissions.iter().any(|p| p == "hearth.admin"));
+    }
+
+    leader
+        .identity
+        .revoke_session(&sys, token.session_id())
+        .unwrap();
+    cluster.converge().await;
+    clock.advance(1_000_000);
+    for node in cluster.followers() {
+        assert!(
+            eventual_rejection(node, &sys, token.access_token())
+                .await
+                .is_some(),
+            "node {} still accepts an operator token whose session the leader revoked",
+            node.id()
+        );
+    }
+
+    cluster.shutdown();
+}
+
 /// Real time a follower's background reloader gets to apply a control after
 /// replication has converged. The replicated epoch row signals the reloader
 /// from the state machine; the reload itself runs on the reloader thread,

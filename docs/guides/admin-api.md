@@ -565,7 +565,32 @@ To provision a realm:
 
 **Authentication:** Realm admin endpoints need a **system-realm** token — the system realm is the nil UUID, `00000000-0000-0000-0000-000000000000` — that carries `hearth.admin` or `hearth.realm.admin`, sent with that UUID as `X-Realm-ID`. A per-realm admin token cannot list or delete realms.
 
-In production, mint one on the host with `hearth admin token`. The command opens the data directory itself, so stop the server first (it refuses while `hearth serve` holds the directory), and run it with the same `HEARTH_MASTER_KEY` in the environment as the server:
+On a running server, mint one in the admin console. Sign in at `/ui/admin/login` with an
+operator-console account that holds the `realm.admin` role and open **API Tokens**
+(`/ui/admin/api-tokens`). Choose a lifetime from 1 to 60 minutes (default 15) and confirm with your
+password **and** your second factor: a current authenticator code, or a passkey that verifies you
+(PIN or biometric — a touch alone is refused). An account with no second factor enrolled cannot
+mint one. The token is shown once, on a page served with `Cache-Control: no-store`; copy it into
+the shell that needs it:
+
+```bash
+read -rs SYSTEM_TOKEN            # paste the token from the console page
+SYSTEM_REALM_ID=00000000-0000-0000-0000-000000000000
+```
+
+The token carries the operator's system-realm permissions (`hearth.admin` among them) and is bound
+to a new session of its own, which expires with it: revoke that session (on your account's
+sessions page, `/ui/account/sessions`, or with `DELETE /admin/sessions/{id}` and the nil
+`X-Realm-ID`) to end the token early. The result page names the session. The issuance is recorded in the system
+realm's audit trail (`token_issued`, actor = the operator, `issued_via: "admin console"`, the
+lifetime and the token's `jti` — never the token). The session and the audit record are written
+through the normal write path, so in cluster mode they replicate: mint on the **leader** (a
+follower cannot accept the write) and the token then works against every node.
+
+For a **stopped** store — the server is down, or the data directory is being rebuilt — mint one on
+the host with `hearth admin token` instead. The command opens the data directory itself, so it
+refuses while `hearth serve` holds the directory, and needs the same `HEARTH_MASTER_KEY` in the
+environment as the server:
 
 ```bash
 systemctl stop hearth
