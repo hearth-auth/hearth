@@ -3350,3 +3350,337 @@ async fn restore_keeps_revoked_jtis_and_blocked_dpop_keys() {
         "the report counts the restored revocations"
     );
 }
+
+// ── export vs a saturated blocking pool (GA audit 3 F-7) ─────────────────────
+
+/// F-7: an export holds the storage write barrier through its read pass, and
+/// in `hearth serve` every read goes through the `ClusterStorageAdapter`.
+/// Each write that arrives meanwhile parks a blocking-pool thread on that
+/// barrier. The adapter served each read by hopping to the same blocking pool
+/// (`spawn_blocking`), so once parked writers filled the pool the export's
+/// next read waited for a thread that only the export could free: the whole
+/// server stopped, for ever, while `/healthz` kept answering 200.
+mod export_under_blocking_pool_pressure {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
+    use hearth::backup::{BackupArchive, BackupExporter, ExportOptions};
+    use hearth::cluster::{ClusterEngine, ClusterStorageAdapter};
+    use hearth::core::{Clock, RealmId, SystemClock};
+    use hearth::identity::{
+        CreateRealmRequest, CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine,
+        IdentityConfig, IdentityEngine,
+    };
+    use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
+    use hearth::storage::{
+        EmbeddedStorageEngine, ScanEntry, StorageConfig, StorageEngine, StorageError,
+    };
+
+    const WAIT: Duration = Duration::from_secs(20);
+
+    /// Forwards every call to `inner`, but holds the first read issued while
+    /// armed until the test releases it — a known point inside the export's
+    /// read pass, with the barrier held.
+    struct PauseFirstRead {
+        inner: Arc<dyn StorageEngine>,
+        armed: AtomicBool,
+        entered: Mutex<Option<mpsc::Sender<()>>>,
+        release: Mutex<Option<mpsc::Receiver<()>>>,
+    }
+
+    impl PauseFirstRead {
+        fn pause_if_armed(&self) {
+            if !self.armed.swap(false, Ordering::SeqCst) {
+                return;
+            }
+            if let Some(tx) = self.entered.lock().expect("entered").take() {
+                let _ = tx.send(());
+            }
+            let release = self.release.lock().expect("release").take();
+            if let Some(rx) = release {
+                let _ = rx.recv();
+            }
+        }
+    }
+
+    impl StorageEngine for PauseFirstRead {
+        fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            self.pause_if_armed();
+            self.inner.get(realm_id, key)
+        }
+
+        fn put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.inner.put(realm_id, key, value)
+        }
+
+        fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+            self.inner.delete(realm_id, key)
+        }
+
+        fn scan(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+        ) -> Result<Vec<ScanEntry>, StorageError> {
+            self.pause_if_armed();
+            self.inner.scan(realm_id, start, end)
+        }
+
+        fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+            self.inner.list_realms()
+        }
+
+        fn begin_snapshot_restore(&self, snapshot_id: &str) -> Result<(), StorageError> {
+            self.inner.begin_snapshot_restore(snapshot_id)
+        }
+
+        fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
+            self.inner.complete_snapshot_restore()
+        }
+    }
+
+    /// Runs `f` on the runtime's blocking pool, where the storage adapter may
+    /// block, and waits for its value.
+    fn on_pool<T: Send + 'static>(
+        handle: &tokio::runtime::Handle,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, String> {
+        let (tx, rx) = mpsc::channel();
+        handle.spawn_blocking(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(WAIT)
+            .map_err(|_| "a setup step on the blocking pool never finished".to_string())
+    }
+
+    struct Wiring {
+        storage: Arc<dyn StorageEngine>,
+        exporter: BackupExporter,
+        gate: Arc<PauseFirstRead>,
+        realm: RealmId,
+    }
+
+    /// `serve`'s wiring: identity, RBAC and audit over one
+    /// `ClusterStorageAdapter` (single node). The exporter's RBAC engine reads
+    /// through `PauseFirstRead`, which forwards to that same adapter.
+    fn wire(data_dir: std::path::PathBuf, users: usize) -> Result<Wiring, String> {
+        let inner = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(data_dir)).map_err(|e| e.to_string())?,
+        );
+        let storage: Arc<dyn StorageEngine> = Arc::new(ClusterStorageAdapter::new(Arc::new(
+            ClusterEngine::single_node(inner),
+        )));
+        let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
+        let rbac = Arc::new(EmbeddedRbacEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock),
+        ));
+        let audit: Arc<dyn AuditEngine> = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock),
+        ));
+        let identity = Arc::new(
+            EmbeddedIdentityEngine::with_rbac(
+                Arc::clone(&storage),
+                Arc::clone(&clock),
+                IdentityConfig {
+                    credential: CredentialConfig::fast_for_testing(),
+                    ..IdentityConfig::default()
+                },
+                Arc::clone(&rbac) as Arc<dyn RbacEngine>,
+                Arc::clone(&audit),
+            )
+            .map_err(|e| e.to_string())?,
+        );
+        let realm = identity
+            .create_realm(&CreateRealmRequest {
+                name: format!("f7-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .map_err(|e| e.to_string())?
+            .id()
+            .clone();
+        rbac.seed_realm(&realm).map_err(|e| e.to_string())?;
+        for i in 0..users {
+            identity
+                .create_user(
+                    &realm,
+                    &CreateUserRequest {
+                        email: format!("f7-{i}@pool.example"),
+                        display_name: "Pool".into(),
+                        first_name: "Pool".into(),
+                        last_name: "User".into(),
+                        attributes: Default::default(),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        let gate = Arc::new(PauseFirstRead {
+            inner: Arc::clone(&storage),
+            armed: AtomicBool::new(false),
+            entered: Mutex::new(None),
+            release: Mutex::new(None),
+        });
+        let export_rbac = Arc::new(EmbeddedRbacEngine::new(
+            Arc::clone(&gate) as Arc<dyn StorageEngine>,
+            clock,
+        ));
+        let exporter = BackupExporter::new(
+            identity as Arc<dyn IdentityEngine>,
+            audit,
+            export_rbac as Arc<dyn RbacEngine>,
+        );
+        Ok(Wiring {
+            storage,
+            exporter,
+            gate,
+            realm,
+        })
+    }
+
+    /// Returns the exported user count and the number of writes that
+    /// completed, or why the scenario could not finish.
+    #[allow(clippy::too_many_lines)]
+    fn export_while_writers_fill_the_pool(
+        handle: &tokio::runtime::Handle,
+        writers: usize,
+        users: usize,
+    ) -> Result<(u64, usize), String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let data_dir = dir.path().join("data");
+        let Wiring {
+            storage,
+            exporter,
+            gate,
+            realm,
+        } = on_pool(handle, move || wire(data_dir, users))??;
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        *gate.entered.lock().expect("entered") = Some(entered_tx);
+        *gate.release.lock().expect("release") = Some(release_rx);
+        gate.armed.store(true, Ordering::SeqCst);
+
+        // The export runs on a blocking-pool thread, as `POST /admin/v1/backup`
+        // runs it.
+        let (export_tx, export_rx) = mpsc::channel();
+        {
+            let realm = realm.clone();
+            let archive = dir.path().join("archive.hbk");
+            handle.spawn_blocking(move || {
+                let result = BackupArchive::create(&archive).and_then(|mut writer| {
+                    let dek = BackupExporter::generate_dek()?;
+                    exporter.export_realm(&realm, &mut writer, &ExportOptions::default(), &dek)
+                });
+                let _ = export_tx.send(
+                    result
+                        .map(|m| m.record_counts.users)
+                        .map_err(|e| e.to_string()),
+                );
+            });
+        }
+        entered_rx
+            .recv_timeout(WAIT)
+            .map_err(|_| "the export never reached its RBAC read pass".to_string())?;
+        let barrier = storage
+            .backup_barrier()
+            .ok_or("the adapter exposes no backup barrier")?;
+        if barrier.try_read().is_ok() {
+            return Err("precondition: the export does not hold the write barrier".into());
+        }
+
+        // Writers park on the barrier, each holding blocking-pool threads.
+        let (write_tx, write_rx) = mpsc::channel();
+        for i in 0..writers {
+            let (storage, realm, tx) = (Arc::clone(&storage), realm.clone(), write_tx.clone());
+            handle.spawn_blocking(move || {
+                let key = format!("f7/writer/{i}");
+                let _ = tx.send(storage.put(&realm, key.as_bytes(), b"v"));
+            });
+        }
+        drop(write_tx);
+
+        // Wait until no blocking-pool thread is left: a no-op task stops
+        // being picked up.
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let (probe_tx, probe_rx) = mpsc::channel();
+            handle.spawn_blocking(move || {
+                let _ = probe_tx.send(());
+            });
+            if probe_rx.recv_timeout(Duration::from_millis(250)).is_err() {
+                break;
+            }
+            if Instant::now() > deadline {
+                return Err("precondition: the writers never filled the blocking pool".into());
+            }
+        }
+        if write_rx.try_recv().is_ok() {
+            return Err("precondition: a write completed while the export held the barrier".into());
+        }
+
+        let _ = release_tx.send(());
+        let users = export_rx
+            .recv_timeout(WAIT)
+            .map_err(|_| {
+                "DEADLOCK: the export never finished its read pass once writers parked on its \
+                 barrier filled the blocking pool — its next storage read queued for a pool \
+                 thread that only the export itself could free"
+                    .to_string()
+            })?
+            .map_err(|e| format!("export failed: {e}"))?;
+
+        let mut completed = 0;
+        for _ in 0..writers {
+            write_rx
+                .recv_timeout(WAIT)
+                .map_err(|_| "a write parked on the barrier never completed".to_string())?
+                .map_err(|e| format!("a parked write failed: {e}"))?;
+            completed += 1;
+        }
+        Ok((users, completed))
+    }
+
+    #[test]
+    fn export_completes_while_writers_parked_on_its_barrier_fill_the_blocking_pool() {
+        const WRITERS: usize = 16;
+        const USERS: usize = 5;
+        let (done_tx, done_rx) = mpsc::channel();
+        // The runtime lives on its own thread so a deadlock is reported as a
+        // failure instead of wedging the test process. 2 workers + 4 blocking
+        // threads stands in for the default 512: 16 parked writers exceed it.
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .max_blocking_threads(4)
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let outcome = export_while_writers_fill_the_pool(rt.handle(), WRITERS, USERS);
+            let finished = outcome.is_ok();
+            let _ = done_tx.send(outcome);
+            // Dropping a deadlocked runtime blocks for ever, so the verdict is
+            // sent first and a runtime that did not finish is leaked.
+            if finished {
+                drop(rt);
+            } else {
+                std::mem::forget(rt);
+            }
+        });
+        let (exported_users, completed_writes) = done_rx
+            .recv_timeout(Duration::from_secs(120))
+            .expect("the scenario never reported")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            exported_users, USERS as u64,
+            "the archive carries every user that existed when the export began"
+        );
+        assert_eq!(
+            completed_writes, WRITERS,
+            "every write parked on the barrier completes once the export releases it"
+        );
+    }
+}
