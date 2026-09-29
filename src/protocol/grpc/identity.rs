@@ -35,6 +35,38 @@ impl IdentityAdminSvc {
     pub fn new(state: GrpcState) -> Self {
         Self { state }
     }
+
+    /// Shared body of `SuspendRealm` / `UnsuspendRealm`, with the REST gate:
+    /// a system-realm admin holding `hearth.realm.admin` (or `hearth.admin`),
+    /// subject to the target's cross-realm trust policy. The engine refuses
+    /// the system realm and archived realms, and audits the transition.
+    fn set_realm_suspended(
+        &self,
+        auth: &super::auth::AdminAuth,
+        id: &str,
+        suspended: bool,
+    ) -> Result<Response<pb::Realm>, Status> {
+        grpc_require_permission(auth, "hearth.realm.admin")?;
+        if !crate::identity::keys::is_system_realm(&auth.realm_id) {
+            return Err(Status::permission_denied(
+                "only a system-realm admin may suspend or unsuspend a realm",
+            ));
+        }
+        let target = grpc_scoped_realm(&self.state, auth, parse_realm_id(id)?)?;
+        let audit_ctx = crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(auth.user_id.clone()),
+            metadata: Some(serde_json::json!({
+                "via": "grpc",
+                "operation": if suspended { "suspend" } else { "unsuspend" },
+            })),
+        };
+        let (_, realm) = self
+            .state
+            .identity
+            .set_realm_suspended(&target, suspended, &audit_ctx)
+            .map_err(identity_to_status)?;
+        Ok(Response::new(pb::Realm::from(&realm)))
+    }
 }
 
 fn parse_user_id(s: &str) -> Result<UserId, Status> {
@@ -299,6 +331,26 @@ impl IdentityAdminService for IdentityAdminSvc {
             .delete_realm(&realm_id)
             .map_err(identity_to_status)?;
         Ok(Response::new(pb::Empty {}))
+    }
+
+    /// The gRPC twin of `POST /admin/realms/{id}/suspend`.
+    async fn suspend_realm(
+        &self,
+        req: Request<pb::SuspendRealmRequest>,
+    ) -> Result<Response<pb::Realm>, Status> {
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        let id = req.into_inner().id;
+        self.set_realm_suspended(&auth, &id, true)
+    }
+
+    /// The gRPC twin of `POST /admin/realms/{id}/unsuspend`.
+    async fn unsuspend_realm(
+        &self,
+        req: Request<pb::UnsuspendRealmRequest>,
+    ) -> Result<Response<pb::Realm>, Status> {
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        let id = req.into_inner().id;
+        self.set_realm_suspended(&auth, &id, false)
     }
 
     // ----- Organizations -----

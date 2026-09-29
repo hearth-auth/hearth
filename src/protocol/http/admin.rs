@@ -67,6 +67,8 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
             "/realms/{id}/rotate-signing-key",
             post(admin_rotate_realm_signing_key),
         )
+        .route("/realms/{id}/suspend", post(admin_suspend_realm))
+        .route("/realms/{id}/unsuspend", post(admin_unsuspend_realm))
         .route(
             "/realms/{id}/branding",
             get(admin_get_realm_branding).patch(admin_patch_realm_branding),
@@ -1486,6 +1488,89 @@ async fn admin_delete_realm(
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "not found"})),
+        )
+            .into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+/// Admin: suspend a realm — the incident-response freeze control.
+///
+/// `POST /admin/realms/{id}/suspend`. Every token of the realm stops
+/// validating, its sessions are revoked, and no new session starts until
+/// `POST /admin/realms/{id}/unsuspend`. See [`admin_set_realm_suspended`].
+async fn admin_suspend_realm(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    admin_set_realm_suspended(&state, &headers, &id, true)
+}
+
+/// Admin: reinstate a suspended realm.
+///
+/// `POST /admin/realms/{id}/unsuspend`. See [`admin_set_realm_suspended`].
+async fn admin_unsuspend_realm(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    admin_set_realm_suspended(&state, &headers, &id, false)
+}
+
+/// Shared body of the suspend / unsuspend routes.
+///
+/// Gate: a **system-realm** admin holding `hearth.realm.admin` (or
+/// `hearth.admin`), subject to the target realm's cross-realm trust policy
+/// like every other `/admin/realms/{id}/*` crossing. A tenant admin may not
+/// freeze or thaw even its own realm. The engine refuses the system realm
+/// (`403`) and an archived or deleting realm (`409`), and audits the
+/// transition in the target realm with the actor and old/new status.
+fn admin_set_realm_suspended(
+    state: &AppState,
+    headers: &HeaderMap,
+    id: &str,
+    suspended: bool,
+) -> Response {
+    let auth = match extract_admin_auth(headers, state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
+    if !crate::identity::keys::is_system_realm(&auth.realm_id) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "error_description": "only a system-realm admin may suspend or unsuspend a realm"
+            })),
+        )
+            .into_response();
+    }
+    let target = match parse_realm_id(id) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let target = match scoped_realm(state, &auth, target) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let audit_ctx = AuditContext {
+        actor: Actor::User(auth.user_id.clone()),
+        metadata: Some(serde_json::json!({
+            "via": "admin_api",
+            "operation": if suspended { "suspend" } else { "unsuspend" },
+        })),
+    };
+    match state
+        .identity
+        .set_realm_suspended(&target, suspended, &audit_ctx)
+    {
+        Ok((_, realm)) => (
+            StatusCode::OK,
+            Json(proto_to_rest_json(&pb::Realm::from(&realm))),
         )
             .into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),

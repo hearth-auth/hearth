@@ -80,6 +80,7 @@ impl std::error::Error for IdentityError {
             | Self::FederationAlreadyLinked
             | Self::SystemRealmProtected { .. }
             | Self::RealmNotArchived
+            | Self::RealmArchived
             | Self::YamlManagedResource { .. }
             | Self::DuplicateScimExternalId
             | Self::ConfigInvalid { .. }

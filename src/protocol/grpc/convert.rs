@@ -118,6 +118,7 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::PasswordExpired
         | IdentityError::PasswordReused
         | IdentityError::RealmNotArchived
+        | IdentityError::RealmArchived
         | IdentityError::YamlManagedResource { .. } => (Code::FailedPrecondition, err.to_string()),
         IdentityError::RateLimited
         | IdentityError::MemberLimitReached

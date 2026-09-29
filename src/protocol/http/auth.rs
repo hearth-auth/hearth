@@ -698,6 +698,11 @@ pub(crate) fn identity_error_to_response(
             StatusCode::CONFLICT,
             "only archived realms can be permanently deleted",
         ),
+        IdentityError::RealmArchived => (
+            StatusCode::CONFLICT,
+            "the realm is archived or being deleted; only an active or suspended realm can \
+             be suspended or reinstated",
+        ),
         IdentityError::YamlManagedResource { .. } => (
             StatusCode::CONFLICT,
             "this resource is managed by hearth.yaml: it cannot be deleted, and its \
