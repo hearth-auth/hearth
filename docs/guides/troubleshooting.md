@@ -57,19 +57,17 @@ The response contains the new single-use recovery codes. Store or transmit them 
 
 **Symptom:** All logins for a realm fail with a realm-suspended error.
 
-**Cause:** The realm was explicitly suspended via the admin API or UI.
+**Cause:** The realm record carries `Suspended` status. No current admin surface writes
+that status: it comes from data written by an earlier release (whose gRPC `UpdateRealm`
+could set it) or from a backup of such data.
 
-**Remediation:** realm status is **not** settable over the REST admin API —
-`PATCH /admin/realms/{id}` answers `405 Method Not Allowed` (realms are declared in
-`hearth.yaml`). Clear a suspension through the gRPC management API:
-
-```
-hearth.identity.v1.IdentityService/UpdateRealm
-  { "id": "<realm-id>", "body": { "status": "REALM_STATUS_ACTIVE" } }
-```
-
-Startup reconciliation restores an **Archived** realm to `Active` when it reappears in
-`hearth.yaml`, but it does not clear a `Suspended` status — that transition is explicit.
+**Remediation:** realm status is **not** settable through any admin API. Realms are
+declared in `hearth.yaml`, so REST `PATCH /admin/realms/{id}` answers
+`405 Method Not Allowed` and gRPC `IdentityAdminService/UpdateRealm` answers
+`FAILED_PRECONDITION`, and `hearth.yaml` has no realm-status key. Startup reconciliation
+restores an **Archived** realm to `Active` when it reappears in `hearth.yaml`, but it does
+not clear a `Suspended` status. There is currently no supported way to clear it; contact
+the maintainers.
 
 ---
 
