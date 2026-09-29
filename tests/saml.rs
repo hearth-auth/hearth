@@ -356,8 +356,27 @@ fn extract_assertion(response_xml: &str) -> String {
     response_xml[start..end].to_string()
 }
 
-/// Builds a `<saml:Assertion>` for `subject` with the given ID, valid for
-/// `audience` at `now`.
+/// Makes an extracted `<saml:Assertion>` self-contained by declaring the
+/// `saml` prefix on it.
+///
+/// An IdP signs an assertion in context: exclusive C14N renders the
+/// `xmlns:saml` it inherits from the `<Response>` on the assertion itself.
+/// Signing the bare extracted substring would compute a canonical form no
+/// standards-conformant verifier (Hearth included) reproduces.
+fn with_saml_ns(assertion: &str) -> String {
+    assert!(
+        assertion.starts_with("<saml:Assertion "),
+        "not an assertion"
+    );
+    assertion.replacen(
+        "<saml:Assertion ",
+        r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" "#,
+        1,
+    )
+}
+
+/// Builds a self-contained `<saml:Assertion>` for `subject` with the given
+/// ID, valid for `audience` at `now`.
 fn assertion_for(id: &str, subject: &str, audience: &str, acs_url: &str, now: Timestamp) -> String {
     let response = build_response_xml(&ResponseBuilder {
         response_id: "_ignored",
@@ -374,7 +393,7 @@ fn assertion_for(id: &str, subject: &str, audience: &str, acs_url: &str, now: Ti
         not_on_or_after: Timestamp::from_micros((1_700_000_000 + 300) * 1_000_000),
         attributes: &BTreeMap::new(),
     });
-    extract_assertion(&response)
+    with_saml_ns(&extract_assertion(&response))
 }
 
 /// B5 — XML Signature Wrapping.
@@ -456,6 +475,22 @@ fn sp_rejects_wrapped_assertion_signed_elsewhere_in_the_document() {
     });
     let original = extract_assertion(&carrier);
     let attack = carrier.replace(&original, &wrapped);
+
+    // Control: the same carrier with the untouched signed assertion is
+    // accepted, so the rejection below is caused by the wrapping.
+    match SamlSpService::complete(
+        &idp_cfg,
+        sp_entity_id,
+        acs_url,
+        Some("_req1"),
+        now,
+        carrier.replace(&original, &signed_assertion).as_bytes(),
+    ) {
+        SamlSpOutcome::Accepted { identity, .. } => {
+            assert_eq!(identity.email, "mallory@corp.example", "control identity");
+        }
+        SamlSpOutcome::Rejected { error } => panic!("control rejected: {error:?}"),
+    }
 
     let outcome = SamlSpService::complete(
         &idp_cfg,
@@ -1013,7 +1048,8 @@ fn xsw_assertion_signed_for_mallory(
 ) -> (String, String) {
     let response = xsw_response_for_mallory(attributes);
     let assertion = extract_assertion(&response);
-    let signed = sign_element(assertion.as_bytes(), "_signed1", idp_key).expect("sign assertion");
+    let signed = sign_element(with_saml_ns(&assertion).as_bytes(), "_signed1", idp_key)
+        .expect("sign assertion");
     let signed = String::from_utf8(signed).expect("utf8");
     (response.replace(&assertion, &signed), signed)
 }
@@ -1202,5 +1238,270 @@ fn sp_rejects_second_signature_on_a_response_level_signature() {
         &idp_cfg,
         &attack,
         "Response with two direct-child signatures",
+    );
+}
+
+// ============================================================================
+// GA sweep 3, round 2 — IdP certificate rollover, and signatures/assertions
+// that spell their namespaces differently (Entra ID's default-namespace
+// `<Signature>`, Keycloak's prefix declared on the `<Response>` only).
+// ============================================================================
+
+const XSW_SAMLP_NS: &str = "urn:oasis:names:tc:SAML:2.0:protocol";
+const XSW_SAML_NS: &str = "urn:oasis:names:tc:SAML:2.0:assertion";
+const XSW_DSIG_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
+
+/// During rollover the connector lists the outgoing AND the incoming IdP
+/// certificate; an assertion signed by the second one must verify. Hearth
+/// used to try only the first.
+#[test]
+fn sp_accepts_an_assertion_signed_by_any_configured_idp_certificate() {
+    let old_key = RsaSigningKey::generate("idp-old", 365).expect("old key");
+    let new_key = RsaSigningKey::generate("idp-new", 365).expect("new key");
+    let mut idp_cfg = xsw_idp_config(&old_key, "NameID", true);
+    idp_cfg
+        .idp_certificates_pem
+        .push(cert_der_to_pem(new_key.cert_der()));
+
+    let (by_old, _) = xsw_assertion_signed_for_mallory(&old_key, &BTreeMap::new());
+    xsw_assert_accepted_as_mallory(&idp_cfg, &by_old, "signed by the first certificate");
+    let (by_new, _) = xsw_assertion_signed_for_mallory(&new_key, &BTreeMap::new());
+    xsw_assert_accepted_as_mallory(&idp_cfg, &by_new, "signed by the second certificate");
+
+    // A key in neither slot is still refused, and so is the G-1 shape.
+    let stranger = RsaSigningKey::generate("idp-stranger", 365).expect("key");
+    let (by_stranger, _) = xsw_assertion_signed_for_mallory(&stranger, &BTreeMap::new());
+    xsw_assert_rejected(&idp_cfg, &by_stranger, "signed by an unlisted key");
+    let wrapped = xsw_insert_before(
+        &by_new,
+        "</saml:Assertion>",
+        &xsw_extra_signature(XSW_VICTIM_SUBJECT),
+    );
+    xsw_assert_rejected(&idp_cfg, &wrapped, "second signature with two certificates");
+}
+
+/// The Response-level twin of the rollover case.
+#[test]
+fn sp_accepts_a_response_level_signature_by_the_second_idp_certificate() {
+    let old_key = RsaSigningKey::generate("idp-old", 365).expect("old key");
+    let new_key = RsaSigningKey::generate("idp-new", 365).expect("new key");
+    let mut idp_cfg = xsw_idp_config(&old_key, "NameID", false);
+    idp_cfg
+        .idp_certificates_pem
+        .push(cert_der_to_pem(new_key.cert_der()));
+
+    let unsigned = xsw_response_for_mallory(&BTreeMap::new());
+    let signed = sign_element(unsigned.as_bytes(), "_r1", &new_key).expect("sign response");
+    let signed = String::from_utf8(signed).expect("utf8");
+    xsw_assert_accepted_as_mallory(
+        &idp_cfg,
+        &signed,
+        "Response signed by the second certificate",
+    );
+}
+
+/// An Entra-ID-shaped assertion: the assertion namespace is the default
+/// namespace, and every child is unprefixed.
+fn entra_assertion(id: &str, subject: &str) -> String {
+    format!(
+        concat!(
+            r#"<Assertion xmlns="{saml}" ID="{id}" Version="2.0" IssueInstant="2023-11-14T22:13:20Z">"#,
+            "<Issuer>https://idp.example</Issuer>",
+            "<Subject><NameID Format=\"urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress\">{subject}</NameID>",
+            r#"<SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">"#,
+            r#"<SubjectConfirmationData InResponseTo="_req1" NotOnOrAfter="2023-11-14T22:18:20Z" Recipient="{acs}"/>"#,
+            "</SubjectConfirmation></Subject>",
+            r#"<Conditions NotBefore="2023-11-14T22:13:10Z" NotOnOrAfter="2023-11-14T22:18:20Z">"#,
+            "<AudienceRestriction><Audience>{sp}</Audience></AudienceRestriction></Conditions>",
+            r#"<AuthnStatement AuthnInstant="2023-11-14T22:13:20Z" SessionIndex="sess1">"#,
+            "<AuthnContext><AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:Password",
+            "</AuthnContextClassRef></AuthnContext></AuthnStatement></Assertion>",
+        ),
+        saml = XSW_SAML_NS,
+        id = id,
+        subject = subject,
+        acs = XSW_ACS_URL,
+        sp = XSW_SP_ENTITY_ID,
+    )
+}
+
+/// The Entra-ID-shaped `<samlp:Response>` carrying `assertion`.
+fn entra_response(assertion: &str) -> String {
+    format!(
+        concat!(
+            r#"<samlp:Response xmlns:samlp="{samlp}" ID="_r1" Version="2.0" "#,
+            r#"IssueInstant="2023-11-14T22:13:20Z" Destination="{acs}" InResponseTo="_req1">"#,
+            r#"<Issuer xmlns="{saml}">https://idp.example</Issuer>"#,
+            r#"<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>"#,
+            "</samlp:Status>{assertion}</samlp:Response>",
+        ),
+        samlp = XSW_SAMLP_NS,
+        saml = XSW_SAML_NS,
+        acs = XSW_ACS_URL,
+        assertion = assertion,
+    )
+}
+
+/// Signs `element` the way Entra ID does: an unprefixed
+/// `<Signature xmlns="…xmldsig#">`, placed after the element's `<Issuer>`,
+/// whose children inherit the default namespace.
+fn sign_with_default_namespace_signature(element: &str, id: &str, key: &RsaSigningKey) -> String {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    use hearth::identity::federation::saml::c14n::{canonicalize, EnvelopedSignature};
+    use sha2::{Digest, Sha256};
+
+    let exc = "http://www.w3.org/2001/10/xml-exc-c14n#";
+    let canonical = canonicalize(element.as_bytes(), EnvelopedSignature::Keep).expect("c14n");
+    let digest = B64.encode(Sha256::digest(&canonical));
+    // Detached, SignedInfo carries the default-namespace declaration it
+    // inherits in place — that is its exclusive-C14N form in context.
+    let signed_info = format!(
+        concat!(
+            r#"<SignedInfo xmlns="{ds}"><CanonicalizationMethod Algorithm="{exc}"></CanonicalizationMethod>"#,
+            r#"<SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"></SignatureMethod>"#,
+            r##"<Reference URI="#{id}"><Transforms>"##,
+            r#"<Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"></Transform>"#,
+            r#"<Transform Algorithm="{exc}"></Transform></Transforms>"#,
+            r#"<DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"></DigestMethod>"#,
+            "<DigestValue>{digest}</DigestValue></Reference></SignedInfo>",
+        ),
+        ds = XSW_DSIG_NS,
+        exc = exc,
+        id = id,
+        digest = digest,
+    );
+    let canonical_si =
+        canonicalize(signed_info.as_bytes(), EnvelopedSignature::Keep).expect("c14n si");
+    let signature_value = B64.encode(key.sign(&canonical_si).expect("sign"));
+    let in_document = signed_info.replacen(&format!(r#" xmlns="{XSW_DSIG_NS}""#), "", 1);
+    let signature = format!(
+        concat!(
+            r#"<Signature xmlns="{ds}">{si}<SignatureValue>{sv}</SignatureValue>"#,
+            "<KeyInfo><X509Data><X509Certificate>{cert}</X509Certificate></X509Data></KeyInfo>",
+            "</Signature>",
+        ),
+        ds = XSW_DSIG_NS,
+        si = in_document,
+        sv = signature_value,
+        cert = B64.encode(key.cert_der()),
+    );
+    xsw_insert_after(element, "</Issuer>", &signature)
+}
+
+/// The verifier accepts an Entra-style default-namespace signature on its
+/// own (no response parsing involved).
+#[test]
+fn verifier_accepts_a_default_namespace_signature() {
+    let idp_key = RsaSigningKey::generate("entra", 365).expect("key");
+    let signed = sign_with_default_namespace_signature(
+        &entra_assertion("_e1", "mallory@corp.example"),
+        "_e1",
+        &idp_key,
+    );
+    assert!(
+        signed.contains("<SignedInfo>"),
+        "fixture must be unprefixed"
+    );
+    match verify_signed_element(
+        entra_response(&signed).as_bytes(),
+        "Assertion",
+        &cert_der_to_pem(idp_key.cert_der()),
+    ) {
+        Ok(verified) => assert_eq!(verified.id, "_e1"),
+        Err(error) => panic!("default-namespace signature rejected: {error:?}"),
+    }
+}
+
+/// End to end: an Entra-shaped Response is accepted and its unprefixed
+/// fields are read.
+#[test]
+fn sp_accepts_an_entra_style_default_namespace_response() {
+    let idp_key = RsaSigningKey::generate("entra", 365).expect("key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let signed = sign_with_default_namespace_signature(
+        &entra_assertion("_signed1", "mallory@corp.example"),
+        "_signed1",
+        &idp_key,
+    );
+    xsw_assert_accepted_as_mallory(&idp_cfg, &entra_response(&signed), "Entra-shaped response");
+}
+
+/// G-1 still holds in the default-namespace spelling: a second unprefixed
+/// `<Signature>` carrying a victim `<Subject>` is refused.
+#[test]
+fn sp_rejects_a_second_default_namespace_signature() {
+    let idp_key = RsaSigningKey::generate("entra", 365).expect("key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let signed = sign_with_default_namespace_signature(
+        &entra_assertion("_signed1", "mallory@corp.example"),
+        "_signed1",
+        &idp_key,
+    );
+    xsw_assert_accepted_as_mallory(&idp_cfg, &entra_response(&signed), "control");
+
+    let forged = format!(
+        r#"<Signature xmlns="{XSW_DSIG_NS}"><Subject xmlns="{XSW_SAML_NS}"><NameID>ceo@corp.example</NameID></Subject></Signature>"#
+    );
+    let attack = xsw_insert_before(&signed, "</Assertion>", &forged);
+    xsw_assert_rejected(
+        &idp_cfg,
+        &entra_response(&attack),
+        "second default-namespace <Signature>",
+    );
+}
+
+/// …and so does the moved-signature variant: the real unprefixed signature
+/// moved to the end with a victim `<Subject>` after its `<KeyInfo>`.
+#[test]
+fn sp_rejects_a_moved_default_namespace_signature_with_content_after_key_info() {
+    let idp_key = RsaSigningKey::generate("entra", 365).expect("key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let signed = sign_with_default_namespace_signature(
+        &entra_assertion("_signed1", "mallory@corp.example"),
+        "_signed1",
+        &idp_key,
+    );
+    xsw_assert_accepted_as_mallory(&idp_cfg, &entra_response(&signed), "control");
+    let start = signed.find("<Signature ").expect("signature");
+    let end = signed.find("</Signature>").expect("end") + "</Signature>".len();
+    let signature = xsw_insert_after(
+        &signed[start..end],
+        "</KeyInfo>",
+        &format!(r#"<Subject xmlns="{XSW_SAML_NS}"><NameID>ceo@corp.example</NameID></Subject>"#),
+    );
+    let without = format!("{}{}", &signed[..start], &signed[end..]);
+    let attack = xsw_insert_before(&without, "</Assertion>", &signature);
+    xsw_assert_rejected(
+        &idp_cfg,
+        &entra_response(&attack),
+        "moved default-namespace signature",
+    );
+}
+
+/// Keycloak's shape: the `saml` prefix is declared on the `<Response>` only,
+/// and the `<saml:Assertion>` relies on it. Exclusive C14N renders an
+/// inherited, visibly used declaration on the apex, so a standard signer's
+/// canonical form carries `xmlns:saml` — which Hearth, canonicalizing the
+/// extracted assertion without its ancestors' declarations, did not.
+#[test]
+fn sp_accepts_an_assertion_whose_prefix_is_declared_on_the_response() {
+    let idp_key = RsaSigningKey::generate("keycloak", 365).expect("key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let response = xsw_response_for_mallory(&BTreeMap::new());
+    let assertion = extract_assertion(&response);
+    let decl = format!(r#" xmlns:saml="{XSW_SAML_NS}""#);
+    // Sign the assertion in its exclusive-C14N form (declaration rendered on
+    // the apex), then embed it relying on the Response's declaration.
+    let signed =
+        sign_element(with_saml_ns(&assertion).as_bytes(), "_signed1", &idp_key).expect("sign");
+    let signed = String::from_utf8(signed)
+        .expect("utf8")
+        .replacen(&decl, "", 1);
+    assert!(!signed.starts_with(&format!("<saml:Assertion{decl}")));
+    xsw_assert_accepted_as_mallory(
+        &idp_cfg,
+        &response.replace(&assertion, &signed),
+        "prefix declared on the Response",
     );
 }

@@ -237,9 +237,17 @@ impl BackupExporter {
         // (HEA-2167). While this guard is held, all storage writes block;
         // reads — including ours — proceed. Every entity read below therefore
         // reflects a single point in time, so the archive cannot be torn (e.g.
-        // a group membership referencing a user the archive omits). Engines
-        // without a barrier (test doubles, cluster wrapper) return `None` and
-        // the export proceeds without isolation.
+        // a group membership referencing a user the archive omits). The
+        // embedded engine owns the barrier and `serve`'s ClusterStorageAdapter
+        // forwards it; only test doubles return `None`, and then the export
+        // proceeds without isolation.
+        //
+        // Every read below must complete without waiting for another thread.
+        // Each write that arrives meanwhile parks a Tokio blocking-pool thread
+        // on this barrier; a read that queued for a pool thread would wait on
+        // writers that wait on us, so enough of them stopped the whole server
+        // (GA audit 3 F-7). The storage adapter therefore serves reads on the
+        // calling thread (`ClusterEngine::read_inline`).
         //
         // The pass only reads and serialises into memory (`members`); the
         // guard is released before phase 2 encrypts, compresses and writes

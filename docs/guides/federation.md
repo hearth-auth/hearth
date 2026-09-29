@@ -383,8 +383,8 @@ realms:
           want_assertions_signed: true # reject unsigned assertions
           # Map SAML attributes to Hearth user fields.
           attribute_map:
-            email: "urn:oid:0.9.2342.19200300.100.1.3"   # mail OID
-            name:  "urn:oid:2.16.840.1.113730.3.1.241"   # displayName OID
+            email:        "urn:oid:0.9.2342.19200300.100.1.3"   # mail OID
+            display_name: "urn:oid:2.16.840.1.113730.3.1.241"   # displayName OID
 ```
 
 SAML login is initiated at:
@@ -403,10 +403,10 @@ https://auth.example.com/ui/realms/<realm>/federation/saml/begin?idp=corp-saml
 | `entity_id` | Yes | IdP SAML entity ID (`entityID` in IdP metadata) |
 | `sso_url` | Yes | IdP Single Sign-On Service URL (HTTP-Redirect binding) |
 | `slo_url` | No | IdP Single Logout Service URL |
-| `idp_certificate_pem` | Yes | IdP signing certificate, PEM-encoded (inline) |
+| `idp_certificate_pem` | Yes | IdP signing certificate, PEM-encoded (inline). During an IdP key rollover, paste the outgoing and the incoming certificate one after the other: an assertion signed by either is accepted. Remove the old one once the IdP has switched. |
 | `sign_authn_requests` | No | Sign outbound AuthnRequests (default: false) |
 | `want_assertions_signed` | No | Reject assertions not individually signed (default: false; **strongly recommended `true` in production**) |
-| `attribute_map` | No | Maps Hearth field names to SAML attribute URIs |
+| `attribute_map` | No | Maps Hearth field names (`email`, `display_name`, `first_name`, `last_name`, `external_sub`) to SAML attribute names; the value `NameID` takes the assertion's subject `NameID` instead of an attribute |
 
 > **`want_assertions_signed` is enforced.** When set to `true`, the ACS rejects any inbound
 > assertion that is not individually signed. A Response-level signature alone is not
