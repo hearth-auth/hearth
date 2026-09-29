@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
@@ -91,15 +91,11 @@ impl PerIpLimiter {
     }
 }
 
-/// The bucket a peer's connections are counted in.
+/// The bucket a peer's connections are counted in: the same
+/// [`rate_limit_key`](crate::protocol::client_info::rate_limit_key) every
+/// per-IP request limiter uses (IPv4 per address, IPv6 per `/64`).
 fn bucket_of(peer: IpAddr) -> IpAddr {
-    match peer {
-        IpAddr::V4(_) => peer,
-        IpAddr::V6(v6) => {
-            let s = v6.segments();
-            IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
-        }
-    }
+    crate::protocol::client_info::rate_limit_key(peer)
 }
 
 /// One admitted connection's slot in a [`PerIpLimiter`]; released on drop.
