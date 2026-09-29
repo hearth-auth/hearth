@@ -324,8 +324,13 @@ async fn backup_restore_keeps_the_marker() {
         .items;
     let target = realm(&h);
     for org in &exported {
+        // The backup writes each record as an ndjson line and parses it back
+        // on restore: round-trip through the same serde form.
+        let line = serde_json::to_string(org).expect("serialize org");
+        let restored: hearth::identity::Organization =
+            serde_json::from_str(&line).expect("parse org");
         h.identity()
-            .import_organization(&target, org, false)
+            .import_organization(&target, &restored, false)
             .expect("import");
     }
     let target_token = enable_scim_token(&h, &target);
