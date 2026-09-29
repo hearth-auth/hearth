@@ -309,6 +309,28 @@ pub trait IdentityEngine: Send + Sync {
         request: &CreateUserRequest,
     ) -> Result<User, IdentityError>;
 
+    /// Creates the local account for a just-in-time federated login, with
+    /// the checks [`Self::create_user`] applies.
+    ///
+    /// `email_verified` is whether the upstream identity provider asserted
+    /// that it verified `request.email`. A verified address gives an account
+    /// in the engine's default status whose email is recorded as verified. An
+    /// unverified one gives a `PendingVerification` account, exactly as
+    /// self-registration does: `create_session` refuses it until the owner of
+    /// the address consumes an email-verification token.
+    ///
+    /// A federated login used to create an `Active` account on whatever
+    /// address the upstream named, verified or not (GA audit round 3, G-3).
+    /// Behind an IdP that lets a user claim any address, that pre-created
+    /// someone else's account — and Hearth's SAML IdP then asserted that
+    /// address to every registered service provider.
+    fn provision_federated_user(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateUserRequest,
+        email_verified: bool,
+    ) -> Result<User, IdentityError>;
+
     /// Creates a new user record in the reserved system realm.
     ///
     /// This is the only public entry point that writes into the system

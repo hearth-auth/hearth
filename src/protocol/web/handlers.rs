@@ -5469,64 +5469,83 @@ fn register_submit_impl(
         }
     };
 
-    if let Some(email_service) = state.email.clone() {
-        let base = derive_base_url(
-            state
-                .config
-                .as_ref()
-                .and_then(|c| c.onboarding.base_url.as_deref()),
-            &state.fallback_base_url(),
-            &headers,
-        );
-        let verify_url = format!(
-            "{base}{action_prefix}/verify-email?token={}",
-            response.verification_token
-        );
-        let branding = realm.config().email_branding.clone();
-        let stored_verification = realm.config().email_templates.get("verification").cloned();
-        // Off the request path: the mail send must not add latency that
-        // distinguishes a fresh address from a registered one
-        // (audit 2026-08-28 §4.24#4).
-        let recipient = form.email.clone();
-        // A-4 + A-50 (task 20.13) — see the identical block in
-        // `forgot_password_submit_impl`. Inside the off-request-path closure
-        // so the arm adds no measurable latency to either outcome.
-        let guards = Arc::clone(&state.abuse_guards);
-        let realm_key = realm.id().as_uuid().to_string();
-        spawn_off_request_path(move || {
-            match guards.check_outbound_email(&realm_key, &recipient) {
-                crate::abuse::runtime::OutboundVerdict::Deny { reason } => {
-                    tracing::warn!(
-                        guard = reason,
-                        "register_submit: outbound cap reached; verification email not sent"
-                    );
-                    return;
-                }
-                crate::abuse::runtime::OutboundVerdict::Warn { reason } => {
-                    tracing::warn!(guard = reason, "register_submit: outbound soft cap reached");
-                }
-                crate::abuse::runtime::OutboundVerdict::Allow => {}
-            }
-            if let Err(e) = email_service.send_verification_email(
-                &recipient,
-                &verify_url,
-                branding.as_ref(),
-                stored_verification.as_ref(),
-                None,
-            ) {
-                tracing::warn!(
-                    error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
-                    "register_submit: failed to send verification email"
-                );
-            }
-        });
-    } else {
-        tracing::warn!(
-            "register_submit: no email transport configured; verification cannot be delivered"
-        );
-    }
+    send_verification_email_off_path(
+        &state,
+        &realm,
+        form.email.clone(),
+        &response.verification_token,
+        &action_prefix,
+        &headers,
+    );
 
     Redirect::to(&sent_url).into_response()
+}
+
+/// Sends the email-verification link for `token` to `recipient` — the mail
+/// self-registration sends, and the one a federated account whose upstream
+/// did not verify its address is sent (GA audit round 3, G-3).
+///
+/// Off the request path: the mail send must not add latency that
+/// distinguishes a fresh address from a registered one (audit 2026-08-28
+/// §4.24#4). The A-4 / A-50 outbound caps (task 20.13) apply, inside the
+/// off-path closure so they add no measurable latency either.
+pub(super) fn send_verification_email_off_path(
+    state: &Arc<WebState>,
+    realm: &Realm,
+    recipient: String,
+    token: &str,
+    action_prefix: &str,
+    headers: &HeaderMap,
+) {
+    let Some(email_service) = state.email.clone() else {
+        tracing::warn!(
+            "verification email: no email transport configured; verification cannot be delivered"
+        );
+        return;
+    };
+    let base = derive_base_url(
+        state
+            .config
+            .as_ref()
+            .and_then(|c| c.onboarding.base_url.as_deref()),
+        &state.fallback_base_url(),
+        headers,
+    );
+    let verify_url = format!("{base}{action_prefix}/verify-email?token={token}");
+    let branding = realm.config().email_branding.clone();
+    let stored_verification = realm.config().email_templates.get("verification").cloned();
+    let guards = Arc::clone(&state.abuse_guards);
+    let realm_key = realm.id().as_uuid().to_string();
+    spawn_off_request_path(move || {
+        match guards.check_outbound_email(&realm_key, &recipient) {
+            crate::abuse::runtime::OutboundVerdict::Deny { reason } => {
+                tracing::warn!(
+                    guard = reason,
+                    "verification email: outbound cap reached; not sent"
+                );
+                return;
+            }
+            crate::abuse::runtime::OutboundVerdict::Warn { reason } => {
+                tracing::warn!(
+                    guard = reason,
+                    "verification email: outbound soft cap reached"
+                );
+            }
+            crate::abuse::runtime::OutboundVerdict::Allow => {}
+        }
+        if let Err(e) = email_service.send_verification_email(
+            &recipient,
+            &verify_url,
+            branding.as_ref(),
+            stored_verification.as_ref(),
+            None,
+        ) {
+            tracing::warn!(
+                error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
+                "verification email: send failed"
+            );
+        }
+    });
 }
 
 /// Renders the post-submission confirmation page for the bare URL.

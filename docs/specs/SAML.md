@@ -58,8 +58,13 @@ the realm's SP registry:
 
 Every IdP route requires a live Hearth session (the `UiSession` extractor) whose
 realm matches the path realm; the asserted `NameID` is that session's user
-email. Hearth signs IdP responses with the realm's RSA key (§4's algorithm rules
-apply in both directions).
+email. Every assertion also carries an `email_verified` attribute (`true` /
+`false`) stating whether the account proved that address — through the
+verification mail, the email-change confirmation, or an upstream IdP that
+verified it. An operator- or SCIM-created account has not, so an SP that keys
+accounts on the email SHOULD require `email_verified` = `true` before trusting
+the `NameID` as proof of the address. Hearth signs IdP responses with the
+realm's RSA key (§4's algorithm rules apply in both directions).
 
 `want_authn_requests_signed` on a registered SP is **enforced** at
 `src/protocol/web/saml.rs`: when the flag is set, the `<AuthnRequest>` MUST carry
@@ -211,6 +216,18 @@ an IdP that owns its users' mailboxes: it lets that IdP claim **any** address
 in the realm. The key is ignored for non-SAML connectors, which carry the
 upstream's own `email_verified` claim.
 
+The same signal decides the state of a **just-in-time** account. A new user
+provisioned from a verified address is `Active` with its email recorded as
+verified. One provisioned from an unverified address — every SAML login from a
+connector without `trust_asserted_email`, and every OIDC / Apple login whose
+`email_verified` is not `true` — is created `PendingVerification`, exactly as
+self-registration is: Hearth mails that address a verification link, answers
+the login with the "check your email" page, and issues no session until the
+link is used. The account then signs in through its federated link as usual.
+(An account under a synthetic `…@fed.<idp>.local` address — no upstream email,
+or one that collides with an existing user — names no mailbox and is `Active`,
+unverified.)
+
 (Tests: `saml_confirm_link_is_reachable_only_when_the_asserted_email_is_trusted`
 proves the consumer; `reconcile_federation_carries_trust_asserted_email_to_the_idp`
 proves the YAML reaches it.)
@@ -267,7 +284,8 @@ assertion ID MUST be rejected as `SamlError::Replay`.
 
 On acceptance the ACS runs the asserted identity through the same federation
 pipeline the OIDC callback uses — existing link, auto-link, confirm-to-link, or
-JIT provisioning — and issues a Hearth session cookie. `saml_login_completed`
+JIT provisioning — and issues a Hearth session cookie (except for a JIT
+account waiting for its address to be verified, §4.2). `saml_login_completed`
 is recorded **only** when that cookie was actually set: a confirm-to-link hop is
 a redirect without one, and the audit log must not report a login that did not
 happen.
