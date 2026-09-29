@@ -403,7 +403,7 @@ https://auth.example.com/ui/realms/<realm>/federation/saml/begin?idp=corp-saml
 | `entity_id` | Yes | IdP SAML entity ID (`entityID` in IdP metadata) |
 | `sso_url` | Yes | IdP Single Sign-On Service URL (HTTP-Redirect binding) |
 | `slo_url` | No | IdP Single Logout Service URL |
-| `idp_certificate_pem` | Yes | IdP signing certificate, PEM-encoded (inline). During an IdP key rollover, paste the outgoing and the incoming certificate one after the other: an assertion signed by either is accepted. Remove the old one once the IdP has switched. |
+| `idp_certificate_pem` | Yes | IdP signing certificate, PEM-encoded (inline). During an IdP key rollover, paste the outgoing and the incoming certificate one after the other: an assertion signed by either is accepted. Remove the old one once the IdP has switched. Every certificate is parsed when the configuration is loaded or reloaded: an unusable one refuses startup (and `hearth config validate` names the realm and connector) instead of failing the first login. |
 | `sign_authn_requests` | No | Sign outbound AuthnRequests (default: false) |
 | `want_assertions_signed` | No | Reject assertions not individually signed (default: false; **strongly recommended `true` in production**) |
 | `attribute_map` | No | Maps Hearth field names (`email`, `display_name`, `first_name`, `last_name`, `external_sub`) to SAML attribute names; the value `NameID` takes the assertion's subject `NameID` instead of an attribute |
@@ -585,7 +585,7 @@ need to be specified unless you want to override a default.
 | `entity_id` | string | — | **SAML only.** IdP entity ID |
 | `sso_url` | string | — | **SAML only.** IdP SSO URL (HTTP-Redirect binding) |
 | `slo_url` | string | — | **SAML only.** IdP Single Logout URL (optional) |
-| `idp_certificate_pem` | string | — | **SAML only.** IdP signing certificate, PEM inline |
+| `idp_certificate_pem` | string | — | **SAML only.** IdP signing certificate, PEM inline; several concatenated certificates during a key rollover. Parsed at load and reload — an unusable certificate refuses startup |
 | `sign_authn_requests` | bool | — | **SAML only.** Sign outbound AuthnRequests (default: false) |
 | `want_assertions_signed` | bool | — | **SAML only.** Reject unsigned assertions (default: false) |
 | `attribute_map` | map | — | **SAML only.** Maps Hearth field names to SAML attribute URIs |
