@@ -180,9 +180,12 @@ pub(super) fn required_action_intercept(
 /// The user's pending required actions: the stored list plus the
 /// dynamically injected enrolment requirements.
 ///
-/// * `Ok(None)` — the user does not exist, so nothing is stored for them.
-///   Every caller's next step (session creation, code exchange) refuses a
-///   missing user, so this is not the place to decide it.
+/// * `Ok(None)` — the user does not exist, or cannot sign in (disabled, or
+///   still waiting for email verification). No required-action session is
+///   minted for such an account (GA audit round 3, D-11): it let a disabled
+///   or unverified account holder who knew the password change it, bind a
+///   phone and send SMS. Every caller's next step (session creation, code
+///   exchange) refuses the account with its usual answer.
 /// * `Err(response)` — a lookup failed. The actions (or the realm's
 ///   enrolment requirements) are unknown, so the caller must refuse: reading
 ///   the fault as "nothing pending" skipped the actions.
@@ -193,8 +196,8 @@ fn pending_required_actions(
     client_id: Option<&str>,
 ) -> Result<Option<Vec<RequiredAction>>, Response> {
     let user = match state.identity.get_user(realm, user_id) {
-        Ok(Some(u)) => u,
-        Ok(None) => return Ok(None),
+        Ok(Some(u)) if u.status() == crate::identity::UserStatus::Active => u,
+        Ok(_) => return Ok(None),
         Err(e) => {
             tracing::warn!(
                 error = %e,

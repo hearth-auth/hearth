@@ -572,3 +572,65 @@ async fn a_refused_network_cannot_detour_a_login_through_a_required_action() {
     assert!(!browser.has_cookie("hearth_ra_session"));
     assert!(!browser.has_cookie("hearth_ui_session"));
 }
+
+// ── D-11: no required-action session for an account that cannot sign in ─────
+
+async fn assert_no_required_action_flow(rig: &Rig, email: &str) {
+    let (browser, resp) = post_password(rig, email).await;
+    let next = location(&resp);
+    assert!(
+        !next
+            .as_deref()
+            .is_some_and(|l| l.starts_with("/required-action/")),
+        "an account that cannot sign in must not be handed a required-action flow \
+         (status {}, location {next:?})",
+        resp.status()
+    );
+    assert!(!browser.has_cookie("hearth_ra_session"));
+    assert!(!browser.has_cookie("hearth_ui_session"));
+}
+
+/// GA audit round 3, D-11: a disabled account holder who knows the password
+/// could still run required actions (change the password, bind a phone).
+#[tokio::test]
+async fn a_disabled_account_is_not_handed_a_required_action_flow() {
+    let rig = build_rig(RealmConfig::default());
+    let user = create_user(
+        &rig,
+        "d11-disabled@example.com",
+        vec![RequiredAction::UpdatePassword],
+    );
+    rig.identity
+        .update_user(
+            &rig.realm_id,
+            &user,
+            &UpdateUserRequest {
+                status: Some(UserStatus::Disabled),
+                ..Default::default()
+            },
+        )
+        .expect("disable");
+    assert_no_required_action_flow(&rig, "d11-disabled@example.com").await;
+}
+
+/// D-11: nor an account still waiting for its email to be verified.
+#[tokio::test]
+async fn an_unverified_account_is_not_handed_a_required_action_flow() {
+    let rig = build_rig(RealmConfig::default());
+    let user = create_user(
+        &rig,
+        "d11-unverified@example.com",
+        vec![RequiredAction::UpdatePassword],
+    );
+    rig.identity
+        .update_user(
+            &rig.realm_id,
+            &user,
+            &UpdateUserRequest {
+                status: Some(UserStatus::PendingVerification),
+                ..Default::default()
+            },
+        )
+        .expect("mark unverified");
+    assert_no_required_action_flow(&rig, "d11-unverified@example.com").await;
+}
