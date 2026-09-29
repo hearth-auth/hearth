@@ -6032,11 +6032,10 @@ pub async fn device_approve_submit(
         session.user_id.as_uuid()
     );
     let peer_ip = captcha_client_ip(&headers, peer_addr, &state.trusted_proxies);
-    let realm_key = session.realm_id.as_uuid().to_string();
 
     match state
         .device_approval_guard
-        .check(&guard_key, peer_ip, &realm_key)
+        .check(&guard_key, peer_ip, &session.realm_id)
     {
         DeviceApprovalDecision::Allow => {}
         decision => return device_approval_refusal(decision),

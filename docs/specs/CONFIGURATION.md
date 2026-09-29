@@ -956,12 +956,14 @@ security:
 
 #### `security.request_shaper`
 
-Global per-IP and per-realm token-bucket request limiter (A-2). When absent, no global shaping is applied; operator is responsible for upstream rate limiting.
+Global per-client and per-realm one-second sliding-window request limiter (A-2), shared by the HTTP and gRPC listeners. It is **on by default**: when the section is absent the defaults below apply. Set a field to `0` to turn that dimension off (for example when an upstream proxy already rate-limits). A shed request answers `429` with `{"limiter":"shaper"}` (gRPC: `RESOURCE_EXHAUSTED`). Browser static assets (`/ui/static/*`, the favicons) are not counted.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `ip_rps` | integer | `100` | Maximum requests per second from a single source IP across all endpoints. |
-| `realm_rps` | integer | `1000` | Maximum requests per second across all clients within a single realm. |
+| `ip_rps` | integer | `100` | Maximum requests per second from one client across all endpoints. A client is an IPv4 address, or an IPv6 `/64` (one host is routinely assigned a whole `/64`). `0` disables. |
+| `realm_rps` | integer | `1000` | Maximum requests per second to one realm, across all clients. A request counts against a realm only when it names one: the realm segment of a `/realms/{realm}/…`, `/ui/realms/{realm}/…` or `/v1/{realm}/…` path, otherwise a UUID `X-Realm-ID` header (gRPC: `x-realm-id` metadata). Requests that name no realm — `/health`, root discovery, the admin console — are limited per client only. A realm addressed by name on one route and by id on another is counted in two buckets. `0` disables. |
+
+Every in-process rate limiter (this one, the JWKS/discovery, token, admin and export limiters, the login tarpit and CAPTCHA challenge store, and the A-3/A-4/A-50 detectors) keeps its per-key state in a bounded map: entries are dropped once their window closes, and each limiter holds at most a fixed number of keys (100 000; 16 384 realm buckets; 65 536 per detector dimension), evicting the soonest-expiring entries when full. Per-IP limiters all bucket IPv6 per `/64`, like `operational.max_connections_per_ip`.
 
 ```yaml
 security:

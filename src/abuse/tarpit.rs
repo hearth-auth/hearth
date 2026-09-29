@@ -34,10 +34,17 @@
 //! but does not gate.  Both can be active simultaneously — the tarpit fires
 //! before the CAPTCHA check in handler order.
 
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use crate::core::{rate_limit_key, ExpiringMap, LimiterClock};
+
+/// Most per-client failure counters held at once (GA sweep 3, E-2).
+pub const TARPIT_CAPACITY: usize = 100_000;
+
+/// How often idle failure counters are swept.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration
@@ -110,15 +117,16 @@ impl IpEntry {
         }
     }
 
-    /// Increments the failure counter, resetting on window expiry.
-    fn increment(&mut self, now: Instant, window: Duration) -> u32 {
+    /// Increments the failure counter, resetting on window expiry. Returns
+    /// the entry's new expiry: the end of its counting window.
+    fn increment(&mut self, now: Instant, window: Duration) -> ((), Instant) {
         if now.duration_since(self.window_start) >= window {
             self.count = 1;
             self.window_start = now;
         } else {
             self.count = self.count.saturating_add(1);
         }
-        self.count
+        ((), self.window_start.plus(window))
     }
 }
 
@@ -126,14 +134,17 @@ impl IpEntry {
 // TarpitStore
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Per-IP tarpit failure counter (A-17).
+/// Per-client tarpit failure counter (A-17).
 ///
 /// Shared via `Arc` across HTTP login/registration handlers.  The `Mutex` is
 /// held only for the duration of a hash-map lookup + counter update.
+///
+/// Clients are counted under [`rate_limit_key`] (IPv6 per `/64`), and the
+/// counters live in a bounded [`ExpiringMap`].
 #[derive(Debug)]
 pub struct TarpitStore {
     config: TarpitConfig,
-    entries: Mutex<HashMap<IpAddr, IpEntry>>,
+    entries: Mutex<ExpiringMap<IpAddr, IpEntry>>,
 }
 
 impl TarpitStore {
@@ -142,7 +153,7 @@ impl TarpitStore {
     pub fn disabled() -> Self {
         Self {
             config: TarpitConfig::default(), // threshold = None
-            entries: Mutex::new(HashMap::new()),
+            entries: Mutex::new(ExpiringMap::new(TARPIT_CAPACITY, SWEEP_INTERVAL)),
         }
     }
 
@@ -151,7 +162,7 @@ impl TarpitStore {
     pub fn with_config(config: TarpitConfig) -> Self {
         Self {
             config,
-            entries: Mutex::new(HashMap::new()),
+            entries: Mutex::new(ExpiringMap::new(TARPIT_CAPACITY, SWEEP_INTERVAL)),
         }
     }
 
@@ -162,11 +173,15 @@ impl TarpitStore {
     /// any counter — call [`record_failure`](Self::record_failure) after the
     /// auth attempt regardless of outcome.
     pub fn check(&self, ip: IpAddr) -> TarpitOutcome {
+        self.check_at(ip, Instant::now())
+    }
+
+    /// [`check`](Self::check) at an explicit time (tests drive the clock).
+    fn check_at(&self, ip: IpAddr, now: Instant) -> TarpitOutcome {
         let Some(threshold) = self.config.threshold else {
             return TarpitOutcome::Allow;
         };
 
-        let now = Instant::now();
         let window = Duration::from_secs(self.config.window_secs);
         let delay = Duration::from_millis(self.config.delay_ms);
 
@@ -175,7 +190,7 @@ impl TarpitStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        if let Some(entry) = map.get(&ip) {
+        if let Some(entry) = map.get(&rate_limit_key(ip)) {
             // If still inside the same window and count is over threshold…
             if now.duration_since(entry.window_start) < window && entry.count >= threshold {
                 return TarpitOutcome::Delay(delay);
@@ -191,20 +206,27 @@ impl TarpitStore {
     /// this after every failed login / registration attempt so the tarpit
     /// activates on the *next* request once the threshold is crossed.
     pub fn record_failure(&self, ip: IpAddr) {
+        self.record_failure_at(ip, Instant::now());
+    }
+
+    /// [`record_failure`](Self::record_failure) at an explicit time.
+    fn record_failure_at(&self, ip: IpAddr, now: Instant) {
         if self.config.threshold.is_none() {
             return;
         }
 
-        let now = Instant::now();
         let window = Duration::from_secs(self.config.window_secs);
         let mut map = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        map.entry(ip)
-            .or_insert_with(|| IpEntry::new(now))
-            .increment(now, window);
+        map.upsert(
+            rate_limit_key(ip),
+            now,
+            || IpEntry::new(now),
+            |entry| entry.increment(now, window),
+        );
     }
 
     /// Clears tarpit state for `ip`.
@@ -216,7 +238,7 @@ impl TarpitStore {
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.remove(&ip);
+        map.remove(&rate_limit_key(ip));
     }
 }
 
@@ -366,6 +388,57 @@ mod tests {
             s.check(ip(30)),
             TarpitOutcome::Allow,
             "check without prior failures must always allow"
+        );
+    }
+
+    // ── GA sweep 3 E-2: counters are swept after their window ────────────────
+
+    #[test]
+    fn failure_counters_are_swept_after_their_window() {
+        let s = TarpitStore::with_config(TarpitConfig {
+            threshold: Some(5),
+            window_secs: 60,
+            delay_ms: 200,
+        });
+        let t0 = Instant::now();
+        for i in 0..3_000u32 {
+            s.record_failure_at(IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i)), t0);
+        }
+        let held = || s.entries.lock().expect("tarpit lock").len();
+        assert_eq!(held(), 3_000);
+        s.record_failure_at(ip(1), t0 + Duration::from_secs(121));
+        assert_eq!(held(), 1, "counters whose window closed are dropped");
+    }
+
+    #[test]
+    fn failure_counters_are_hard_capped() {
+        let s = store_with_threshold(5);
+        let t0 = Instant::now();
+        for i in 0..u32::try_from(TARPIT_CAPACITY + 2_000).expect("fits") {
+            s.record_failure_at(IpAddr::V4(Ipv4Addr::from(i)), t0);
+        }
+        assert!(s.entries.lock().expect("tarpit lock").len() <= TARPIT_CAPACITY);
+    }
+
+    // ── GA sweep 3 E-3: an IPv6 /64 is one client ────────────────────────────
+
+    #[test]
+    fn two_addresses_in_one_slash64_share_a_failure_counter() {
+        let s = store_with_threshold(2);
+        let a: IpAddr = "2001:db8:5:6::1".parse().expect("ip");
+        let b: IpAddr = "2001:db8:5:6::2".parse().expect("ip");
+        s.record_failure(a);
+        s.record_failure(b);
+        assert_eq!(
+            s.check("2001:db8:5:6::3".parse().expect("ip")),
+            TarpitOutcome::Delay(Duration::from_millis(200)),
+            "rotating the low 64 bits must not reset the tarpit"
+        );
+        s.clear(b);
+        assert_eq!(
+            s.check(a),
+            TarpitOutcome::Allow,
+            "clear resets the whole /64"
         );
     }
 }
