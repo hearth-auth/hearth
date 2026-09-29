@@ -454,9 +454,13 @@ federated login provisions a user just in time, the upstream's email is taken as
 if the upstream said so (`email_verified: true`; for SAML, only when the connector sets
 `trust_asserted_email: true`). Otherwise the account is created `PendingVerification`, like a
 self-registered one: Hearth mails the address a verification link and shows the "check your
-email" page instead of signing the user in. After the link is used, the same federated login
-signs in normally. This stops an upstream that lets users claim any address from pre-creating
-an account on someone else's address.
+email" page instead of signing the user in. The verification keeps the federated link only
+when it is completed in the browser that performed the federated login (a cookie that login
+set, bound to the mailed token); the same federated login then signs in normally. Completed in
+any other browser, the account is activated **without** the federated link, and the removal is
+audited as `federation_account_unlinked` (`reason:
+email_verified_outside_federated_login_browser`). This stops an upstream that lets users claim
+any address from pre-creating — and keeping a way into — an account on someone else's address.
 
 > ⚠️ **`auto` is an account-takeover risk.** It removes the phishing-protection gate: Hearth
 > attaches the upstream identity to whatever local account already holds that email address,
