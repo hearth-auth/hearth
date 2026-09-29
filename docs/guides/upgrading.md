@@ -622,6 +622,13 @@ cluster must share one value anyway: run the restore and the new cluster with th
    The token needs the `hearth.admin` and `hearth.export` capabilities. Check the archive lists
    every tenant realm (`hearth backup inspect --input pre-upgrade.hearth-backup`); see the
    [Backup guide](./backup.md) for signing (the restore refuses an unsigned archive).
+
+   **No `$SYSTEM_TOKEN`?** v1.6.11 has no production way to mint one, and this release's
+   `hearth admin token` needs the node stopped and refuses a cluster node's store — and stopping
+   is one-way here ([System-realm tokens](./clustering.md#system-realm-tokens)). Skip this export.
+   In step 3, export **every** realm instead: drop `--realm …`, add `--include-audit` and write
+   `--output pre-upgrade.hearth-backup`. That one archive then carries the system realm too, so
+   step 4 runs only the first restore.
 2. **Stop every node** — one-way, see above — and **move each node's data directory aside** (keep
    it, for investigation and for step 3; do not delete it):
 
@@ -678,6 +685,19 @@ cluster must share one value anyway: run the restore and the new cluster with th
    here. `hearth backup restore`
    writes only the store, never a Raft log, so a directory it restored into while empty holds no
    `raft.db`. Do **not** start `hearth serve` on it yet.
+
+   To check the new cluster with `/admin/cluster/status` in step 6, mint a system-realm token
+   **now**, into this directory, before step 5 copies it: every node then starts from the same
+   session and audit record, so the token validates on all of them. It lives at most one hour:
+
+   ```bash
+   SYSTEM_TOKEN=$(hearth admin token --data-dir /var/lib/hearth/data-new \
+     --config /etc/hearth/hearth.yaml --user ops@example.com --ttl 1h)
+   ```
+
+   `--user` is an operator-console account from the restored system realm holding `realm.admin`.
+   Minting after the copy, on one node, would put the record on that node only
+   ([System-realm tokens](./clustering.md#system-realm-tokens)).
 5. **Copy that directory to every node** before any node starts, into the path each node's
    `storage.data_dir` names — which step 2 emptied. Create it fresh so the copy cannot merge into
    leftovers, then copy:

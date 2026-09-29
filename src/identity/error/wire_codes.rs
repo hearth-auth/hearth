@@ -139,6 +139,7 @@ impl IdentityError {
             Self::Unauthorized => Some("HEARTH_FORBIDDEN"),
             Self::SystemRealmProtected { .. } => Some("HEARTH_SYSTEM_REALM_PROTECTED"),
             Self::RealmNotArchived => Some("HEARTH_REALM_NOT_ARCHIVED"),
+            Self::RealmArchived => Some("HEARTH_REALM_ARCHIVED"),
             Self::YamlManagedResource { .. } => Some("HEARTH_YAML_MANAGED_RESOURCE"),
 
             Self::InvalidPushedAuthorizationRequest => Some("invalid_request"),

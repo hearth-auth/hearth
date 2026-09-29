@@ -114,6 +114,77 @@ pub fn grpc_require_permission(auth: &AdminAuth, required: &str) -> Result<(), S
     Ok(())
 }
 
+/// gRPC face of the realm-level BOLA guard shared with REST
+/// ([`crate::protocol::admin_auth::admin_realm_scope`]): same realm, or a
+/// system-realm crossing the target realm's cross-realm trust policies allow.
+///
+/// Returns `PERMISSION_DENIED` for a tenant addressing another realm or a
+/// crossing the target's policy refuses.
+pub(crate) fn grpc_scoped_realm(
+    state: &GrpcState,
+    auth: &AdminAuth,
+    target: crate::core::RealmId,
+) -> Result<crate::core::RealmId, Status> {
+    use crate::protocol::admin_auth::{admin_realm_scope, AdminRealmScope};
+
+    match admin_realm_scope(
+        state.identity.as_ref(),
+        &auth.realm_id,
+        &target,
+        now_micros(),
+    )
+    .map_err(super::convert::identity_to_status)?
+    {
+        AdminRealmScope::Permitted => Ok(target),
+        AdminRealmScope::OtherRealm => Err(Status::new(Code::PermissionDenied, "forbidden")),
+        AdminRealmScope::PolicyDenied => Err(Status::new(
+            Code::PermissionDenied,
+            "the target realm's cross-realm trust policy does not grant this capability",
+        )),
+    }
+}
+
+/// gRPC face of the privilege ceiling on user administration
+/// ([`crate::protocol::admin_auth::check_user_admin_ceiling`]): the caller may
+/// not modify or delete a user of `auth.realm_id` who holds an admin
+/// permission the caller lacks.
+///
+/// Returns `PERMISSION_DENIED` when the target outranks the caller and
+/// `UNAVAILABLE` when the target's permissions cannot be resolved.
+pub(crate) fn grpc_require_user_ceiling(
+    state: &GrpcState,
+    auth: &AdminAuth,
+    target: &UserId,
+) -> Result<(), Status> {
+    use crate::protocol::admin_auth::{check_user_admin_ceiling, UserCeilingError};
+
+    check_user_admin_ceiling(
+        state.rbac.as_ref(),
+        &auth.realm_id,
+        target,
+        &auth.permissions,
+    )
+    .map_err(|e| match e {
+        UserCeilingError::Exceeded => Status::new(
+            Code::PermissionDenied,
+            "the target user holds admin permissions the caller lacks",
+        ),
+        UserCeilingError::Unresolved => Status::new(
+            Code::Unavailable,
+            "could not resolve the target user's permissions; retry later",
+        ),
+    })
+}
+
+fn now_micros() -> i64 {
+    #[allow(clippy::cast_possible_truncation)]
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as i64;
+    now
+}
+
 fn extract_bearer_token(md: &MetadataMap) -> Result<String, Status> {
     let raw = md
         .get("authorization")
@@ -126,12 +197,7 @@ fn extract_bearer_token(md: &MetadataMap) -> Result<String, Status> {
 }
 
 fn check_rate_limit(limiter: &Arc<AdminRateLimiter>, user_id: &UserId) -> Result<(), Status> {
-    #[allow(clippy::cast_possible_truncation)]
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as i64;
-    match limiter.check(user_id, now) {
+    match limiter.check(user_id, now_micros()) {
         RateLimitOutcome::Allowed => Ok(()),
         RateLimitOutcome::Exceeded => {
             Err(Status::new(Code::ResourceExhausted, "rate limit exceeded"))

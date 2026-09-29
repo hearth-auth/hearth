@@ -608,6 +608,29 @@ impl ClusterEngine {
         self.raft.is_none() || self.reads_allowed.load(Ordering::Relaxed)
     }
 
+    /// Runs `read` against the local engine on the calling thread, behind the
+    /// same replication-lag check as [`Self::get`] and [`Self::scan`].
+    ///
+    /// [`ClusterStorageAdapter`]'s reads use this rather than the async
+    /// `get`/`scan`, which hop to the Tokio blocking pool. The adapter's
+    /// caller is already off the executor, so the hop bought nothing and made
+    /// every read wait for a free pool thread. A backup export reads while it
+    /// holds the storage write barrier, and each write that arrives meanwhile
+    /// parks a pool thread on that barrier: once they filled the pool, the
+    /// export's next read waited for a thread only the export could free, and
+    /// the whole server stopped for good (GA audit 3 F-7).
+    fn read_inline<T>(
+        &self,
+        read: impl FnOnce(&EmbeddedStorageEngine) -> Result<T, crate::storage::StorageError>,
+    ) -> Result<T, ClusterError> {
+        if !self.reads_ok() {
+            return Err(ClusterError::ReplicationLagExceeded {
+                leader_addr: self.current_leader_addr(),
+            });
+        }
+        read(&self.inner).map_err(ClusterError::Storage)
+    }
+
     /// Propose a [`RaftCommand`] and block until quorum commit.
     async fn propose(&self, cmd: RaftCommand) -> Result<(), ClusterError> {
         self.propose_with_response(cmd).await.map(|_| ())
@@ -1128,6 +1151,19 @@ fn check_clock_skew(payload: &[u8]) -> Option<u64> {
 /// an async context; `block_in_place` first parks the current thread's
 /// async tasks, making the nested `block_on` safe.
 ///
+/// Reads are local in every topology, and so are writes on a single node, so
+/// both skip the async layer: they run on the calling thread (inside
+/// `block_in_place`) and never wait for a second blocking-pool thread. A
+/// backup export depends on that — see `ClusterEngine::read_inline` and
+/// `single_node_write`. Only cluster-mode writes still go through `block_on`,
+/// because a Raft proposal is async.
+///
+/// `enqueue_batch` / `await_batch_durable` are deliberately NOT forwarded:
+/// the trait defaults route through [`StorageEngine::put_batch`] (and so
+/// through Raft in cluster mode). Forwarding them to the inner engine would
+/// bypass replication, and would expose the split-commit barrier deadlock
+/// (GA audit 3 F-1) in `serve`.
+///
 /// [`ClusterError::NotLeader`] and [`ClusterError::ReplicationLagExceeded`]
 /// are surfaced as [`StorageError::Io`] with a descriptive message so
 /// callers can detect redirect-eligible errors by inspecting the message.
@@ -1141,6 +1177,26 @@ impl ClusterStorageAdapter {
     /// Wraps a [`ClusterEngine`] for use as [`StorageEngine`].
     pub fn new(engine: Arc<ClusterEngine>) -> Self {
         Self { engine }
+    }
+
+    /// Single-node mode: runs `write` against the local engine on the calling
+    /// thread and returns its result. Cluster mode: `None` — the write must be
+    /// proposed through Raft.
+    ///
+    /// The async single-node path hopped to the blocking pool, so a writer
+    /// already on a pool thread (a `spawn_blocking` handler) waited for a
+    /// SECOND pool thread. Writers parked on a backup export's barrier filled
+    /// the pool with such outer threads; when the export released it, their
+    /// inner writes found no thread and the server stayed stopped (GA audit 3
+    /// F-7). Inline, a writer holds only the thread it already has.
+    fn single_node_write<T>(
+        &self,
+        write: impl FnOnce(&EmbeddedStorageEngine) -> Result<T, crate::storage::StorageError>,
+    ) -> Option<Result<T, crate::storage::StorageError>> {
+        self.engine
+            .raft
+            .is_none()
+            .then(|| tokio::task::block_in_place(|| write(&self.engine.inner)))
     }
 }
 
@@ -1250,19 +1306,16 @@ impl StorageEngine for ClusterStorageAdapter {
         self.engine.inner.delete(realm_id, key)
     }
 
+    /// Served on the calling thread, never via the blocking pool (see
+    /// `ClusterEngine::read_inline`). `block_in_place` only hands a runtime
+    /// worker's other tasks to another thread while this one reads.
     fn get(
         &self,
         realm_id: &RealmId,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, crate::storage::StorageError> {
-        let engine = Arc::clone(&self.engine);
-        let realm_id = realm_id.clone();
-        let key = key.to_vec();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async move { engine.get(&realm_id, &key).await })
-        })
-        .map_err(cluster_to_storage_err)
+        tokio::task::block_in_place(|| self.engine.read_inline(|inner| inner.get(realm_id, key)))
+            .map_err(cluster_to_storage_err)
     }
 
     fn put(
@@ -1271,6 +1324,9 @@ impl StorageEngine for ClusterStorageAdapter {
         key: &[u8],
         value: &[u8],
     ) -> Result<(), crate::storage::StorageError> {
+        if let Some(done) = self.single_node_write(|inner| inner.put(realm_id, key, value)) {
+            return done;
+        }
         let engine = Arc::clone(&self.engine);
         let realm_id = realm_id.clone();
         let key = key.to_vec();
@@ -1283,6 +1339,9 @@ impl StorageEngine for ClusterStorageAdapter {
     }
 
     fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), crate::storage::StorageError> {
+        if let Some(done) = self.single_node_write(|inner| inner.delete(realm_id, key)) {
+            return done;
+        }
         let engine = Arc::clone(&self.engine);
         let realm_id = realm_id.clone();
         let key = key.to_vec();
@@ -1293,21 +1352,70 @@ impl StorageEngine for ClusterStorageAdapter {
         .map_err(cluster_to_storage_err)
     }
 
+    /// Served on the calling thread; see [`Self::get`].
     fn scan(
         &self,
         realm_id: &RealmId,
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<ScanEntry>, crate::storage::StorageError> {
-        let engine = Arc::clone(&self.engine);
-        let realm_id = realm_id.clone();
-        let start = start.to_vec();
-        let end = end.to_vec();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async move { engine.scan(&realm_id, &start, &end).await })
+            self.engine
+                .read_inline(|inner| inner.scan(realm_id, start, end))
         })
         .map_err(cluster_to_storage_err)
+    }
+
+    /// Forwarded so the inner engine's key-only merge runs; the trait default
+    /// materialises every value through [`Self::scan`] (GA audit 3 F-4).
+    fn scan_keys(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<Vec<u8>>, crate::storage::StorageError> {
+        tokio::task::block_in_place(|| {
+            self.engine
+                .read_inline(|inner| inner.scan_keys(realm_id, start, end))
+        })
+        .map_err(cluster_to_storage_err)
+    }
+
+    /// Forwarded to the inner engine; see [`Self::scan_keys`].
+    fn count_prefix(
+        &self,
+        realm_id: &RealmId,
+        prefix: &[u8],
+        cap: u64,
+    ) -> Result<u64, crate::storage::StorageError> {
+        tokio::task::block_in_place(|| {
+            self.engine
+                .read_inline(|inner| inner.count_prefix(realm_id, prefix, cap))
+        })
+        .map_err(cluster_to_storage_err)
+    }
+
+    /// Forwarded to the inner engine; see [`Self::scan_keys`].
+    fn scan_prefix_paged(
+        &self,
+        realm_id: &RealmId,
+        prefix: &[u8],
+        offset: u64,
+        limit: u32,
+        cap: u64,
+    ) -> Result<(Vec<ScanEntry>, u64), crate::storage::StorageError> {
+        tokio::task::block_in_place(|| {
+            self.engine
+                .read_inline(|inner| inner.scan_prefix_paged(realm_id, prefix, offset, limit, cap))
+        })
+        .map_err(cluster_to_storage_err)
+    }
+
+    /// The inner engine's WAL write fence. `/readyz` reads it through this
+    /// adapter in every `serve` topology; the trait default (`false`) kept a
+    /// node that refused every write reporting ready (GA audit 3 F-4).
+    fn is_write_fenced(&self) -> bool {
+        self.engine.inner.is_write_fenced()
     }
 
     fn put_batch(
@@ -1315,6 +1423,9 @@ impl StorageEngine for ClusterStorageAdapter {
         realm_id: &RealmId,
         entries: &[(Vec<u8>, Vec<u8>)],
     ) -> Result<(), crate::storage::StorageError> {
+        if let Some(done) = self.single_node_write(|inner| inner.put_batch(realm_id, entries)) {
+            return done;
+        }
         let engine = Arc::clone(&self.engine);
         let realm_id = realm_id.clone();
         let entries = entries.to_vec();
@@ -1331,6 +1442,11 @@ impl StorageEngine for ClusterStorageAdapter {
         puts: &[(Vec<u8>, Vec<u8>)],
         deletes: &[Vec<u8>],
     ) -> Result<(), crate::storage::StorageError> {
+        if let Some(done) =
+            self.single_node_write(|inner| inner.write_batch(realm_id, puts, deletes))
+        {
+            return done;
+        }
         let engine = Arc::clone(&self.engine);
         let realm_id = realm_id.clone();
         let puts = puts.to_vec();
@@ -1352,6 +1468,11 @@ impl StorageEngine for ClusterStorageAdapter {
         key: &[u8],
         value: &[u8],
     ) -> Result<bool, crate::storage::StorageError> {
+        if let Some(done) =
+            self.single_node_write(|inner| inner.put_if_absent(realm_id, key, value))
+        {
+            return done;
+        }
         let engine = Arc::clone(&self.engine);
         let realm_id = realm_id.clone();
         let key = key.to_vec();
@@ -1368,6 +1489,9 @@ impl StorageEngine for ClusterStorageAdapter {
         realm_id: &RealmId,
         key: &[u8],
     ) -> Result<u64, crate::storage::StorageError> {
+        if let Some(done) = self.single_node_write(|inner| inner.increment_u64(realm_id, key)) {
+            return done;
+        }
         let engine = Arc::clone(&self.engine);
         let realm_id = realm_id.clone();
         let key = key.to_vec();
@@ -1502,6 +1626,63 @@ mod tests {
         assert!(
             Arc::ptr_eq(&inner_barrier, &adapter_barrier),
             "the adapter must expose the SAME barrier the export blocks on"
+        );
+    }
+
+    /// `serve` reads the WAL write fence through the adapter (`/readyz` →
+    /// identity → storage). The adapter inherited the trait default `false`,
+    /// so a node whose WAL refused every write kept reporting ready and kept
+    /// taking write traffic (GA audit 3 F-4).
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn adapter_reports_the_inner_wal_write_fence() {
+        let dir = tempdir().unwrap();
+        let inner = open_engine(dir.path().join("data").as_path());
+        let adapter =
+            ClusterStorageAdapter::new(Arc::new(ClusterEngine::single_node(Arc::clone(&inner))));
+        assert!(
+            !adapter.is_write_fenced(),
+            "an unfenced engine must not report a fence"
+        );
+
+        inner.engage_wal_fence_for_test();
+
+        assert!(
+            inner.is_write_fenced(),
+            "precondition: the inner engine is fenced"
+        );
+        assert!(
+            adapter.is_write_fenced(),
+            "the adapter must report the inner engine's WAL write fence"
+        );
+    }
+
+    /// The adapter's key-only scans (`scan_keys`, `count_prefix`,
+    /// `scan_prefix_paged`) answer exactly what the inner engine answers,
+    /// tombstones included — they are forwarded, not rebuilt from `scan`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn adapter_key_only_scans_match_the_inner_engine() {
+        let dir = tempdir().unwrap();
+        let inner = open_engine(dir.path().join("data").as_path());
+        let adapter =
+            ClusterStorageAdapter::new(Arc::new(ClusterEngine::single_node(Arc::clone(&inner))));
+        let realm = make_realm();
+        for k in [b"p:a".as_slice(), b"p:b", b"p:c", b"q:z"] {
+            adapter.put(&realm, k, b"v").unwrap();
+        }
+        adapter.delete(&realm, b"p:b").unwrap();
+
+        let keys = adapter.scan_keys(&realm, b"p:", b"p;").unwrap();
+        assert_eq!(keys, vec![b"p:a".to_vec(), b"p:c".to_vec()]);
+        assert_eq!(keys, inner.scan_keys(&realm, b"p:", b"p;").unwrap());
+        assert_eq!(adapter.count_prefix(&realm, b"p:", 0).unwrap(), 2);
+        assert_eq!(adapter.count_prefix(&realm, b"p:", 1).unwrap(), 1);
+        let (window, total) = adapter.scan_prefix_paged(&realm, b"p:", 1, 5, 0).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(
+            window.iter().map(|e| e.key.clone()).collect::<Vec<_>>(),
+            vec![b"p:c".to_vec()]
         );
     }
 
