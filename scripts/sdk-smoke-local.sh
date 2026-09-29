@@ -14,6 +14,8 @@ HEARTH_PID=""
 GIN_PID=""
 DEMO_PID=""
 HEARTH_CWD=""
+DEMO_HEARTH_PID=""
+DEMO_HEARTH_CWD=""
 
 cleanup() {
     [ -n "$DEMO_PID" ]   && kill "$DEMO_PID"   2>/dev/null || true
@@ -21,6 +23,9 @@ cleanup() {
     [ -n "$HEARTH_PID" ] && kill "$HEARTH_PID" 2>/dev/null || true
     [ -n "$HEARTH_PID" ] && wait "$HEARTH_PID" 2>/dev/null || true
     [ -n "$HEARTH_CWD" ] && rm -rf "$HEARTH_CWD" 2>/dev/null || true
+    [ -n "$DEMO_HEARTH_PID" ] && kill "$DEMO_HEARTH_PID" 2>/dev/null || true
+    [ -n "$DEMO_HEARTH_PID" ] && wait "$DEMO_HEARTH_PID" 2>/dev/null || true
+    [ -n "$DEMO_HEARTH_CWD" ] && rm -rf "$DEMO_HEARTH_CWD" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -183,27 +188,52 @@ echo "    go build: OK"
 go vet ./...
 echo "    go vet: OK"
 
-# Resolve demo realm from the Hearth instance started in step 2.
-# The system realm is HEARTH_REALM_ID (from bootstrap); we need the demo realm.
+# The backend needs the demo realm: it checks revocation by introspecting every
+# token (HEA-2094) as its own confidential client, the "notes-api" application
+# that examples/full-stack-demo/hearth.yaml declares (the admin API cannot mint
+# a client secret, so a plain --dev boot has no such client). Boot a second
+# instance with that config, as the nightly reference-integration job does.
+DEMO_HEARTH_PORT=$(free_port)
+DEMO_HEARTH_URL="http://127.0.0.1:${DEMO_HEARTH_PORT}"
+DEMO_HEARTH_CWD="$(mktemp -d)"
+echo "    Starting hearth serve --dev --config full-stack-demo/hearth.yaml on port ${DEMO_HEARTH_PORT}"
+( cd "$DEMO_HEARTH_CWD" && exec "$HEARTH_BIN" serve --dev --port "$DEMO_HEARTH_PORT" \
+    --config "$REPO_ROOT/examples/full-stack-demo/hearth.yaml" ) >"$DEMO_HEARTH_CWD/hearth.log" 2>&1 &
+DEMO_HEARTH_PID=$!
+for i in $(seq 1 60); do
+    curl -sf "${DEMO_HEARTH_URL}/health" > /dev/null 2>&1 && break
+    sleep 0.5
+done
+curl -sf "${DEMO_HEARTH_URL}/health" > /dev/null \
+    || { tail -40 "$DEMO_HEARTH_CWD/hearth.log"; echo "FAIL: demo hearth did not start within 30s"; exit 1; }
+
+# Only the system-realm token lists every realm; the dev-realm token sees its own.
+DEMO_BOOT=$(curl -sf -X POST "${DEMO_HEARTH_URL}/admin/bootstrap")
 DEMO_REALM_ID=$(
     curl -sf \
-        -H "Authorization: Bearer $HEARTH_ACCESS_TOKEN" \
-        -H "X-Realm-ID: $HEARTH_REALM_ID" \
-        "${HEARTH_BASE_URL}/admin/realms" \
-    | jq -r '.items[] | select(.name == "demo") | .id' 2>/dev/null || true
+        -H "Authorization: Bearer $(echo "$DEMO_BOOT" | jq -r .system_access_token)" \
+        -H "X-Realm-ID: $(echo "$DEMO_BOOT" | jq -r .system_realm_id)" \
+        "${DEMO_HEARTH_URL}/admin/realms" \
+    | jq -r '.items[] | select(.name == "demo") | .id'
 )
+[ -n "$DEMO_REALM_ID" ] || { echo "FAIL: demo realm not created from hearth.yaml"; exit 1; }
+DEMO_REALM_SLUG="demo"
 
-# Fall back to the system realm if no "demo" realm exists (plain --dev startup).
-# In that case REALM_SLUG stays "dev-realm" so JWKS paths resolve correctly.
-if [ -z "$DEMO_REALM_ID" ]; then
-    DEMO_REALM_ID="$HEARTH_REALM_ID"
-    DEMO_REALM_SLUG="dev-realm"
-else
-    DEMO_REALM_SLUG="demo"
-fi
+# A demo-realm access token for the authenticated request: the notes-api
+# client's own client_credentials token (the defaults backend/main.go uses).
+DEMO_API_CLIENT_ID="de58b2b9-5aad-5534-bfc6-fb57884e7c5b"
+DEMO_API_CLIENT_SECRET="hearth-demo-api-secret-not-for-production"
+DEMO_ACCESS_TOKEN=$(
+    curl -sf -X POST "${DEMO_HEARTH_URL}/realms/demo/token" \
+        -u "${DEMO_API_CLIENT_ID}:${DEMO_API_CLIENT_SECRET}" \
+        -d grant_type=client_credentials \
+    | jq -r .access_token
+)
+[ -n "$DEMO_ACCESS_TOKEN" ] && [ "$DEMO_ACCESS_TOKEN" != "null" ] \
+    || { echo "FAIL: no demo-realm access token"; exit 1; }
 
 DEMO_PORT=$(free_port)
-HEARTH_URL="$HEARTH_BASE_URL" REALM_ID="$DEMO_REALM_ID" REALM_SLUG="$DEMO_REALM_SLUG" \
+HEARTH_URL="$DEMO_HEARTH_URL" REALM_ID="$DEMO_REALM_ID" REALM_SLUG="$DEMO_REALM_SLUG" \
     PORT="$DEMO_PORT" go run . &
 DEMO_PID=$!
 
@@ -226,7 +256,7 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${DEMO_PORT}/a
     || { echo "FAIL: expected 401 on /api/notes (no token), got $STATUS"; exit 1; }
 
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-    -H "Authorization: Bearer $HEARTH_ACCESS_TOKEN" \
+    -H "Authorization: Bearer $DEMO_ACCESS_TOKEN" \
     "http://127.0.0.1:${DEMO_PORT}/api/notes")
 [ "$STATUS" = "200" ] \
     && echo "    OK: 200 with valid token on /api/notes" \
@@ -241,7 +271,7 @@ if curl -sf "http://localhost:5173" > /dev/null 2>&1; then
     cd "$REPO_ROOT/tests/ui"
     npm ci --prefer-offline
     npx playwright install chromium --with-deps 2>/dev/null || npx playwright install chromium
-    HEARTH_URL="$HEARTH_BASE_URL" \
+    HEARTH_URL="$DEMO_HEARTH_URL" \
     DEMO_BACKEND_URL="http://127.0.0.1:${DEMO_PORT}" \
     DEMO_FRONTEND_URL="http://localhost:5173" \
     DEMO_REALM_SLUG="$DEMO_REALM_SLUG" \
@@ -258,6 +288,9 @@ fi
 
 kill "$DEMO_PID" 2>/dev/null || true
 DEMO_PID=""
+kill "$DEMO_HEARTH_PID" 2>/dev/null || true
+wait "$DEMO_HEARTH_PID" 2>/dev/null || true
+DEMO_HEARTH_PID=""
 echo "    full-stack-demo backend: PASS"
 
 # ── 8. Agent Auth smoke ───────────────────────────────────────────────────────
