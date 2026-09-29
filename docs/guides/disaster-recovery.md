@@ -509,29 +509,39 @@ rejoined empty.
    ([Signed archives](./backup.md#signed-archives)).
 
 4. **Bootstrap the authoritative node alone.** Edit its `hearth.yaml` to
-   list only itself in `cluster.peers`. While it is still stopped, mint a
-   system-realm token for the check below, then start it and confirm it
-   elects itself leader of a single-node cluster:
+   list only itself in `cluster.peers`, start it, and confirm it elects
+   itself leader of a single-node cluster. The check needs a system-realm
+   token: sign in to this node's admin console (`/ui/admin/login`), open
+   **API Tokens** (`/ui/admin/api-tokens`) and mint one with your password
+   and second factor. The node leads alone, so the console's write commits
+   ([System-realm tokens](./clustering.md#system-realm-tokens)):
 
    ```bash
-   # Still stopped since step 1. Needs the node's HEARTH_MASTER_KEY in the
-   # environment, as `hearth backup create` does. --sole-cluster-node is safe
-   # only because this node now runs alone and the others rejoin empty from
-   # its snapshot in step 6.
-   SYSTEM_TOKEN=$(hearth admin token --config /etc/hearth/hearth.yaml \
-     --user ops@example.com --sole-cluster-node --ttl 1h)
    systemctl start hearth
+   read -rs SYSTEM_TOKEN   # paste the token from the console page
    curl -s -H "Authorization: Bearer $SYSTEM_TOKEN" \
      -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000" \
      https://auth.example.com/admin/cluster/status
    # Should show: {"role":"leader","term":<N>,"last_applied_index":<N>,"peers":[...]}
    ```
 
+   **Console unreachable?** Mint on the host instead, **before**
+   `systemctl start`, while the node is still stopped since step 1:
+
+   ```bash
+   # Needs the node's HEARTH_MASTER_KEY in the environment, as
+   # `hearth backup create` does. --sole-cluster-node is safe only because
+   # this node now runs alone and the others rejoin empty from its snapshot
+   # in step 6.
+   SYSTEM_TOKEN=$(hearth admin token --config /etc/hearth/hearth.yaml \
+     --user ops@example.com --sole-cluster-node --ttl 1h)
+   ```
+
    `/admin/cluster/*` requires the **system realm** (nil UUID) — a
    realm-scoped admin token gets `403 {"error":"cluster admin requires
-   system realm"}`. `--user` names an operator-console account holding the
-   `realm.admin` role; the token is printed to stdout only and its issuance
-   is audited ([System-realm tokens](./clustering.md#system-realm-tokens)). The endpoint answers `503 {"error":"not in cluster
+   system realm"}`. Either way the token belongs to an operator-console
+   account holding the `realm.admin` role, is shown or printed once and
+   its issuance is audited. The endpoint answers `503 {"error":"not in cluster
    mode"}` when the node is running single-node.
 
    **`peers` will not be empty.** Raft membership is persisted in the log

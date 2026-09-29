@@ -4684,7 +4684,7 @@ fn run_admin_token(
     config_path: Option<&std::path::Path>,
     sole_cluster_node: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use hearth::identity::{HOST_ADMIN_TOKEN_MAX_TTL, HOST_ADMIN_TOKEN_MIN_TTL};
+    use hearth::identity::{OperatorTokenIssuer, OPERATOR_TOKEN_MAX_TTL, OPERATOR_TOKEN_MIN_TTL};
     use std::io::Write as _;
 
     let ttl_micros =
@@ -4692,12 +4692,12 @@ fn run_admin_token(
     let ttl = u64::try_from(ttl_micros)
         .map(Duration::from_micros)
         .map_err(|_| "--ttl must be positive")?;
-    if !(HOST_ADMIN_TOKEN_MIN_TTL..=HOST_ADMIN_TOKEN_MAX_TTL).contains(&ttl) {
+    if !(OPERATOR_TOKEN_MIN_TTL..=OPERATOR_TOKEN_MAX_TTL).contains(&ttl) {
         return Err(format!(
             "--ttl must be between {}m and {}m: this token is for one maintenance step, \
              not a standing credential",
-            HOST_ADMIN_TOKEN_MIN_TTL.as_secs() / 60,
-            HOST_ADMIN_TOKEN_MAX_TTL.as_secs() / 60
+            OPERATOR_TOKEN_MIN_TTL.as_secs() / 60,
+            OPERATOR_TOKEN_MAX_TTL.as_secs() / 60
         )
         .into());
     }
@@ -4766,14 +4766,15 @@ fn run_admin_token(
         }
         Err(e) => return Err(e.into()),
     };
-    let identity = build_embedded_identity(Arc::clone(&storage) as Arc<dyn StorageEngine>, kek)?;
+    let (identity, _audit, _rbac) =
+        build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>, kek)?;
 
     let system_realm = hearth::core::RealmId::new(uuid::Uuid::nil());
     let operator = identity
         .get_user_by_email(&system_realm, user)?
         .ok_or_else(|| format!("no account '{user}' in the system realm"))?;
     let token = identity
-        .issue_host_admin_token(operator.id(), ttl)
+        .issue_operator_token(operator.id(), ttl, &OperatorTokenIssuer::HostCli)
         .map_err(|e| match e {
             hearth::identity::IdentityError::Unauthorized => format!(
                 "'{user}' may not administer the system realm: the account is disabled or its \
@@ -5644,30 +5645,6 @@ fn build_all_engines(
     storage: Arc<dyn StorageEngine>,
     key_encryption_key: Option<hearth::identity::key_encryption::StorageKek>,
 ) -> Result<AllEngines, Box<dyn std::error::Error>> {
-    let (identity, audit, rbac) = build_embedded_engines(storage, key_encryption_key)?;
-    Ok((identity as Arc<dyn IdentityEngine>, audit, rbac))
-}
-
-/// The concrete identity engine over `storage`, wired as
-/// [`build_all_engines`] wires it, for a command that needs an inherent
-/// `EmbeddedIdentityEngine` method.
-fn build_embedded_identity(
-    storage: Arc<dyn StorageEngine>,
-    key_encryption_key: Option<hearth::identity::key_encryption::StorageKek>,
-) -> Result<Arc<EmbeddedIdentityEngine>, Box<dyn std::error::Error>> {
-    Ok(build_embedded_engines(storage, key_encryption_key)?.0)
-}
-
-type EmbeddedEngines = (
-    Arc<EmbeddedIdentityEngine>,
-    Arc<dyn hearth::audit::AuditEngine>,
-    Arc<dyn hearth::rbac::RbacEngine>,
-);
-
-fn build_embedded_engines(
-    storage: Arc<dyn StorageEngine>,
-    key_encryption_key: Option<hearth::identity::key_encryption::StorageKek>,
-) -> Result<EmbeddedEngines, Box<dyn std::error::Error>> {
     let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
     let raw_rbac = Arc::new(EmbeddedRbacEngine::new(
         Arc::clone(&storage),
@@ -5696,7 +5673,8 @@ fn build_embedded_engines(
         Arc::clone(&audit),
     )?);
     raw_rbac.init_sv_bumper(Arc::clone(&raw_identity) as Arc<dyn SvBumper>);
-    Ok((raw_identity, Arc::clone(&audit), rbac))
+    let identity = raw_identity as Arc<dyn hearth::identity::IdentityEngine>;
+    Ok((identity, Arc::clone(&audit), rbac))
 }
 
 /// Builds the identity + RBAC engine pair used by one-shot admin

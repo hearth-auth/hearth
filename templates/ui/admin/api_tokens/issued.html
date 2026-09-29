@@ -1,0 +1,62 @@
+{% extends "ui/_layout.html" %}
+{% block title %}{{ product_name }} · API token created{% endblock %}
+{% block breadcrumb %}
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  <span class="text-ht-content-muted">System</span>
+  <span class="text-ht-content-muted">›</span>
+  <a href="/ui/admin/api-tokens" class="text-ht-content-secondary hover:text-ht-content-primary">API tokens</a>
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary" aria-current="page">Created</span>
+</nav>
+{% endblock %}
+{% block body %}
+<div class="mb-6">
+  <h1 class="font-display text-2xl font-medium text-ht-content-primary">API token created</h1>
+  <p class="mt-1 text-sm text-ht-content-muted">
+    <strong>Copy it now — it will not be shown again.</strong>
+    It expires at {{ expires_at }} ({{ ttl_minutes }} min).
+  </p>
+</div>
+
+<div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle space-y-5">
+  <div>
+    <div class="flex items-center justify-between pb-2">
+      <p class="text-sm font-medium text-ht-content-primary">Token</p>
+      <button type="button"
+              title="Copy token"
+              data-component="copy-to-clipboard"
+              data-source="#api-token"
+              data-copied-label="Copied"
+              class="rounded border border-strong bg-ht-surface-elevated px-2 py-0.5 font-mono text-xs text-ht-content-muted hover-bg-divider hover:text-ht-content-secondary transition-colors">
+        Copy
+      </button>
+    </div>
+    <code id="api-token" class="block break-all rounded bg-ht-surface-base px-3 py-2 font-mono text-sm text-ht-content-secondary">{{ token }}</code>
+  </div>
+
+  <div>
+    <p class="text-sm font-medium text-ht-content-primary">Use it</p>
+    <pre class="mt-2 overflow-x-auto rounded bg-ht-surface-base px-3 py-2 font-mono text-xs leading-relaxed text-ht-content-secondary">SYSTEM_TOKEN='…'   # paste the token above
+curl -s -H "Authorization: Bearer $SYSTEM_TOKEN" \
+  -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000" \
+  https://&lt;hearth&gt;/admin/cluster/status</pre>
+  </div>
+
+  <dl class="grid grid-cols-1 gap-4 border-t border-divider-faint pt-5 sm:grid-cols-2">
+    <div>
+      <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Session</dt>
+      <dd class="mt-1"><code class="font-mono text-xs text-ht-content-secondary">{{ session_id }}</code></dd>
+      <dd class="mt-1 text-xs text-ht-content-muted">Revoke this session to end the token early.</dd>
+    </div>
+    <div>
+      <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Token ID (jti)</dt>
+      <dd class="mt-1"><code class="font-mono text-xs text-ht-content-secondary">{{ jti }}</code></dd>
+      <dd class="mt-1 text-xs text-ht-content-muted">Recorded in the system realm's audit log.</dd>
+    </div>
+  </dl>
+
+  <div class="border-t border-divider-faint pt-5">
+    <a href="/ui/admin/api-tokens" class="text-sm font-medium text-ht-content-muted hover:text-ht-content-secondary">Create another</a>
+  </div>
+</div>
+{% endblock %}

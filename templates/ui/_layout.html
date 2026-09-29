@@ -87,6 +87,12 @@
               </a>
             </li>
             <li>
+              <a href="/ui/admin/api-tokens" class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm font-medium {% if active == "api-tokens" %}bg-divider text-ht-content-primary{% else %}text-ht-content-secondary hover-bg-divider hover:text-ht-content-primary{% endif %}"{% if active == "api-tokens" %} aria-current="page"{% endif %}>
+                <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>
+                API Tokens
+              </a>
+            </li>
+            <li>
               <a href="/ui/admin/migrations" class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm font-medium {% if active == "migrations" %}bg-divider text-ht-content-primary{% else %}text-ht-content-secondary hover-bg-divider hover:text-ht-content-primary{% endif %}"{% if active == "migrations" %} aria-current="page"{% endif %}>
                 <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
                 Migrations

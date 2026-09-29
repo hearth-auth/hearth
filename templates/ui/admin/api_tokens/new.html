@@ -1,0 +1,115 @@
+{% extends "ui/_layout.html" %}
+{% block title %}{{ product_name }} · API tokens{% endblock %}
+{% block breadcrumb %}
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  <span class="text-ht-content-muted">System</span>
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary" aria-current="page">API tokens</span>
+</nav>
+{% endblock %}
+{% block body %}
+<div class="mb-6">
+  <h1 class="font-display text-2xl font-medium text-ht-content-primary">API tokens</h1>
+  <p class="mt-1 text-sm text-ht-content-muted">
+    Create a short-lived token for the system realm's admin API — <code class="rounded-sm bg-ht-surface-base px-1 font-mono">/admin/realms</code>,
+    <code class="rounded-sm bg-ht-surface-base px-1 font-mono">/admin/cluster/*</code>, <code class="rounded-sm bg-ht-surface-base px-1 font-mono">/admin/backup</code>.
+    It carries your permissions, is shown once, and is bound to its own session: revoke that session to end it early.
+  </p>
+</div>
+
+<div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
+
+  {% match error %}
+    {% when Some with (msg) %}
+      <div class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm font-medium text-danger-fg" role="alert">{{ msg }}</div>
+    {% when None %}
+  {% endmatch %}
+
+  <form id="api-token-form"
+        method="post"
+        action="/ui/admin/api-tokens"
+        autocomplete="off"
+        data-api-token-form
+        class="space-y-5">
+    {% match csrf %}
+      {% when Some with (token) %}
+        <input type="hidden" name="_csrf" value="{{ token }}">
+      {% when None %}
+    {% endmatch %}
+
+    <div>
+      <label for="ttl_minutes" class="block text-sm font-medium text-ht-content-secondary">Lifetime (minutes)</label>
+      <input type="number"
+             id="ttl_minutes"
+             name="ttl_minutes"
+             min="{{ min_minutes }}"
+             max="{{ max_minutes }}"
+             step="1"
+             required
+             value="{{ ttl_minutes }}"
+             class="mt-1 input w-32 font-mono">
+      <p class="mt-1 text-xs text-ht-content-muted">From {{ min_minutes }} to {{ max_minutes }} minutes. Pick the shortest that covers the task.</p>
+    </div>
+
+    <fieldset class="space-y-4 border-t border-divider-faint pt-5">
+      <legend class="text-sm font-medium text-ht-content-primary">Confirm it's you</legend>
+      <p class="text-xs text-ht-content-muted">A token outlives this page, so creating one asks for your password and your second factor again.</p>
+
+      <div>
+        <label for="password" class="block text-sm font-medium text-ht-content-secondary">Password</label>
+        <input type="password"
+               id="password"
+               name="password"
+               autocomplete="current-password"
+               class="mt-1 input">
+      </div>
+
+      {% if has_totp %}
+      <div>
+        <label for="totp_code" class="block text-sm font-medium text-ht-content-secondary">Authenticator code</label>
+        <input type="text"
+               id="totp_code"
+               name="totp_code"
+               inputmode="numeric"
+               autocomplete="one-time-code"
+               pattern="[0-9]{6}"
+               maxlength="6"
+               class="mt-1 input w-40 font-mono">
+      </div>
+      {% endif %}
+
+      {% if has_passkey %}
+      <div>
+        <input type="hidden" name="assertion_credential_id" id="assertion_credential_id">
+        <input type="hidden" name="assertion_client_data_json" id="assertion_client_data_json">
+        <input type="hidden" name="assertion_authenticator_data" id="assertion_authenticator_data">
+        <input type="hidden" name="assertion_signature" id="assertion_signature">
+        <input type="hidden" name="assertion_user_handle" id="assertion_user_handle">
+        <button type="button"
+                id="api-token-passkey"
+                class="inline-flex items-center gap-1.5 rounded border border-strong bg-ht-surface-elevated px-3 py-2 text-sm font-medium text-ht-content-secondary hover-bg-divider disabled:opacity-40">
+          Use a passkey instead of a code
+        </button>
+        <p id="api-token-passkey-error" class="mt-1 text-xs text-danger-fg" role="alert" hidden></p>
+        <p class="mt-1 text-xs text-ht-content-muted">The passkey must verify you (PIN or biometric); a touch alone is not enough.</p>
+      </div>
+      {% endif %}
+
+      {% if !has_totp && !has_passkey %}
+      <div class="rounded-lg bg-warning/[0.12] px-4 py-3 text-sm font-medium text-warning-fg" role="status">
+        Your account has no second factor. Enrol an authenticator app or a passkey on
+        <a href="/ui/account" class="underline">your account page</a> before creating a token.
+      </div>
+      {% endif %}
+    </fieldset>
+
+    <div class="flex items-center gap-3 border-t border-divider-faint pt-5">
+      <button type="submit"
+              class="btn-ember rounded px-4 py-2 text-sm font-semibold">
+        Create token
+      </button>
+    </div>
+  </form>
+</div>
+<script src="/ui/static/admin/api-tokens.js" defer></script>
+{% endblock %}
