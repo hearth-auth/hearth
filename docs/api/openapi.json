@@ -3563,7 +3563,7 @@
     "/webauthn/register/begin": {
       "post": {
         "summary": "Begin WebAuthn credential registration",
-        "description": "Requires a step-up proof. An access token alone is one factor, so enrolling with it would turn a stolen token into a permanent credential. Supply exactly one of `password`, `totp_code`, or `assertion`. An account that holds none of those credentials needs no proof.\n",
+        "description": "First-party tokens only: a token issued to a third-party client is refused with 403 `forbidden`. Requires a step-up proof. An access token alone is one factor, so enrolling with it would turn a stolen token into a permanent credential. Supply exactly one of `password`, `totp_code`, or `assertion`. An account that holds none of those credentials needs no proof.\n",
         "operationId": "webauthnRegisterBegin",
         "tags": [
           "Auth"
@@ -3632,7 +3632,7 @@
             "description": "PublicKeyCredentialCreationOptions JSON"
           },
           "403": {
-            "description": "`step_up_required` \u2014 no step-up proof was supplied, or it did not verify.\n"
+            "description": "`forbidden` \u2014 the token was issued to a third-party client; or `step_up_required` \u2014 no step-up proof was supplied, or it did not verify.\n"
           },
           "503": {
             "description": "`temporarily_unavailable` \u2014 the KDF admission gate shed the password verification. Retry after the `Retry-After` hint.\n"
@@ -3643,6 +3643,7 @@
     "/webauthn/register/complete": {
       "post": {
         "summary": "Complete WebAuthn credential registration",
+        "description": "First-party tokens only: a token issued to a third-party client is refused with 403.",
         "operationId": "webauthnRegisterComplete",
         "tags": [
           "Auth"
@@ -3665,6 +3666,9 @@
         "responses": {
           "200": {
             "description": "Credential stored"
+          },
+          "403": {
+            "description": "The token was issued to a third-party client"
           }
         }
       }

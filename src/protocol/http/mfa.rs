@@ -16,7 +16,7 @@ use crate::protocol::client_info::PeerAddr;
 use crate::protocol::step_up::StepUpProofBody;
 
 use super::{
-    extract_realm_id, extract_user_auth, identity_error_to_response, make_ip_rate_limit_response,
+    extract_realm_id, identity_error_to_response, make_ip_rate_limit_response,
     resolve_realm_by_name, AppState,
 };
 
@@ -241,7 +241,15 @@ async fn webauthn_register_begin(
         Err(e) => return e.into_response(),
     };
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
+    // Adding a credential to the user's account is first-party only, like
+    // listing and removing one (GA audit 3 B-5, round 3).
+    let user_id = match super::auth::extract_first_party_user_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -297,7 +305,15 @@ async fn webauthn_register_complete(
         Err(e) => return e.into_response(),
     };
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
+    // Adding a credential to the user's account is first-party only, like
+    // listing and removing one (GA audit 3 B-5, round 3).
+    let user_id = match super::auth::extract_first_party_user_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };

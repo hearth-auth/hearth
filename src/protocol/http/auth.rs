@@ -1075,8 +1075,9 @@ fn coerce_string_ints(v: serde_json::Value) -> serde_json::Value {
     }
 }
 /// Enforces DPoP proof validation for `cnf`-bound tokens at resource endpoints
-/// (RFC 9449 §7.2). Called from [`extract_user_auth`] when the validated token
-/// carries a `cnf.jkt` claim.
+/// (RFC 9449 §7.2). Called from the user-token extractors
+/// ([`extract_user_auth_claims`] and its first-party / session variants) when
+/// the validated token carries a `cnf.jkt` claim.
 fn enforce_dpop_binding(
     headers: &HeaderMap,
     state: &AppState,
@@ -1136,22 +1137,13 @@ fn enforce_dpop_binding(
 }
 
 /// Extracts and validates user authentication, enforcing DPoP binding for
-/// `cnf`-bound tokens (RFC 9449 §7.2).
+/// `cnf`-bound tokens (RFC 9449 §7.2), and returns the user with the bearer
+/// token's validated claims — for a handler that judges the client the token
+/// was issued to. Any client's token passes; a surface that acts with the
+/// user's full authority uses [`extract_first_party_user_auth`] instead.
 ///
 /// `htm` is the HTTP method (e.g. `"GET"`). `htu` is the full request URI
 /// including scheme and authority (e.g. `"https://auth.example.com/oauth/consents"`).
-pub(crate) fn extract_user_auth(
-    headers: &HeaderMap,
-    state: &AppState,
-    realm_id: &RealmId,
-    htm: &str,
-    htu: &str,
-) -> Result<UserId, (StatusCode, Json<serde_json::Value>)> {
-    user_auth_claims(headers, state, realm_id, htm, htu).map(|(user_id, _)| user_id)
-}
-
-/// [`extract_user_auth`] that also returns the bearer token's validated
-/// claims, for a handler that judges the client the token was issued to.
 pub(crate) fn extract_user_auth_claims(
     headers: &HeaderMap,
     state: &AppState,
@@ -1165,7 +1157,7 @@ pub(crate) fn extract_user_auth_claims(
     user_auth_claims(headers, state, realm_id, htm, htu)
 }
 
-/// [`extract_user_auth`] for account self-service surfaces that act with the
+/// [`extract_user_auth_claims`] for account self-service surfaces that act with the
 /// user's full authority over their own account — consents, passkeys (GA
 /// audit 3 B-5). The token must be a first-party session token or one issued
 /// to a first-party client
@@ -1201,8 +1193,8 @@ pub(crate) fn third_party_token_forbidden() -> (StatusCode, Json<serde_json::Val
     )
 }
 
-/// [`extract_user_auth`] that also returns the bearer token's validated
-/// claims, for a surface the engine must judge by the token itself: the
+/// [`extract_user_auth_claims`] for a surface the engine must judge by the
+/// token itself: the
 /// non-interactive `/authorize` checks the client the token was issued to
 /// (GA audit 3 B-1) and the factor its session proved (GA audit B2/B5). A
 /// token whose `sid` names no session (a sessionless token) is refused.
@@ -1268,9 +1260,10 @@ fn user_auth_claims(
 /// returning the decoded claims on success.
 ///
 /// Resource endpoints that consume the raw access token directly — rather than
-/// through [`extract_user_auth`] — MUST route through this guard so a stolen
-/// DPoP-bound token cannot be replayed as a plain `Bearer` (HEA-2031). Callers
-/// that only need the [`UserId`] should prefer [`extract_user_auth`]; this
+/// through [`extract_user_auth_claims`] — MUST route through this guard so a
+/// stolen DPoP-bound token cannot be replayed as a plain `Bearer` (HEA-2031).
+/// Callers that only need the [`UserId`] should prefer
+/// [`extract_first_party_user_auth`]; this
 /// helper exists for handlers that must hand the raw token to the identity
 /// layer (e.g. `/userinfo`, `/v1/me/permissions`).
 ///

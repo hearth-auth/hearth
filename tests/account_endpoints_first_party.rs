@@ -455,3 +455,53 @@ async fn dcr_initial_access_refuses_a_third_party_clients_token() {
         "control: first-party admin; body {body}"
     );
 }
+
+// ── Round 3: passkey enrolment is first-party only too ─────────────────────
+
+/// Enrolling a passkey added a credential to the user's account with a
+/// third-party app's token (the step-up still asked for the password, but a
+/// third-party app has no business driving the ceremony at all).
+#[tokio::test]
+async fn passkey_enrolment_refuses_a_third_party_clients_token() {
+    let f = setup().await;
+    let proof = serde_json::json!({"password": PASSWORD});
+
+    let (status, body) = f
+        .call(
+            "POST",
+            "/webauthn/register/begin",
+            &f.first_party,
+            Some(proof.clone()),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "control: first-party enrolment; body {body}"
+    );
+
+    let (status, body) = f
+        .call(
+            "POST",
+            "/webauthn/register/begin",
+            &f.third_party,
+            Some(proof),
+        )
+        .await;
+    assert_forbidden(status, &body, "POST /webauthn/register/begin");
+
+    let (status, body) = f
+        .call(
+            "POST",
+            "/webauthn/register/complete",
+            &f.third_party,
+            Some(serde_json::json!({
+                "client_data_json": "e30",
+                "attestation_object": "oA",
+                "origin": ORIGIN,
+            })),
+        )
+        .await;
+    assert_forbidden(status, &body, "POST /webauthn/register/complete");
+    assert_eq!(f.passkey_count(), 0, "no credential may be added");
+}

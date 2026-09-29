@@ -13,7 +13,7 @@ func RequireRole(client *hearth.Client, role string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw, _ := c.Get(KeyRawToken)
 		token, _ := raw.(string)
-		if !client.HasRole(token, role) {
+		if !client.HasRole(c.Request.Context(), token, role) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error":         "forbidden",
 				"required_role": role,
@@ -31,7 +31,7 @@ func RequirePermission(client *hearth.Client, perm string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw, _ := c.Get(KeyRawToken)
 		token, _ := raw.(string)
-		if !client.HasPermission(token, perm) {
+		if !client.HasPermission(c.Request.Context(), token, perm) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error":               "forbidden",
 				"required_permission": perm,
