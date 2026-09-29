@@ -716,6 +716,21 @@ Content-Type: application/json
 
 The same Bearer-auth requirement applies to the equivalent gRPC `Authorize` RPC.
 
+**The token authorizes only its own client** (GA audit 3 B-1). These surfaces cannot show a consent
+screen, so a code is minted only for a client the bearer token may speak for:
+
+- a token issued to a client (RFC 9068 `client_id` claim) MAY authorize **that client only**;
+- a token that names no client — a Hearth first-party session token — MAY authorize a
+  **first-party** client only.
+
+Any other request is refused with `403` and `error_code: "HEARTH_CLIENT_MISMATCH"` (gRPC
+`PERMISSION_DENIED`) before any side effect. Without this rule a third-party app's token minted a
+code for a first-party public client — which needs neither consent nor a secret — and redeemed it
+for that client's tokens carrying the user's full permissions. The consent rule (a third-party
+client needs a recorded consent covering the scopes, `HEARTH_CONSENT_REQUIRED`) and the MFA-use rule
+still apply on top. Enforced by the engine (`authorize_non_interactive`), so the global, realm and
+gRPC surfaces cannot diverge; pinned by `tests/oauth_non_interactive_authorize.rs`.
+
 ---
 
 ## 8. Request Encoding — Accepted Content Types

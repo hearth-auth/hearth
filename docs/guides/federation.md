@@ -449,6 +449,15 @@ realms:
 | `confirm` | Prompt the user to authenticate with their local password or passkey before linking **(default; Keycloak-equivalent safety posture)** | Any public-facing realm |
 | `auto` | Silently link on verified email match — no re-auth step | Single high-trust IdP where the IdP verifies email (Google, Microsoft) — **account-takeover risk otherwise** |
 
+**A new account on an address the upstream did not verify waits for that address.** When a
+federated login provisions a user just in time, the upstream's email is taken as verified only
+if the upstream said so (`email_verified: true`; for SAML, only when the connector sets
+`trust_asserted_email: true`). Otherwise the account is created `PendingVerification`, like a
+self-registered one: Hearth mails the address a verification link and shows the "check your
+email" page instead of signing the user in. After the link is used, the same federated login
+signs in normally. This stops an upstream that lets users claim any address from pre-creating
+an account on someone else's address.
+
 > ⚠️ **`auto` is an account-takeover risk.** It removes the phishing-protection gate: Hearth
 > attaches the upstream identity to whatever local account already holds that email address,
 > with no local re-authentication. The security of every local account in the realm therefore

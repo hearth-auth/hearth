@@ -1942,6 +1942,7 @@ async fn browser_required_action_check_fails_closed_on_a_lookup_error() {
         &rig.realm_id,
         &rig.user_id,
         None,
+        &hearth::identity::SessionContext::default(),
         &axum::http::HeaderMap::new(),
         Timestamp::from_micros(0),
     );
@@ -1971,6 +1972,7 @@ async fn browser_required_action_check_fails_closed_on_a_realm_lookup_error() {
         &rig.realm_id,
         &rig.user_id,
         None,
+        &hearth::identity::SessionContext::default(),
         &axum::http::HeaderMap::new(),
         Timestamp::from_micros(0),
     );
@@ -1988,6 +1990,7 @@ async fn browser_required_action_check_routes_a_pending_action() {
         &rig.realm_id,
         &rig.user_id,
         None,
+        &hearth::identity::SessionContext::default(),
         &axum::http::HeaderMap::new(),
         Timestamp::from_micros(0),
     )
@@ -2011,6 +2014,7 @@ async fn browser_required_action_check_treats_a_missing_user_as_nothing_pending(
         &rig.realm_id,
         &UserId::new(uuid::Uuid::new_v4()),
         None,
+        &hearth::identity::SessionContext::default(),
         &axum::http::HeaderMap::new(),
         Timestamp::from_micros(0),
     );

@@ -24,8 +24,9 @@
 //! `hearth_ra_webauthn` = an HMAC of the RA session cookie and the
 //! challenge, and `complete` refuses a challenge without the matching
 //! cookie. On success the action is cleared and recorded completed, and the
-//! RA flow continues with `webauthn_verified` set, so the browser-login
-//! session created at the end records `MfaProof::ProvedWebAuthn`.
+//! RA flow continues with its proof raised to `MfaProof::ProvedWebAuthn`
+//! (`RaClaims::record_verified_passkey`), which the browser-login session
+//! created at the end records.
 
 use std::sync::Arc;
 
@@ -343,7 +344,7 @@ pub async fn passkey_complete(
     }
 
     let secure = state.is_secure_request(&headers);
-    claims.webauthn_verified = true;
+    claims.record_verified_passkey();
     let now = Timestamp::from_micros(super::now_micros());
     let next = advance_flow(
         &state,

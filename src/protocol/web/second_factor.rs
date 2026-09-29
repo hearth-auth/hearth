@@ -380,6 +380,19 @@ pub(super) fn redirect_as_json(redirect: &Response) -> Response {
     response
 }
 
+/// Whether `response` sets the cookie `name` (to any value).
+fn sets_cookie(response: &Response, name: &str) -> bool {
+    response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|line| {
+            line.split_once('=')
+                .is_some_and(|(cookie_name, _)| cookie_name.trim() == name)
+        })
+}
+
 /// `POST /ui/mfa-passkey-challenge/complete` — verifies the assertion against
 /// the pending user's own credentials and completes the login.
 #[allow(clippy::too_many_lines)] // one linear verification sequence
@@ -465,21 +478,6 @@ pub async fn mfa_passkey_challenge_complete(
             .and_then(|d| i64::try_from(d.as_micros()).ok())
             .unwrap_or(0),
     );
-    if let Some(ra) = super::required_action::required_action_check_browser(
-        &state,
-        realm.id(),
-        user.id(),
-        pending.return_to.as_deref(),
-        &headers,
-        now,
-    ) {
-        state.set_current_realm(realm.id().clone());
-        let mut response = redirect_as_json(&ra);
-        append_cookie(&mut response, &clear_mfa_pending_cookie(secure));
-        return response;
-    }
-
-    revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);
     // A first factor (password, magic link, federated login) plus this
     // passkey is two factors. It is `ProvedWebAuthn` only when the
     // authenticator also proved user verification — the one proof a realm
@@ -492,6 +490,27 @@ pub async fn mfa_passkey_challenge_complete(
         },
         ..build_session_context(&headers, peer_addr, &state.trusted_proxies)
     };
+    if let Some(ra) = super::required_action::required_action_check_browser(
+        &state,
+        realm.id(),
+        user.id(),
+        pending.return_to.as_deref(),
+        &session_ctx,
+        &headers,
+        now,
+    ) {
+        state.set_current_realm(realm.id().clone());
+        let mut response = redirect_as_json(&ra);
+        // The pending cookie is spent — unless the answer routes this login
+        // back to the passkey with a fresh one (a UV-less assertion on a
+        // realm that requires user verification), which must survive.
+        if !sets_cookie(&ra, MFA_PENDING_COOKIE) {
+            append_cookie(&mut response, &clear_mfa_pending_cookie(secure));
+        }
+        return response;
+    }
+
+    revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);
     match state
         .identity
         .create_session(realm.id(), user.id(), &session_ctx)

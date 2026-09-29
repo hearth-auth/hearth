@@ -229,6 +229,11 @@ pub enum IdentityError {
     RegistrationRequiresInvitation,
     /// The OAuth client requires user consent and no sufficient consent record exists.
     ConsentRequired,
+    /// A non-interactive authorization request named a client the bearer
+    /// token was not issued to (GA audit 3 B-1): a token issued to a client
+    /// may authorize only that client, and a first-party session token only
+    /// a first-party client.
+    ClientMismatch,
     /// The pending-authorization ticket was not found.
     ConsentTicketNotFound,
     /// The pending-authorization ticket has expired.
