@@ -232,7 +232,11 @@ only. A `client_assertion` is verified against the client's registered keys:
 
 `jwks_uri` is not fetched: a client registered with only a `jwks_uri` cannot authenticate and
 must register its keys inline. The assertion rules are those of §8.1 (`iss` = `sub` = the
-client, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min). Under FAPI 2.0 — a FAPI 2.0
+client, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min). "The client" is its
+`client_id` exactly as registration returned it — the bare UUID it also sends as the `client_id`
+parameter (RFC 7523 §3, OIDC Core §9). Hearth's internal `client_<uuid>` subject form, or any
+other spelling of the UUID, is refused; the same rule covers a request object's `iss` and
+`client_id` claims (RFC 9101 §4) and the JWT-bearer grant's `iss`/`sub`. Under FAPI 2.0 — a FAPI 2.0
 client, or any client of a realm with a `fapi_profile` — `aud` MUST be the realm issuer as a
 single JSON string (FAPI 2.0 Security Profile §5.3.2.1); an array is refused even when it holds
 only the issuer. Other clients follow RFC 7523 §3: `aud` may be an array that contains the issuer.

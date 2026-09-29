@@ -428,7 +428,7 @@ fn client_assertion(
 ) -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
-    let cid = client.client_id().to_string();
+    let cid = client.client_id().as_uuid().to_string();
     let realm_name = rig
         .identity
         .get_realm(&rig.realm_id)
@@ -558,7 +558,7 @@ fn jar_jwt(
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
 
-    let cid = client.client_id().to_string();
+    let cid = client.client_id().as_uuid().to_string();
     let realm_name = rig
         .identity
         .get_realm(&rig.realm_id)

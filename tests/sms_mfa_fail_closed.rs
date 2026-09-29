@@ -1556,7 +1556,7 @@ fn jar_authorize_uri_with(rig: &LoginRig, overrides: &serde_json::Value) -> (Str
             },
         )
         .expect("register JAR client");
-    let cid = client.client_id().to_string();
+    let cid = client.client_id().as_uuid().to_string();
     let realm_name = rig
         .state
         .identity
@@ -2024,8 +2024,7 @@ fn jar_key() -> &'static ring::signature::Ed25519KeyPair {
 fn jar_client_assertion(rig: &LoginRig, client_id: &str) -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
-    let cid =
-        hearth::core::ClientId::new(uuid::Uuid::parse_str(client_id).expect("uuid")).to_string();
+    let cid = uuid::Uuid::parse_str(client_id).expect("uuid").to_string();
     let realm_name = rig
         .state
         .identity

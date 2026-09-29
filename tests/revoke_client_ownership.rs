@@ -869,8 +869,8 @@ fn assertion(env: &Env, key: &SigningKey, client_id: &ClientId) -> String {
     .expect("secs");
     let issuer = env.h.identity().oidc_discovery().issuer;
     key.issue_assertion_jwt(&JwtAssertionClaims {
-        iss: client_id.to_string(),
-        sub: client_id.to_string(),
+        iss: client_id.as_uuid().to_string(),
+        sub: client_id.as_uuid().to_string(),
         aud: Audience::single(format!("{issuer}/realms/{}", env.realm_name)),
         exp: now + 60,
         jti: Some(uuid::Uuid::new_v4().to_string()),

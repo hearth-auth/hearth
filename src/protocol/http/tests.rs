@@ -961,7 +961,7 @@ async fn par_jar_accepted_under_fapi_advanced() {
     let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
     // HTTP body expects the raw UUID; JAR claims compare against the prefixed form.
     let cid_http = client.client_id().as_uuid().to_string();
-    let cid_jar = client.client_id().to_string();
+    let cid_jar = client.client_id().as_uuid().to_string();
     const REDIRECT: &str = "https://app.example.com/callback";
     const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
@@ -1119,7 +1119,7 @@ fn advanced_realm_client_assertion(
         b64.encode(serde_json::json!({"alg": "EdDSA", "kid": kid}).to_string()),
         b64.encode(
             serde_json::json!({
-                "iss": client.to_string(), "sub": client.to_string(), "aud": issuer,
+                "iss": client.as_uuid().to_string(), "sub": client.as_uuid().to_string(), "aud": issuer,
                 "exp": now + 60, "iat": now, "jti": uuid::Uuid::new_v4().to_string(),
             })
             .to_string()

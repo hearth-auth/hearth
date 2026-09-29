@@ -939,16 +939,8 @@ fn jar_params(
             return Err(handlers_common::bad_request("invalid request object"));
         }
     };
-    // RFC 9101 §4: the claim, when present, must name the same client.
-    if jar
-        .client_id
-        .as_deref()
-        .is_some_and(|cid| cid != client_id.to_string())
-    {
-        return Err(handlers_common::bad_request(
-            "client_id mismatch with request object",
-        ));
-    }
+    // `verify_jar` checked the JAR's `iss` and `client_id` claims against the
+    // client (RFC 9101 §4), in the client_id form the client was issued.
 
     let redirect_uri = jar.redirect_uri.unwrap_or_else(|| q.redirect_uri.clone());
     let response_type = jar.response_type.unwrap_or_else(|| q.response_type.clone());

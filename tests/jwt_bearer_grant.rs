@@ -113,7 +113,7 @@ async fn jwt_bearer_valid_assertion_issues_token() {
     // Sign and submit assertion
     let assertion = make_assertion(
         &assertion_key,
-        &client.client_id().to_string(),
+        &client.client_id().as_uuid().to_string(),
         &audience,
         60,
         Some(uuid::Uuid::new_v4().to_string()),
@@ -178,7 +178,7 @@ async fn jwt_bearer_expired_assertion_rejected() {
     let issuer = realm_issuer(&harness, &realm);
     let assertion = make_assertion(
         &assertion_key,
-        &client.client_id().to_string(),
+        &client.client_id().as_uuid().to_string(),
         &issuer,
         -1, // already expired
         Some(uuid::Uuid::new_v4().to_string()),
@@ -248,7 +248,7 @@ async fn jwt_bearer_jti_replay_rejected() {
     let jti = uuid::Uuid::new_v4().to_string();
     let assertion = make_assertion(
         &assertion_key,
-        &client.client_id().to_string(),
+        &client.client_id().as_uuid().to_string(),
         &issuer,
         60,
         Some(jti.clone()),
@@ -333,7 +333,7 @@ async fn jwt_bearer_wrong_issuer_rejected() {
     // Use a wrong issuer (not the client_id)
     let claims = JwtAssertionClaims {
         iss: "not-the-client-id".to_string(),
-        sub: client.client_id().to_string(),
+        sub: client.client_id().as_uuid().to_string(),
         aud: Audience::single(issuer),
         exp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -407,7 +407,7 @@ async fn jwt_bearer_wrong_audience_rejected() {
 
     let assertion = make_assertion(
         &assertion_key,
-        &client.client_id().to_string(),
+        &client.client_id().as_uuid().to_string(),
         "https://wrong-audience.example.com",
         60,
         Some(uuid::Uuid::new_v4().to_string()),
@@ -464,7 +464,7 @@ async fn jwt_bearer_no_registered_key_rejected() {
     let issuer = realm_issuer(&harness, &realm);
     let assertion = make_assertion(
         &assertion_key,
-        &client.client_id().to_string(),
+        &client.client_id().as_uuid().to_string(),
         &issuer,
         60,
         Some(uuid::Uuid::new_v4().to_string()),
@@ -533,7 +533,7 @@ async fn jwt_bearer_tampered_signature_rejected() {
     let issuer = realm_issuer(&harness, &realm);
     let good_assertion = make_assertion(
         &assertion_key,
-        &client.client_id().to_string(),
+        &client.client_id().as_uuid().to_string(),
         &issuer,
         60,
         Some(uuid::Uuid::new_v4().to_string()),
@@ -607,7 +607,7 @@ async fn jwt_bearer_no_jti_rejected() {
     // Pass jti: None — the server must reject rather than silently skip replay protection.
     let assertion = make_assertion(
         &assertion_key,
-        &client.client_id().to_string(),
+        &client.client_id().as_uuid().to_string(),
         &audience,
         60,
         None,
@@ -680,7 +680,7 @@ async fn jwt_bearer_sub_mismatch_rejected() {
         .as_secs() as i64;
     // iss == client_id but sub is a different value — must be rejected.
     let claims = JwtAssertionClaims {
-        iss: client.client_id().to_string(),
+        iss: client.client_id().as_uuid().to_string(),
         sub: "not-the-client-id".to_string(),
         aud: Audience::single(audience),
         exp: now + 60,
@@ -755,7 +755,7 @@ async fn jwt_bearer_exp_too_far_future_rejected() {
     // failed on slow runners when even 2s of overhead was enough to slip under).
     let assertion = make_assertion(
         &assertion_key,
-        &client.client_id().to_string(),
+        &client.client_id().as_uuid().to_string(),
         &audience,
         1200,
         Some(uuid::Uuid::new_v4().to_string()),
@@ -825,7 +825,7 @@ async fn jwt_bearer_corrupted_jti_bytes_returns_internal_error() {
     let jti = uuid::Uuid::new_v4().to_string();
     let assertion = make_assertion(
         &assertion_key,
-        &client.client_id().to_string(),
+        &client.client_id().as_uuid().to_string(),
         &issuer,
         60,
         Some(jti.clone()),

@@ -964,6 +964,8 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Validates signature, `iss == sub == client_id`, `exp` in the future,
     /// `aud` contains the realm issuer URL, and JTI replay prevention.
+    /// `client_id` means the value the client was issued at registration (the
+    /// bare UUID), exactly — not the internal `client_<uuid>` display form.
     fn verify_client_assertion(
         &self,
         realm_id: &RealmId,
@@ -975,8 +977,10 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Looks up the client's registered `jwks`, selects the key matching the
     /// JWT header `kid`/`alg`, verifies the signature (EdDSA or RS256), and
-    /// validates `iss == client_id`, `aud` contains the realm issuer URL, and
-    /// `exp` is in the future. Returns the decoded [`JarClaims`] on success.
+    /// validates `iss == client_id` (and a `client_id` claim, when present,
+    /// `== client_id`), `aud` contains the realm issuer URL, and `exp` is in
+    /// the future. `client_id` means the value the client was issued (the bare
+    /// UUID), exactly. Returns the decoded [`JarClaims`] on success.
     ///
     /// Rejects `alg: none`, missing JWKS, unknown `kid`, and any claim
     /// validation failure with [`IdentityError::InvalidJar`].
