@@ -1,11 +1,10 @@
 //! `<Response>` and `<Assertion>` XML construction, parsing, and validation.
 
-use quick_xml::events::BytesStart;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::authn_request::{format_xsd_datetime, parse_xsd_datetime};
 use super::xml::{
-    attr, escape_attr, escape_text, is_element, ns, parse_err, walk_outside_signatures, XmlStep,
+    escape_attr, escape_text, ns, parse_err, walk_outside_signatures, ElementRef, XmlStep,
 };
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
@@ -43,7 +42,11 @@ pub struct Assertion {
     pub subject_name_id_format: Option<String>,
     pub not_before: Option<Timestamp>,
     pub not_on_or_after: Option<Timestamp>,
-    pub audience: Option<String>,
+    /// One entry per `<saml:AudienceRestriction>` in `<Conditions>`, each
+    /// holding that restriction's `<saml:Audience>` values in document order.
+    /// SAML Core §2.5.1.4: the assertion is addressed to this SP only if EVERY
+    /// restriction lists it (any position within a restriction).
+    pub audience_restrictions: Vec<Vec<String>>,
     pub attributes: BTreeMap<String, Vec<String>>,
     pub in_response_to: Option<String>,
     pub session_index: Option<String>,
@@ -225,8 +228,8 @@ enum Node {
 
 impl Node {
     /// Classifies `e` given its parent node.
-    fn classify(parent: Option<Node>, e: &BytesStart<'_>) -> Node {
-        let is = |namespace: &str, local: &str| is_element(e, namespace, local);
+    fn classify(parent: Option<Node>, e: ElementRef<'_>) -> Node {
+        let is = |namespace: &str, local: &str| e.is(namespace, local);
         match parent {
             None if is(ns::SAMLP, "Response") => Node::Response,
             Some(Node::Response) if is(ns::SAMLP, "Status") => Node::Status,
@@ -240,7 +243,7 @@ impl Node {
             Some(Node::Subject) if is(ns::SAML, "NameID") => Node::NameId,
             Some(Node::Subject) if is(ns::SAML, "SubjectConfirmation") => {
                 Node::SubjectConfirmation {
-                    bearer: attr(e, "Method").is_some_and(|m| m.trim() == CM_BEARER),
+                    bearer: e.attr("Method").is_some_and(|m| m.trim() == CM_BEARER),
                 }
             }
             Some(Node::Conditions) if is(ns::SAML, "AudienceRestriction") => {
@@ -309,22 +312,22 @@ struct ResponseParser {
 }
 
 impl ResponseParser {
-    fn open(&mut self, e: &BytesStart<'_>) -> Result<(), IdentityError> {
+    fn open(&mut self, e: ElementRef<'_>) -> Result<(), IdentityError> {
         let node = Node::classify(self.stack.last().copied(), e);
         if node.captures_text() {
             self.text.clear();
         }
         match node {
             Node::Response => {
-                self.response_id = attr(e, "ID");
-                self.in_response_to = attr(e, "InResponseTo");
-                self.issue_instant = attr(e, "IssueInstant");
-                self.destination = attr(e, "Destination");
+                self.response_id = e.attr("ID");
+                self.in_response_to = e.attr("InResponseTo");
+                self.issue_instant = e.attr("IssueInstant");
+                self.destination = e.attr("Destination");
             }
             Node::Status => once(&mut self.seen_status, "<samlp:Status> in Response")?,
             Node::StatusCode => {
                 once(&mut self.seen_status_code, "<samlp:StatusCode> in Status")?;
-                self.status_code = attr(e, "Value");
+                self.status_code = e.attr("Value");
             }
             Node::ResponseIssuer => {
                 once(&mut self.seen_response_issuer, "<saml:Issuer> in Response")?;
@@ -332,13 +335,13 @@ impl ResponseParser {
             Node::Assertion => {
                 self.current = Some(AssertionInProgress {
                     assertion: Assertion {
-                        id: attr(e, "ID").unwrap_or_default(),
+                        id: e.attr("ID").unwrap_or_default(),
                         issuer: String::new(),
                         subject_name_id: None,
                         subject_name_id_format: None,
                         not_before: None,
                         not_on_or_after: None,
-                        audience: None,
+                        audience_restrictions: Vec::new(),
                         attributes: BTreeMap::new(),
                         in_response_to: self.in_response_to.clone(),
                         session_index: None,
@@ -361,7 +364,7 @@ impl ResponseParser {
 
     /// Elements the parser reads for an attribute but does not descend into:
     /// `<SubjectConfirmationData>` and `<AuthnStatement>`.
-    fn open_other(&mut self, e: &BytesStart<'_>) {
+    fn open_other(&mut self, e: ElementRef<'_>) {
         let parent = self.stack.last().copied();
         let Some(ref mut cur) = self.current else {
             return;
@@ -371,22 +374,22 @@ impl ResponseParser {
             // Only a bearer confirmation inside this assertion's `<Subject>`
             // counts — see `Assertion::bearer_confirmations`.
             Some(Node::SubjectConfirmation { bearer: true })
-                if is_element(e, ns::SAML, "SubjectConfirmationData") =>
+                if e.is(ns::SAML, "SubjectConfirmationData") =>
             {
                 a.bearer_confirmations.push(BearerConfirmation {
-                    recipient: attr(e, "Recipient"),
-                    not_on_or_after: attr(e, "NotOnOrAfter").and_then(|s| parse_xsd_datetime(&s)),
-                    in_response_to: attr(e, "InResponseTo"),
+                    recipient: e.attr("Recipient"),
+                    not_on_or_after: e.attr("NotOnOrAfter").and_then(|s| parse_xsd_datetime(&s)),
+                    in_response_to: e.attr("InResponseTo"),
                 });
             }
-            Some(Node::Assertion) if is_element(e, ns::SAML, "AuthnStatement") => {
-                a.session_index = attr(e, "SessionIndex");
+            Some(Node::Assertion) if e.is(ns::SAML, "AuthnStatement") => {
+                a.session_index = e.attr("SessionIndex");
             }
             _ => {}
         }
     }
 
-    fn open_in_assertion(&mut self, node: Node, e: &BytesStart<'_>) -> Result<(), IdentityError> {
+    fn open_in_assertion(&mut self, node: Node, e: ElementRef<'_>) -> Result<(), IdentityError> {
         let Some(ref mut cur) = self.current else {
             return Ok(());
         };
@@ -395,17 +398,17 @@ impl ResponseParser {
             Node::Subject => once(&mut cur.seen_subject, "<saml:Subject> in Assertion")?,
             Node::NameId => {
                 once(&mut cur.seen_name_id, "<saml:NameID> in Subject")?;
-                cur.assertion.subject_name_id_format = attr(e, "Format");
+                cur.assertion.subject_name_id_format = e.attr("Format");
             }
             Node::Conditions => {
                 once(&mut cur.seen_conditions, "<saml:Conditions> in Assertion")?;
-                cur.assertion.not_before =
-                    attr(e, "NotBefore").and_then(|s| parse_xsd_datetime(&s));
+                cur.assertion.not_before = e.attr("NotBefore").and_then(|s| parse_xsd_datetime(&s));
                 cur.assertion.not_on_or_after =
-                    attr(e, "NotOnOrAfter").and_then(|s| parse_xsd_datetime(&s));
+                    e.attr("NotOnOrAfter").and_then(|s| parse_xsd_datetime(&s));
             }
+            Node::AudienceRestriction => cur.assertion.audience_restrictions.push(Vec::new()),
             Node::Attribute => {
-                self.attr_name = attr(e, "Name");
+                self.attr_name = e.attr("Name");
                 self.attr_values.clear();
                 if let Some(ref name) = self.attr_name {
                     if !cur.attribute_names.insert(name.clone()) {
@@ -445,7 +448,11 @@ impl ResponseParser {
             (Node::ResponseIssuer, Some(v), _) => self.response_issuer = Some(v),
             (Node::AssertionIssuer, Some(v), Some(c)) => c.assertion.issuer = v,
             (Node::NameId, Some(v), Some(c)) => c.assertion.subject_name_id = Some(v),
-            (Node::Audience, Some(v), Some(c)) => c.assertion.audience = Some(v),
+            (Node::Audience, Some(v), Some(c)) => {
+                if let Some(restriction) = c.assertion.audience_restrictions.last_mut() {
+                    restriction.push(v);
+                }
+            }
             (Node::AttributeValue, Some(v), _) => self.attr_values.push(v),
             (Node::Attribute, _, Some(c)) => {
                 let values = std::mem::take(&mut self.attr_values);
@@ -535,10 +542,17 @@ pub fn extract_and_validate_assertion(
         return Err(IdentityError::Saml(SamlError::IssuerMismatch));
     }
 
-    // Audience check.
-    match &a.audience {
-        Some(v) if v == p.sp_entity_id => {}
-        _ => return Err(IdentityError::Saml(SamlError::AudienceMismatch)),
+    // Audience check — SAML Core §2.5.1.4. Within one `<AudienceRestriction>`
+    // the assertion is addressed to this SP if ANY `<Audience>` names it;
+    // several restrictions are a conjunction, so EACH must name it. The Web
+    // Browser SSO profile (§4.1.4.2) requires at least one restriction naming
+    // the SP, so none at all is refused too.
+    let addressed_to_us = !a.audience_restrictions.is_empty()
+        && a.audience_restrictions
+            .iter()
+            .all(|restriction| restriction.iter().any(|aud| aud == p.sp_entity_id));
+    if !addressed_to_us {
+        return Err(IdentityError::Saml(SamlError::AudienceMismatch));
     }
 
     // Timestamps.
@@ -671,7 +685,7 @@ mod tests {
         let a = &parsed.assertions[0];
         assert_eq!(a.id, "_a1");
         assert_eq!(a.subject_name_id.as_deref(), Some("alice@example.com"));
-        assert_eq!(a.audience.as_deref(), Some("https://sp.example"));
+        assert_eq!(a.audience_restrictions, [["https://sp.example"]]);
     }
 
     /// quick-xml 0.41 tokenizes `&amp;`-style references into standalone
@@ -705,7 +719,7 @@ mod tests {
         let a = &parsed.assertions[0];
         assert_eq!(a.issuer, "https://idp.example/sso?a=1&b=2");
         assert_eq!(a.subject_name_id.as_deref(), Some("a&b@example.com"));
-        assert_eq!(a.audience.as_deref(), Some("https://sp.example/?x=1&y=2"));
+        assert_eq!(a.audience_restrictions, [["https://sp.example/?x=1&y=2"]]);
         assert_eq!(
             a.attributes.get("dept").map(Vec::as_slice),
             Some(["R&D <core>".to_string()].as_slice())
@@ -1081,7 +1095,7 @@ mod tests {
         let a = &parsed.assertions[0];
         assert_eq!(a.subject_name_id.as_deref(), Some("alice@example.com"));
         assert_eq!(a.issuer, "https://idp.example");
-        assert_eq!(a.audience.as_deref(), Some("https://sp.example"));
+        assert_eq!(a.audience_restrictions, [["https://sp.example"]]);
         assert_eq!(
             a.not_on_or_after,
             Some(Timestamp::from_micros(1_700_000_300 * 1_000_000))
@@ -1211,6 +1225,105 @@ mod tests {
             matches!(&err, IdentityError::Saml(SamlError::Parse { reason }) if reason.contains("root")),
             "wrong error: {err:?}"
         );
+    }
+
+    // ==================================================================
+    // GA audit 3 round 2 — `<AudienceRestriction>` semantics (SAML Core
+    // §2.5.1.4): within one restriction ANY `<Audience>` may name this SP;
+    // with several restrictions, EACH must name it.
+    // ==================================================================
+
+    const OTHER_SP: &str = "https://other-sp.example";
+    const THIS_SP: &str = "https://sp.example";
+
+    /// Validates a Response whose `<Conditions>` carries one
+    /// `<AudienceRestriction>` per inner slice. Everything else is valid.
+    fn validate_audiences(restrictions: &[&[&str]]) -> Result<Assertion, IdentityError> {
+        let conditions: String = restrictions
+            .iter()
+            .map(|r| {
+                let audiences: String = r
+                    .iter()
+                    .map(|a| format!("<saml:Audience>{a}</saml:Audience>"))
+                    .collect();
+                format!("<saml:AudienceRestriction>{audiences}</saml:AudienceRestriction>")
+            })
+            .collect();
+        let xml = format!(
+            concat!(
+                r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" "#,
+                r#"xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_r1" "#,
+                r#"IssueInstant="2023-11-14T00:00:00Z" Destination="https://sp.example/acs">"#,
+                r#"<saml:Issuer>https://idp.example</saml:Issuer>"#,
+                r#"<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>"#,
+                r#"<saml:Assertion ID="_a1"><saml:Issuer>https://idp.example</saml:Issuer>"#,
+                r#"<saml:Subject><saml:NameID>alice@example.com</saml:NameID>"#,
+                r#"<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">"#,
+                r#"<saml:SubjectConfirmationData Recipient="https://sp.example/acs" "#,
+                r#"NotOnOrAfter="2099-01-01T00:00:00Z"/></saml:SubjectConfirmation></saml:Subject>"#,
+                r#"<saml:Conditions NotBefore="2023-11-14T00:00:00Z" NotOnOrAfter="2099-01-01T00:00:00Z">"#,
+                "{conditions}</saml:Conditions></saml:Assertion></samlp:Response>",
+            ),
+            conditions = conditions,
+        );
+        let parsed = parse_response(xml.as_bytes()).expect("parse");
+        extract_and_validate_assertion(
+            &parsed,
+            &ValidateParams {
+                sp_entity_id: THIS_SP,
+                acs_url: "https://sp.example/acs",
+                idp_entity_id: "https://idp.example",
+                expected_in_response_to: None,
+                now: Timestamp::from_micros(1_700_000_000 * 1_000_000),
+                clock_skew_secs: 60,
+            },
+        )
+    }
+
+    fn assert_audience_mismatch(res: Result<Assertion, IdentityError>, case: &str) {
+        assert!(
+            matches!(res, Err(IdentityError::Saml(SamlError::AudienceMismatch))),
+            "{case}: expected AudienceMismatch, got {res:?}"
+        );
+    }
+
+    /// Any audience of a restriction may be this SP — its position does not
+    /// matter. The old parser kept only the LAST `<Audience>`, so `[sp, other]`
+    /// was refused.
+    #[test]
+    fn audience_restriction_accepts_this_sp_anywhere_in_the_list() {
+        validate_audiences(&[&[OTHER_SP, THIS_SP]]).expect("[other, sp] must be accepted");
+        validate_audiences(&[&[THIS_SP, OTHER_SP]]).expect("[sp, other] must be accepted");
+    }
+
+    /// A restriction that does not name this SP refuses the assertion.
+    #[test]
+    fn audience_restriction_without_this_sp_rejected() {
+        assert_audience_mismatch(validate_audiences(&[&[OTHER_SP]]), "[other]");
+    }
+
+    /// Several restrictions are a conjunction: each must name this SP. The
+    /// old parser kept only the last audience, so `[other], [sp]` passed.
+    #[test]
+    fn every_audience_restriction_must_name_this_sp() {
+        assert_audience_mismatch(
+            validate_audiences(&[&[THIS_SP], &[OTHER_SP]]),
+            "[sp], [other]",
+        );
+        assert_audience_mismatch(
+            validate_audiences(&[&[OTHER_SP], &[THIS_SP]]),
+            "[other], [sp]",
+        );
+        validate_audiences(&[&[THIS_SP], &[OTHER_SP, THIS_SP]])
+            .expect("two restrictions that both name this SP must be accepted");
+    }
+
+    /// The Web Browser SSO profile (§4.1.4.2) requires a restriction naming
+    /// the SP: none at all, or an empty one, is refused.
+    #[test]
+    fn missing_or_empty_audience_restriction_rejected() {
+        assert_audience_mismatch(validate_audiences(&[]), "no restriction");
+        assert_audience_mismatch(validate_audiences(&[&[]]), "empty restriction");
     }
 
     /// The parser must attribute a `<SubjectConfirmationData>` to the
