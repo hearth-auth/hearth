@@ -843,7 +843,11 @@ impl SigningKey {
             token_type: "refresh".to_string(),
             jti: None,
             fid: request.fid.clone(),
-            scope: None,
+            // The grant's scope rides on the refresh token: rotation reads it
+            // to keep the grant's narrowing and to re-issue the same `scope`.
+            // Without it a device-grant token lost both on its first refresh
+            // (GA audit 3 B-4).
+            scope: request.scope.clone(),
             nonce: None,
             azp: None,
             cnf: None, // DPoP binding is on access tokens only

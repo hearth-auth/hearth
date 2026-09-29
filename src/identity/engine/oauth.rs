@@ -982,15 +982,15 @@ impl EmbeddedIdentityEngine {
         }
 
         let scope_value = stored_code.scope.trim().to_string();
-        let scope_for_resolver =
-            if scope_value.is_empty() || scope_value.split_whitespace().count() != 1 {
-                None
-            } else {
-                Some(scope_value.as_str())
-            };
+        // Every permission-bearing scope of the grant narrows — the rule the
+        // refresh and device grants and live resolution apply too (GA audit 3
+        // B-4). Only a single-scope grant used to be narrowed, so
+        // `openid docs:read` resolved the user's full set.
+        let grant_scopes: Vec<String> =
+            scope_value.split_whitespace().map(str::to_string).collect();
         let resolved = self
             .rbac
-            .resolve_permissions(&stored_code.user_id, realm_id, None, scope_for_resolver)
+            .resolve_for_granted_scopes(&stored_code.user_id, realm_id, None, &grant_scopes)
             .map_err(|e| match e {
                 RbacError::TokenSizeExceeded {
                     limit,
@@ -1005,8 +1005,7 @@ impl EmbeddedIdentityEngine {
                     reason: format!("rbac resolve failed: {e}"),
                 },
             })?;
-        let granted_scopes: BTreeSet<String> =
-            scope_value.split_whitespace().map(str::to_string).collect();
+        let granted_scopes: BTreeSet<String> = grant_scopes.into_iter().collect();
 
         // For non-Embedded modes, strip RBAC claims from the access token.
         use crate::identity::oidc::AccessTokenAuthorization;
@@ -2705,6 +2704,14 @@ impl EmbeddedIdentityEngine {
                     session.id(),
                     &super::TokenIssuanceContext {
                         client_id: Some(client_id.clone()),
+                        // The scope the device requested and the user approved:
+                        // it narrows the permissions and is carried as the
+                        // token's `scope` (GA audit 3 B-4; B-6's scope half).
+                        granted_scopes: stored
+                            .scope
+                            .as_deref()
+                            .map(|s| s.split_whitespace().map(str::to_string).collect())
+                            .unwrap_or_default(),
                         ..Default::default()
                     },
                 )?;
@@ -3584,15 +3591,24 @@ impl EmbeddedIdentityEngine {
             return Ok(DENY);
         };
 
-        // Parse optional org scoping.
-        let org_id: Option<crate::core::OrganizationId> = self.active_org_context(
-            realm_id,
-            request.organization_id.as_deref().and_then(|o| {
-                uuid::Uuid::parse_str(o.strip_prefix("org_").unwrap_or(o))
-                    .ok()
-                    .map(crate::core::OrganizationId::new)
-            }),
-        );
+        // The organisation context is the token's own `oid`, never the
+        // caller's choice: a token minted in organisation A was answered with
+        // the user's authority in B, and a realm-level token with any
+        // organisation's. `organization_id` may only restate the token's
+        // organisation; anything else is denied (GA audit 3, round 2).
+        let parse_org = |o: &str| {
+            uuid::Uuid::parse_str(o.strip_prefix("org_").unwrap_or(o))
+                .ok()
+                .map(crate::core::OrganizationId::new)
+        };
+        let token_org = claims.oid.as_deref().and_then(parse_org);
+        if let Some(requested) = request.organization_id.as_deref() {
+            let requested = parse_org(requested);
+            if requested.is_none() || requested != token_org {
+                return Ok(DENY);
+            }
+        }
+        let org_id = self.active_org_context(realm_id, token_org);
 
         // The TOKEN's live authority, not the user's (GA audit 3 B-2 / C-8):
         // the token client's claim profile, every permission-bearing scope,
