@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use crate::core::{RealmId, UserId};
 use crate::identity::webauthn::CompleteAuthenticationParams;
-use crate::identity::{CleartextPassword, IdentityEngine, KdfGateError};
+use crate::identity::{CleartextPassword, IdentityEngine, IdentityError, KdfGateError};
 
 /// An assertion from an already-enrolled passkey, offered as a step-up proof.
 #[derive(Debug)]
@@ -84,6 +84,10 @@ pub enum StepUpError {
     /// An operator step-up needs a second factor and the account holds none
     /// (no TOTP factor, no passkey). Enrolling one is the only way forward.
     SecondFactorNotEnrolled,
+    /// The account's login lockout, or its TOTP guess budget, is spent: too
+    /// many wrong passwords or codes. No proof is checked until the window
+    /// passes, however correct. The caller SHOULD answer `429`.
+    Locked,
 }
 
 impl std::fmt::Display for StepUpError {
@@ -94,6 +98,7 @@ impl std::fmt::Display for StepUpError {
             Self::SecondFactorNotEnrolled => {
                 f.write_str("step-up needs a second factor and the account holds none")
             }
+            Self::Locked => f.write_str("step-up refused — too many failed attempts"),
         }
     }
 }
@@ -109,6 +114,10 @@ impl std::error::Error for StepUpError {}
 /// # Errors
 ///
 /// - [`StepUpError::Required`] when the step-up was not proven.
+/// - [`StepUpError::Locked`] when the account's login lockout (password) or
+///   TOTP guess budget (code) is spent. Wrong proofs spend the same budgets a
+///   login does, so a stolen session cannot guess faster here than at the
+///   login form.
 /// - [`StepUpError::Overloaded`] when the KDF gate shed a password verify.
 pub async fn verify_step_up(
     identity: &Arc<dyn IdentityEngine>,
@@ -118,16 +127,29 @@ pub async fn verify_step_up(
 ) -> Result<(), StepUpError> {
     match proof {
         StepUpProof::Password(password) => {
-            // Argon2id — route through the shared admission gate rather than an
-            // ungated `spawn_blocking` (HEA-1891 / F3).
+            // Argon2id — route through the KDF admission gate rather than an
+            // ungated `spawn_blocking` (HEA-1891 / F3), and through the same
+            // gate the account's login uses: a system-realm operator's verify
+            // draws from the admin-reserved pool, so a tenant-login flood
+            // that fills the shared gate cannot shed it (HEA-1892 / F2).
+            //
+            // `verify_password` applies the account's login lockout itself:
+            // a wrong password here counts as a failed login, and a locked
+            // account is refused before its credential is checked.
+            let kdf_gate = if realm_id.as_uuid().is_nil() {
+                crate::identity::admin_gate()
+            } else {
+                crate::identity::gate()
+            };
             let engine = Arc::clone(identity);
             let realm = realm_id.clone();
             let user = user_id.clone();
-            match crate::identity::gate()
+            match kdf_gate
                 .run(move || engine.verify_password(&realm, &user, &password))
                 .await
             {
                 Ok(Ok(true)) => Ok(()),
+                Ok(Err(IdentityError::RateLimited)) => Err(StepUpError::Locked),
                 Ok(Ok(false) | Err(_)) => Err(StepUpError::Required),
                 Err(KdfGateError::Overloaded { retry_after }) => {
                     Err(StepUpError::Overloaded { retry_after })
@@ -138,8 +160,11 @@ pub async fn verify_step_up(
                 }
             }
         }
+        // `verify_totp` spends the account's TOTP guess budget — the one its
+        // login's second factor draws from — and refuses once it is spent.
         StepUpProof::TotpCode(code) => match identity.verify_totp(realm_id, user_id, &code) {
             Ok(()) => Ok(()),
+            Err(IdentityError::RateLimited) => Err(StepUpError::Locked),
             Err(_) => Err(StepUpError::Required),
         },
         StepUpProof::WebAuthnAssertion(assertion) => {
@@ -212,6 +237,8 @@ impl std::fmt::Debug for SecondFactorProof {
 /// - [`StepUpError::SecondFactorNotEnrolled`] — no TOTP factor and no passkey.
 /// - [`StepUpError::Required`] — a required proof is missing or does not
 ///   verify.
+/// - [`StepUpError::Locked`] — the account's login lockout or TOTP guess
+///   budget is spent (see [`verify_step_up`]).
 /// - [`StepUpError::Overloaded`] — the KDF gate shed the password verify.
 pub async fn verify_operator_step_up(
     identity: &Arc<dyn IdentityEngine>,
