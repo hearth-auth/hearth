@@ -161,6 +161,7 @@ pub(super) fn required_action_intercept(
         user_id,
         actions,
         params.to_oidc_params(),
+        None,
         now,
     ) {
         Ok(t) => t,
@@ -349,6 +350,7 @@ pub fn required_action_check_browser(
         actions,
         return_to.map(str::to_string),
         mfa_proof,
+        None,
         now,
     ) {
         Ok(t) => t,
@@ -576,7 +578,9 @@ pub fn resume_oidc_flow(
 /// to the next action page.  (AC-3: sequential multi-action flow)
 ///
 /// Exactly one of `oidc_params` or `browser_return_to` should be `Some` —
-/// whichever was set when the RA flow was originally initiated.
+/// whichever was set when the RA flow was originally initiated. `flow` is
+/// the flow's id ([`ra_token::RaClaims::flow`]), which the new token keeps.
+#[allow(clippy::too_many_arguments)]
 pub fn next_required_action(
     state: &Arc<WebState>,
     realm: &RealmId,
@@ -585,6 +589,7 @@ pub fn next_required_action(
     oidc_params: Option<OidcParams>,
     browser_return_to: Option<String>,
     mfa_proof: MfaProof,
+    flow: &str,
     secure: bool,
     now: Timestamp,
 ) -> Response {
@@ -599,7 +604,7 @@ pub fn next_required_action(
     let token = if let Some(oidc) = oidc_params {
         match state
             .identity
-            .generate_ra_token(realm, &user_id, remaining, oidc, now)
+            .generate_ra_token(realm, &user_id, remaining, oidc, Some(flow), now)
         {
             Ok(t) => t,
             Err(e) => {
@@ -614,6 +619,7 @@ pub fn next_required_action(
             remaining,
             browser_return_to,
             mfa_proof,
+            Some(flow),
             now,
         ) {
             Ok(t) => t,
@@ -1224,7 +1230,8 @@ fn advance_flow(
 ) -> Response {
     let remaining: Vec<RequiredAction> = claims
         .pending_actions
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|a| *a != done)
         .collect();
     if !remaining.is_empty() {
@@ -1236,9 +1243,20 @@ fn advance_flow(
             claims.oidc_params,
             claims.browser_return_to,
             claims.mfa_proof,
+            &claims.flow,
             secure,
             now,
         );
+    }
+    // The flow ends here — in a session or an authorization code — and it
+    // ends once. A copy of any of its RA cookies used to end it again: the
+    // "already satisfied" pages lead straight here, and every replay minted
+    // another session (GA audit round 3, D-2).
+    if let Err(e) = state.identity.consume_required_action_flow(realm, &claims) {
+        tracing::info!(error = %e, "required actions: this flow has already ended");
+        let mut response = forbidden_page();
+        append_cookie(&mut response, &ra_token::clear_ra_session_cookie(secure));
+        return response;
     }
     if claims.browser_return_to.is_some() {
         resume_browser_flow(

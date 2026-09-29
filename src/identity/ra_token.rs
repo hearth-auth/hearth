@@ -4,7 +4,13 @@
 //! state across required-action completion pages.  Transported as an HttpOnly
 //! SameSite=Strict cookie scoped to `/required-action`.
 //!
-//! TTL: 15 minutes (900 seconds).  Stateless — no storage record needed.
+//! TTL: 15 minutes (900 seconds). The token itself is stateless, but two
+//! small storage records bound it (GA audit round 3, D-2): the flow it
+//! belongs to ([`RaClaims::flow`]) is claimed once when the flow ends, so a
+//! copy of the cookie cannot end it again; and the user's RA generation
+//! ([`RaClaims::generation`]) is bumped whenever one of the user's sessions
+//! is revoked (sign-out, sign-out everywhere, a password change, a disable),
+//! which invalidates every RA token minted before.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -116,6 +122,18 @@ pub struct RaClaims {
     /// OIDC path, which resumes from the session the user already holds.
     #[serde(default)]
     pub mfa_proof: MfaProof,
+    /// Identifier of the required-action flow this token belongs to, kept by
+    /// every token the flow re-mints. The flow's end claims it once, so the
+    /// flow ends — in a session or an authorization code — at most once
+    /// (GA audit round 3, D-2). Empty only in a token minted before this
+    /// field existed, which can no longer end a flow.
+    #[serde(default)]
+    pub flow: String,
+    /// The user's required-action generation when the token was minted. The
+    /// engine refuses a token whose generation is not the user's current one:
+    /// revoking any of the user's sessions bumps it.
+    #[serde(default)]
+    pub generation: u64,
     /// Issued-at time (Unix seconds).
     pub iat: i64,
     /// Expiry time (Unix seconds).
@@ -138,6 +156,17 @@ pub enum RaTokenError {
     /// The `sub` claim does not match the expected user ID.
     #[error("RA session token subject does not match the expected user")]
     UserMismatch,
+    /// The user's sessions were revoked after the token was minted (a
+    /// sign-out, a password change, an operator action), or the revocation
+    /// state could not be read.
+    #[error("RA session token was revoked")]
+    Revoked,
+}
+
+/// A fresh required-action flow identifier (128 random bits, hex).
+#[must_use]
+pub fn new_flow_id() -> String {
+    crate::core::random_secret_hex()
 }
 
 /// Minimal JWT header used when decoding incoming tokens.
@@ -149,12 +178,16 @@ struct JwtHeader {
 
 /// Generates a signed RA session JWT for the OIDC login path.
 ///
-/// The token is valid for [`RA_TOKEN_TTL_SECS`] seconds from `now`.
+/// The token is valid for [`RA_TOKEN_TTL_SECS`] seconds from `now`. `flow`
+/// and `generation` are [`RaClaims::flow`] and [`RaClaims::generation`].
+#[allow(clippy::too_many_arguments)]
 pub fn generate(
     user_id: &str,
     realm_id: &str,
     pending_actions: Vec<RequiredAction>,
     oidc_params: OidcParams,
+    flow: String,
+    generation: u64,
     signing_key: &SigningKey,
     now: Timestamp,
 ) -> Result<String, IdentityError> {
@@ -168,6 +201,8 @@ pub fn generate(
         oidc_params: Some(oidc_params),
         browser_return_to: None,
         mfa_proof: MfaProof::None,
+        flow,
+        generation,
         iat,
         exp,
     };
@@ -183,12 +218,17 @@ pub fn generate(
 /// session created at the end records it (see [`RaClaims::mfa_proof`]).
 /// `MfaProof::Inherited` is recorded as `MfaProof::None`: it names a proof
 /// made by some earlier authentication, which this flow cannot vouch for.
+/// `flow` and `generation` are [`RaClaims::flow`] and
+/// [`RaClaims::generation`].
+#[allow(clippy::too_many_arguments)]
 pub fn generate_browser(
     user_id: &str,
     realm_id: &str,
     pending_actions: Vec<RequiredAction>,
     return_to: Option<String>,
     mfa_proof: MfaProof,
+    flow: String,
+    generation: u64,
     signing_key: &SigningKey,
     now: Timestamp,
 ) -> Result<String, IdentityError> {
@@ -205,6 +245,8 @@ pub fn generate_browser(
             MfaProof::Inherited => MfaProof::None,
             proved => proved,
         },
+        flow,
+        generation,
         iat,
         exp,
     };
@@ -382,6 +424,8 @@ mod tests {
             "realm_xyz",
             vec![RequiredAction::VerifyEmail, RequiredAction::UpdatePassword],
             test_oidc_params(),
+            "flow-1".to_string(),
+            0,
             &key,
             now,
         )
@@ -411,6 +455,8 @@ mod tests {
             "realm_xyz",
             vec![RequiredAction::VerifyEmail],
             test_oidc_params(),
+            "flow-1".to_string(),
+            0,
             &key,
             issue_time,
         )
@@ -438,6 +484,8 @@ mod tests {
             "realm_xyz",
             vec![RequiredAction::VerifyEmail],
             test_oidc_params(),
+            "flow-1".to_string(),
+            0,
             &signing_key,
             now,
         )
@@ -460,6 +508,8 @@ mod tests {
             "realm_xyz",
             vec![RequiredAction::VerifyEmail],
             test_oidc_params(),
+            "flow-1".to_string(),
+            0,
             &key,
             now,
         )
@@ -482,6 +532,8 @@ mod tests {
             "realm_xyz",
             vec![],
             test_oidc_params(),
+            "flow-1".to_string(),
+            0,
             &key,
             now,
         )
@@ -542,6 +594,8 @@ mod tests {
             vec![RequiredAction::UpdatePassword],
             None,
             proof,
+            "flow-1".to_string(),
+            0,
             &key,
             now,
         )

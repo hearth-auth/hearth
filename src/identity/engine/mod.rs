@@ -8036,14 +8036,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         pending_actions: Vec<crate::identity::types::RequiredAction>,
         oidc_params: crate::identity::ra_token::OidcParams,
+        flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError> {
         let key = self.get_or_load_realm_signing_key(realm_id)?;
+        let generation = self.ra_generation(realm_id, user_id)?;
         crate::identity::ra_token::generate(
             &user_id.as_uuid().to_string(),
             &realm_id.as_uuid().to_string(),
             pending_actions,
             oidc_params,
+            flow.map_or_else(crate::identity::ra_token::new_flow_id, str::to_string),
+            generation,
             &key,
             now,
         )
@@ -8056,15 +8060,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         pending_actions: Vec<crate::identity::types::RequiredAction>,
         return_to: Option<String>,
         mfa_proof: crate::identity::MfaProof,
+        flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError> {
         let key = self.get_or_load_realm_signing_key(realm_id)?;
+        let generation = self.ra_generation(realm_id, user_id)?;
         crate::identity::ra_token::generate_browser(
             &user_id.as_uuid().to_string(),
             &realm_id.as_uuid().to_string(),
             pending_actions,
             return_to,
             mfa_proof,
+            flow.map_or_else(crate::identity::ra_token::new_flow_id, str::to_string),
+            generation,
             &key,
             now,
         )
@@ -8076,10 +8084,38 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         token: &str,
         now: Timestamp,
     ) -> Result<crate::identity::ra_token::RaClaims, crate::identity::ra_token::RaTokenError> {
+        use crate::identity::ra_token::RaTokenError;
         let key = self
             .get_or_load_realm_signing_key(realm_id)
-            .map_err(|_| crate::identity::ra_token::RaTokenError::InvalidSignature)?;
-        crate::identity::ra_token::validate(token, key.public_key_bytes(), now)
+            .map_err(|_| RaTokenError::InvalidSignature)?;
+        let claims = crate::identity::ra_token::validate(token, key.public_key_bytes(), now)?;
+        // The user's sessions were revoked after this token was minted (or
+        // the revocation state cannot be read): the flow is over.
+        let user_id = uuid::Uuid::parse_str(&claims.sub)
+            .map(UserId::new)
+            .map_err(|_| RaTokenError::MalformedClaims)?;
+        match self.ra_generation(realm_id, &user_id) {
+            Ok(current) if current == claims.generation => Ok(claims),
+            _ => Err(RaTokenError::Revoked),
+        }
+    }
+
+    fn consume_required_action_flow(
+        &self,
+        realm_id: &RealmId,
+        claims: &crate::identity::ra_token::RaClaims,
+    ) -> Result<(), IdentityError> {
+        // A token minted before flows had ids cannot prove it has not ended.
+        if claims.flow.is_empty() {
+            return Err(IdentityError::InvalidToken);
+        }
+        let marker = keys::encode_consumed_ra_flow(&Self::sha256_hex(claims.flow.as_bytes()));
+        let expires_at = Timestamp::from_micros(claims.exp.saturating_mul(1_000_000));
+        if self.claim_single_use(realm_id, &marker, expires_at)? {
+            Ok(())
+        } else {
+            Err(IdentityError::InvalidToken)
+        }
     }
 
     fn rotate_realm_signing_key(
@@ -9030,6 +9066,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             self.persist_session(realm_id, &session)?;
             session
         };
+        // A sign-out (or any revocation) also ends the user's required-action
+        // flows under way (GA audit round 3, D-2).
+        self.bump_ra_generation(realm_id, session.user_id())?;
 
         // Cascade: revoke all refresh-token grant families issued under this session.
         //
@@ -9252,6 +9291,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
+        // Revoke-all ends the user's required-action flows too, even when the
+        // user holds no session to revoke (GA audit round 3, D-2).
+        self.bump_ra_generation(realm_id, user_id)?;
         let mut offset = 0u64;
         let batch = crate::core::MAX_PAGE_LIMIT;
         let mut revoked: u32 = 0;
@@ -18881,6 +18923,49 @@ fn classify_phc_algorithm(phc: &str) -> Option<crate::identity::credentials::Pas
 }
 
 impl EmbeddedIdentityEngine {
+    /// The user's current required-action generation (`0` until the first
+    /// revocation). See [`keys::encode_ra_generation`].
+    pub(crate) fn ra_generation(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<u64, IdentityError> {
+        let bytes = self
+            .storage
+            .get(realm_id, &keys::encode_ra_generation(user_id))
+            .map_err(Self::storage_err)?;
+        Ok(bytes
+            .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+            .map_or(0, u64::from_le_bytes))
+    }
+
+    /// Ends every required-action flow under way for `user_id` by bumping
+    /// the user's required-action generation (GA audit round 3, D-2). Called
+    /// whenever one of the user's sessions is revoked. Serialised per user so
+    /// two concurrent bumps cannot both write the same successor.
+    pub(crate) fn bump_ra_generation(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<(), IdentityError> {
+        let lock = self.token_redemption_lock(&format!(
+            "ra-gen:{}:{}",
+            realm_id.as_uuid(),
+            user_id.as_uuid()
+        ));
+        let _guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = self.ra_generation(realm_id, user_id)?.wrapping_add(1);
+        self.storage
+            .put(
+                realm_id,
+                &keys::encode_ra_generation(user_id),
+                &next.to_le_bytes(),
+            )
+            .map_err(Self::storage_err)
+    }
+
     /// Returns the current session-version for `session_id`, or `1` if not tracked.
     pub(crate) fn get_session_sv(&self, realm_id: &RealmId, session_id: &SessionId) -> u64 {
         self.sv_store.get_version(realm_id, session_id).unwrap_or(1)

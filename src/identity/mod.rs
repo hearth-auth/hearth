@@ -246,13 +246,16 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Signs with the realm's Ed25519 key. The `pending_actions` list is
     /// embedded in the token verbatim — callers are responsible for sorting by
-    /// priority before calling this function.
+    /// priority before calling this function. `flow` continues an existing
+    /// flow ([`ra_token::RaClaims::flow`]); `None` starts a new one. The token
+    /// records the user's current required-action generation.
     fn generate_ra_token(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         pending_actions: Vec<RequiredAction>,
         oidc_params: ra_token::OidcParams,
+        flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
 
@@ -263,6 +266,8 @@ pub trait IdentityEngine: Send + Sync {
     /// cookie and redirecting to `return_to` (or `/ui` when `None`).
     /// `mfa_proof` is what the login has proved so far; the session created
     /// when the flow ends records it (see [`ra_token::RaClaims::mfa_proof`]).
+    /// `flow` as for [`Self::generate_ra_token`].
+    #[allow(clippy::too_many_arguments)]
     fn generate_browser_ra_token(
         &self,
         realm_id: &RealmId,
@@ -270,19 +275,34 @@ pub trait IdentityEngine: Send + Sync {
         pending_actions: Vec<RequiredAction>,
         return_to: Option<String>,
         mfa_proof: MfaProof,
+        flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
 
     /// Validates a Required-Action session JWT using the realm's public key.
     ///
-    /// Checks signature, `alg`/`typ` headers, and expiry. Returns the decoded
-    /// claims on success.
+    /// Checks signature, `alg`/`typ` headers and expiry, and that the token
+    /// was minted under the user's current required-action generation:
+    /// revoking any of the user's sessions ends every flow under way
+    /// ([`ra_token::RaTokenError::Revoked`], GA audit round 3, D-2). Returns
+    /// the decoded claims on success.
     fn validate_ra_token(
         &self,
         realm_id: &RealmId,
         token: &str,
         now: Timestamp,
     ) -> Result<ra_token::RaClaims, ra_token::RaTokenError>;
+
+    /// Ends the required-action flow `claims` belongs to, once: the first
+    /// call succeeds, and every later call for the same flow — a replayed
+    /// copy of any of the flow's tokens — fails with
+    /// [`IdentityError::InvalidToken`] (GA audit round 3, D-2). Callers claim
+    /// the flow before the session or authorization code it ends in.
+    fn consume_required_action_flow(
+        &self,
+        realm_id: &RealmId,
+        claims: &ra_token::RaClaims,
+    ) -> Result<(), IdentityError>;
 
     /// Rotates the Ed25519 signing key for a realm.
     ///

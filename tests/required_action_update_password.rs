@@ -648,6 +648,7 @@ async fn post_expired_ra_token_redirects_to_root() {
                 resource: None,
                 via_par: false,
             },
+            None,
             past,
         )
         .expect("generate expired ra token");
