@@ -27,6 +27,10 @@ pub use engine::EmbeddedRbacEngine;
 pub use error::RbacError;
 pub use registry::RegistryError;
 pub use seed::seed_permission_description;
+/// The built-in permission catalogue, for drift tests in other modules (the
+/// protocol layer's admin-permission list is checked against it).
+#[cfg(test)]
+pub(crate) use seed::SEED_PERMISSIONS;
 pub use types::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, CycleKind, Group,
     GroupId, GroupMember, GroupMembership, GroupMembershipEdge, Page, Permission,

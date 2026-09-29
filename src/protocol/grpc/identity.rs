@@ -5,9 +5,8 @@ use tonic::{Code, Request, Response, Status};
 use crate::core::{AgentCredentialId, AgentId, ClientId, OrganizationId, UserId};
 use crate::identity::{
     self as domain, AgentOwner, CreateAgentApiKeyRequest, CreateAgentRequest,
-    CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, RegisterClientRequest,
-    UpdateAgentRequest, UpdateClientRequest, UpdateOrganizationRequest, UpdateRealmRequest,
-    UpdateUserRequest,
+    CreateOrganizationRequest, CreateUserRequest, RegisterClientRequest, UpdateAgentRequest,
+    UpdateClientRequest, UpdateOrganizationRequest, UpdateUserRequest,
 };
 use crate::protocol::convert::identity::{
     domain_realm_status_to_proto, domain_user_status_to_proto, realm_page_to_proto,
@@ -46,6 +45,13 @@ fn parse_realm_id(s: &str) -> Result<crate::core::RealmId, Status> {
     s.parse::<uuid::Uuid>()
         .map(crate::core::RealmId::new)
         .map_err(|_| Status::invalid_argument("invalid realm id"))
+}
+
+/// The refusal for `CreateRealm` / `UpdateRealm`: the same message REST's
+/// `405` carries, as `FAILED_PRECONDITION` (the RPC exists on the wire, but
+/// the server's realm source of truth is its configuration file).
+fn realms_are_yaml_managed() -> Status {
+    Status::failed_precondition(crate::protocol::admin_auth::REALMS_ARE_YAML_MANAGED)
 }
 
 fn parse_org_id(s: &str) -> Result<OrganizationId, Status> {
@@ -250,55 +256,29 @@ impl IdentityAdminService for IdentityAdminSvc {
         Ok(Response::new(pb::Realm::from(&realm)))
     }
 
+    /// Refused: realms are declared in `hearth.yaml` (REST `POST /admin/realms`
+    /// answers `405` for the same reason). Authenticates first, like every RPC
+    /// on this service, then answers `FAILED_PRECONDITION` without writing.
     async fn create_realm(
         &self,
         req: Request<pb::CreateRealmRequest>,
     ) -> Result<Response<pb::Realm>, Status> {
-        let auth = authenticate_admin(req.metadata(), &self.state)?;
-        grpc_require_permission(&auth, "hearth.realm.admin")?;
-        // Only system-realm admins may create new realms.
-        if !crate::identity::keys::is_system_realm(&auth.realm_id) {
-            return Err(Status::new(Code::PermissionDenied, "forbidden"));
-        }
-        let body: CreateRealmRequest = req.into_inner().into();
-        let realm = self
-            .state
-            .identity
-            .create_realm(&body)
-            .map_err(identity_to_status)?;
-        // Seed the RBAC defaults on the new realm. Hard error: the caller
-        // must see the failure so they can retry or rollback. The realm record
-        // is already committed but the unsurfaced-failure path would leave the
-        // realm permanently broken with no admin roles.
-        self.state.rbac.seed_realm(realm.id()).map_err(|e| {
-            let error_id = uuid::Uuid::new_v4();
-            tracing::error!(error = %e, %error_id, "RBAC realm seed failed");
-            Status::internal(format!("internal error [{error_id}]"))
-        })?;
-        Ok(Response::new(pb::Realm::from(&realm)))
+        authenticate_admin(req.metadata(), &self.state)?;
+        Err(realms_are_yaml_managed())
     }
 
+    /// Refused: realms are declared in `hearth.yaml` (REST
+    /// `PATCH /admin/realms/{id}` answers `405`). It used to replace the
+    /// realm's whole config with the three fields the proto carries plus
+    /// defaults, wiping MFA, CIDR, lockout, SCIM-token and webhook settings
+    /// until the next reload, and could rename or suspend a realm the YAML
+    /// still declares (GA audit round 3, G-7).
     async fn update_realm(
         &self,
         req: Request<pb::UpdateRealmCall>,
     ) -> Result<Response<pb::Realm>, Status> {
-        let auth = authenticate_admin(req.metadata(), &self.state)?;
-        grpc_require_permission(&auth, "hearth.realm.admin")?;
-        let call = req.into_inner();
-        let realm_id = parse_realm_id(&call.id)?;
-        if realm_id != auth.realm_id && !crate::identity::keys::is_system_realm(&auth.realm_id) {
-            return Err(Status::new(Code::PermissionDenied, "forbidden"));
-        }
-        let body: UpdateRealmRequest = call
-            .body
-            .ok_or_else(|| Status::invalid_argument("body required"))?
-            .into();
-        let realm = self
-            .state
-            .identity
-            .update_realm(&realm_id, &body)
-            .map_err(identity_to_status)?;
-        Ok(Response::new(pb::Realm::from(&realm)))
+        authenticate_admin(req.metadata(), &self.state)?;
+        Err(realms_are_yaml_managed())
     }
 
     async fn delete_realm(
