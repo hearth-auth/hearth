@@ -226,17 +226,8 @@ pub(crate) fn build_client_secret_jwt(
     client_id: &str,
     private_key_pem: &str,
 ) -> Result<String, IdentityError> {
-    let der = pem_to_der(private_key_pem)?;
     let rng = ring::rand::SystemRandom::new();
-    let key_pair = ring::signature::EcdsaKeyPair::from_pkcs8(
-        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
-        &der,
-        &rng,
-    )
-    .map_err(|_| IdentityError::FederationUpstreamError {
-        provider: IdpKind::Apple.label().to_string(),
-        reason: "failed to load Apple private key".to_string(),
-    })?;
+    let key_pair = load_private_key(private_key_pem, &rng)?;
 
     let now = now_unix();
     let header = serde_json::json!({"alg": "ES256", "kid": key_id});
@@ -272,6 +263,36 @@ pub(crate) fn build_client_secret_jwt(
     })?;
     let sig_b64 = URL_SAFE_NO_PAD.encode(sig.as_ref());
     Ok(format!("{signing_input}.{sig_b64}"))
+}
+
+/// Loads the Sign In with Apple ES256 key from its PKCS#8 PEM — the one
+/// parser both the token exchange and configuration validation use.
+fn load_private_key(
+    private_key_pem: &str,
+    rng: &ring::rand::SystemRandom,
+) -> Result<ring::signature::EcdsaKeyPair, IdentityError> {
+    let der = pem_to_der(private_key_pem)?;
+    ring::signature::EcdsaKeyPair::from_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        &der,
+        rng,
+    )
+    .map_err(|_| IdentityError::FederationUpstreamError {
+        provider: IdpKind::Apple.label().to_string(),
+        reason: "failed to load Apple private key".to_string(),
+    })
+}
+
+/// Checks an `apple_private_key_pem` with exactly the parser the token
+/// exchange uses, so configuration load refuses a key the first Sign In with
+/// Apple would fail on (GA audit 3, round 3).
+///
+/// # Errors
+///
+/// Returns an error when the PEM is not base64 PKCS#8 or not a P-256 ECDSA
+/// key. The error carries no key material.
+pub fn validate_private_key_pem(private_key_pem: &str) -> Result<(), IdentityError> {
+    load_private_key(private_key_pem, &ring::rand::SystemRandom::new()).map(|_| ())
 }
 
 /// Decodes a PEM-wrapped PKCS#8 key block into raw DER bytes.

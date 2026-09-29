@@ -572,6 +572,7 @@ impl Config {
         validate_realm_applications_all(self.realms.as_ref(), &mut issues);
         validate_realm_organizations_all(self.realms.as_ref(), &mut issues);
         validate_realm_saml_sps_all(self.realms.as_ref(), &mut issues);
+        validate_realm_federation_keys_all(self.realms.as_ref(), &mut issues);
         validate_realm_protected_resources_all(self.realms.as_ref(), self.dev_mode, &mut issues);
         validate_realm_introspection_clients_all(self.realms.as_ref(), &mut issues);
 
@@ -1452,6 +1453,75 @@ fn validate_realm_saml_sps_all(
         for (sp_key, sp) in sps {
             if let Some((field, reason)) = saml_sp_signing_problem(name, sp_key, sp) {
                 issues.push(ValidationIssue { field, reason });
+            }
+        }
+    }
+}
+
+/// Parses, at configuration load and reload, every PEM a federation
+/// connector needs at login: a SAML connector's `idp_certificate_pem` (a
+/// single certificate or a rollover bundle) and an Apple connector's
+/// `apple_private_key_pem`.
+///
+/// Both used to be parsed only at the first federated login, so a paste
+/// error surfaced as a failed sign-in instead of a refused boot (GA audit 3,
+/// round 3). The checks call the runtime's own parsers
+/// (`saml::validate_idp_certificate_bundle`, `apple::validate_private_key_pem`)
+/// so load-time validation cannot disagree with what login accepts.
+fn validate_realm_federation_keys_all(
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(realms) = realms else { return };
+    for (realm, cfg) in realms {
+        let Some(federation) = &cfg.federation else {
+            continue;
+        };
+        for (idp, provider) in &federation.providers {
+            let base = format!("realms.{realm}.federation.providers.{idp}");
+            let present = |v: &Option<String>| v.clone().filter(|p| !p.trim().is_empty());
+            match provider.kind.as_str() {
+                "saml" => match present(&provider.idp_certificate_pem) {
+                    None => issues.push(ValidationIssue {
+                        field: format!("{base}.idp_certificate_pem"),
+                        reason: format!(
+                            "SAML connector '{idp}' in realm '{realm}' has no \
+                             `idp_certificate_pem`: without the IdP's signing \
+                             certificate no assertion can be verified"
+                        ),
+                    }),
+                    Some(pem) => {
+                        if let Err(e) =
+                            crate::identity::federation::saml::validate_idp_certificate_bundle(&pem)
+                        {
+                            issues.push(ValidationIssue {
+                                field: format!("{base}.idp_certificate_pem"),
+                                reason: format!(
+                                    "SAML connector '{idp}' in realm '{realm}': \
+                                     `idp_certificate_pem` is not a usable RSA signing \
+                                     certificate (or bundle of them): {e}"
+                                ),
+                            });
+                        }
+                    }
+                },
+                "apple" => {
+                    let usable = present(&provider.apple_private_key_pem).is_some_and(|pem| {
+                        crate::identity::federation::apple::validate_private_key_pem(&pem).is_ok()
+                    });
+                    if !usable {
+                        issues.push(ValidationIssue {
+                            field: format!("{base}.apple_private_key_pem"),
+                            reason: format!(
+                                "Apple connector '{idp}' in realm '{realm}': \
+                                 `apple_private_key_pem` is missing or is not a P-256 \
+                                 private key in PKCS#8 PEM form \
+                                 (`-----BEGIN PRIVATE KEY-----`)"
+                            ),
+                        });
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -4190,6 +4260,181 @@ realms:
         assert!(
             msg.contains("sp_certificate_pem"),
             "the error must name the offending key: {msg}"
+        );
+    }
+
+    // ── GA audit 3 round 3: federation PEMs are parsed at load/reload ───────
+    //
+    // A SAML connector's `idp_certificate_pem` and an Apple connector's
+    // `apple_private_key_pem` were only ever parsed at the first federated
+    // login, so a paste error surfaced as a failed sign-in, not at boot. These
+    // pin the load-time check, and that it uses the runtime's own parsers.
+
+    /// A production-shaped YAML whose realm `acme` declares one federation
+    /// provider `corp` with `provider` (lines indented for that position).
+    fn yaml_with_federation_provider(provider: &str) -> String {
+        format!(
+            r#"
+oidc:
+  issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+email:
+  transport: smtp
+  from: "noreply@example.com"
+  smtp:
+    host: "smtp.example.com"
+    port: 587
+realms:
+  acme:
+    federation:
+      providers:
+        corp:
+{provider}"#
+        )
+    }
+
+    fn saml_provider(idp_certificate_pem: Option<&str>) -> String {
+        let mut out = String::from(concat!(
+            "          type: saml\n",
+            "          entity_id: \"https://idp.corp.example\"\n",
+            "          sso_url: \"https://idp.corp.example/sso\"\n",
+        ));
+        if let Some(pem) = idp_certificate_pem {
+            out.push_str(&format!("          idp_certificate_pem: {pem:?}\n"));
+        }
+        out
+    }
+
+    fn apple_provider(private_key_pem: &str) -> String {
+        format!(
+            concat!(
+                "          type: apple\n",
+                "          client_id: \"com.example.web\"\n",
+                "          apple_team_id: \"A1B2C3D4E5\"\n",
+                "          apple_key_id: \"ABCDE12345\"\n",
+                "          apple_private_key_pem: {:?}\n",
+            ),
+            private_key_pem
+        )
+    }
+
+    fn test_certificate_pem(name: &str) -> String {
+        use base64::Engine as _;
+        let key = crate::identity::tokens::RsaSigningKey::generate(name, 365).expect("key");
+        let b64 = base64::engine::general_purpose::STANDARD.encode(key.cert_der());
+        let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            out.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
+            out.push('\n');
+        }
+        out.push_str("-----END CERTIFICATE-----\n");
+        out
+    }
+
+    /// Issues whose field is `realms.acme.federation.providers.corp.<key>`.
+    fn federation_issue(yaml: &str, key: &str) -> Option<ValidationIssue> {
+        let field = format!("realms.acme.federation.providers.corp.{key}");
+        Config::from_yaml_str_unchecked(yaml)
+            .expect("parse")
+            .validate_all()
+            .into_iter()
+            .find(|i| i.field == field)
+    }
+
+    #[test]
+    fn saml_idp_certificate_must_be_usable_at_load() {
+        let yaml = yaml_with_federation_provider(&saml_provider(Some(
+            "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydA==\n-----END CERTIFICATE-----\n",
+        )));
+        let issue = federation_issue(&yaml, "idp_certificate_pem")
+            .expect("an unusable IdP certificate must be reported at load");
+        assert!(
+            issue.reason.contains("'corp'") && issue.reason.contains("'acme'"),
+            "the reason must name the IdP and the realm: {}",
+            issue.reason
+        );
+        // The boot / reload loader refuses it too.
+        let err = Config::from_yaml_str(&yaml).expect_err("boot must fail closed");
+        assert!(err.to_string().contains("idp_certificate_pem"), "{err}");
+    }
+
+    #[test]
+    fn saml_idp_certificate_is_required() {
+        let yaml = yaml_with_federation_provider(&saml_provider(None));
+        let issue = federation_issue(&yaml, "idp_certificate_pem")
+            .expect("a SAML connector without a certificate must be reported at load");
+        assert!(issue.reason.contains("'corp'"), "{}", issue.reason);
+    }
+
+    /// The rollover shape: two concatenated certificates, both usable.
+    #[test]
+    fn saml_idp_certificate_bundle_is_accepted() {
+        let bundle = format!(
+            "{}{}",
+            test_certificate_pem("old"),
+            test_certificate_pem("new")
+        );
+        let yaml = yaml_with_federation_provider(&saml_provider(Some(&bundle)));
+        assert!(
+            federation_issue(&yaml, "idp_certificate_pem").is_none(),
+            "a two-certificate bundle must be accepted"
+        );
+    }
+
+    /// A bundle is only as good as its worst block: a broken second
+    /// certificate is refused at load, naming which one.
+    #[test]
+    fn saml_idp_certificate_bundle_with_an_unusable_block_is_refused() {
+        let bundle = format!(
+            "{}-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydA==\n-----END CERTIFICATE-----\n",
+            test_certificate_pem("old")
+        );
+        let yaml = yaml_with_federation_provider(&saml_provider(Some(&bundle)));
+        let issue = federation_issue(&yaml, "idp_certificate_pem")
+            .expect("a bundle with an unusable block must be reported");
+        assert!(
+            issue.reason.contains("certificate 2 of 2"),
+            "the reason must say which block: {}",
+            issue.reason
+        );
+    }
+
+    #[test]
+    fn apple_private_key_must_be_a_usable_p256_key_at_load() {
+        let garbage = "-----BEGIN PRIVATE KEY-----\nbm90IGEga2V5\n-----END PRIVATE KEY-----\n";
+        let yaml = yaml_with_federation_provider(&apple_provider(garbage));
+        let issue = federation_issue(&yaml, "apple_private_key_pem")
+            .expect("an unusable Apple key must be reported at load");
+        assert!(
+            issue.reason.contains("'corp'") && issue.reason.contains("'acme'"),
+            "{}",
+            issue.reason
+        );
+        assert!(
+            !issue.reason.contains("bm90IGEga2V5"),
+            "the reason must not echo key material: {}",
+            issue.reason
+        );
+
+        use base64::Engine as _;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+            &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            &rng,
+        )
+        .expect("generate");
+        let pem = format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+            base64::engine::general_purpose::STANDARD.encode(pkcs8.as_ref())
+        );
+        let yaml = yaml_with_federation_provider(&apple_provider(&pem));
+        assert!(
+            federation_issue(&yaml, "apple_private_key_pem").is_none(),
+            "a real P-256 PKCS#8 key must be accepted"
         );
     }
 
