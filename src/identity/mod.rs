@@ -26,6 +26,7 @@ pub mod mcp;
 pub mod migration;
 pub mod oidc;
 pub mod onboarding;
+pub mod operator_token;
 pub mod pre_token_webhook;
 pub mod ra_token;
 pub mod reconcile;
@@ -85,9 +86,7 @@ pub use email::{
 pub(crate) use engine::client_jwks::validate_client_jwks;
 pub use engine::cross_realm::{find_system_sourced_cross_realm_policies, SystemSourcedPolicy};
 pub use engine::{
-    EmbeddedIdentityEngine, HostAdminToken, IdentityConfig, RateLimitConfig, SessionConfig,
-    TokenIssuanceContext, HOST_ADMIN_TOKEN_ISSUER, HOST_ADMIN_TOKEN_MAX_TTL,
-    HOST_ADMIN_TOKEN_MIN_TTL,
+    EmbeddedIdentityEngine, IdentityConfig, RateLimitConfig, SessionConfig, TokenIssuanceContext,
 };
 pub use error::IdentityError;
 pub use kdf_gate::{
@@ -107,13 +106,18 @@ pub use oidc::{
     StepUpMfaGrantRequest, TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest,
     UpdateClientRequest, UserInfoResponse,
 };
+pub use operator_token::{
+    OperatorToken, OperatorTokenIssuer, OPERATOR_TOKEN_DEFAULT_TTL, OPERATOR_TOKEN_MAX_TTL,
+    OPERATOR_TOKEN_MIN_TTL,
+};
 pub use session_version::{SessionVersionStore, SvDeltaEntry, SvDeltaResponse, SvSnapshotResponse};
 pub use sms::{
     LoggingSmsSender, SharedSmsSender, SmsError, SmsMessage, SmsSecret, SmsSender, SnsSmsSender,
     StubSmsHttpTransport, TwilioSmsSender,
 };
 pub use step_up::{
-    has_step_up_credential, verify_step_up, StepUpAssertion, StepUpError, StepUpProof,
+    has_step_up_credential, verify_operator_step_up, verify_step_up, SecondFactorProof,
+    StepUpAssertion, StepUpError, StepUpProof,
 };
 pub use tokens::{
     decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
@@ -693,6 +697,37 @@ pub trait IdentityEngine: Send + Sync {
         session_id: &SessionId,
         ctx: &TokenIssuanceContext,
     ) -> Result<TokenPair, IdentityError>;
+
+    /// Mints a short-lived access token for a **system-realm** operator
+    /// account (GA audit 3 DOC-2): the token the realm and cluster admin API
+    /// need, carried as a Bearer with `X-Realm-ID` set to the nil UUID.
+    ///
+    /// The token is bound to a new session that expires with it (revoking
+    /// that session revokes the token), carries the account's resolved RBAC
+    /// claims — which must include `hearth.admin` — and has no usable refresh
+    /// token. The issuance is written to the system realm's audit trail
+    /// (actor, `issuer`, lifetime, `jti`; never the token) before the token
+    /// is returned; if that write fails, no token is returned.
+    ///
+    /// The caller authenticates the requester first: this method runs no
+    /// interactive gate. See [`OperatorTokenIssuer`].
+    ///
+    /// # Errors
+    ///
+    /// - [`IdentityError::InvalidInput`] — `ttl` is outside
+    ///   [`OPERATOR_TOKEN_MIN_TTL`]..=[`OPERATOR_TOKEN_MAX_TTL`].
+    /// - [`IdentityError::UserNotFound`] — no such account in the system realm.
+    /// - [`IdentityError::UserNotVerified`] / [`IdentityError::Unauthorized`] —
+    ///   the account is pending verification or disabled.
+    /// - [`IdentityError::Unauthorized`] — the token would not carry
+    ///   `hearth.admin`.
+    /// - [`IdentityError::AuditFailure`] — the issuance could not be audited.
+    fn issue_operator_token(
+        &self,
+        user_id: &UserId,
+        ttl: std::time::Duration,
+        issuer: &OperatorTokenIssuer,
+    ) -> Result<OperatorToken, IdentityError>;
 
     /// Validates an access token: verifies the Ed25519 signature, enforces
     /// `exp`, checks the realm binding (`tid`), and confirms the session is
