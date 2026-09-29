@@ -1,12 +1,9 @@
 //! SAML metadata `<EntityDescriptor>` generation and parsing.
 
+use super::xml::{escape_attr, ns, parse_err, walk_outside_signatures, XmlStep};
+use crate::identity::error::IdentityError;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use quick_xml::events::Event;
-use quick_xml::Reader;
-
-use super::xml::{attr, escape_attr, is_element, ns, parse_err, read_text, unescape_text};
-use crate::identity::error::IdentityError;
 
 /// SP metadata parameters.
 pub struct SpMetadataParams<'a> {
@@ -120,61 +117,62 @@ pub struct ParsedIdpMetadata {
 
 /// Parses an `<EntityDescriptor>` containing an `<IDPSSODescriptor>`.
 pub fn parse_idp_metadata(xml: &[u8]) -> Result<ParsedIdpMetadata, IdentityError> {
-    let mut reader = Reader::from_reader(xml);
-    reader.config_mut().expand_empty_elements = false;
-
     let mut entity_id: Option<String> = None;
     let mut sso_redirect: Option<String> = None;
     let mut sso_post: Option<String> = None;
     let mut slo_url: Option<String> = None;
     let mut certs: Vec<String> = Vec::new();
-    let mut in_idp = false;
-    let mut expect_cert = false;
+    // Depth of the open `<md:IDPSSODescriptor>`, and of the open
+    // `<ds:X509Certificate>` whose text is being collected.
+    let mut idp_depth: Option<usize> = None;
+    let mut cert_depth: Option<usize> = None;
+    let mut cert_text = String::new();
 
-    let mut buf = Vec::new();
-    loop {
-        let ev = reader.read_event_into(&mut buf);
-        match ev {
-            Ok(Event::Start(ref e) | Event::Empty(ref e)) => {
-                if is_element(e, ns::MD, "EntityDescriptor") && entity_id.is_none() {
-                    entity_id = attr(e, "entityID");
-                } else if is_element(e, ns::MD, "IDPSSODescriptor") {
-                    in_idp = true;
-                } else if in_idp && is_element(e, ns::MD, "SingleSignOnService") {
-                    let binding = attr(e, "Binding").unwrap_or_default();
-                    let loc = attr(e, "Location");
+    // Read through the signature-blind walker, matching elements by namespace
+    // URI: a certificate inside the metadata's own `<ds:Signature>` (its
+    // `KeyInfo`) is not an IdP signing certificate (GA audit 3, round 2).
+    walk_outside_signatures(xml, |step| {
+        match step {
+            XmlStep::Open { element: e, depth } => {
+                if e.is(ns::MD, "EntityDescriptor") && entity_id.is_none() {
+                    entity_id = e.attr("entityID");
+                } else if e.is(ns::MD, "IDPSSODescriptor") {
+                    idp_depth.get_or_insert(depth);
+                } else if idp_depth.is_some() && e.is(ns::MD, "SingleSignOnService") {
+                    let binding = e.attr("Binding").unwrap_or_default();
+                    let loc = e.attr("Location");
                     if binding.ends_with("HTTP-Redirect") {
                         sso_redirect = loc;
                     } else if binding.ends_with("HTTP-POST") {
                         sso_post = loc;
                     }
-                } else if in_idp && is_element(e, ns::MD, "SingleLogoutService") {
+                } else if idp_depth.is_some() && e.is(ns::MD, "SingleLogoutService") {
                     if slo_url.is_none() {
-                        slo_url = attr(e, "Location");
+                        slo_url = e.attr("Location");
                     }
-                } else if in_idp && e.name().as_ref().ends_with(b"X509Certificate") {
-                    expect_cert = true;
+                } else if idp_depth.is_some() && e.is(ns::DS, "X509Certificate") {
+                    cert_depth = Some(depth);
+                    cert_text.clear();
                 }
             }
-            Ok(Event::End(e)) if e.name().as_ref().ends_with(b"IDPSSODescriptor") => {
-                in_idp = false;
-            }
-            Ok(Event::Text(t)) if expect_cert => {
-                if let Ok(s) = unescape_text(&t) {
-                    let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+            XmlStep::Text { text, depth } if cert_depth == Some(depth) => cert_text.push_str(text),
+            XmlStep::Close { depth } => {
+                if cert_depth == Some(depth) {
+                    cert_depth = None;
+                    let cleaned: String =
+                        cert_text.chars().filter(|c| !c.is_whitespace()).collect();
                     if !cleaned.is_empty() {
                         certs.push(wrap_cert_pem(&cleaned));
                     }
                 }
-                expect_cert = false;
+                if idp_depth == Some(depth) {
+                    idp_depth = None;
+                }
             }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(parse_err(format!("metadata parse error: {e}"))),
-            Ok(Event::DocType(_)) => return Err(parse_err("DOCTYPE declarations are rejected")),
-            _ => {}
+            XmlStep::Text { .. } => {}
         }
-        buf.clear();
-    }
+        Ok(())
+    })?;
 
     let entity_id = entity_id.ok_or_else(|| parse_err("no entityID in metadata"))?;
 
@@ -197,15 +195,35 @@ fn wrap_cert_pem(b64: &str) -> String {
     out
 }
 
-// Unused for compatibility with other modules expecting `read_text`.
-#[allow(dead_code)]
-fn _read_text_unused<R: std::io::BufRead>(r: &mut Reader<R>) -> Result<String, IdentityError> {
-    read_text(r)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GA audit 3 round 2: a certificate inside a `<ds:Signature>` (the
+    /// metadata's own signature `KeyInfo`) is not an IdP signing
+    /// certificate — only the `KeyDescriptor`'s is — and `ds:` is matched by
+    /// the namespace it is bound to on the root.
+    #[test]
+    fn parse_idp_metadata_ignores_certificates_inside_a_signature() {
+        let xml = concat!(
+            r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" "#,
+            r#"xmlns:ds="http://www.w3.org/2000/09/xmldsig#" entityID="https://idp.example">"#,
+            r#"<md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">"#,
+            "<ds:Signature><ds:KeyInfo><ds:X509Data><ds:X509Certificate>U0lHTkFUVVJF",
+            "</ds:X509Certificate></ds:X509Data></ds:KeyInfo></ds:Signature>",
+            r#"<md:KeyDescriptor use="signing"><ds:KeyInfo><ds:X509Data>"#,
+            "<ds:X509Certificate>UkVBTA==</ds:X509Certificate></ds:X509Data></ds:KeyInfo>",
+            "</md:KeyDescriptor></md:IDPSSODescriptor></md:EntityDescriptor>",
+        );
+        let parsed = parse_idp_metadata(xml.as_bytes()).expect("parse");
+        assert_eq!(
+            parsed.signing_certs_pem.len(),
+            1,
+            "{:?}",
+            parsed.signing_certs_pem
+        );
+        assert!(parsed.signing_certs_pem[0].contains("UkVBTA=="));
+    }
 
     #[test]
     fn sp_metadata_contains_acs() {

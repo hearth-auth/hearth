@@ -353,6 +353,89 @@ async fn system_realm_user_without_admin_permission_gets_403() {
     );
 }
 
+/// The console's user administration is exempt from the per-surface
+/// privilege-ceiling calls (`admin_auth::check_user_admin_ceiling`) only
+/// because it admits nobody but `hearth.admin`, who clears the ceiling by
+/// construction (GA audit round 3). A system-realm *sub*-admin
+/// (`hearth.users.admin`) must therefore be refused before any user mutation;
+/// if this gate ever widens to sub-admins, the console must call the ceiling.
+#[tokio::test]
+async fn system_realm_sub_admin_cannot_use_console_user_admin() {
+    let rig = build_rig();
+    let system_realm = hearth::core::RealmId::new(uuid::Uuid::nil());
+    let sub_admin = rig
+        .identity
+        .create_admin_user(&CreateUserRequest {
+            email: "users-admin@hearth.test".to_string(),
+            display_name: "Users Admin".to_string(),
+            first_name: String::new(),
+            last_name: String::new(),
+            attributes: Default::default(),
+        })
+        .expect("create system-realm user");
+    rig.identity
+        .update_user(
+            &system_realm,
+            sub_admin.id(),
+            &UpdateUserRequest {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .expect("activate system-realm user");
+    let role = rig
+        .authz
+        .get_role_by_name(&system_realm, "hearth.users.admin")
+        .expect("role lookup")
+        .expect("hearth.users.admin seeded in the system realm");
+    rig.authz
+        .assign_role(
+            &system_realm,
+            &hearth::rbac::AssignRoleRequest {
+                subject: hearth::rbac::Subject::User(sub_admin.id().clone()),
+                role_id: role.id,
+                scope: hearth::rbac::Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign hearth.users.admin");
+    let session = rig
+        .identity
+        .create_session(
+            &system_realm,
+            sub_admin.id(),
+            &hearth::identity::SessionContext::default(),
+        )
+        .expect("create session");
+    let csrf = "csrf-sub-admin";
+    let cookie = auth_cookie(session.id(), &system_realm, csrf);
+
+    let uid = rig.non_admin_user_id.as_uuid();
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/ui/admin/realms/acme/users/{uid}/delete"))
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("_csrf={csrf}")))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        rig.identity
+            .get_user(&rig.realm_id, &rig.non_admin_user_id)
+            .expect("get_user")
+            .is_some(),
+        "a refused sub-admin must not delete the user"
+    );
+}
+
 #[tokio::test]
 async fn unauthenticated_user_redirects_to_login() {
     let rig = build_rig();

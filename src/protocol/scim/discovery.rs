@@ -12,27 +12,14 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
-use crate::protocol::http::{extract_admin_auth, AppState};
-use crate::protocol::scim::error::ScimError;
-
-fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<(), ScimError> {
-    extract_admin_auth(headers, state)
-        .map(|_| ())
-        .map_err(|(status, body)| {
-            let detail = body
-                .0
-                .get("error")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("authentication failed")
-                .to_string();
-            ScimError::new(status, detail)
-        })
-}
+use crate::protocol::http::AppState;
+use crate::protocol::scim::auth::authenticate_discovery as authenticate;
 
 /// `GET /scim/v2/ServiceProviderConfig` — RFC 7644 §4.
 ///
 /// Advertises capabilities. Phase 1 supports: PATCH, filtering (limited),
-/// and bulk=false. Authentication is a realm-scoped admin token.
+/// and bulk=false. Authentication is the realm's SCIM token or an admin token
+/// for the realm (see [`crate::protocol::scim::auth::authenticate_discovery`]).
 pub async fn service_provider_config(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

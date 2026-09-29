@@ -527,6 +527,189 @@ pub fn grants_admin_permission(permissions: &[String], required: &str) -> bool {
         .any(|p| p == SUPERUSER_PERMISSION || p == required)
 }
 
+/// Returns the first admin-grade permission in `target` that `actor` does not
+/// hold, or `None` when the actor may administer the target.
+///
+/// This is the privilege ceiling on user administration, as a pure function:
+///
+/// - An actor holding [`SUPERUSER_PERMISSION`] outranks everyone (`None`).
+/// - Otherwise the actor must hold **every** admin-grade permission
+///   ([`ADMIN_PERMISSIONS`]) the target holds. A same-level peer passes; a
+///   target with any admin permission the actor lacks — `hearth.admin`
+///   included — does not.
+///
+/// Non-admin permissions of the target are ignored: the ceiling protects the
+/// admin plane, not application authorization.
+#[must_use]
+pub fn admin_ceiling_gap<'a, I>(actor: &[String], target: I) -> Option<&'a str>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    if actor.iter().any(|p| p == SUPERUSER_PERMISSION) {
+        return None;
+    }
+    target
+        .into_iter()
+        .filter(|p| is_admin_permission(p))
+        .find(|p| !actor.iter().any(|a| a == p))
+}
+
+/// Why [`check_user_admin_ceiling`] refused an operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserCeilingError {
+    /// The target user holds an admin-grade permission the actor lacks.
+    Exceeded,
+    /// The target's permissions could not be resolved. The operation is
+    /// refused (fail closed) rather than assumed safe.
+    Unresolved,
+}
+
+/// The privilege ceiling on user administration: an admin may not modify,
+/// re-email, reset, disable or delete a user who holds an admin-grade
+/// permission the admin lacks (see [`admin_ceiling_gap`] for the rule).
+///
+/// `actor_permissions` is the actor's permission set (token claims); a SCIM
+/// provisioning token passes an empty set, so it may act on no admin
+/// principal at all. `realm_id` is the realm the target user lives in, which is
+/// where its permissions are resolved.
+///
+/// Every user-administration surface calls this one function: REST
+/// `/admin/users*` and `/admin/realms/{id}/users/{id}/required-actions`, gRPC
+/// `UpdateUser` / `DeleteUser`, and SCIM `/Users`. Without it a
+/// `hearth.users.admin` sub-admin could rewrite a superuser's email and reset
+/// the password, and so take over `hearth.admin` (GA audit round 3). The web
+/// console admits only `hearth.admin`, which satisfies the ceiling by
+/// construction.
+///
+/// # Errors
+///
+/// [`UserCeilingError::Exceeded`] when the target outranks the actor;
+/// [`UserCeilingError::Unresolved`] when the RBAC read fails.
+pub fn check_user_admin_ceiling(
+    rbac: &dyn crate::rbac::RbacEngine,
+    realm_id: &RealmId,
+    target: &UserId,
+    actor_permissions: &[String],
+) -> Result<(), UserCeilingError> {
+    // A superuser clears the ceiling whatever the target holds: skip the read.
+    if actor_permissions.iter().any(|p| p == SUPERUSER_PERMISSION) {
+        return Ok(());
+    }
+    let resolved = rbac
+        .resolve_permissions(target, realm_id, None, None)
+        .map_err(|e| {
+            tracing::warn!(
+                realm_id = %realm_id,
+                error = %e,
+                "admin ceiling could not resolve the target's permissions; refusing"
+            );
+            UserCeilingError::Unresolved
+        })?;
+    let gap = admin_ceiling_gap(
+        actor_permissions,
+        resolved
+            .permissions
+            .iter()
+            .map(crate::rbac::Permission::as_str),
+    );
+    match gap {
+        None => Ok(()),
+        Some(missing) => {
+            tracing::warn!(
+                realm_id = %realm_id,
+                missing_permission = missing,
+                "user administration refused: the target holds an admin permission the actor lacks"
+            );
+            Err(UserCeilingError::Exceeded)
+        }
+    }
+}
+
+/// Capability a cross-realm admin operation must be granted by a stored
+/// [`crate::identity::CrossRealmTrustPolicy`] in the target realm before it is
+/// permitted. A policy may also carry `*`, which grants every capability.
+pub const CROSS_REALM_ADMIN_CAPABILITY: &str = "hearth.admin";
+
+/// Whether an admin authenticated in one realm may operate on another, as
+/// decided by [`admin_realm_scope`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminRealmScope {
+    /// Same realm, or a system-realm crossing the target's policies allow.
+    Permitted,
+    /// A tenant-realm admin addressing a realm that is not its own.
+    OtherRealm,
+    /// A system-realm crossing that the target realm's trust policy refuses.
+    PolicyDenied,
+}
+
+/// The realm-level object-authorization rule (BOLA guard) shared by every
+/// admin surface that takes a realm id: REST `/admin/realms/{id}/*` and gRPC
+/// `GetRealm` / `DeleteRealm`.
+///
+/// - `caller_realm == target_realm`: no boundary is crossed, always permitted.
+/// - A tenant realm may not address another realm: [`AdminRealmScope::OtherRealm`].
+/// - The **system realm** (nil UUID) may cross, subject to the target realm's
+///   cross-realm trust policies. Three-way outcome:
+///   1. **Permitted** — a live policy in the target names the system realm and
+///      grants [`CROSS_REALM_ADMIN_CAPABILITY`] (or `*`).
+///   2. **Denied** — a live policy in the target names the system realm but
+///      withholds that capability: [`AdminRealmScope::PolicyDenied`].
+///   3. **Ungoverned** — no live policy in the target names the system realm.
+///      The default is *permissive-with-audit*: the crossing is allowed and a
+///      `WARN`-level record is emitted. Fail-closed here would brick the
+///      system realm's management plane on every deployment that has never
+///      authored a policy.
+///
+/// gRPC `GetRealm` / `DeleteRealm` used to apply only the first two rules, so
+/// a policy that refused the system realm held on REST and not on gRPC (GA
+/// audit round 3).
+///
+/// # Errors
+///
+/// Propagates an identity-engine error from the policy reads.
+pub fn admin_realm_scope(
+    identity: &dyn crate::identity::IdentityEngine,
+    caller_realm: &RealmId,
+    target_realm: &RealmId,
+    now_micros: i64,
+) -> Result<AdminRealmScope, crate::identity::IdentityError> {
+    if caller_realm == target_realm {
+        return Ok(AdminRealmScope::Permitted);
+    }
+    if !caller_realm.as_uuid().is_nil() {
+        return Ok(AdminRealmScope::OtherRealm);
+    }
+    if identity.check_cross_realm_policy(
+        target_realm,
+        caller_realm,
+        CROSS_REALM_ADMIN_CAPABILITY,
+    )? {
+        return Ok(AdminRealmScope::Permitted);
+    }
+    let now = crate::core::Timestamp::from_micros(now_micros);
+    let governed = identity
+        .list_cross_realm_policies(target_realm)?
+        .iter()
+        .any(|p| &p.source_realm_id == caller_realm && p.expires_at.is_none_or(|exp| now < exp));
+    if governed {
+        tracing::warn!(
+            source_realm = %caller_realm.as_uuid(),
+            target_realm = %target_realm.as_uuid(),
+            capability = CROSS_REALM_ADMIN_CAPABILITY,
+            "cross-realm admin operation refused by trust policy"
+        );
+        return Ok(AdminRealmScope::PolicyDenied);
+    }
+    tracing::warn!(
+        source_realm = %caller_realm.as_uuid(),
+        target_realm = %target_realm.as_uuid(),
+        capability = CROSS_REALM_ADMIN_CAPABILITY,
+        "cross-realm admin operation permitted by default: no cross-realm trust \
+         policy governs this realm pair"
+    );
+    Ok(AdminRealmScope::Permitted)
+}
+
 /// Returns whether an access token may be used against an administrative
 /// surface, judged by the client it was issued to (GA audit B1).
 ///
@@ -1129,6 +1312,58 @@ mod tests {
         ] {
             assert!(!is_admin_permission(name), "{name} must not be admin-grade");
         }
+    }
+
+    // --- Privilege ceiling on user administration (GA audit round 3) ---
+
+    fn owned(ps: &[&str]) -> Vec<String> {
+        ps.iter().map(|p| (*p).to_string()).collect()
+    }
+
+    #[test]
+    fn ceiling_superuser_outranks_everyone() {
+        let actor = owned(&["hearth.admin"]);
+        assert_eq!(
+            admin_ceiling_gap(&actor, ADMIN_PERMISSIONS.iter().copied()),
+            None
+        );
+    }
+
+    #[test]
+    fn ceiling_sub_admin_may_not_act_on_a_superuser() {
+        let actor = owned(&["hearth.users.admin", "hearth.realm.admin"]);
+        assert_eq!(
+            admin_ceiling_gap(&actor, ["hearth.admin"]),
+            Some("hearth.admin")
+        );
+    }
+
+    #[test]
+    fn ceiling_sub_admin_needs_every_admin_permission_the_target_holds() {
+        let actor = owned(&["hearth.users.admin"]);
+        assert_eq!(
+            admin_ceiling_gap(&actor, ["hearth.users.admin", "hearth.clients.admin"]),
+            Some("hearth.clients.admin")
+        );
+        assert_eq!(
+            admin_ceiling_gap(&actor, ["hearth.users.admin"]),
+            None,
+            "same level"
+        );
+    }
+
+    #[test]
+    fn ceiling_ignores_non_admin_permissions_and_plain_targets() {
+        let provisioning_token: Vec<String> = Vec::new();
+        assert_eq!(
+            admin_ceiling_gap(&provisioning_token, ["user.write", "hearth.export"]),
+            None
+        );
+        assert_eq!(
+            admin_ceiling_gap(&provisioning_token, ["hearth.agents.admin"]),
+            Some("hearth.agents.admin"),
+            "an empty actor set may act on no admin principal"
+        );
     }
 
     #[test]

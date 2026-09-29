@@ -8,6 +8,18 @@ The Admin REST API is a bearer-token-authenticated HTTP API served at the root `
 
 ## Users
 
+**Privilege ceiling.** The user endpoints need `hearth.users.admin` (or `hearth.admin`). In
+addition, an admin may not modify, re-email, disable, reset or delete a user who holds an admin
+permission the admin lacks: `hearth.admin` outranks every sub-admin, and a sub-admin may act on
+another user only when it holds every admin permission (`hearth.admin`, `hearth.users.admin`,
+`hearth.clients.admin`, `hearth.realm.admin`, `hearth.agents.admin`) that user holds. A refused
+call answers `403` with `"error_description": "the target user holds admin permissions the caller
+lacks"`, and `503` when the target's permissions cannot be resolved. The rule covers
+`PATCH`/`DELETE /admin/users/{id}`, `DELETE /admin/users/{id}/device-fingerprints`, the `disable`
+operation of `POST /admin/users/bulk` (a batch naming any such user is refused whole),
+`PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`, the gRPC `UpdateUser` /
+`DeleteUser` RPCs and SCIM `/scim/v2/Users`.
+
 ### List users
 
 `GET /admin/users`
@@ -534,9 +546,11 @@ To provision a realm:
 
 1. Add an entry under `realms:` in `hearth.yaml`.
 2. Restart Hearth (or send `SIGHUP` for a hot reload). The reconciler creates the realm on first startup.
-3. There is no realm-suspension control: `hearth.yaml` has no realm `status:` key, and neither
-   REST nor gRPC writes realm status (gRPC `CreateRealm` / `UpdateRealm` answer
-   `FAILED_PRECONDITION` with the same message as the REST `405`).
+3. To freeze a realm during an incident, suspend it with `POST /admin/realms/{id}/suspend`
+   and reinstate it with `POST /admin/realms/{id}/unsuspend` (see [Suspend and unsuspend a
+   realm](#suspend-and-unsuspend-a-realm)). Suspension is runtime state: `hearth.yaml` has no
+   realm `status:` key, and reconciliation never clears a suspension. gRPC `CreateRealm` /
+   `UpdateRealm` answer `FAILED_PRECONDITION` with the same message as the REST `405`.
 4. To permanently delete a realm, remove it from `hearth.yaml` and restart. Hearth archives it automatically. Then call `DELETE /admin/realms/{id}` to purge the archived realm's data.
 
 → See [Configuration reference](../specs/CONFIGURATION.md#realmsname) for the full `realms.<name>` YAML schema.
@@ -615,6 +629,43 @@ curl -s \
 | `200` | Realm found — body is a single Realm object |
 | `404` | Realm not found |
 
+### Suspend and unsuspend a realm
+
+```
+POST /admin/realms/{realm_id}/suspend
+POST /admin/realms/{realm_id}/unsuspend
+```
+
+The incident-response freeze control. Suspending a realm makes every token it issued stop
+validating (including tokens issued before the suspension), revokes its sessions and refuses
+new logins until it is reinstated. Unsuspend restores service; users sign in again.
+
+- **Caller:** a system-realm admin holding `hearth.realm.admin` or `hearth.admin`, with
+  `X-Realm-ID` set to the system realm. A tenant realm's own admins may not suspend or
+  reinstate it. The target realm's cross-realm trust policy applies, as for every other
+  `/admin/realms/{id}/*` crossing.
+- **The system realm cannot be suspended** (`403`).
+- **Archived or deleting realms do not move** (`409`, `HEARTH_REALM_ARCHIVED`): only
+  reappearing in `hearth.yaml` reactivates an archived realm.
+- **Audited** in the target realm as `realm_updated`, attributed to the caller, with
+  `previous_status` and `status` in the metadata.
+- **Survives reloads:** YAML reconciliation (startup or `SIGHUP`) never clears a suspension.
+- gRPC twins: `IdentityAdminService/SuspendRealm` and `/UnsuspendRealm`.
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $SYSTEM_TOKEN" \
+  -H "X-Realm-ID: $SYSTEM_REALM_ID" \
+  http://127.0.0.1:8420/admin/realms/550e8400-e29b-41d4-a716-446655440000/suspend
+```
+
+| Status | Meaning |
+|--------|---------|
+| `200` | The realm, in its new status (`REALM_STATUS_SUSPENDED` / `REALM_STATUS_ACTIVE`) |
+| `403` | Not a system-realm `hearth.realm.admin`, the target is the system realm, or the target's trust policy refuses the crossing |
+| `404` | Realm not found |
+| `409` | Realm is archived or being deleted |
+
 ### Delete realm
 
 ```
@@ -633,8 +684,12 @@ curl -s -X DELETE \
 | Status | Meaning |
 |--------|---------|
 | `204` | Realm permanently deleted |
+| `403` | Not your realm, or the target realm's cross-realm trust policy names the system realm without granting `hearth.admin` |
 | `404` | Realm not found |
 | `409` | Realm is not archived — remove it from `hearth.yaml` and restart first |
+
+`GET` and `DELETE /admin/realms/{realm_id}` and their gRPC twins (`GetRealm`, `DeleteRealm`)
+apply the same realm-scope rule, trust policies included.
 
 ---
 
