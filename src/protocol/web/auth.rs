@@ -1664,8 +1664,7 @@ mod tests {
         let expired = now.saturating_sub(10);
         let return_to_b64 = "";
         let nonce = "test-nonce";
-        let mac =
-            compute_mfa_pending_mac(&secret, &uid, &tid, expired, return_to_b64, nonce, "c");
+        let mac = compute_mfa_pending_mac(&secret, &uid, &tid, expired, return_to_b64, nonce, "c");
         let value = format!(
             "{}.{}.{expired}.{return_to_b64}.{nonce}.c.{mac}",
             uid.as_uuid(),

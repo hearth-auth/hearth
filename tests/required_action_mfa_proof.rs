@@ -686,8 +686,15 @@ async fn a_required_action_session_opens_at_most_one_session() {
     verified_user_with_pending_verification(&rig, "d2-replay@example.com");
     let (mut browser, ra) = start_verify_email_flow(&rig, "d2-replay@example.com").await;
     let resp = browser.get("/required-action/VERIFY_EMAIL").await;
-    assert_eq!(location(&resp).as_deref(), Some("/ui"), "the flow completes");
-    assert!(browser.has_cookie("hearth_ui_session"), "control: one session");
+    assert_eq!(
+        location(&resp).as_deref(),
+        Some("/ui"),
+        "the flow completes"
+    );
+    assert!(
+        browser.has_cookie("hearth_ui_session"),
+        "control: one session"
+    );
 
     let mut replay = browser_with_ra_cookie(&rig, &ra);
     let resp = replay.get("/required-action/VERIFY_EMAIL").await;
@@ -759,4 +766,39 @@ async fn logging_out_ends_a_required_action_flow() {
         resp.status(),
         location(&resp)
     );
+}
+
+/// The session a required-action flow ends in records the client like any
+/// other login — its address (which the realm's network policy is checked
+/// against) and its user agent (shown in the user's session list). It used
+/// to record neither.
+#[tokio::test]
+async fn the_session_after_a_required_action_records_the_client() {
+    let rig = build_rig(RealmConfig::default());
+    verified_user_with_pending_verification(&rig, "ra-client@example.com");
+    let mut browser = Browser::new(rig.app.clone());
+    browser.set_header("user-agent", "RaProofAgent/1.0");
+    let login = format!("/ui/realms/{}/login", rig.realm_name);
+    let html = body_text(browser.get(&login).await).await;
+    let mut fields = hidden_fields(&html, &login);
+    fields.push(("email".to_string(), "ra-client@example.com".to_string()));
+    fields.push(("password".to_string(), PASSWORD.to_string()));
+    let resp = browser.post_form(&login, &fields).await;
+    assert_eq!(
+        location(&resp).as_deref(),
+        Some("/required-action/VERIFY_EMAIL")
+    );
+    let resp = browser.get("/required-action/VERIFY_EMAIL").await;
+    assert_eq!(location(&resp).as_deref(), Some("/ui"));
+
+    let cookie = browser.cookie("hearth_ui_session").expect("session");
+    let session_id =
+        hearth::core::SessionId::new(cookie.split('.').next().expect("id").parse().expect("uuid"));
+    let session = rig
+        .identity
+        .get_session(&rig.realm_id, &session_id)
+        .expect("lookup")
+        .expect("session");
+    assert_eq!(session.ip_address(), Some("127.0.0.1"));
+    assert_eq!(session.user_agent_raw(), Some("RaProofAgent/1.0"));
 }

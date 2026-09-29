@@ -30,6 +30,8 @@
 
 use std::sync::Arc;
 
+use crate::protocol::client_info::PeerAddr;
+
 use askama::Template;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -43,8 +45,8 @@ use super::super::link_token::keyed_binding;
 use super::super::templates::render;
 use super::super::WebState;
 use super::{
-    advance_flow, clear_persisted_action, enroll_mfa_status, ra_form_token, read_ra_cookie,
-    validated_ra_session, EnrollMfaStatus,
+    advance_flow, clear_persisted_action, client_context, enroll_mfa_status, ra_form_token,
+    read_ra_cookie, validated_ra_session, EnrollMfaStatus,
 };
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{Timestamp, UserId};
@@ -283,6 +285,7 @@ pub struct PasskeyRegistrationBody {
 /// cookies, for the page's script to navigate to.
 pub async fn passkey_complete(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Json(body): Json<PasskeyRegistrationBody>,
 ) -> Response {
@@ -351,6 +354,7 @@ pub async fn passkey_complete(
         &realm,
         claims,
         RequiredAction::EnrollMfa,
+        &client_context(&state, &headers, peer_addr),
         secure,
         now,
     );
