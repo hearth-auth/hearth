@@ -1003,7 +1003,10 @@ pub async fn mfa_otp_challenge_submit(
         pending.return_to.as_deref(),
         // The OTP just verified is a proved second factor, as in
         // `finish_otp_login`; the RA flow carries it to the session.
-        MfaProof::Proved,
+        &SessionContext {
+            mfa_proof: MfaProof::Proved,
+            ..session_ctx.clone()
+        },
         &headers,
         now_ra,
     ) {
@@ -2312,7 +2315,7 @@ fn login_finish(
         user.id(),
         return_to.as_deref(),
         // The password alone: nothing proved beyond the first factor.
-        session_ctx.mfa_proof,
+        &session_ctx,
         &headers,
         now,
     ) {
@@ -2793,6 +2796,8 @@ fn passkey_complete_for_user(
             .and_then(|d| i64::try_from(d.as_micros()).ok())
             .unwrap_or(0),
     );
+    let mut session_ctx = session_ctx.clone();
+    session_ctx.mfa_proof = mfa_proof;
     // A required-action detour carries the same proof to the session it
     // ends in (GA audit round 3, I-2).
     if let Some(ra) = super::required_action::required_action_check_browser(
@@ -2800,7 +2805,7 @@ fn passkey_complete_for_user(
         realm.id(),
         auth_result.user_id(),
         None,
-        mfa_proof,
+        &session_ctx,
         headers,
         now,
     ) {
@@ -2810,9 +2815,6 @@ fn passkey_complete_for_user(
 
     // A-41: Destroy any pre-existing session cookie before issuing a new one.
     revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
-
-    let mut session_ctx = session_ctx.clone();
-    session_ctx.mfa_proof = mfa_proof;
 
     match state
         .identity
@@ -3074,7 +3076,10 @@ pub async fn mfa_challenge_submit(
         // The TOTP or recovery code just verified — and nothing more. The
         // detour used to end in `Inherited`, which a passkey-only realm
         // accepts (GA audit round 3, D-1).
-        MfaProof::Proved,
+        &SessionContext {
+            mfa_proof: MfaProof::Proved,
+            ..session_ctx.clone()
+        },
         &headers,
         now_ra,
     ) {
@@ -3430,7 +3435,10 @@ pub async fn mfa_enroll_required_submit(
         &pending.user_id,
         pending.return_to.as_deref(),
         // The live code that confirmed the enrolment (see below).
-        MfaProof::Proved,
+        &SessionContext {
+            mfa_proof: MfaProof::Proved,
+            ..session_ctx.clone()
+        },
         &headers,
         now_ra,
     ) {
@@ -4828,7 +4836,7 @@ fn magic_link_redeem_impl(
         &user_id,
         None,
         // The link proves the inbox, one factor; nothing was owed above.
-        MfaProof::None,
+        &build_session_context(headers, peer_addr, &state.trusted_proxies),
         headers,
         now,
     ) {
@@ -6127,7 +6135,10 @@ pub async fn device_approve_submit(
         Some("/ui/device"),
         // What the login behind this session proved; the session the
         // detour ends in records no more than that.
-        session.mfa_proof,
+        &SessionContext {
+            mfa_proof: session.mfa_proof,
+            ..build_session_context(&headers, peer_addr, &state.trusted_proxies)
+        },
         &headers,
         now,
     ) {

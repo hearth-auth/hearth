@@ -482,17 +482,20 @@ pub async fn mfa_passkey_challenge_complete(
     // passkey is two factors. It is `ProvedWebAuthn` only when the
     // authenticator also proved user verification — the one proof a realm
     // with `webauthn_required` accepts (audit 2026-08-28 §4.18#3, B10).
-    let mfa_proof = if result.user_verified() {
-        MfaProof::ProvedWebAuthn
-    } else {
-        MfaProof::Proved
+    let session_ctx = SessionContext {
+        mfa_proof: if result.user_verified() {
+            MfaProof::ProvedWebAuthn
+        } else {
+            MfaProof::Proved
+        },
+        ..build_session_context(&headers, peer_addr, &state.trusted_proxies)
     };
     if let Some(ra) = super::required_action::required_action_check_browser(
         &state,
         realm.id(),
         user.id(),
         pending.return_to.as_deref(),
-        mfa_proof,
+        &session_ctx,
         &headers,
         now,
     ) {
@@ -508,10 +511,6 @@ pub async fn mfa_passkey_challenge_complete(
     }
 
     revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);
-    let session_ctx = SessionContext {
-        mfa_proof,
-        ..build_session_context(&headers, peer_addr, &state.trusted_proxies)
-    };
     match state
         .identity
         .create_session(realm.id(), user.id(), &session_ctx)

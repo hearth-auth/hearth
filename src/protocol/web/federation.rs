@@ -949,7 +949,7 @@ fn complete_login(
         user_id,
         Some(return_to),
         // The upstream login is one factor; nothing was owed above.
-        crate::identity::MfaProof::None,
+        &build_session_context(headers, peer_addr, &state.trusted_proxies),
         headers,
         now,
     ) {

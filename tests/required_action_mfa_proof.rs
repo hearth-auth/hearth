@@ -504,3 +504,71 @@ async fn a_skipped_passkey_enrolment_does_not_turn_a_totp_login_into_a_passkey_l
     );
     assert!(!browser.has_cookie("hearth_ui_session"), "no session");
 }
+
+/// Same class, network policy: a passkey login (which leaves the realm's
+/// `cidr_policy` to `create_session`) from a refused network must not start a
+/// required-action flow. The flow's session used to be created with no client
+/// address at all, which the policy check reads as "nothing to refuse".
+#[tokio::test]
+async fn a_refused_network_cannot_detour_a_login_through_a_required_action() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+
+    let rig = build_rig(RealmConfig {
+        mfa_methods: methods(&["webauthn"]),
+        // The test client's peer address is loopback.
+        cidr_policy: Some(hearth::identity::CidrPolicy {
+            allow: Vec::new(),
+            deny: vec!["127.0.0.0/8".to_string()],
+        }),
+        ..Default::default()
+    });
+    let user = create_user(
+        &rig,
+        "cidr-detour@example.com",
+        vec![RequiredAction::UpdatePassword],
+    );
+    let authenticator = enrol_passkey(&rig, &user, true);
+
+    let mut browser = Browser::new(rig.app.clone());
+    let begin = browser
+        .get(&format!(
+            "/ui/realms/{}/login/passkey-begin",
+            rig.realm_name
+        ))
+        .await;
+    assert_eq!(begin.status(), StatusCode::OK, "passkey begin");
+    let options: serde_json::Value =
+        serde_json::from_str(&body_text(begin).await).expect("options JSON");
+    let challenge = URL_SAFE_NO_PAD
+        .decode(options["challenge"].as_str().expect("challenge"))
+        .expect("b64 challenge");
+    let user_handle = user.as_uuid().to_string();
+    let (cdj, auth_data, sig, handle) = authenticator.build_verified_authentication_response(
+        &challenge,
+        ORIGIN,
+        1,
+        Some(&user_handle),
+    );
+    let resp = browser
+        .post_json(
+            &format!("/ui/realms/{}/login/passkey-complete", rig.realm_name),
+            &serde_json::json!({
+                "credential_id": URL_SAFE_NO_PAD.encode(&authenticator.credential_id),
+                "client_data_json": URL_SAFE_NO_PAD.encode(&cdj),
+                "authenticator_data": URL_SAFE_NO_PAD.encode(&auth_data),
+                "signature": URL_SAFE_NO_PAD.encode(&sig),
+                "user_handle": handle.map(|h| URL_SAFE_NO_PAD.encode(h)),
+            }),
+            &[],
+        )
+        .await;
+    let status = resp.status();
+    let body = body_text(resp).await;
+    assert!(
+        !body.contains("/required-action/"),
+        "a login from a refused network must not start a required-action flow: {status} {body}"
+    );
+    assert!(!browser.has_cookie("hearth_ra_session"));
+    assert!(!browser.has_cookie("hearth_ui_session"));
+}

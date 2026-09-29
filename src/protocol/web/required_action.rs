@@ -262,14 +262,21 @@ fn pending_required_actions(
 /// "nothing pending". A user that does not exist returns `None`;
 /// `create_session` refuses it (`UserNotFound`).
 ///
-/// `mfa_proof` is what the authentication that reached this gate proved: the
-/// RA session token carries it and the session created when the flow ends
+/// `ctx` is the context of the login that reached this gate, built from its
+/// request. Its `mfa_proof` — what that authentication proved — is carried
+/// in the RA session token, and the session created when the flow ends
 /// records it ([`resume_browser_flow`]). A flow that cannot end in a session
-/// — the proof does not meet the realm's `mfa_required` / `webauthn_required`
-/// policy and no pending action can raise it — is not started: the login is
-/// sent to the passkey it owes, or refused (GA audit round 3, D-1). Starting
-/// it let whoever relayed a password and a TOTP code enrol a phone of their
-/// own on the account before the login was refused.
+/// is not started (GA audit round 3, D-1): starting it let whoever relayed a
+/// password and a TOTP code enrol a phone of their own on the account before
+/// the login was refused.
+///
+/// * The realm's `cidr_policy` refuses the client address (`403`). The
+///   session the flow ends in is created without one, which the policy
+///   reads as "nothing to refuse", so the flow must not start from a network
+///   the policy turns away.
+/// * The proof does not meet the realm's `mfa_required` / `webauthn_required`
+///   policy and no pending action can raise it: the login is sent to the
+///   passkey it owes, or refused.
 ///
 /// Unlike the OIDC intercept, this generates an RA token without
 /// OIDC params; flow resumption creates a session cookie and redirects to
@@ -279,7 +286,7 @@ pub fn required_action_check_browser(
     realm: &RealmId,
     user_id: &UserId,
     return_to: Option<&str>,
-    mfa_proof: MfaProof,
+    ctx: &SessionContext,
     headers: &HeaderMap,
     now: Timestamp,
 ) -> Option<Response> {
@@ -297,6 +304,18 @@ pub fn required_action_check_browser(
     }
 
     let secure = state.is_secure_request(headers);
+    if let Err(e) = state
+        .identity
+        .check_realm_network_policy(realm, ctx.ip_address.as_deref())
+    {
+        tracing::info!(
+            error = %e,
+            realm_id = %realm.as_uuid(),
+            "required actions: the realm's network policy refuses this login"
+        );
+        return Some(forbidden_page());
+    }
+    let mfa_proof = ctx.mfa_proof;
     let realm_config = match state.identity.get_realm(realm) {
         Ok(r) => r.map(|r| r.config().clone()),
         Err(e) => {
@@ -412,16 +431,19 @@ fn owed_factor_or_refusal(
                 state, realm, user_id, step, return_to, secure,
             )
         }
-        Ok(_) => {
-            let mut page = handlers_common::ForbiddenTemplate::new(None);
-            page.chrome = false;
-            super::templates::render_status(&page, StatusCode::FORBIDDEN)
-        }
+        Ok(_) => forbidden_page(),
         Err(e) => {
             tracing::warn!(error = %e, "required actions: second-factor lookup failed");
             handlers_common::server_error()
         }
     }
+}
+
+/// The bare `403` page for a login this flow refuses.
+fn forbidden_page() -> Response {
+    let mut page = handlers_common::ForbiddenTemplate::new(None);
+    page.chrome = false;
+    super::templates::render_status(&page, StatusCode::FORBIDDEN)
 }
 
 /// Clears the RA cookie, creates a session, and redirects to the original
