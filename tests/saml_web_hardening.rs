@@ -691,6 +691,69 @@ fn idp_metadata_advertises_want_authn_requests_signed() {
 }
 
 // ============================================================================
+// GA audit round 3, G-3 — the assertion says whether Hearth verified the
+// address it names. The NameID is the account's email; an SP that keys
+// accounts on it could not tell a proved address from one an operator (or,
+// before G-3, an upstream IdP) merely typed in.
+// ============================================================================
+
+/// The decoded `<Response>` XML inside an HTTP-POST binding page.
+fn saml_response_xml(post_page: &str) -> String {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    let payload = post_page
+        .split(r#"name="SAMLResponse" value=""#)
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the page posts a SAMLResponse");
+    String::from_utf8(B64.decode(payload).expect("base64 SAMLResponse")).expect("utf-8 XML")
+}
+
+fn email_verified_attribute(xml: &str) -> Option<String> {
+    xml.split(r#"<saml:Attribute Name="email_verified">"#)
+        .nth(1)
+        .and_then(|rest| rest.split("<saml:AttributeValue>").nth(1))
+        .and_then(|rest| rest.split("</saml:AttributeValue>").next())
+        .map(str::to_string)
+}
+
+#[test]
+fn idp_sso_states_whether_the_asserted_email_is_verified() {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+
+    let (app, identity, realm_id) = build_app_full();
+    let email = "sso-verified@demo.test";
+    let cookie = authenticated_cookie(identity.as_ref(), &realm_id, email);
+    let xml = authn_request_xml("_ar_ev1", "https://crm.example");
+    let (status, body) = post_sso(&app, &cookie, &B64.encode(xml.as_bytes()));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        email_verified_attribute(&saml_response_xml(&body)).as_deref(),
+        Some("false"),
+        "an operator-created account has not proved its address"
+    );
+
+    let user = identity
+        .get_user_by_email(&realm_id, email)
+        .expect("lookup")
+        .expect("user");
+    let token = identity
+        .issue_email_verification_token(&realm_id, user.id())
+        .expect("issue");
+    identity
+        .verify_email_token(&realm_id, &token)
+        .expect("verify");
+    let xml = authn_request_xml("_ar_ev2", "https://crm.example");
+    let (status, body) = post_sso(&app, &cookie, &B64.encode(xml.as_bytes()));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        email_verified_attribute(&saml_response_xml(&body)).as_deref(),
+        Some("true")
+    );
+}
+
+// ============================================================================
 // 19.5 (audit 2026-08-28 §4.10#6, §4.22#4) — the SP assertion consumer must
 // create a session.
 //
@@ -705,12 +768,28 @@ fn idp_metadata_advertises_want_authn_requests_signed() {
 
 /// Registers a SAML-kind IdP connector whose `client_secret` carries the IdP's
 /// signing certificate (the shape `sp_acs` reads).
+///
+/// The connector trusts the asserted address (`trust_asserted_email`), so a
+/// JIT-provisioned user is active at once; see
+/// [`register_saml_idp_trusting`] for one that does not.
 fn register_saml_idp(
     identity: &dyn IdentityEngine,
     realm_id: &hearth::core::RealmId,
     name: &str,
     entity_id: &str,
     cert_pem: String,
+) -> hearth::core::IdpId {
+    register_saml_idp_trusting(identity, realm_id, name, entity_id, cert_pem, true)
+}
+
+/// [`register_saml_idp`] with `trust_asserted_email` spelled out.
+fn register_saml_idp_trusting(
+    identity: &dyn IdentityEngine,
+    realm_id: &hearth::core::RealmId,
+    name: &str,
+    entity_id: &str,
+    cert_pem: String,
+    trust_asserted_email: bool,
 ) -> hearth::core::IdpId {
     use hearth::identity::federation::{FederationSecret, IdpConfig, IdpKind};
     let now = SystemClock.now();
@@ -735,7 +814,7 @@ fn register_saml_idp(
             claim_mappings,
             leeway_seconds: 60,
             want_assertions_signed: false,
-            trust_asserted_email: false,
+            trust_asserted_email,
             apple: None,
             created_at: now,
             updated_at: now,
@@ -877,6 +956,55 @@ fn sp_acs_valid_assertion_creates_a_session() {
             .expect("lookup")
             .is_some(),
         "the asserted subject must be provisioned as a real user"
+    );
+}
+
+/// GA audit round 3, G-3: SAML carries no `email_verified`, so a connector
+/// that does not trust the asserted address (`trust_asserted_email: false`,
+/// the default) provisions an account that waits for the address owner to
+/// verify it — no session on an address nobody proved.
+#[test]
+fn sp_acs_untrusted_email_provisions_an_account_pending_verification() {
+    let (app, identity, realm_id) = build_app_full();
+    let idp_key = hearth::identity::tokens::RsaSigningKey::generate("corp-idp", 365).expect("key");
+    let idp_id = register_saml_idp_trusting(
+        identity.as_ref(),
+        &realm_id,
+        "corp",
+        "https://corp-idp.example",
+        cert_der_to_pem(idp_key.cert_der()),
+        false,
+    );
+    seed_saml_state(identity.as_ref(), &realm_id, &idp_id, "relay-g3", "_req_g3");
+    let sp_entity_id = "http://localhost:8420/ui/realms/demo";
+    let acs_url = format!("{sp_entity_id}/federation/saml/acs");
+    let b64 = signed_saml_response_b64(
+        &idp_key,
+        "_req_g3",
+        &acs_url,
+        sp_entity_id,
+        "https://corp-idp.example",
+        "unproven@corp.example",
+    );
+
+    let resp = post_acs(&app, &b64, "relay-g3", &[]);
+    let cookies: Vec<String> = resp
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        !cookies.iter().any(|c| c.starts_with("hearth_ui_session=")),
+        "no session on an unproven address; got {cookies:?}"
+    );
+    let user = identity
+        .get_user_by_email(&realm_id, "unproven@corp.example")
+        .expect("lookup")
+        .expect("the asserted subject is provisioned");
+    assert_eq!(
+        user.status(),
+        hearth::identity::UserStatus::PendingVerification
     );
 }
 
@@ -1325,4 +1453,68 @@ fn idp_slo_refuses_signed_logout_request_carrying_a_second_signature() {
         "a LogoutRequest carrying two signatures must not be answered; got {status}"
     );
     assert_eq!(status, 403, "expected 403, got {status}: {body}");
+}
+
+// ============================================================================
+// GA sweep 3, round 2 — IdP signing-certificate rollover through the ACS.
+//
+// The connector's `idp_certificate_pem` may hold a bundle — the outgoing and
+// the incoming certificate concatenated — while an IdP rolls its key. The
+// ACS used to hand the whole bundle to the verifier as one certificate, which
+// read only the first block, so every assertion signed with the new key was
+// refused until the operator swapped the PEM at exactly the right moment.
+// ============================================================================
+
+#[test]
+fn sp_acs_accepts_an_assertion_signed_by_the_second_certificate_of_a_bundle() {
+    let (app, identity, realm_id) = build_app_full();
+    let old_key = hearth::identity::tokens::RsaSigningKey::generate("corp-old", 365).expect("key");
+    let new_key = hearth::identity::tokens::RsaSigningKey::generate("corp-new", 365).expect("key");
+    let bundle = format!(
+        "{}{}",
+        cert_der_to_pem(old_key.cert_der()),
+        cert_der_to_pem(new_key.cert_der())
+    );
+    let idp_id = register_saml_idp(
+        identity.as_ref(),
+        &realm_id,
+        "corp",
+        "https://corp-idp.example",
+        bundle,
+    );
+    seed_saml_state(
+        identity.as_ref(),
+        &realm_id,
+        &idp_id,
+        "relay-roll",
+        "_req_roll",
+    );
+
+    let sp_entity_id = "http://localhost:8420/ui/realms/demo";
+    let acs_url = format!("{sp_entity_id}/federation/saml/acs");
+    let b64 = signed_saml_response_b64(
+        &new_key,
+        "_req_roll",
+        &acs_url,
+        sp_entity_id,
+        "https://corp-idp.example",
+        "rollover-user@corp.example",
+    );
+
+    let resp = post_acs(&app, &b64, "relay-roll", &[]);
+    let status = resp.status().as_u16();
+    let cookies: Vec<String> = resp
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        status, 303,
+        "an assertion signed by the bundle's second certificate must be accepted"
+    );
+    assert!(
+        cookies.iter().any(|c| c.starts_with("hearth_ui_session=")),
+        "the accepted assertion must produce a session; got {cookies:?}"
+    );
 }

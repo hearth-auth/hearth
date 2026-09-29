@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::core::{RealmId, UserId};
-use crate::identity::RealmStatus;
+use crate::identity::{Realm, RealmStatus};
 use crate::protocol::admin_auth::{grants_admin_permission, RateLimitOutcome};
 use crate::protocol::http::{extract_admin_auth, AppState};
 use crate::protocol::scim::error::ScimError;
@@ -76,13 +76,14 @@ pub struct ScimAuth {
     /// Format is `"scim_token:<realm_uuid>"` for the bearer-token path, or
     /// the admin user UUID string for the JWT fallback path.
     pub actor: String,
-    /// `true` when authenticated via the realm-scoped SCIM bearer token;
-    /// `false` when via the admin-JWT fallback path.
+    /// The permissions the caller acts with, for the privilege ceiling on user
+    /// administration ([`crate::protocol::admin_auth::check_user_admin_ceiling`]).
     ///
-    /// Mutating handlers use this to enforce the SCIM authority boundary:
-    /// provisioning tokens carry a narrowed permission set that may not act
-    /// on principals holding admin-level permissions.
-    pub is_scim_token: bool,
+    /// Empty for the provisioning token: a narrowed service account that may
+    /// act on no principal holding an admin permission. The admin-JWT
+    /// fallback carries the token's permissions, so a sub-admin may act only
+    /// on same-or-lower users, exactly as on REST `/admin/users*`.
+    pub actor_permissions: Vec<String>,
 }
 
 /// Authenticate and authorize a SCIM request for `resource` using the
@@ -100,10 +101,71 @@ pub fn authenticate(
     resource: ScimResource,
 ) -> Result<ScimAuth, ScimError> {
     let realm_id = extract_realm_id(headers)?;
+    let realm = active_realm(state, &realm_id)?;
 
+    if let Some(expected_hash) = realm.config().scim_bearer_token_hash.as_deref() {
+        // Realm-scoped SCIM bearer token path: only accept the pre-shared token.
+        let token = extract_bearer_token(headers)?;
+        if !scim_token_matches(expected_hash, &token) {
+            return Err(ScimError::unauthorized("invalid bearer token"));
+        }
+        check_scim_rate_limit(state, &realm_id)?;
+        Ok(ScimAuth {
+            actor: format!("scim_token:{}", realm_id.as_uuid()),
+            realm_id,
+            actor_permissions: Vec::new(),
+        })
+    } else {
+        // No SCIM token configured: fall back to admin JWT.
+        let admin = admin_jwt(headers, state, &realm_id)?;
+        // Apply the same per-realm rate limiter to the admin-JWT fallback path
+        // so it cannot be used to bypass SCIM throttling (defect 3 / HEA-2032).
+        check_scim_rate_limit(state, &realm_id)?;
+        // Narrow to the resource's admin permission, exactly as its admin twin
+        // does: the outer gate above admits every admin-grade permission.
+        let required = resource.required_admin_permission();
+        if !grants_admin_permission(&admin.permissions, required) {
+            return Err(ScimError::forbidden(format!(
+                "{required} or hearth.admin permission required"
+            )));
+        }
+        Ok(ScimAuth {
+            actor: admin.user_id.as_uuid().to_string(),
+            realm_id,
+            actor_permissions: admin.permissions,
+        })
+    }
+}
+
+/// Authenticate a request to a SCIM discovery endpoint
+/// (`/ServiceProviderConfig`, `/Schemas`, `/ResourceTypes`).
+///
+/// Accepts the realm's SCIM provisioning token — the credential an IdP was
+/// given, and uses to read discovery before provisioning — as well as any
+/// admin token for the realm (any admin-grade permission: the responses are
+/// static capability documents). Discovery used to accept only the admin
+/// token, so the realm's own SCIM token got `401` (GA audit round 3).
+///
+/// A bearer that is not the realm's SCIM token is then tried as an admin
+/// token, so a wrong bearer still answers `401`.
+pub fn authenticate_discovery(headers: &HeaderMap, state: &AppState) -> Result<(), ScimError> {
+    let realm_id = extract_realm_id(headers)?;
+    let realm = active_realm(state, &realm_id)?;
+
+    if let Some(expected_hash) = realm.config().scim_bearer_token_hash.as_deref() {
+        let token = extract_bearer_token(headers)?;
+        if scim_token_matches(expected_hash, &token) {
+            return check_scim_rate_limit(state, &realm_id);
+        }
+    }
+    admin_jwt(headers, state, &realm_id).map(|_| ())
+}
+
+/// Looks the realm up and refuses (`403`) one that is missing or not active.
+fn active_realm(state: &AppState, realm_id: &RealmId) -> Result<Realm, ScimError> {
     let realm = state
         .identity
-        .get_realm(&realm_id)
+        .get_realm(realm_id)
         .map_err(|e| {
             tracing::warn!(error = %e, "SCIM auth realm lookup failed");
             ScimError::internal()
@@ -122,57 +184,41 @@ pub fn authenticate(
     if realm.status() != RealmStatus::Active {
         return Err(ScimError::forbidden("realm unavailable"));
     }
+    Ok(realm)
+}
 
-    if let Some(expected_hash) = realm.config().scim_bearer_token_hash.as_deref() {
-        // Realm-scoped SCIM bearer token path: only accept the pre-shared token.
-        let token = extract_bearer_token(headers)?;
-        let incoming_hash = sha256_hex(&token);
-        let hash_match: bool = expected_hash
-            .as_bytes()
-            .ct_eq(incoming_hash.as_bytes())
-            .into();
-        if !hash_match {
-            return Err(ScimError::unauthorized("invalid bearer token"));
-        }
-        check_scim_rate_limit(state, &realm_id)?;
-        Ok(ScimAuth {
-            actor: format!("scim_token:{}", realm_id.as_uuid()),
-            realm_id,
-            is_scim_token: true,
-        })
-    } else {
-        // No SCIM token configured: fall back to admin JWT.
-        let admin = extract_admin_auth(headers, state).map_err(|(status, body)| {
-            let detail = body
-                .0
-                .get("error")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("authentication failed")
-                .to_string();
-            ScimError::new(status, detail)
-        })?;
-        // Assert the JWT's realm matches the X-Realm-ID header to prevent
-        // cross-realm privilege escalation on the fallback path.
-        if admin.realm_id != realm_id {
-            return Err(ScimError::forbidden("realm mismatch"));
-        }
-        // Apply the same per-realm rate limiter to the admin-JWT fallback path
-        // so it cannot be used to bypass SCIM throttling (defect 3 / HEA-2032).
-        check_scim_rate_limit(state, &realm_id)?;
-        // Narrow to the resource's admin permission, exactly as its admin twin
-        // does: the outer gate above admits every admin-grade permission.
-        let required = resource.required_admin_permission();
-        if !grants_admin_permission(&admin.permissions, required) {
-            return Err(ScimError::forbidden(format!(
-                "{required} or hearth.admin permission required"
-            )));
-        }
-        Ok(ScimAuth {
-            actor: admin.user_id.as_uuid().to_string(),
-            realm_id,
-            is_scim_token: false,
-        })
+/// Constant-time comparison of the presented bearer against the realm's
+/// stored SCIM token hash.
+fn scim_token_matches(expected_hash: &str, token: &str) -> bool {
+    let incoming_hash = sha256_hex(token);
+    expected_hash
+        .as_bytes()
+        .ct_eq(incoming_hash.as_bytes())
+        .into()
+}
+
+/// Validates the bearer as an admin token for `realm_id` (any admin-grade
+/// permission), mapping the admin plane's refusal onto a SCIM error.
+fn admin_jwt(
+    headers: &HeaderMap,
+    state: &AppState,
+    realm_id: &RealmId,
+) -> Result<crate::protocol::http::AdminAuth, ScimError> {
+    let admin = extract_admin_auth(headers, state).map_err(|(status, body)| {
+        let detail = body
+            .0
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("authentication failed")
+            .to_string();
+        ScimError::new(status, detail)
+    })?;
+    // Assert the JWT's realm matches the X-Realm-ID header to prevent
+    // cross-realm privilege escalation on the fallback path.
+    if &admin.realm_id != realm_id {
+        return Err(ScimError::forbidden("realm mismatch"));
     }
+    Ok(admin)
 }
 
 fn extract_realm_id(headers: &HeaderMap) -> Result<RealmId, ScimError> {

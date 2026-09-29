@@ -40,12 +40,15 @@ pub enum MfaProof {
     /// from a fresh authentication.
     ProvedWebAuthn,
     /// This session derives from an earlier authentication that already passed
-    /// the realm's MFA gate: an authorization code, an approved device code, or
-    /// a completed required-action flow. Those artefacts can only be minted for
-    /// a principal who already holds a session, and a session can only be
-    /// created by a path that satisfied this same gate.
+    /// the realm's MFA gate: an authorization code or an approved device code.
+    /// Those artefacts can only be minted for a principal who already holds a
+    /// session, and a session can only be created by a path that satisfied
+    /// this same gate.
     ///
-    /// Use it only where that upstream gate can be named in a comment.
+    /// Use it only where that upstream gate can be named in a comment. A
+    /// browser required-action flow does NOT qualify: its RA token is minted
+    /// before any session exists, by whichever login reached the gate, so it
+    /// carries the proof that login made (GA audit round 3, D-1).
     Inherited,
     /// A WebAuthn (passkey) ceremony that proved user *presence* only.
     ///
@@ -75,9 +78,12 @@ impl MfaProof {
     /// an OTP does not, however many passkeys the account holds.
     ///
     /// [`MfaProof::Inherited`] passes for the same reason it passes
-    /// `mfa_required`: the artefact behind it can only be minted for a
-    /// principal who already holds a session, and a session on this realm can
-    /// only be created by a path that cleared this same gate.
+    /// `mfa_required`: the artefact behind it (an authorization code, an
+    /// approved device code) can only be minted for a principal who already
+    /// holds a session, and a session on this realm can only be created by a
+    /// path that cleared this same gate. Its two constructors are the code
+    /// and device-code exchanges; refusing it here would refuse every token
+    /// grant on a `webauthn_required` realm.
     pub fn satisfies_webauthn_required(self) -> bool {
         matches!(self, Self::ProvedWebAuthn | Self::Inherited)
     }

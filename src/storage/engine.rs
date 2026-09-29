@@ -1028,6 +1028,13 @@ impl EmbeddedStorageEngine {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Engages the WAL write fence as a failed group commit would, so a test
+    /// outside this module can check that a wrapper reports it.
+    #[cfg(test)]
+    pub(crate) fn engage_wal_fence_for_test(&self) {
+        self.wal.engage_fence("test_fault");
+    }
+
     /// Returns the cumulative number of WAL `sync_all` calls completed since
     /// this engine was opened.
     ///

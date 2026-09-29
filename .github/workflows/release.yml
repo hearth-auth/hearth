@@ -166,6 +166,15 @@ jobs:
     name: Release validation (test matrix + bench gate)
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      # Same setting as ci.yml's quality job, for the same reason: `nextest
+      # --workspace` links 307 test binaries at ~429 MB each with full debug
+      # info, which does not fit the runner's disk. Without it this job died
+      # at link time on every release tag ("collect2: fatal error: ld
+      # terminated with signal 7 [Bus error]", "No space left on device"), so
+      # no server release could be cut (GA audit round 3 H-2 / I-12).
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - name: Checkout release commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -242,6 +251,16 @@ jobs:
         id: slsa_pin
         continue-on-error: true
         run: bash scripts/check-slsa-generator-pin.sh
+
+      # The bench gate builds a second, release-profile target tree. On the
+      # v2.0.0 tag it died with "No space left on device" next to the debug
+      # tree the suite left behind. Nothing after Step 1 reads target/debug
+      # (the summary reads nextest.log), so drop it before the release build.
+      - name: Free the debug target before the release-profile bench build
+        if: always()
+        run: |
+          rm -rf target/debug
+          df -h .
 
       # ── Advisory gate ─────────────────────────────────────────────────────
       - name: "Step 7 — Benchmark gate (make bench-gate, advisory)"

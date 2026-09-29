@@ -85,7 +85,9 @@ pub use email::{
 pub(crate) use engine::client_jwks::validate_client_jwks;
 pub use engine::cross_realm::{find_system_sourced_cross_realm_policies, SystemSourcedPolicy};
 pub use engine::{
-    EmbeddedIdentityEngine, IdentityConfig, RateLimitConfig, SessionConfig, TokenIssuanceContext,
+    EmbeddedIdentityEngine, HostAdminToken, IdentityConfig, RateLimitConfig, SessionConfig,
+    TokenIssuanceContext, HOST_ADMIN_TOKEN_ISSUER, HOST_ADMIN_TOKEN_MAX_TTL,
+    HOST_ADMIN_TOKEN_MIN_TTL,
 };
 pub use error::IdentityError;
 pub use kdf_gate::{
@@ -229,6 +231,30 @@ pub trait IdentityEngine: Send + Sync {
         request: &UpdateRealmRequest,
     ) -> Result<Realm, IdentityError>;
 
+    /// Suspends (`suspended = true`) or reinstates a realm — the
+    /// incident-response freeze control.
+    ///
+    /// Suspension reuses [`RealmStatus::Suspended`]: every token of the realm
+    /// stops validating, its sessions are revoked, and no new session starts
+    /// until the realm is reinstated. Only an `Active` or `Suspended` realm
+    /// moves; the check runs under the realm-ops lock. The `RealmUpdated`
+    /// audit event is attributed to `audit_ctx` and carries
+    /// `previous_status` / `status`. YAML reconciliation never clears a
+    /// suspension (it only unarchives).
+    ///
+    /// Returns the status the realm had before, and the updated realm.
+    ///
+    /// # Errors
+    ///
+    /// `SystemRealmProtected` for the system realm, `RealmNotFound`,
+    /// `RealmArchived` for an archived or deleting realm.
+    fn set_realm_suspended(
+        &self,
+        realm_id: &RealmId,
+        suspended: bool,
+        audit_ctx: &AuditContext,
+    ) -> Result<(RealmStatus, Realm), IdentityError>;
+
     /// Deletes a realm and all associated data.
     ///
     /// Cascading deletion removes all users, sessions, credentials,
@@ -261,15 +287,15 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// After all actions complete, the flow resumes by creating a session
     /// cookie and redirecting to `return_to` (or `/ui` when `None`).
-    /// `webauthn_verified` carries forward that this flow registered a
-    /// user-verified passkey (see [`ra_token::RaClaims::webauthn_verified`]).
+    /// `mfa_proof` is what the login has proved so far; the session created
+    /// when the flow ends records it (see [`ra_token::RaClaims::mfa_proof`]).
     fn generate_browser_ra_token(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         pending_actions: Vec<RequiredAction>,
         return_to: Option<String>,
-        webauthn_verified: bool,
+        mfa_proof: MfaProof,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
 
@@ -307,6 +333,28 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         request: &CreateUserRequest,
+    ) -> Result<User, IdentityError>;
+
+    /// Creates the local account for a just-in-time federated login, with
+    /// the checks [`Self::create_user`] applies.
+    ///
+    /// `email_verified` is whether the upstream identity provider asserted
+    /// that it verified `request.email`. A verified address gives an account
+    /// in the engine's default status whose email is recorded as verified. An
+    /// unverified one gives a `PendingVerification` account, exactly as
+    /// self-registration does: `create_session` refuses it until the owner of
+    /// the address consumes an email-verification token.
+    ///
+    /// A federated login used to create an `Active` account on whatever
+    /// address the upstream named, verified or not (GA audit round 3, G-3).
+    /// Behind an IdP that lets a user claim any address, that pre-created
+    /// someone else's account — and Hearth's SAML IdP then asserted that
+    /// address to every registered service provider.
+    fn provision_federated_user(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateUserRequest,
+        email_verified: bool,
     ) -> Result<User, IdentityError>;
 
     /// Creates a new user record in the reserved system realm.

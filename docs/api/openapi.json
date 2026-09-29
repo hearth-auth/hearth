@@ -1020,44 +1020,6 @@
             }
           }
         }
-      },
-      "post": {
-        "operationId": "IdentityAdminService_CreateRealm",
-        "tags": [
-          "IdentityAdminService"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/v1CreateRealmRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "A successful response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/v1Realm"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "An unexpected error response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/rpcStatus"
-                }
-              }
-            }
-          }
-        }
       }
     },
     "/admin/realms/{id}": {
@@ -1117,52 +1079,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/v1Empty"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "An unexpected error response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/rpcStatus"
-                }
-              }
-            }
-          }
-        }
-      },
-      "put": {
-        "operationId": "IdentityAdminService_UpdateRealm",
-        "tags": [
-          "IdentityAdminService"
-        ],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "type": "string"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/v1UpdateRealmRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "A successful response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/v1Realm"
                 }
               }
             }
@@ -1398,6 +1314,88 @@
           },
           "400": {
             "description": "grace_period_secs was not a non-negative integer"
+          }
+        }
+      }
+    },
+    "/admin/realms/{id}/suspend": {
+      "post": {
+        "summary": "Suspend a realm (incident-response freeze)",
+        "description": "Every token of the realm stops validating, its sessions are revoked and no new session starts until the realm is reinstated. Caller must be a system-realm admin (`hearth.realm.admin` or `hearth.admin`, with `X-Realm-ID` set to the system realm); the target realm's cross-realm trust policy applies. The system realm cannot be suspended. Audited in the target realm with the actor and old/new status. YAML reconciliation never clears a suspension. gRPC twin: `IdentityAdminService/SuspendRealm`.",
+        "operationId": "IdentityAdminService_SuspendRealm",
+        "tags": [
+          "IdentityAdminService"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The realm, now suspended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1Realm"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a system-realm hearth.realm.admin, the target is the system realm, or the target's trust policy refuses the crossing"
+          },
+          "404": {
+            "description": "Realm not found"
+          },
+          "409": {
+            "description": "The realm is archived or being deleted (HEARTH_REALM_ARCHIVED)"
+          }
+        }
+      }
+    },
+    "/admin/realms/{id}/unsuspend": {
+      "post": {
+        "summary": "Reinstate a suspended realm",
+        "description": "Restores a suspended realm to active. Same gate as suspend. An archived realm is not revived (409): only reappearing in hearth.yaml does that. gRPC twin: `IdentityAdminService/UnsuspendRealm`.",
+        "operationId": "IdentityAdminService_UnsuspendRealm",
+        "tags": [
+          "IdentityAdminService"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The realm, now active",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1Realm"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a system-realm hearth.realm.admin, or the target's trust policy refuses the crossing"
+          },
+          "404": {
+            "description": "Realm not found"
+          },
+          "409": {
+            "description": "The realm is archived or being deleted (HEARTH_REALM_ARCHIVED)"
           }
         }
       }

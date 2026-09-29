@@ -3369,6 +3369,11 @@ pub struct FederationProviderYaml {
     /// mailboxes, because it lets that IdP claim any address in the realm.
     /// Ignored for non-SAML connectors, which carry the upstream's own
     /// `email_verified` claim (task 25.27).
+    ///
+    /// It also decides the state of a just-in-time account: an untrusted
+    /// address gives a `PendingVerification` account that is mailed a
+    /// verification link and gets no session until it is used (GA audit
+    /// round 3, G-3).
     #[serde(default)]
     pub trust_asserted_email: Option<bool>,
     /// Attribute mapping: Hearth field → SAML attribute URI.

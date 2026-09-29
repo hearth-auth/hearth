@@ -28,7 +28,7 @@ Understanding the terminology difference is the first step. Hearth borrows the "
 | **Role mapping** | **Role assignment** | The RBAC engine stores the same subject → role relationship. |
 | **User** | **User** | Email, name, and status fields map directly. |
 | **Group** | **Organization** (B2B) or **Group** (RBAC) | Keycloak groups used for access control become RBAC groups; groups used for B2B tenancy become Organizations. |
-| **Identity provider (IdP federation)** | Not yet available | See [Out of scope](#out-of-scope). |
+| **Identity provider (IdP federation)** | **Federation provider** (`realms.<name>.federation.providers`) | Google, GitHub, Microsoft (Entra ID), Apple, any OIDC provider, and SAML 2.0 IdPs (Hearth as SP). Providers are declared in `hearth.yaml`, not imported — see [How to Configure Federation](federation.md). LDAP user federation is not available. |
 | **Authentication flow** | **Auth policy** (per-realm) | Hearth supports password, passkey, TOTP, and magic-link; custom SPI flows do not migrate. |
 | **Client scope** | **Scope bundle** | Scope bundles are configured in `hearth.yaml`; they are not imported from Keycloak. |
 | **Session** | **Session** | Existing sessions are not migrated — users must log in again after migration. |
@@ -263,16 +263,18 @@ Keycloak operators may not be aware of this field because Keycloak anchors desti
 realms:
   my-realm:
     federation:
-      - kind: saml
-        display_name: "Corporate IdP"
-        entity_id: "https://idp.corp.example.com/metadata"
-        sso_url: "https://idp.corp.example.com/saml/sso"
-        idp_certificate_pem: |
-          -----BEGIN CERTIFICATE-----
-          <your IdP signing certificate>
-          -----END CERTIFICATE-----
-        want_assertions_signed: true    # require assertion-level XML-DSIG
-        sign_authn_requests: true       # sign outbound AuthnRequests
+      providers:
+        corp-saml:
+          type: saml
+          display_name: "Corporate IdP"
+          entity_id: "https://idp.corp.example.com/metadata"
+          sso_url: "https://idp.corp.example.com/saml/sso"
+          idp_certificate_pem: |
+            -----BEGIN CERTIFICATE-----
+            <your IdP signing certificate>
+            -----END CERTIFICATE-----
+          want_assertions_signed: true    # require assertion-level XML-DSIG
+          sign_authn_requests: true       # sign outbound AuthnRequests
 ```
 
 ---
@@ -285,7 +287,8 @@ The following Keycloak features do not migrate automatically. They require manua
 |---|---|---|
 | **Client roles** | Not imported | Recreate as realm roles manually if needed |
 | **Groups** (used as RBAC containers) | Not imported | Recreate as Hearth RBAC groups in `hearth.yaml` |
-| **Identity provider federation** (Google, SAML, LDAP) | Not yet available | Track on the roadmap; users must authenticate with a local credential in the interim |
+| **Identity provider connectors** (Google, OIDC, SAML) | Not imported | Declare each connector in `hearth.yaml` under `realms.<name>.federation.providers` — see [How to Configure Federation](federation.md). Users' existing links to an upstream IdP are not imported. With the default `link_existing_accounts: confirm` (see [Account-linking policy](federation.md#account-linking-policy)), linking asks for the migrated account's local password or passkey, so a user who only ever signed in through the IdP must reset their password before their first federated login. |
+| **LDAP / Active Directory user federation** | Not available | Import the directory's users, or put an OIDC/SAML IdP in front of the directory and federate to it |
 | **Custom authentication flows / SPI** | Not applicable | Hearth uses a built-in auth policy engine; SPI extensions do not port |
 | **TOTP / WebAuthn credentials** | Not exported by Keycloak | Users must re-enroll after migration |
 | **Session tokens** | Not migrated | All users must log in again after switchover |

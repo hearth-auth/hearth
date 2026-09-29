@@ -17,7 +17,7 @@ This guide walks you through moving an existing Auth0 tenant to Hearth. Because 
 | **User** | **User** | Email, name, email-verified, and blocked status all import. |
 | **Role** | **Role** | Auth0 roles become Hearth RBAC roles with the same name. Assignments are preserved. |
 | **Organization** | **Organization** | Auth0 organizations import with their member lists and per-member role assignments. |
-| **Connection** (Google, SAML, AD) | Not yet available | See [Out of scope](#out-of-scope). |
+| **Connection** (Google, SAML, social) | **Federation provider** (`realms.<name>.federation.providers`) | Google, GitHub, Microsoft (Entra ID), Apple, any OIDC provider, and SAML 2.0 IdPs. Providers are declared in `hearth.yaml`, not imported — see [How to Configure Federation](federation.md). AD/LDAP connections are not available. |
 | **Actions / Rules / Hooks** | Not applicable | Hearth uses a built-in auth policy engine instead. |
 | **MFA factors** | Not migrated | Auth0 does not export TOTP secrets; users must re-enroll. |
 
@@ -239,11 +239,12 @@ Spot-check a representative set of users against the Auth0 role list.
 
 | Auth0 feature | Status in Hearth | Action required |
 |---|---|---|
-| **Federated connections** (Google OAuth, SAML, LDAP, AD) | Not yet available | Track on roadmap; users must use a local Hearth credential in the interim |
+| **Federated connections** (Google OAuth, OIDC, SAML) | Not imported | Declare each connection as a provider in `hearth.yaml` under `realms.<name>.federation.providers` — see [How to Configure Federation](federation.md) |
+| **AD / LDAP connections** | Not available | Import the directory's users, or put an OIDC/SAML IdP in front of the directory and federate to it |
 | **MFA factors** (TOTP, WebAuthn, SMS) | Not exported by Auth0 | Users must re-enroll after migration |
 | **Actions / Rules / Hooks** | Not applicable | Implement equivalent logic in your application or wait for Hearth's planned hook surface |
 | **Session tokens** | Not migrated | All users must log in again after switchover |
-| **Social login providers** | Not yet available | Users who authenticated only via social login must reset their password |
+| **Social login identities** | Not imported | Configure the same provider (Google, GitHub, Microsoft, Apple) in `hearth.yaml`. Users' links to it are not imported. With the default `link_existing_accounts: confirm` (see [Account-linking policy](federation.md#account-linking-policy)), linking asks for the migrated account's local password or passkey, so a user who only ever signed in socially must reset their password before their first federated login |
 | **Custom domains** | Configuration only | Configure `oidc.issuer` and TLS in `hearth.yaml`; no import needed |
 | **Auth0 Marketplace integrations** | Not applicable | Evaluate Hearth webhook support for post-login event delivery |
 | **Delta / incremental sync** | Not implemented | Re-run a full import for any incremental user additions before the cutover window |

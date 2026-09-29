@@ -58,8 +58,13 @@ the realm's SP registry:
 
 Every IdP route requires a live Hearth session (the `UiSession` extractor) whose
 realm matches the path realm; the asserted `NameID` is that session's user
-email. Hearth signs IdP responses with the realm's RSA key (§4's algorithm rules
-apply in both directions).
+email. Every assertion also carries an `email_verified` attribute (`true` /
+`false`) stating whether the account proved that address — through the
+verification mail, the email-change confirmation, or an upstream IdP that
+verified it. An operator- or SCIM-created account has not, so an SP that keys
+accounts on the email SHOULD require `email_verified` = `true` before trusting
+the `NameID` as proof of the address. Hearth signs IdP responses with the
+realm's RSA key (§4's algorithm rules apply in both directions).
 
 `want_authn_requests_signed` on a registered SP is **enforced** at
 `src/protocol/web/saml.rs`: when the flag is set, the `<AuthnRequest>` MUST carry
@@ -92,15 +97,17 @@ consulted now.
 
 ## 3. XML parsing hardening
 
-The XML reader (`saml/xml.rs`, `saml/response.rs`) is a purpose-built
-streaming reader on `quick-xml` — **not** a general-purpose DOM parser, and
-**not** fully namespace-aware: an element's namespace is resolved only from an
-`xmlns` declaration on that element itself, and otherwise the conventional
-prefixes (`samlp`/`saml2p`, `saml`/`saml2`, `ds`, `md`) are accepted as their
-usual namespaces regardless of how an ancestor bound them. The canonicalizer
-(`saml/c14n.rs`) does resolve declarations through ancestors; where the two
-disagree the result fails closed (a digest mismatch, or a refused signature),
-never open. It enforces:
+The XML reader (`saml/xml.rs`, `saml/response.rs`) is a purpose-built,
+namespace-aware streaming reader on `quick-xml` — **not** a general-purpose DOM
+parser. Every element is identified by the namespace URI its prefix is bound to
+in scope — declarations on the element itself or inherited from any ancestor,
+including the default namespace — and never by how the prefix is spelled: a
+`ds:` prefix bound to some other URI is not XML-DSIG, an unbound prefix is in
+no namespace, and Entra ID's unprefixed `<Signature xmlns="…xmldsig#">` with
+unprefixed children is recognised like `<ds:Signature>`. When a slice of a
+document is scanned or canonicalized (the signed element, its `<Signature>`,
+`<SignedInfo>`), it is given the bindings it inherits in the document, so the
+scanners and the canonicalizer (`saml/c14n.rs`) always agree. It enforces:
 
 - **No DTD / DOCTYPE.** Any document containing a `<!DOCTYPE …>` declaration
   MUST be rejected as a parse error. External and internal entity definitions
@@ -163,6 +170,19 @@ Hearth requires a **valid enveloped XML signature** on inbound assertions.
   by the digest.
 - **Signing key:** the IdP's registered certificate (PEM, RSA public key). No
   key material is trusted from the assertion itself (no inline cert trust).
+  The connector's `idp_certificate_pem` may hold several concatenated
+  certificates — during an IdP key rollover, the outgoing and the incoming one
+  — and a signature is accepted when it verifies under **any** of them.
+  (Tests: `sp_accepts_an_assertion_signed_by_any_configured_idp_certificate`,
+  `sp_acs_accepts_an_assertion_signed_by_the_second_certificate_of_a_bundle`.)
+- **Canonical form in context.** The signed element is canonicalized with the
+  namespace declarations it inherits from its ancestors: exclusive C14N renders
+  a visibly used inherited declaration (e.g. `xmlns:saml` declared only on the
+  `<Response>`, as Keycloak emits it) on the apex, so the digest Hearth computes
+  is the one a standards-conformant signer computed. `<SignedInfo>` is likewise
+  canonicalized with the bindings in scope where it sits.
+- **Base64 content** (`DigestValue`, `SignatureValue`) may be line-wrapped;
+  whitespace is removed before decoding.
 
 ### 4.1 Signature-wrapping (XSW) defenses
 
@@ -219,7 +239,10 @@ but consumes another. Hearth defends structurally:
   `idp_sso_refuses_signed_authn_request_carrying_a_second_signature`,
   `idp_slo_refuses_signed_logout_request_carrying_a_second_signature`,
   `second_direct_child_signature_rejected`,
-  `canon_removes_only_the_named_signature`.)
+  `canon_removes_only_the_named_signature`; in Entra ID's default-namespace
+  spelling: `sp_accepts_an_entra_style_default_namespace_response`,
+  `sp_rejects_a_second_default_namespace_signature`,
+  `sp_rejects_a_moved_default_namespace_signature_with_content_after_key_info`.)
 - **Nothing but `SignedInfo`, `SignatureValue` and `KeyInfo` in a signature.**
   The verified `<ds:Signature>` MUST have exactly one `<ds:SignedInfo>`,
   exactly one `<ds:SignatureValue>`, at most one `<ds:KeyInfo>`, and no other
@@ -275,6 +298,18 @@ an IdP that owns its users' mailboxes: it lets that IdP claim **any** address
 in the realm. The key is ignored for non-SAML connectors, which carry the
 upstream's own `email_verified` claim.
 
+The same signal decides the state of a **just-in-time** account. A new user
+provisioned from a verified address is `Active` with its email recorded as
+verified. One provisioned from an unverified address — every SAML login from a
+connector without `trust_asserted_email`, and every OIDC / Apple login whose
+`email_verified` is not `true` — is created `PendingVerification`, exactly as
+self-registration is: Hearth mails that address a verification link, answers
+the login with the "check your email" page, and issues no session until the
+link is used. The account then signs in through its federated link as usual.
+(An account under a synthetic `…@fed.<idp>.local` address — no upstream email,
+or one that collides with an existing user — names no mailbox and is `Active`,
+unverified.)
+
 (Tests: `saml_confirm_link_is_reachable_only_when_the_asserted_email_is_trusted`
 proves the consumer; `reconcile_federation_carries_trust_asserted_email_to_the_idp`
 proves the YAML reaches it.)
@@ -291,10 +326,16 @@ order (all rejections use the listed `SamlError` variant):
    SP ACS URL; else `DestinationMismatch` (cookie-less CSRF defense).
 4. **Issuer** — the assertion/Response issuer MUST equal the registered IdP
    entity ID; else `IssuerMismatch`.
-5. **Audience** — the parsed `AudienceRestriction/Audience` value MUST equal
-   this SP's entity ID; else `AudienceMismatch`. A single audience value is
-   parsed, so this is an equality check, not a membership test over a list.
-   The SP entity ID it is compared against comes from `onboarding.base_url`,
+5. **Audience** — SAML Core §2.5.1.4: within one `<AudienceRestriction>` the
+   assertion is addressed to this SP when **any** `<Audience>` equals this SP's
+   entity ID; when the `<Conditions>` carry several `<AudienceRestriction>`
+   elements, **each** MUST name it. An assertion with no `<AudienceRestriction>`
+   (or an empty one) is refused, as the Web Browser SSO profile (§4.1.4.2)
+   requires one naming the SP. Otherwise `AudienceMismatch`.
+   (Tests: `audience_restriction_accepts_this_sp_anywhere_in_the_list`,
+   `audience_restriction_without_this_sp_rejected`,
+   `every_audience_restriction_must_name_this_sp`,
+   `missing_or_empty_audience_restriction_rejected`.) The SP entity ID it is compared against comes from `onboarding.base_url`,
    or from `oidc.issuer` when that is unset. Forwarded headers
    (`X-Forwarded-Host`, `X-Forwarded-Proto`) are **never** consulted: anyone who
    can reach the port can set them, and an origin the attacker chose is not an
@@ -331,7 +372,8 @@ assertion ID MUST be rejected as `SamlError::Replay`.
 
 On acceptance the ACS runs the asserted identity through the same federation
 pipeline the OIDC callback uses — existing link, auto-link, confirm-to-link, or
-JIT provisioning — and issues a Hearth session cookie. `saml_login_completed`
+JIT provisioning — and issues a Hearth session cookie (except for a JIT
+account waiting for its address to be verified, §4.2). `saml_login_completed`
 is recorded **only** when that cookie was actually set: a confirm-to-link hop is
 a redirect without one, and the audit log must not report a login that did not
 happen.

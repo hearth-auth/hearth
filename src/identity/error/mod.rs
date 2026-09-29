@@ -205,6 +205,13 @@ pub enum IdentityError {
     /// available afterwards, or on a realm whose cascade already started
     /// (audit 2026-08-28 §4.20#10).
     RealmNotArchived,
+    /// A realm lifecycle operation (suspend, unsuspend) targeted a realm that
+    /// is archived or being deleted.
+    ///
+    /// Those realms belong to YAML reconciliation: only reappearing in
+    /// `hearth.yaml` reactivates an archived realm, so an unsuspend must not
+    /// revive one, and suspending it would mask its archival.
+    RealmArchived,
     /// A runtime mutation targeted a resource that `hearth.yaml` owns.
     ///
     /// Config-managed resources are reconciled from YAML at every startup, so
