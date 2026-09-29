@@ -6,6 +6,388 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+<!-- GA audit round 3, 2026-09-29 (branch feature/ga-sweep-3-2026-09-28). -->
+
+### Security
+- **SAML XML-signature wrapping closed (critical).** Hearth-as-SP accepted a signed
+  assertion carrying a second `<ds:Signature>` element, and read `<saml:NameID>`,
+  `<saml:Attribute>`, `<saml:Conditions>`, `<saml:Audience>` and `<saml:Issuer>` from
+  inside it. Anyone with an ordinary account at a connected SAML IdP could log in as any
+  other user linked to that IdP (including realm admins), or extend an assertion's
+  validity to any date. The enveloped-signature transform now removes only the signature
+  being verified, an element with more than one enveloped signature is rejected, a
+  signature may contain only `SignedInfo`, `SignatureValue` and `KeyInfo`, and no SAML
+  field is ever read from inside a `<ds:Signature>` (GA-3 G-1).
+- The same fix applies to signed `<AuthnRequest>` and `<LogoutRequest>` messages that
+  Hearth-as-IdP verifies: a second signature can no longer rewrite the request ID that
+  Hearth echoes as `InResponseTo` in the response it signs (GA-3 G-1).
+- **Federation keys are checked at startup and reload (Breaking for broken configs).**
+  Hearth now parses two keys when the configuration is loaded or reloaded, using the
+  same parsers login uses:
+  - A SAML connector's `idp_certificate_pem`, whether one certificate or a rollover
+    bundle. Every certificate in it must be usable.
+  - An Apple connector's `apple_private_key_pem`, which must be a P-256 PKCS#8 key.
+
+  A missing or unusable key now refuses startup and reload. `hearth config validate`
+  reports it, naming the realm and the connector (plus the block number for a bundle).
+  Before, the problem only showed up as a failed federated login (GA-3 round 3).
+- **Non-interactive `/authorize` authorizes only the bearer token's own client** — `POST /authorize`,
+  `POST /realms/{realm}/authorize` and gRPC `OAuthService/Authorize` minted a code for any
+  `client_id` from any user access token, so a third-party app's token was turned into a
+  first-party public client's tokens carrying the user's full permissions (admin API included),
+  and any leaked access token into a fresh first-party refresh family. A token issued to a client
+  (RFC 9068 `client_id`) now authorizes that client only, and a first-party session token a
+  first-party client only; anything else answers `403` `HEARTH_CLIENT_MISMATCH` (gRPC
+  `PERMISSION_DENIED`). **Breaking** for integrations that minted codes for one client with another
+  client's token, or for a third-party client with a first-party session token (GA audit 3 B-1).
+- **Live RBAC answers for the token, not the user** — introspection-mode resource servers
+  (`/introspect`, `/realms/{realm}/introspect`, gRPC `Introspect`), the decision endpoint
+  (`POST /oauth/authorize`, gRPC `Decide`) and `GET /v1/me/permissions` resolved the user's full
+  live roles, groups and permissions for any token. They now return what an `embedded` token for the
+  same client and grant would carry, resolved live: the token client's claim profile applies (a
+  third-party client's token gets no roles, groups or permissions by default, and `decide` answers
+  `allowed: false`), every permission-bearing scope narrows (`openid docs:read` no longer resolves
+  wider than `docs:read`), and a delegated (`act`) token is capped at the permissions it was
+  delegated. **Breaking** for resource servers that relied on third-party or delegated tokens
+  receiving the user's full authority (GA audit 3 B-2 / C-8 / B-5).
+- **Decision endpoint honours `resource` and every token check** — `POST /oauth/authorize` and gRPC
+  `Decide` ignored the documented RFC 8707 `resource` audience check, so a token minted for one
+  resource server was authorized at another; they now answer `allowed: false` unless the token's
+  `aud` names the resource. Decisions also apply every `validate_token` check, including the
+  audience cutoff of a removed protected resource and the DPoP key blocklist, and gRPC `Decide`
+  denies any token `validate_token` refuses (GA audit 3 C-8 / C-9).
+- **Embedded tokens are narrowed by their scopes at every issuance** — the code exchange narrowed
+  only a single-scope grant, refresh rotation dropped the narrowing (a token narrowed to a bundle came
+  back with the user's full permission set, admin permissions included, on its first refresh) and
+  the device grant ignored its scope. The code exchange, every refresh and the device grant now
+  resolve `permissions` from every permission-bearing granted scope (OIDC scopes and scopes the realm
+  registry does not know neither narrow nor widen). Refresh tokens carry the grant's `scope`; device
+  grant access tokens now carry `scope`. **Breaking** (token contents) (GA audit 3 B-4).
+- **Account self-service endpoints refuse third-party client tokens** — `GET /oauth/consents`,
+  `GET /webauthn/credentials` and `DELETE /webauthn/credentials/{id}` answer `403` to a token issued
+  to a third-party client; `DELETE /oauth/consents/{client_id}` lets a third-party client revoke only
+  its own consent. **Breaking** for apps that listed or managed a user's consents or passkeys
+  (GA audit 3 B-5).
+- **Removing a passkey requires a step-up** — `DELETE /webauthn/credentials/{id}` needs a JSON
+  step-up proof (`password`, `totp_code` or `assertion`, as enrolment does) and answers
+  `403 step_up_required` without one; the console's passkey removal asks for the same proof.
+  **Breaking** for REST clients that deleted with the access token alone (GA audit 3 D-6).
+- **Session-version feed and DCR initial access refuse third-party client tokens** — even when a
+  realm's claim profile releases `hearth.admin` / `hearth.sv_feed` / `hearth.clients.admin` to a
+  third-party client, its token no longer reads `/oauth/session-versions[/snapshot]` or registers
+  clients via `POST /register` (GA audit 3 I-14).
+- **Decision endpoint answers for the token's organisation only** — `POST /oauth/authorize` (and gRPC
+  `Decide`) take the organisation context from the token's `oid`; an `organization_id` naming a
+  different organisation — or any, for a realm-level token — answers `allowed: false`, and an absent
+  one uses the token's `oid`. **Breaking** for resource servers that passed an organisation the
+  token was not minted in.
+- **Passkey enrolment is first-party only** — `POST /webauthn/register/begin` and
+  `POST /webauthn/register/complete` refuse a token issued to a third-party client with
+  `403 forbidden`, like listing and removing passkeys; the step-up proof is still required.
+  **Breaking** for third-party apps that enrolled passkeys on a user's account (GA audit 3 B-5).
+- `GET /end_session` with both `id_token_hint` and `client_id` refuses, with
+  `400 invalid_request`, a hint that was not issued to that client (its `aud` does not contain the
+  client_id). Nothing is revoked in that case (OIDC RP-Initiated Logout §2; GA audit 3).
+- **A required-action detour no longer upgrades a login's second factor** — a browser login that
+  hit a pending required action (a forced password change, email verification, or the
+  `ENROLL_PHONE_OTP` / `ENROLL_EMAIL_OTP` enrolment a realm injects for every user whenever
+  `mfa_methods` lists `sms` / `email_otp`) resumed as if it had passed the realm's MFA gate, which
+  satisfied both `mfa_required` and `webauthn_required`. On a `webauthn_required` realm a phisher
+  relaying the password and one TOTP code (or holding a UV-less passkey) got a session — and could
+  enrol their own phone on the account on the way; on an `mfa_required` realm the password alone
+  did. The session a detour ends in now records the factor the login actually proved, raised only
+  by a factor proved during the detour (a user-verified passkey registration, or a first factor
+  enrolled by a user who held none). A detour that cannot end in a session is not started: the
+  login is sent to the passkey challenge it owes, or refused with `403` (GA3 D-1 / I-2).
+- **A required-action detour no longer bypasses the realm `cidr_policy`** — the session a
+  detour ended in was created without a client address, which the network policy reads as
+  nothing to refuse, so a magic-link or passkey login from a refused network got a session
+  whenever an action was pending. Such a login is now refused (`403`) before the detour starts.
+- **Breaking — federated sign-up no longer trusts an unverified upstream email** — just-in-time provisioning
+  created an active account on whatever address the upstream IdP named, even when it did not
+  assert `email_verified` (OIDC / Apple) or the SAML connector does not set
+  `trust_asserted_email`. An IdP that lets users claim any address could pre-create someone else's
+  account, which Hearth's SAML IdP then asserted to service providers. Such an account is now
+  created `PendingVerification`, the address is mailed a verification link, and the login shows
+  the "check your email" page; once verified, the federated login signs in normally. An account
+  whose upstream verified the address is created active with its email recorded as verified
+  (GA3 G-3).
+- **`/userinfo` `email_verified` reflects the account** — it answered `true` for every token with
+  the `email` scope. It now reports the account's own verification state (`false` for operator-,
+  SCIM- or migration-created accounts until the address is verified), and only alongside a
+  released `email` (GA3 B-8).
+- **A federated just-in-time account keeps its upstream link only in the browser that created
+  it** — an account created `PendingVerification` by a federated login on an unverified
+  upstream address kept that upstream identity linked through verification, so the address
+  owner clicking the (unsolicited) verification mail activated an account the upstream identity
+  could sign in to. The link now survives only when the verification is completed in the browser
+  that performed the federated login; completed anywhere else, the account is activated without
+  the federated link and the removal is audited as `federation_account_unlinked`
+  (GA3 G-3).
+- **Code-flow and device-flow tokens no longer count as a proved second factor** — the session
+  behind a token from the authorization-code exchange or the device grant was recorded as having
+  passed MFA whatever the browser session that authorized it had proved, so a password-only or
+  UV-less-passkey session could obtain, through JSON / gRPC `Authorize` with that token, codes
+  for a client with `mfa_required` or for a user holding an `mfa_required_roles` role. The token
+  session now records the authorizing session's own proof (GA3 D-7).
+- **A required-action flow ends once and dies with a sign-out** — a copy of the required-action
+  cookie minted a new browser session (or authorization code) on every replay once its actions
+  were satisfied, and signing out did not stop it. A flow now completes at most once, and
+  sign-out, sign-out-everywhere, a password change, disabling the account or an email change end
+  every flow under way (GA3 D-2).
+- **A magic link and an email OTP are one factor** — after a magic-link login, a user whose only
+  second factor was email OTP completed the login with a code from the same mailbox, which
+  satisfied `mfa_required`. The email OTP is no longer offered or accepted as the second factor
+  of a magic-link login; such a user is refused on an `mfa_required` realm (GA3 D-4).
+- **No required-action flow for a disabled or unverified account** — a holder of the password of
+  a disabled or not-yet-verified account was taken through pending required actions (change the
+  password, bind a phone, send SMS) before the account status was checked. Such a login is now
+  refused up front with the usual answer (GA3 D-11).
+- **SCIM admin-JWT fallback now enforces the same permission as the admin API.** On a realm
+  with no SCIM bearer token, SCIM accepted any admin-grade token, so a caller holding only
+  `hearth.clients.admin` or `hearth.agents.admin` could create, read, rewrite and delete every
+  user and organization in the realm, superusers included. `/scim/v2/Users` now requires
+  `hearth.users.admin` (as REST `/admin/users*` does) and `/scim/v2/Groups` requires
+  `hearth.realm.admin` (as the gRPC organization RPCs do). `hearth.admin` still satisfies
+  both. Any other token gets `403` (GA audit round 3, G-5).
+- **SCIM provisioning tokens can no longer modify or delete any admin principal.** The guard
+  protected only `hearth.admin` and `hearth.users.admin` holders, so a provisioning token could
+  rewrite the email of a `hearth.realm.admin`, `hearth.clients.admin` or `hearth.agents.admin`
+  holder and take the account over. The protected set is now the admin API's own admission list
+  (GA audit round 3, G-6).
+- **Privilege ceiling on user administration.** An admin can no longer modify, re-email,
+  disable, reset or delete a user who holds an admin permission the admin lacks. Before this, a
+  `hearth.users.admin` sub-admin could rewrite a `hearth.admin` user's email and then reset the
+  password. `hearth.admin` outranks every sub-admin. A sub-admin may act on another user only if
+  it holds every admin permission that user holds. Refused calls return `403` (gRPC
+  `PERMISSION_DENIED`), and `503` (`UNAVAILABLE`) if the target's permissions cannot be read.
+  One shared rule now applies to:
+  - REST `PATCH`/`DELETE /admin/users/{id}` and `DELETE /admin/users/{id}/device-fingerprints`.
+  - The `disable` operation of `POST /admin/users/bulk`. A batch that names an out-ranking user
+    is refused as a whole.
+  - `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`.
+  - gRPC `UpdateUser` / `DeleteUser`.
+  - SCIM `/Users`, on both the provisioning-token and admin-JWT paths.
+
+  The web console admits only `hearth.admin`, so it already satisfies the rule.
+- **gRPC `GetRealm` / `DeleteRealm` now honour the target realm's cross-realm trust policy**,
+  as REST `/admin/realms/{id}` does. A system-realm token can no longer read or purge, over
+  gRPC, a realm whose policy refuses the system realm. REST and gRPC now share one realm-scope
+  rule.
+- **A SCIM provisioning token can modify or delete only the organizations SCIM created.**
+  Organizations created through `POST /scim/v2/Groups` now carry a durable
+  "provisioned by SCIM" marker. No request field sets or clears it, and backups carry it.
+  The realm's SCIM bearer token can still read every organization, but its `PUT`, `PATCH` and
+  `DELETE` on `/scim/v2/Groups/{id}` return `403` for an organization created through the admin
+  API, the console or `hearth.yaml`. Before, the token could delete any organization.
+  Admin-token SCIM callers keep their rights.
+- **The privilege ceiling now covers demotion, sign-out and consents.** A sub-admin can no longer
+  strip an out-ranking user's authority, or revoke that user's sessions or consents. Before, a
+  `hearth.realm.admin` sub-admin could remove a superuser's role and a `hearth.users.admin`
+  sub-admin could sign a superuser out. Refused calls return `403` / `PERMISSION_DENIED`, and
+  `503` / `UNAVAILABLE` if the check cannot complete. Newly covered:
+  - Role unassignment: REST `DELETE /admin/assignments/{id}`; gRPC `UnassignUserRole` and
+    `UnassignGroupRole`. For a group assignment, every member of the group and of any group
+    nested in it is checked.
+  - Group membership: REST `DELETE /admin/groups/{id}/members/{member_id}` and
+    `DELETE /admin/groups/{id}`; gRPC `RemoveGroupMember` and `DeleteGroup`.
+  - Direct and additional grants: gRPC `RevokeUserPermission` and `RemoveAdditionalRole`.
+  - Sessions: REST `DELETE /admin/sessions/{id}` and `POST /admin/sessions/{id}/sv-bump`.
+  - Consents: REST `DELETE /admin/users/{id}/consents/{client_id}`; gRPC `RevokeConsent`.
+- **The privilege ceiling now counts admin permissions a user holds only through an
+  organization-scoped role or grant**, in every organization the user belongs to.
+- **Request shaper realm budget is per realm again** — the HTTP request shaper counted every request
+  in one server-wide "realm" bucket (default 1 000 req/s), so about ten addresses at the per-client
+  cap answered `429` for everyone. A request now counts against a realm only when it names one (the
+  realm segment of a `/realms/{realm}/…`, `/ui/realms/{realm}/…` or `/v1/{realm}/…` path, otherwise
+  a UUID `X-Realm-ID` header); requests that name no realm are limited per client only. On gRPC only
+  a UUID `x-realm-id` opens a realm bucket; any other value is ignored instead of becoming a
+  never-evicted map key (GA sweep 3, E-1).
+- **Rate-limiter memory is bounded** — every in-process limiter (request shaper, JWKS/discovery,
+  token, admin and export limiters, login tarpit, CAPTCHA challenge store, and the A-3 distributed
+  attack detector, A-4 outbound volume shield and A-50 cross-realm cap) kept one entry per key
+  forever, so rotating IPv6 source addresses, invented client ids, usernames or realm headers grew
+  memory without limit. Entries are now dropped when their window closes and each limiter holds a
+  fixed maximum number of keys, evicting the soonest-expiring entries when full. The A-3, A-4 and
+  A-50 detectors no longer record anything while disabled (their default) (GA sweep 3, E-2).
+- **Per-IP limits count an IPv6 `/64` as one client** — the request shaper, per-IP login limit (hosted
+  login, password grant, magic-link request), self-registration per-IP limit, JWKS/discovery limit,
+  anonymous token-refresh bucket, login tarpit, CAPTCHA challenge store and A-3 detector keyed on the
+  full IPv6 address, so one host with a routed `/64` had 2^64 fresh budgets. They now group IPv6 per
+  `/64` (IPv4-mapped addresses as their IPv4 form), matching `operational.max_connections_per_ip`
+  (GA sweep 3, E-3).
+- **HTTP metrics labels are a closed set** — `hearth_http_request_duration_seconds` used the raw
+  request method as its `method` label, so each invented method (answered `405`) added a series for
+  the life of the process. Methods other than `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD` and
+  `OPTIONS` are now labelled `OTHER`, and a request with no matched route template is labelled
+  `route="unmatched"` rather than with its raw path (GA sweep 3, E-6).
+- A system-realm operator's step-up password check (console API tokens, passkey enrolment and
+  removal, MFA step-up) now runs on the admin-reserved KDF pool, as the admin console login does,
+  so a tenant-login flood that fills the shared pool can no longer refuse it with `503`. Step-up
+  passwords and TOTP codes continue to count against the account's login lockout and TOTP guess
+  budget (GA audit 3 DOC-2).
+
+### Added
+- Token introspection now returns `client_id` (RFC 7662 §2.2): the client the token was issued
+  to (GA audit 3).
+- **Realm suspension, the incident-response freeze control.** New endpoints
+  `POST /admin/realms/{id}/suspend` and `POST /admin/realms/{id}/unsuspend`, with gRPC twins
+  `IdentityAdminService/SuspendRealm` and `UnsuspendRealm`.
+  - While a realm is suspended, every token it issued stops validating (including tokens issued
+    before the suspension), its sessions are revoked, and new logins are refused. Unsuspend
+    restores service.
+  - Only a system-realm admin with `hearth.realm.admin` or `hearth.admin` can call them, and the
+    target realm's cross-realm trust policy applies.
+  - The system realm cannot be suspended (`403`).
+  - Archived or deleting realms cannot be suspended or unsuspended (`409`, new wire code
+    `HEARTH_REALM_ARCHIVED`).
+  - Each change is audited in the target realm as `realm_updated`, with the actor and
+    `previous_status` / `status`.
+  - Restarting Hearth or reloading `hearth.yaml` does not clear a suspension.
+- **`hearth admin token`** — mints a short-lived system-realm (nil UUID) access token for an
+  operator-console account that holds `hearth.admin`, the production source of the
+  `$SYSTEM_TOKEN` that the realm admin API and `/admin/cluster/*` need (until now only
+  `POST /admin/bootstrap` in a dev build could mint one). Usage:
+  `hearth admin token --config <hearth.yaml> --user <email> [--ttl 15m] [--data-dir <path>]`.
+  The token lives `--ttl` (1 minute to 1 hour, default 15 minutes), goes to stdout only (logs go
+  to stderr), and its issuance is recorded in the system realm's audit trail (`token_issued`,
+  `issued_via: "hearth admin token"`). The command opens the data directory itself, so stop
+  `hearth serve` first. It refuses a cluster node's data directory, because its writes would bypass
+  Raft, unless `--sole-cluster-node` is passed for the disaster-recovery rebuild
+  (GA audit 3 DOC-2).
+- **Console API tokens** — a system-realm operator signed in to the admin console can mint a
+  short-lived system-realm (nil UUID) API token at **`/ui/admin/api-tokens`** (sidebar: API
+  Tokens), the production source of the `$SYSTEM_TOKEN` for `/admin/realms`, `/admin/backup` and
+  `/admin/cluster/*` on a **running** server or cluster. Minting needs a fresh step-up: the
+  account's password **and** a second factor it holds (a current authenticator code, or a passkey
+  assertion with user verification; a touch-only assertion is refused); an operator with no second
+  factor enrolled cannot mint. The lifetime is chosen per token, 1 to 60 minutes (default 15). The
+  token carries the operator's system-realm permissions, is bound to a new session of its own
+  (revoke it to end the token early), is shown once with `Cache-Control: no-store` and never put in
+  a URL or log, and its issuance is recorded in the system realm's audit trail (`token_issued`,
+  actor = the operator, `issued_via: "admin console"`, lifetime, `jti`). In cluster mode the
+  session and audit record replicate through Raft, so a token minted on the leader works on every
+  node; mint on the leader (GA audit 3 DOC-2).
+
+### Changed
+- **SAML parsing is stricter (Breaking for malformed IdP output).** Hearth now rejects
+  SAML messages that repeat a single-valued field: a second `<Issuer>`, `<Subject>`,
+  subject `<NameID>` or `<Conditions>` in an assertion, two attributes with the same
+  `Name`, a second `<Issuer>`, `<Status>` or top-level `<StatusCode>` in a response, a
+  second `<Issuer>` or `<NameID>` in a request, and documents with more than one root
+  element. Before, the last copy won, or the values were concatenated. Fields are now
+  read only from their SAML-schema position, so a `<NameID>` inside an attribute value
+  (for example `eduPersonTargetedID`) no longer overwrites the subject (GA-3 G-1).
+- **SAML namespace handling is strict (Breaking for malformed IdP output).** An element
+  prefix that is never declared is now in no namespace, and a `ds:` prefix bound to a
+  non-XML-DSIG URI is not a signature. Before, the conventional prefixes were accepted
+  whatever they were bound to. Standards-conformant IdPs are unaffected.
+- An operator or SCIM change of a user's email address clears the account's `email_verified`
+  flag; the self-service email-change confirmation still sets it (GA3 B-8).
+- SAML assertions Hearth issues as IdP carry an `email_verified` attribute (`true` / `false`)
+  saying whether the account proved the address named in the `NameID` (GA3 G-3).
+- **Breaking:** gRPC `IdentityAdminService/CreateRealm` and `UpdateRealm` now answer
+  `FAILED_PRECONDITION` with "Realms are managed via hearth.yaml. Remove this endpoint from your
+  client.", the same message REST `POST`/`PATCH /admin/realms` return with `405`. The caller
+  still has to authenticate. `UpdateRealm` used to replace the realm's whole configuration
+  with the three fields its message carries, which silently cleared MFA, CIDR, lockout,
+  password policy, SCIM token, webhook and FAPI settings until the next restart or reload. It
+  could also rename or suspend a realm that `hearth.yaml` still declares. The proto messages
+  and RPCs remain on the wire for compatibility. No API now sets or clears realm suspension
+  (GA audit round 3, G-7).
+- **`security.request_shaper.ip_rps` / `realm_rps: 0` disables that dimension**, matching every other
+  limiter's `0` sentinel; `0` previously shed every request. The documentation now states that the
+  shaper is on by default (it always was) (GA sweep 3, E-1).
+- `hearth admin token` audit records now also carry the token's `jti`. The command is now the
+  fallback for a **stopped** store; the upgrade, clustering and disaster-recovery guides name the
+  console page first (GA audit 3 DOC-2).
+
+### Fixed
+- **SAML audience checks now follow the SAML standard.** Within an `<AudienceRestriction>`,
+  any listed `<Audience>` may name Hearth; when there are several restrictions, each one
+  must name it. Before, only the last `<Audience>` counted. Assertions listing Hearth among
+  several audiences were refused unless Hearth came last, and a second restriction
+  naming Hearth could hide a first one that did not (GA-3 round 2).
+- **SAML IdP certificate rollover.** A SAML connector's `idp_certificate_pem` may now hold
+  several concatenated certificates, and an assertion that verifies under any of them is
+  accepted. Before, only the first certificate was ever tried, so an IdP key rollover
+  broke login until the PEM was swapped at exactly the right moment (GA-3 round 2).
+- **Entra ID and Keycloak SAML signatures verify.** XML namespaces are now resolved by URI
+  through the whole document instead of by prefix spelling. Entra ID's unprefixed
+  `<Signature xmlns="…xmldsig#">` is accepted, as are assertions that rely on a namespace
+  prefix declared only on the enclosing `<Response>` (the Keycloak shape). Base64
+  signature and digest values that are line-wrapped (the Shibboleth shape) also verify.
+  All of these were refused before, and all the signature-wrapping defences apply to
+  them too (GA-3 round 2).
+- Migration guides (Keycloak, Auth0) no longer say identity-provider federation is "not
+  yet available". They point to the federation guide and state what is and is not
+  imported. The Keycloak guide's SAML example now uses the real configuration shape, and
+  the federation guide's SAML `attribute_map` example uses `display_name`; the old `name`
+  key was silently ignored.
+- `hearth.maximal.yaml`'s SAML `attribute_map` example used a `name` key that is
+  silently ignored; it now uses `display_name`.
+- `POST /realms/{realm}/authorize` now accepts a pushed authorization request (`request_uri`,
+  RFC 9126) exactly like `POST /authorize`; it ignored it before, so a FAPI realm could not use the
+  realm-scoped route.
+- **Standard `private_key_jwt`, JWT-bearer and request-object clients are accepted** — a client
+  assertion's `iss`/`sub` (token, PAR, introspection, revocation, device authorization, token
+  exchange), a JWT-bearer grant assertion's `iss`/`sub`, and a signed request object's `iss` /
+  `client_id` (PAR, `POST /authorize`, browser `/authorize`) must now be the `client_id` exactly
+  as registration returned it — the bare UUID the client sends as `client_id` (RFC 7523 §3,
+  OIDC Core §9, RFC 9101 §4). Hearth compared them with its internal `client_<uuid>` form, so
+  every standards-compliant client library was refused with `invalid_client` /
+  `invalid_request_object`. **Breaking** for clients that worked around it by sending
+  `client_<uuid>`: that form (and any other spelling of the UUID) is now refused. Assertion `aud`
+  is unchanged: the realm issuer only (GA audit 3).
+- **Token fields name a client by its issued `client_id`.** These fields now carry the bare UUID
+  that registration returns: an ID token's `aud` and `azp` (OIDC Core §2), an access token's
+  `client_id` claim (RFC 9068 §2.2), a JARM response's `aud` (success and error), an exchanged
+  token's `act.sub`, and the pre-token webhook payload's `client_id`. They carried Hearth's
+  internal `client_<uuid>` form before, so standard OIDC relying parties refused Hearth ID
+  tokens. **Breaking** (token claim values): consumers that matched `client_<uuid>` must use the
+  registered client_id. A `client_credentials` / JWT-bearer token's `sub` is unchanged
+  (`client_<uuid>`) (GA audit 3).
+- **ID tokens carry the realm issuer.** An ID token's `iss` (code exchange and device grant) is now
+  the realm issuer `{oidc.issuer}/realms/{name}`: the `issuer` of the realm discovery document,
+  and the issuer access tokens already used. The RFC 9207 `iss` authorization-response parameter,
+  JARM responses (success and error), back-channel logout tokens and the front-channel logout
+  `iss` parameter changed the same way. They carried the bare `oidc.issuer`, so a standard RP
+  that validates `iss` against the discovery document refused Hearth ID tokens. **Breaking**
+  (claim values): relying parties must configure the realm discovery document
+  (`/realms/{name}/.well-known/openid-configuration`). The server-level document is unchanged
+  (GA audit 3).
+- **Back-channel logout tokens match the session's ID tokens.** A logout token's `sub` and `sid`
+  are now the ID token's strings (`user_<uuid>`, `session_<uuid>`) instead of bare UUIDs, and its
+  `iss` is the realm issuer. The front-channel `sid` parameter matches too. Before this, a relying
+  party could not find the session a logout referred to (OIDC BCL §2.6, FCL §2). **Breaking**
+  (claim values) (GA audit 3).
+- The session a required-action flow ends in records the client address, user agent and device
+  label, like any other login, and the realm's `cidr_policy` is checked against that address.
+- Deleting a user also removes its required-action generation record.
+- The SCIM discovery endpoints (`/scim/v2/ServiceProviderConfig`, `/Schemas`, `/ResourceTypes`)
+  now accept the realm's SCIM bearer token as well as admin tokens. Before, an identity provider
+  holding the provisioning token got `401` on them.
+- `docs/api/openapi.json` no longer documents `POST /admin/realms` and `PUT /admin/realms/{id}`
+  as working `200` operations. Realms are YAML-managed and those calls are refused.
+- gRPC `IdentityAdminService/DeleteRealm` now writes the same `realm_deleted` audit event (in
+  the system realm, attributed to the caller) as REST `DELETE /admin/realms/{id}`.
+- A backup export (`POST /admin/backup`, scheduled or manual) under sustained write load could
+  stop the whole server permanently while `/healthz` still answered 200. Writes that arrived during
+  the export filled Tokio's blocking pool while waiting on the export's consistency barrier, and
+  the export's next read, or the parked writers' own nested writes, then waited for a pool thread
+  that would never become free. Storage reads, and writes on a single node, now run on the calling
+  thread and do not need a second pool thread (GA audit 3 F-7).
+- `/readyz` now reports not-ready when the WAL write fence is engaged in `hearth serve`. The
+  cluster storage adapter that `serve` always installs did not forward the fence, so a node that
+  refused every write kept reporting ready (GA audit 3 F-4).
+- The release validation job built its test suite with full debug info and ran out of disk on
+  the runner at link time ("ld terminated with signal 7", "No space left on device"), so no
+  server release could be cut after v1.6.10. It now uses line-table debug info, as CI does, and
+  frees the debug target before the benchmark build (GA audit 3 H-2 / I-12).
+- The console API-token page answered a locked account's correct password with "both must be
+  correct" (`403`). It now answers `429` "Too many failed attempts" until the lockout window
+  passes (GA audit 3 DOC-2).
+
 <!-- GA audit follow-ups, 2026-09-28 (branch feature/ga-followups-9-28-26). -->
 
 ### Security
