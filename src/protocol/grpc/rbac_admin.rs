@@ -13,7 +13,12 @@ use std::sync::Arc;
 use tonic::{Code, Request, Response, Status};
 
 use crate::core::{OrganizationId, RealmId, UserId};
-use crate::protocol::grpc::auth::{grpc_require_permission, AdminAuth};
+use crate::protocol::admin_auth::{
+    check_assignment_admin_ceiling, check_group_admin_ceiling, check_member_admin_ceiling,
+};
+use crate::protocol::grpc::auth::{
+    ceiling_status, grpc_require_permission, grpc_require_user_ceiling, AdminAuth,
+};
 use crate::rbac::{
     AssignRoleRequest, CreateGroupRequest, CreateRoleRequest, GroupId, GroupMember, Permission,
     RoleId, Scope, Subject, UpdateGroupRequest, UpdateRoleRequest,
@@ -637,6 +642,16 @@ impl RbacAdminService for RbacAdminSvc {
         reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let group_id = parse_group_id(&inner.group_id)?;
+        // Deleting the group strips its roles from every member (GA audit
+        // round 3): the privilege ceiling applies to each.
+        check_group_admin_ceiling(
+            self.state.identity.as_ref(),
+            self.state.rbac.as_ref(),
+            &realm_id,
+            &group_id,
+            &auth.permissions,
+        )
+        .map_err(ceiling_status)?;
         self.state
             .rbac
             .delete_group(&realm_id, &group_id)
@@ -717,6 +732,14 @@ impl RbacAdminService for RbacAdminSvc {
             .member
             .ok_or_else(|| Status::invalid_argument("missing member"))?;
         let member = proto_to_group_member(&member_proto)?;
+        check_member_admin_ceiling(
+            self.state.identity.as_ref(),
+            self.state.rbac.as_ref(),
+            &realm_id,
+            &member,
+            &auth.permissions,
+        )
+        .map_err(ceiling_status)?;
         self.state
             .rbac
             .remove_group_member(&realm_id, &group_id, &member)
@@ -766,6 +789,14 @@ impl RbacAdminService for RbacAdminSvc {
         reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let aid = parse_assignment_id(&inner.assignment_id)?;
+        check_assignment_admin_ceiling(
+            self.state.identity.as_ref(),
+            self.state.rbac.as_ref(),
+            &realm_id,
+            &aid,
+            &auth.permissions,
+        )
+        .map_err(ceiling_status)?;
         self.state
             .rbac
             .unassign_role(&realm_id, &aid)
@@ -835,6 +866,14 @@ impl RbacAdminService for RbacAdminSvc {
         reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let aid = parse_assignment_id(&inner.assignment_id)?;
+        check_assignment_admin_ceiling(
+            self.state.identity.as_ref(),
+            self.state.rbac.as_ref(),
+            &realm_id,
+            &aid,
+            &auth.permissions,
+        )
+        .map_err(ceiling_status)?;
         self.state
             .rbac
             .unassign_role(&realm_id, &aid)
@@ -939,7 +978,7 @@ impl RbacAdminService for RbacAdminSvc {
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         reject_system_realm_write(&auth.realm_id)?;
-        let realm_id = auth.realm_id;
+        let realm_id = auth.realm_id.clone();
         let user_id = parse_user_id(&inner.user_id)?;
         let permission = Permission::new(inner.permission.clone())
             .map_err(|r| Status::invalid_argument(format!("invalid permission: {r}")))?;
@@ -953,6 +992,7 @@ impl RbacAdminService for RbacAdminSvc {
         } else {
             Scope::Realm
         };
+        grpc_require_user_ceiling(&self.state, &auth, &user_id)?;
         self.state
             .rbac
             .revoke_user_permission(&realm_id, &user_id, &permission, &scope)
@@ -1051,12 +1091,13 @@ impl RbacAdminService for RbacAdminSvc {
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         reject_system_realm_write(&auth.realm_id)?;
-        let realm_id = auth.realm_id;
+        let realm_id = auth.realm_id.clone();
         let org_stripped = inner.org_id.strip_prefix("org_").unwrap_or(&inner.org_id);
         let org_uuid = uuid::Uuid::parse_str(org_stripped)
             .map_err(|_| Status::invalid_argument("invalid org_id"))?;
         let org_id = OrganizationId::new(org_uuid);
         let user_id = parse_user_id(&inner.user_id)?;
+        grpc_require_user_ceiling(&self.state, &auth, &user_id)?;
         self.state
             .rbac
             .remove_additional_role(&realm_id, &org_id, &user_id, &inner.role_name)
@@ -1227,11 +1268,12 @@ impl RbacAdminService for RbacAdminSvc {
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         reject_system_realm_write(&auth.realm_id)?;
-        let realm_id = auth.realm_id;
+        let realm_id = auth.realm_id.clone();
         let user_id = parse_user_id(&inner.user_id)?;
         let client_uuid = uuid::Uuid::parse_str(&inner.client_id)
             .map_err(|_| Status::new(Code::InvalidArgument, "invalid client_id"))?;
         let client_id = crate::core::ClientId::new(client_uuid);
+        grpc_require_user_ceiling(&self.state, &auth, &user_id)?;
         self.state
             .identity
             .revoke_consent(&realm_id, &user_id, &client_id)

@@ -156,6 +156,8 @@ If you need to deprovision or demote an admin user via SCIM:
 
 ## Group provisioning
 
+SCIM Groups are Hearth organizations. An organization created through SCIM (`POST /scim/v2/Groups`) carries a durable "provisioned by SCIM" marker; no request field sets or clears it, and backups carry it. The realm's SCIM **bearer token** may read every organization but may replace, patch or delete **only** the ones SCIM created — an organization created through the admin API, the console or `hearth.yaml` answers `403` to the token's `PUT`, `PATCH` and `DELETE`. Admin-token callers on the fallback path keep their rights (they need `hearth.realm.admin`, see above).
+
 ### Create a group
 
 ```bash
@@ -287,6 +289,7 @@ The following SCIM features are deferred to a future hardening release:
 |---------|-------------|
 | `403 Forbidden` on auth | Wrong realm UUID in `X-Realm-ID`, realm not active, or — on the admin-JWT fallback — the token lacks `hearth.users.admin` (`/Users`) / `hearth.realm.admin` (`/Groups`) and `hearth.admin`. |
 | `403 Forbidden` on PATCH / PUT / DELETE | Target user holds an admin permission (`hearth.admin` or any `hearth.*.admin`) the caller lacks. SCIM bearer tokens cannot mutate admin principals at all. Remove the admin role first, or use an admin JWT that outranks the target. |
+| `403 Forbidden` on `PUT` / `PATCH` / `DELETE /Groups/{id}` with the bearer token | The organization was not created through SCIM; the provisioning token may modify only organizations it created. |
 | `401 Unauthorized` | Bearer token mismatch. |
 | `400 Bad Request` / `invalidValue` | Missing `X-Realm-ID` header, or non-UUID value. |
 | `412 Precondition Failed` | Stale `If-Match` validator — the resource was modified after your last read. Re-fetch the resource, capture the new `ETag`, and retry. |

@@ -146,8 +146,8 @@ pub(crate) fn grpc_scoped_realm(
 
 /// gRPC face of the privilege ceiling on user administration
 /// ([`crate::protocol::admin_auth::check_user_admin_ceiling`]): the caller may
-/// not modify or delete a user of `auth.realm_id` who holds an admin
-/// permission the caller lacks.
+/// not modify, delete, demote or sign out a user of `auth.realm_id` who holds
+/// an admin permission the caller lacks.
 ///
 /// Returns `PERMISSION_DENIED` when the target outranks the caller and
 /// `UNAVAILABLE` when the target's permissions cannot be resolved.
@@ -156,15 +156,22 @@ pub(crate) fn grpc_require_user_ceiling(
     auth: &AdminAuth,
     target: &UserId,
 ) -> Result<(), Status> {
-    use crate::protocol::admin_auth::{check_user_admin_ceiling, UserCeilingError};
-
-    check_user_admin_ceiling(
+    crate::protocol::admin_auth::check_user_admin_ceiling(
+        state.identity.as_ref(),
         state.rbac.as_ref(),
         &auth.realm_id,
         target,
         &auth.permissions,
     )
-    .map_err(|e| match e {
+    .map_err(ceiling_status)
+}
+
+/// Maps a privilege-ceiling refusal onto a gRPC status: `PERMISSION_DENIED`
+/// when the target outranks the caller, `UNAVAILABLE` when it could not be
+/// resolved.
+pub(crate) fn ceiling_status(e: crate::protocol::admin_auth::UserCeilingError) -> Status {
+    use crate::protocol::admin_auth::UserCeilingError;
+    match e {
         UserCeilingError::Exceeded => Status::new(
             Code::PermissionDenied,
             "the target user holds admin permissions the caller lacks",
@@ -173,7 +180,7 @@ pub(crate) fn grpc_require_user_ceiling(
             Code::Unavailable,
             "could not resolve the target user's permissions; retry later",
         ),
-    })
+    }
 }
 
 fn now_micros() -> i64 {
