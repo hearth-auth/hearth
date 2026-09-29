@@ -776,7 +776,9 @@ impl EmbeddedIdentityEngine {
             .put(realm_id, &code_key, &code_bytes)
             .map_err(Self::storage_err)?;
 
-        let issuer = self.config.oidc.issuer.clone();
+        // The realm's issuer identifier — its discovery document's `issuer`,
+        // the RFC 9207 `iss` parameter and the JARM `iss` (GA audit 3 round 6).
+        let issuer = self.realm_issuer_url(realm_id);
 
         // 10. JARM — if a JWT response mode was requested OR the client enforces JARM,
         //     sign the response. When the client has `authorization_signed_response_alg`
@@ -1267,7 +1269,8 @@ impl EmbeddedIdentityEngine {
         // iss MUST match the discovery document's issuer (OIDC Core §2)
         let id_token_claims = TokenClaims {
             sub: stored_code.user_id.to_string(),
-            iss: self.config.oidc.issuer.clone(),
+            // OIDC Core §3.1.3.7 step 2: the realm discovery document's issuer.
+            iss: self.realm_issuer_url(realm_id),
             aud: Audience::single(issued_client_id(&request.client_id)),
             exp: iat + access_ttl_secs,
             iat,
@@ -2751,7 +2754,8 @@ impl EmbeddedIdentityEngine {
                 let iat = now.as_micros() / 1_000_000;
                 let id_token_claims = TokenClaims {
                     sub: user_id.to_string(),
-                    iss: self.config.oidc.issuer.clone(),
+                    // OIDC Core §3.1.3.7 step 2: the realm discovery issuer.
+                    iss: self.realm_issuer_url(realm_id),
                     aud: Audience::single(issued_client_id(client_id)),
                     exp: iat + self.config.token.access_token_ttl_secs,
                     iat,
@@ -5356,7 +5360,7 @@ impl EmbeddedIdentityEngine {
         let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
         let now_secs = self.clock.now().as_micros() / 1_000_000;
         let claims = JarmErrorClaims {
-            iss: self.config.oidc.issuer.clone(),
+            iss: self.realm_issuer_url(realm_id),
             aud: client_id.to_string(),
             // FAPI 2.0 §5.3.2.2 requires JARM JWT lifetime ≤ 5 minutes.
             exp: now_secs + 300,
@@ -5524,7 +5528,9 @@ impl EmbeddedIdentityEngine {
 
         if let Ok(entries) = self.storage.scan(realm_id, &sfam_prefix, &sfam_end) {
             let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
-            let issuer = self.config.oidc.issuer.clone();
+            // BCL §2.4: the logout token's `iss` is the issuer of the ID
+            // tokens it ends — the realm issuer.
+            let issuer = self.realm_issuer_url(realm_id);
             let now = self.clock.now();
             let iat = now.as_micros() / 1_000_000;
 
@@ -5570,11 +5576,14 @@ impl EmbeddedIdentityEngine {
                     .filter(|u| validation::is_allowed_backchannel_logout_uri(u))
                 {
                     let jti = uuid::Uuid::new_v4().to_string();
+                    // BCL §2.6: `sub` and `sid` are compared with the ID
+                    // tokens the RP holds for this session, so they are the
+                    // same strings the ID token carries.
                     let logout_claims = LogoutTokenClaims::new(
                         issuer.clone(),
-                        user_id.as_uuid().to_string(),
-                        Audience::single(client_id.as_uuid().to_string()),
-                        session_id.as_uuid().to_string(),
+                        user_id.to_string(),
+                        Audience::single(issued_client_id(&client_id)),
+                        session_id.to_string(),
                         jti,
                         iat,
                     );
@@ -5628,6 +5637,7 @@ impl EmbeddedIdentityEngine {
         };
 
         Ok(RpLogoutResult {
+            issuer: self.realm_issuer_url(realm_id),
             user_id,
             session_id,
             backchannel_targets,

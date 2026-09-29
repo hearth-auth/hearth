@@ -715,6 +715,24 @@ When the session is already gone, the endpoint still redirects cleanly (idempote
 
 On successful logout, Hearth fans out back-channel logout tokens to all registered RPs that have a `backchannel_logout_uri` configured. Front-channel logout URIs are served via a redirect page when `post_logout_redirect_uri` is absent.
 
+A logout token's `iss`, `sub` and `sid` are the exact strings the session's ID tokens carry — the
+realm issuer, `user_<uuid>` and `session_<uuid>` — because the RP matches them against the ID
+token it holds (BCL §2.4, §2.6); its `aud` is the issued `client_id`. The front-channel iframe
+URL carries the same `iss` and `sid` (FCL §2). A `client_id` sent with an `id_token_hint` must be
+one the hint's `aud` names (`400 invalid_request` otherwise).
+
+### 7.3.1 Issuer identifier
+
+Each realm is its own OIDC issuer: `{oidc.issuer}/realms/{name}`, the `issuer` of the realm
+discovery document (`/realms/{name}/.well-known/openid-configuration`). Every realm-issued
+artifact carries it — ID tokens (code exchange, device grant), access and refresh tokens, the
+RFC 9207 `iss` authorization-response parameter, JARM responses, logout tokens and the
+front-channel `iss` parameter — whichever route (realm-scoped or `X-Realm-ID`) produced it, so it
+always equals the realm document's `issuer` (OIDC Core §3.1.3.7 step 2, Discovery §4.3).
+The server-level document at `/.well-known/openid-configuration` describes the host itself
+(`issuer` = `oidc.issuer`); its endpoints need an `X-Realm-ID` header no standard RP sends, and
+no realm token carries its issuer. Relying parties configure the realm document.
+
 ### 7.4 Authorization Endpoint — GET Shim for SPAs
 
 The OIDC discovery document advertises `authorization_endpoint` as `{issuer}/authorize`. Browser-based PKCE clients (SPAs) redirect the user's browser there via `GET`. The interactive login+consent UI lives at `/ui/realms/{realm}/oauth/authorize`, so:

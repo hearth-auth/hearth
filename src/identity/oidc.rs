@@ -1005,6 +1005,9 @@ pub struct RpLogoutRequest {
 /// Result of RP-initiated logout.
 #[derive(Debug, Clone)]
 pub struct RpLogoutResult {
+    /// The realm's issuer identifier — the `iss` of the session's ID tokens
+    /// and of its logout tokens, sent as the front-channel `iss` parameter.
+    pub issuer: String,
     /// The user whose session was terminated.
     pub user_id: crate::core::UserId,
     /// The session that was revoked.
