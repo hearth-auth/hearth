@@ -784,3 +784,113 @@ async fn me_permissions_releases_nothing_to_a_third_party_clients_token() {
         "a third-party client's token must read no RBAC data; body {body}"
     );
 }
+
+// ── Round 2: decide answers for the token's organisation only ─────────────
+
+/// `organization_id` on `POST /oauth/authorize` was caller-chosen, so a token
+/// minted in organisation A was answered with the user's authority in
+/// organisation B (or a realm-level token with any organisation's). The org
+/// context is now the token's `oid`; a request naming another is denied.
+#[tokio::test]
+async fn decide_answers_only_for_the_tokens_organization() {
+    use hearth::core::OrganizationId;
+    use hearth::identity::{CreateOrganizationRequest, OrganizationConfig};
+
+    let f = setup().await;
+    let make_org = |slug: &str| -> OrganizationId {
+        let org =
+            f.h.identity()
+                .create_organization(
+                    &f.realm,
+                    &CreateOrganizationRequest {
+                        name: slug.to_string(),
+                        slug: slug.to_string(),
+                        description: None,
+                        config: Some(OrganizationConfig { max_members: None }),
+                        ..Default::default()
+                    },
+                )
+                .expect("create organization")
+                .id()
+                .clone();
+        let role =
+            f.h.rbac()
+                .create_role(
+                    &f.realm,
+                    &CreateRoleRequest {
+                        name: format!("{slug}-manager"),
+                        description: None,
+                        permissions: vec![Permission::new("team.manage").unwrap()],
+                        parent_roles: vec![],
+                        ..Default::default()
+                    },
+                )
+                .expect("create role");
+        f.h.rbac()
+            .assign_role(
+                &f.realm,
+                &AssignRoleRequest {
+                    subject: Subject::User(f.user.clone()),
+                    role_id: role.id,
+                    scope: Scope::Org {
+                        org_id: org.clone(),
+                    },
+                    assigned_by: None,
+                },
+            )
+            .expect("assign org-scoped role");
+        org
+    };
+    let org_a = make_org("org-a");
+    let org_b = make_org("org-b");
+
+    let session =
+        f.h.identity()
+            .create_session(&f.realm, &f.user, &SessionContext::default())
+            .expect("session");
+    let in_a =
+        f.h.identity()
+            .issue_tokens_with_context(
+                &f.realm,
+                &f.user,
+                session.id(),
+                &TokenIssuanceContext {
+                    oid: Some(org_a.to_string()),
+                    ..TokenIssuanceContext::default()
+                },
+            )
+            .expect("issue tokens")
+            .access_token()
+            .to_string();
+    let decide_in = |token: &str, org: Option<&OrganizationId>| {
+        f.h.identity()
+            .decide_token_permission(
+                &f.realm,
+                &DecidePermissionRequest {
+                    token: token.into(),
+                    permission: "team.manage".into(),
+                    organization_id: org.map(ToString::to_string),
+                    resource: None,
+                },
+            )
+            .expect("decide")
+            .allowed
+    };
+
+    assert!(
+        decide_in(&in_a, Some(&org_a)),
+        "control: the token's own organisation"
+    );
+    assert!(
+        decide_in(&in_a, None),
+        "no organization_id: the token's own organisation applies"
+    );
+    assert!(
+        !decide_in(&in_a, Some(&org_b)),
+        "a token minted in organisation A must not be answered for B"
+    );
+    assert!(
+        !decide_in(&f.session_token, Some(&org_a)),
+        "a realm-level token must not be answered for an organisation"
+    );
+}

@@ -806,3 +806,75 @@ async fn grpc_decide_denies_a_dpop_bound_token() {
          POST /oauth/authorize denies it"
     );
 }
+
+// ── Round 2: PAR on the realm twin ──────────────────────────────────────────
+
+/// `POST /realms/{realm}/authorize` ignored `request_uri`: a client that had
+/// pushed its request (RFC 9126) — mandatory in a FAPI realm — could use only
+/// the header-routed `POST /authorize`. The realm twin now consumes the pushed
+/// request exactly as the global handler does.
+#[tokio::test]
+async fn realm_authorize_consumes_a_pushed_authorization_request() {
+    use hearth::identity::PushedAuthorizationRequest;
+
+    let f = setup().await;
+    let client = f.register(ClientTrustLevel::FirstParty, false);
+    let push = || {
+        f.harness
+            .identity()
+            .push_authorization_request(
+                &f.realm,
+                &PushedAuthorizationRequest {
+                    client_id: client.clone(),
+                    redirect_uri: REDIRECT_URI.into(),
+                    scope: "openid".into(),
+                    state: "pushed-state".into(),
+                    resource: None,
+                    response_type: "code".into(),
+                    code_challenge: Some(PKCE_CHALLENGE.into()),
+                    code_challenge_method: Some(CodeChallengeMethod::S256),
+                    nonce: None,
+                    request: None,
+                    response_mode: None,
+                    prompt: None,
+                },
+            )
+            .expect("push authorization request")
+            .request_uri
+    };
+    let par_body = |request_uri: &str| {
+        serde_json::json!({
+            "client_id": client.as_uuid().to_string(),
+            "request_uri": request_uri,
+        })
+        .to_string()
+    };
+
+    // Control: the global handler consumes it.
+    let (status, body) = post_authorize(&f, "/authorize", &f.token, par_body(&push()), None).await;
+    assert_eq!(status, StatusCode::OK, "global PAR; body {body}");
+    assert_eq!(body["state"], "pushed-state", "body {body}");
+
+    let realm_uri = format!("/realms/{}/authorize", f.realm_name);
+    let request_uri = push();
+    let (status, body) =
+        post_authorize(&f, &realm_uri, &f.token, par_body(&request_uri), None).await;
+    assert_eq!(status, StatusCode::OK, "realm-twin PAR; body {body}");
+    assert!(
+        body["code"].as_str().is_some_and(|c| !c.is_empty()),
+        "a code must be issued; body {body}"
+    );
+    assert_eq!(
+        body["state"], "pushed-state",
+        "the pushed parameters are used; body {body}"
+    );
+
+    // Single use, as on the global handler.
+    let (status, body) =
+        post_authorize(&f, &realm_uri, &f.token, par_body(&request_uri), None).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a spent request_uri; body {body}"
+    );
+}
