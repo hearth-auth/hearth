@@ -980,3 +980,94 @@ async fn web_passkey_removal_with_a_passkey_assertion_is_allowed() {
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert_eq!(web_passkey_count(&rig), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Console enrolment is first-party only (GA audit 3 B-5, round 3)
+// ---------------------------------------------------------------------------
+
+/// The console enrolment endpoints authenticate by Hearth's own MAC-checked
+/// session cookie only; a third-party client's bearer token — even with a
+/// valid step-up proof and CSRF token — must not start or finish an
+/// enrolment. Guards the console twin of the REST first-party gate.
+#[tokio::test]
+async fn web_enrolment_refuses_a_third_party_clients_bearer_token() {
+    use hearth::identity::{ClientTrustLevel, RegisterClientRequest};
+
+    let rig = build_web_rig(true);
+    let client = rig
+        .identity
+        .register_client(
+            &rig.realm_id,
+            &RegisterClientRequest {
+                client_name: "third-party-app".into(),
+                redirect_uris: vec!["https://app.example.com/cb".into()],
+                grant_types: vec!["authorization_code".into()],
+                require_consent: true,
+                trust_level: ClientTrustLevel::ThirdParty,
+                declared_scopes: vec!["openid".into()],
+                ..RegisterClientRequest::default()
+            },
+        )
+        .expect("register client")
+        .client_id()
+        .clone();
+    let session = rig
+        .identity
+        .create_session(&rig.realm_id, &rig.user_id, &SessionContext::default())
+        .expect("session");
+    let token = rig
+        .identity
+        .issue_tokens_with_context(
+            &rig.realm_id,
+            &rig.user_id,
+            session.id(),
+            &TokenIssuanceContext {
+                client_id: Some(client),
+                ..TokenIssuanceContext::default()
+            },
+        )
+        .expect("tokens")
+        .access_token()
+        .to_string();
+
+    for (path, body) in [
+        (
+            "/ui/account/passkeys/register-begin",
+            serde_json::json!({ "password": PASSWORD }),
+        ),
+        (
+            "/ui/account/passkeys/register-complete",
+            serde_json::json!({ "client_data_json": "e30", "attestation_object": "oA" }),
+        ),
+    ] {
+        let response = rig
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::COOKIE, "hearth_ui_csrf=csrf-abc")
+                    .header("x-csrf-token", "csrf-abc")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("oneshot");
+        let status = response.status();
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            status.is_redirection() && location.contains("/login"),
+            "{path}: a bearer token is no console session — expected a redirect to \
+             login, got {status} (location {location:?})"
+        );
+    }
+    assert_eq!(web_passkey_count(&rig), 0, "no credential may be added");
+}
