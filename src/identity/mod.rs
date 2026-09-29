@@ -261,15 +261,15 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// After all actions complete, the flow resumes by creating a session
     /// cookie and redirecting to `return_to` (or `/ui` when `None`).
-    /// `webauthn_verified` carries forward that this flow registered a
-    /// user-verified passkey (see [`ra_token::RaClaims::webauthn_verified`]).
+    /// `mfa_proof` is what the login has proved so far; the session created
+    /// when the flow ends records it (see [`ra_token::RaClaims::mfa_proof`]).
     fn generate_browser_ra_token(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         pending_actions: Vec<RequiredAction>,
         return_to: Option<String>,
-        webauthn_verified: bool,
+        mfa_proof: MfaProof,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
 

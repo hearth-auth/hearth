@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 use crate::identity::tokens::SigningKey;
-use crate::identity::types::RequiredAction;
+use crate::identity::types::{MfaProof, RequiredAction};
 
 /// Cookie name for the RA session token.
 pub const RA_SESSION_COOKIE: &str = "hearth_ra_session";
@@ -101,12 +101,21 @@ pub struct RaClaims {
     /// and redirects to this path (or `/ui` when `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_return_to: Option<String>,
-    /// Whether this required-action flow has registered a passkey with user
-    /// verification. The browser-login session created when the flow ends
-    /// then records `MfaProof::ProvedWebAuthn`: the user just proved a
-    /// user-verified passkey.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub webauthn_verified: bool,
+    /// What this login has proved about a second factor: the proof of the
+    /// authentication that started the flow, raised only by a factor the flow
+    /// itself proved (see [`RaClaims::record_verified_passkey`] and
+    /// [`RaClaims::record_enrolled_factor`]).
+    ///
+    /// The browser-login session created when the flow ends records exactly
+    /// this, and the engine's `mfa_required` / `webauthn_required` gates read
+    /// it (GA audit round 3, D-1). The flow used to resume with
+    /// `MfaProof::Inherited`, which satisfies both gates, so any pending
+    /// action turned a TOTP code, a UV-less passkey or the password alone into
+    /// a session the same login was refused without the detour. Never
+    /// `Inherited`: [`generate_browser`] refuses to carry it. Unused on the
+    /// OIDC path, which resumes from the session the user already holds.
+    #[serde(default)]
+    pub mfa_proof: MfaProof,
     /// Issued-at time (Unix seconds).
     pub iat: i64,
     /// Expiry time (Unix seconds).
@@ -158,7 +167,7 @@ pub fn generate(
         pending_actions,
         oidc_params: Some(oidc_params),
         browser_return_to: None,
-        webauthn_verified: false,
+        mfa_proof: MfaProof::None,
         iat,
         exp,
     };
@@ -170,12 +179,16 @@ pub fn generate(
 ///
 /// After all required actions complete, the flow resumes by creating a
 /// session cookie and redirecting to `return_to` (or `/ui` when `None`).
+/// `mfa_proof` is what the authentication that started the flow proved; the
+/// session created at the end records it (see [`RaClaims::mfa_proof`]).
+/// `MfaProof::Inherited` is recorded as `MfaProof::None`: it names a proof
+/// made by some earlier authentication, which this flow cannot vouch for.
 pub fn generate_browser(
     user_id: &str,
     realm_id: &str,
     pending_actions: Vec<RequiredAction>,
     return_to: Option<String>,
-    webauthn_verified: bool,
+    mfa_proof: MfaProof,
     signing_key: &SigningKey,
     now: Timestamp,
 ) -> Result<String, IdentityError> {
@@ -188,12 +201,40 @@ pub fn generate_browser(
         pending_actions,
         oidc_params: None,
         browser_return_to: return_to,
-        webauthn_verified,
+        mfa_proof: match mfa_proof {
+            MfaProof::Inherited => MfaProof::None,
+            proved => proved,
+        },
         iat,
         exp,
     };
 
     signing_key.sign_jwt(&claims, RA_TOKEN_TYPE)
+}
+
+impl RaClaims {
+    /// Records that this flow registered a passkey whose ceremony proved user
+    /// verification: the login has just proved exactly the factor a
+    /// `webauthn_required` realm asks for.
+    pub fn record_verified_passkey(&mut self) {
+        self.mfa_proof = MfaProof::ProvedWebAuthn;
+    }
+
+    /// Records that this flow enrolled a TOTP, SMS or email-OTP factor and
+    /// the user proved it by typing back a live code.
+    ///
+    /// That counts as a second factor only for a login that had proved none
+    /// ([`MfaProof::None`]): the first-login enrolment a realm requiring MFA
+    /// relies on, which forced TOTP enrolment already records as
+    /// [`MfaProof::Proved`]. A login that proved something keeps its proof —
+    /// in particular a UV-less passkey ([`MfaProof::PasskeyPossession`]) is
+    /// not raised by enrolling a factor of the presenter's choosing, the way
+    /// forced enrolment is never offered to a user who holds a factor.
+    pub fn record_enrolled_factor(&mut self) {
+        if self.mfa_proof == MfaProof::None {
+            self.mfa_proof = MfaProof::Proved;
+        }
+    }
 }
 
 /// Validates an RA session JWT and returns the decoded claims.
@@ -488,5 +529,65 @@ mod tests {
         let err =
             validate("not.a.valid.jwt.at.all", key.public_key_bytes(), now).expect_err("malformed");
         assert_eq!(err, RaTokenError::MalformedClaims);
+    }
+
+    // ── MFA proof carried to the resumed session (GA audit round 3, D-1) ────
+
+    fn browser_claims(proof: MfaProof) -> RaClaims {
+        let key = SigningKey::generate().expect("key generation");
+        let now = test_now();
+        let token = generate_browser(
+            "user_abc",
+            "realm_xyz",
+            vec![RequiredAction::UpdatePassword],
+            None,
+            proof,
+            &key,
+            now,
+        )
+        .expect("generate");
+        validate(&token, key.public_key_bytes(), now).expect("validate")
+    }
+
+    #[test]
+    fn a_browser_token_carries_the_proof_of_the_login_that_minted_it() {
+        for proof in [
+            MfaProof::None,
+            MfaProof::Proved,
+            MfaProof::ProvedWebAuthn,
+            MfaProof::PasskeyPossession,
+        ] {
+            assert_eq!(browser_claims(proof).mfa_proof, proof);
+        }
+    }
+
+    #[test]
+    fn a_browser_token_never_carries_an_inherited_proof() {
+        assert_eq!(
+            browser_claims(MfaProof::Inherited).mfa_proof,
+            MfaProof::None,
+            "a proof made by some earlier authentication is not this login's"
+        );
+    }
+
+    #[test]
+    fn an_enrolled_factor_raises_only_a_login_that_proved_nothing() {
+        for (before, after) in [
+            (MfaProof::None, MfaProof::Proved),
+            (MfaProof::Proved, MfaProof::Proved),
+            (MfaProof::ProvedWebAuthn, MfaProof::ProvedWebAuthn),
+            (MfaProof::PasskeyPossession, MfaProof::PasskeyPossession),
+        ] {
+            let mut claims = browser_claims(before);
+            claims.record_enrolled_factor();
+            assert_eq!(claims.mfa_proof, after, "from {before:?}");
+        }
+    }
+
+    #[test]
+    fn a_verified_passkey_registration_proves_webauthn() {
+        let mut claims = browser_claims(MfaProof::Proved);
+        claims.record_verified_passkey();
+        assert_eq!(claims.mfa_proof, MfaProof::ProvedWebAuthn);
     }
 }

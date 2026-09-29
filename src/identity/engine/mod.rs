@@ -7993,7 +7993,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         pending_actions: Vec<crate::identity::types::RequiredAction>,
         return_to: Option<String>,
-        webauthn_verified: bool,
+        mfa_proof: crate::identity::MfaProof,
         now: Timestamp,
     ) -> Result<String, IdentityError> {
         let key = self.get_or_load_realm_signing_key(realm_id)?;
@@ -8002,7 +8002,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             &realm_id.as_uuid().to_string(),
             pending_actions,
             return_to,
-            webauthn_verified,
+            mfa_proof,
             &key,
             now,
         )

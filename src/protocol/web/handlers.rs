@@ -1001,6 +1001,9 @@ pub async fn mfa_otp_challenge_submit(
         &pending.realm_id,
         &pending.user_id,
         pending.return_to.as_deref(),
+        // The OTP just verified is a proved second factor, as in
+        // `finish_otp_login`; the RA flow carries it to the session.
+        MfaProof::Proved,
         &headers,
         now_ra,
     ) {
@@ -2308,6 +2311,8 @@ fn login_finish(
         realm.id(),
         user.id(),
         return_to.as_deref(),
+        // The password alone: nothing proved beyond the first factor.
+        session_ctx.mfa_proof,
         &headers,
         now,
     ) {
@@ -2767,6 +2772,20 @@ fn passkey_complete_for_user(
     // operator-forced password change, email verification or enrolment could
     // be walked around by signing in with a passkey instead of the password.
     // Same gate as the password form, answered in this endpoint's JSON shape.
+    // The engine's own `mfa_required` gate reads this proof, so it must carry
+    // what the ceremony proved rather than an assumption made before it ran.
+    // `ProvedWebAuthn` rather than the generic `Proved`: a realm that sets
+    // `webauthn_required` accepts only a WebAuthn assertion, and this is the
+    // one path that can produce it (audit 2026-08-28 §4.18#3, task 25.26).
+    let mfa_proof = if user_verified {
+        crate::identity::MfaProof::ProvedWebAuthn
+    } else {
+        // Possession of the passkey the account holds (GA audit B5): the
+        // engine admits it only when the user holds no other factor, which
+        // the gate above has already challenged.
+        crate::identity::MfaProof::PasskeyPossession
+    };
+
     let now = crate::core::Timestamp::from_micros(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2774,11 +2793,14 @@ fn passkey_complete_for_user(
             .and_then(|d| i64::try_from(d.as_micros()).ok())
             .unwrap_or(0),
     );
+    // A required-action detour carries the same proof to the session it
+    // ends in (GA audit round 3, I-2).
     if let Some(ra) = super::required_action::required_action_check_browser(
         state,
         realm.id(),
         auth_result.user_id(),
         None,
+        mfa_proof,
         headers,
         now,
     ) {
@@ -2789,20 +2811,8 @@ fn passkey_complete_for_user(
     // A-41: Destroy any pre-existing session cookie before issuing a new one.
     revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
 
-    // The engine's own `mfa_required` gate reads this proof, so it must carry
-    // what the ceremony proved rather than an assumption made before it ran.
-    // `ProvedWebAuthn` rather than the generic `Proved`: a realm that sets
-    // `webauthn_required` accepts only a WebAuthn assertion, and this is the
-    // one path that can produce it (audit 2026-08-28 §4.18#3, task 25.26).
     let mut session_ctx = session_ctx.clone();
-    session_ctx.mfa_proof = if user_verified {
-        crate::identity::MfaProof::ProvedWebAuthn
-    } else {
-        // Possession of the passkey the account holds (GA audit B5): the
-        // engine admits it only when the user holds no other factor, which
-        // the gate above has already challenged.
-        crate::identity::MfaProof::PasskeyPossession
-    };
+    session_ctx.mfa_proof = mfa_proof;
 
     match state
         .identity
@@ -3061,6 +3071,10 @@ pub async fn mfa_challenge_submit(
         &pending.realm_id,
         &pending.user_id,
         pending.return_to.as_deref(),
+        // The TOTP or recovery code just verified — and nothing more. The
+        // detour used to end in `Inherited`, which a passkey-only realm
+        // accepts (GA audit round 3, D-1).
+        MfaProof::Proved,
         &headers,
         now_ra,
     ) {
@@ -3415,6 +3429,8 @@ pub async fn mfa_enroll_required_submit(
         &pending.realm_id,
         &pending.user_id,
         pending.return_to.as_deref(),
+        // The live code that confirmed the enrolment (see below).
+        MfaProof::Proved,
         &headers,
         now_ra,
     ) {
@@ -4811,6 +4827,8 @@ fn magic_link_redeem_impl(
         realm.id(),
         &user_id,
         None,
+        // The link proves the inbox, one factor; nothing was owed above.
+        MfaProof::None,
         headers,
         now,
     ) {
@@ -6088,6 +6106,9 @@ pub async fn device_approve_submit(
         &session.realm_id,
         &session.user_id,
         Some("/ui/device"),
+        // What the login behind this session proved; the session the
+        // detour ends in records no more than that.
+        session.mfa_proof,
         &headers,
         now,
     ) {

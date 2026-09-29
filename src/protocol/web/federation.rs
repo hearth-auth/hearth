@@ -929,6 +929,8 @@ fn complete_login(
         realm_id,
         user_id,
         Some(return_to),
+        // The upstream login is one factor; nothing was owed above.
+        crate::identity::MfaProof::None,
         headers,
         now,
     ) {
