@@ -8,6 +8,11 @@
 //! | realm-A admin → get realm-B | `cross_realm_get_realm_denied` |
 //! | realm-A admin → update realm-B | `cross_realm_update_realm_denied` |
 //! | realm-A admin → create_realm | `cross_realm_create_realm_denied` |
+//!
+//! `UpdateRealm` and `CreateRealm` are refused for every caller since GA audit
+//! round 3 (G-7) — realms are YAML-managed — so the two cross-realm cases now
+//! assert that refusal and that nothing was written; the full matrix is in
+//! `ga3_grpc_realm_yaml_managed.rs`.
 //! | realm-A admin → list_realms | `list_realms_scoped_to_own_realm` |
 //! | system admin → get realm-A | `system_admin_can_get_any_realm` (positive) |
 //! | realm-A admin → get realm-A | `realm_admin_can_get_own_realm` (positive) |
@@ -217,7 +222,8 @@ async fn cross_realm_get_realm_denied() {
     );
 }
 
-/// Realm-A admin calling update_realm on realm-B must get PermissionDenied.
+/// Realm-A admin calling update_realm on realm-B is refused (every
+/// `UpdateRealm` is, since G-7) and realm-B keeps its name.
 #[tokio::test]
 async fn cross_realm_update_realm_denied() {
     let h = common::TestHarness::embedded().await.expect("harness");
@@ -225,6 +231,13 @@ async fn cross_realm_update_realm_denied() {
 
     let (realm_a, token_a) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
     let (realm_b, _token_b) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
+    let realm_b_name = h
+        .identity()
+        .get_realm(&realm_b)
+        .expect("lookup")
+        .expect("realm-B exists")
+        .name()
+        .to_string();
 
     let result = svc
         .update_realm(grpc_req(
@@ -244,25 +257,32 @@ async fn cross_realm_update_realm_denied() {
         result
             .expect_err("cross-realm update_realm must be denied")
             .code(),
-        Code::PermissionDenied,
+        Code::FailedPrecondition,
     );
+    let stored = h
+        .identity()
+        .get_realm(&realm_b)
+        .expect("lookup")
+        .expect("realm-B still exists");
+    assert_eq!(stored.name(), realm_b_name, "realm-B must not be renamed");
 }
 
-/// Non-system realm admin calling create_realm must get PermissionDenied.
-/// Only system-realm admins may create new realms.
+/// Non-system realm admin calling create_realm is refused (every
+/// `CreateRealm` is, since G-7) and no realm appears.
 #[tokio::test]
 async fn cross_realm_create_realm_denied() {
     let h = common::TestHarness::embedded().await.expect("harness");
     let svc = make_svc(&h);
 
     let (realm_a, token_a) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
+    let name = format!("new-realm-{}", uuid::Uuid::new_v4());
 
     let result = svc
         .create_realm(grpc_req(
             &realm_a,
             &token_a,
             pb::CreateRealmRequest {
-                name: format!("new-realm-{}", uuid::Uuid::new_v4()),
+                name: name.clone(),
                 config: None,
             },
         ))
@@ -272,7 +292,14 @@ async fn cross_realm_create_realm_denied() {
         result
             .expect_err("non-system realm admin must not be able to create realms")
             .code(),
-        Code::PermissionDenied,
+        Code::FailedPrecondition,
+    );
+    assert!(
+        h.identity()
+            .get_realm_by_name(&name)
+            .expect("lookup")
+            .is_none(),
+        "no realm may be created"
     );
 }
 

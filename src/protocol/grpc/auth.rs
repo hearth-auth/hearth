@@ -74,16 +74,10 @@ pub fn authenticate_admin(md: &MetadataMap, state: &GrpcState) -> Result<AdminAu
     // gRPC services are RBAC/identity admin operations; callers may refine
     // per-RPC with require_admin_permission on the HTTP side or by inspecting
     // claims.permissions in the gRPC handler.
-    let is_admin = claims.permissions.iter().any(|p| {
-        matches!(
-            p.as_str(),
-            "hearth.admin"
-                | "hearth.users.admin"
-                | "hearth.clients.admin"
-                | "hearth.realm.admin"
-                | "hearth.agents.admin"
-        )
-    });
+    let is_admin = claims
+        .permissions
+        .iter()
+        .any(|p| crate::protocol::admin_auth::is_admin_permission(p));
     // A token held by a third-party client never administers the realm
     // (GA audit B1) — parity with the REST `extract_admin_auth`.
     if !is_admin
@@ -114,11 +108,7 @@ pub fn authenticate_admin(md: &MetadataMap, state: &GrpcState) -> Result<AdminAu
 /// The `Result` **must** be used — discarding it silently bypasses authorization.
 #[must_use = "discarding this Result bypasses authorization; bind the return value"]
 pub fn grpc_require_permission(auth: &AdminAuth, required: &str) -> Result<(), Status> {
-    let permitted = auth
-        .permissions
-        .iter()
-        .any(|p| p == "hearth.admin" || p == required);
-    if !permitted {
+    if !crate::protocol::admin_auth::grants_admin_permission(&auth.permissions, required) {
         return Err(Status::new(Code::PermissionDenied, "forbidden"));
     }
     Ok(())
