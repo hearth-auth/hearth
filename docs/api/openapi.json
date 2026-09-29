@@ -1020,44 +1020,6 @@
             }
           }
         }
-      },
-      "post": {
-        "operationId": "IdentityAdminService_CreateRealm",
-        "tags": [
-          "IdentityAdminService"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/v1CreateRealmRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "A successful response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/v1Realm"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "An unexpected error response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/rpcStatus"
-                }
-              }
-            }
-          }
-        }
       }
     },
     "/admin/realms/{id}": {
@@ -1117,52 +1079,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/v1Empty"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "An unexpected error response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/rpcStatus"
-                }
-              }
-            }
-          }
-        }
-      },
-      "put": {
-        "operationId": "IdentityAdminService_UpdateRealm",
-        "tags": [
-          "IdentityAdminService"
-        ],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "type": "string"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/v1UpdateRealmRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "A successful response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/v1Realm"
                 }
               }
             }

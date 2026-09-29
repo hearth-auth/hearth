@@ -8,6 +8,18 @@ The Admin REST API is a bearer-token-authenticated HTTP API served at the root `
 
 ## Users
 
+**Privilege ceiling.** The user endpoints need `hearth.users.admin` (or `hearth.admin`). In
+addition, an admin may not modify, re-email, disable, reset or delete a user who holds an admin
+permission the admin lacks: `hearth.admin` outranks every sub-admin, and a sub-admin may act on
+another user only when it holds every admin permission (`hearth.admin`, `hearth.users.admin`,
+`hearth.clients.admin`, `hearth.realm.admin`, `hearth.agents.admin`) that user holds. A refused
+call answers `403` with `"error_description": "the target user holds admin permissions the caller
+lacks"`, and `503` when the target's permissions cannot be resolved. The rule covers
+`PATCH`/`DELETE /admin/users/{id}`, `DELETE /admin/users/{id}/device-fingerprints`, the `disable`
+operation of `POST /admin/users/bulk` (a batch naming any such user is refused whole),
+`PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`, the gRPC `UpdateUser` /
+`DeleteUser` RPCs and SCIM `/scim/v2/Users`.
+
 ### List users
 
 `GET /admin/users`
@@ -622,8 +634,12 @@ curl -s -X DELETE \
 | Status | Meaning |
 |--------|---------|
 | `204` | Realm permanently deleted |
+| `403` | Not your realm, or the target realm's cross-realm trust policy names the system realm without granting `hearth.admin` |
 | `404` | Realm not found |
 | `409` | Realm is not archived — remove it from `hearth.yaml` and restart first |
+
+`GET` and `DELETE /admin/realms/{realm_id}` and their gRPC twins (`GetRealm`, `DeleteRealm`)
+apply the same realm-scope rule, trust policies included.
 
 ---
 

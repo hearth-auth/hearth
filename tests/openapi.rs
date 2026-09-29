@@ -200,3 +200,44 @@ fn docs_path_has_get_operation() {
         "/docs must have a GET operation for Swagger UI"
     );
 }
+
+// ---------------------------------------------------------------------------
+// YAML-managed realms (GA audit round 3, G-7)
+// ---------------------------------------------------------------------------
+
+/// Realms are declared in `hearth.yaml`: REST `POST /admin/realms` and
+/// `PATCH /admin/realms/{id}` answer `405`, gRPC `CreateRealm` / `UpdateRealm`
+/// answer `FAILED_PRECONDITION`. The spec must not advertise them as working
+/// `200` operations, while the realm reads and the archived-realm purge stay.
+#[test]
+fn yaml_managed_realm_writes_are_not_documented() {
+    let v = merged();
+    let paths = v["paths"].as_object().expect("paths");
+
+    let mut advertised = Vec::new();
+    for (path, item) in paths {
+        for (method, op) in item.as_object().into_iter().flatten() {
+            let id = op["operationId"].as_str().unwrap_or_default();
+            if matches!(
+                id,
+                "IdentityAdminService_CreateRealm" | "IdentityAdminService_UpdateRealm"
+            ) {
+                advertised.push(format!("{method} {path} ({id})"));
+            }
+        }
+    }
+    assert!(
+        advertised.is_empty(),
+        "realm writes must not be documented: {advertised:?}"
+    );
+
+    assert!(v["paths"]["/admin/realms"]["get"].is_object(), "ListRealms");
+    assert!(
+        v["paths"]["/admin/realms/{id}"]["get"].is_object(),
+        "GetRealm"
+    );
+    assert!(
+        v["paths"]["/admin/realms/{id}"]["delete"].is_object(),
+        "DeleteRealm"
+    );
+}

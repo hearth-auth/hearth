@@ -34,8 +34,8 @@ use super::extract_realm_id;
 use super::{
     check_export_capability, check_export_rate_limit, emit_export_watermark, extract_admin_auth,
     identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
-    require_admin_permission, require_any_admin_permission, require_superuser, AdminAuth, AppState,
-    BACKUP_RESTORE_BODY_LIMIT,
+    require_admin_permission, require_any_admin_permission, require_superuser,
+    require_user_admin_ceiling, AdminAuth, AppState, BACKUP_RESTORE_BODY_LIMIT,
 };
 
 /// Registers all admin API routes (mounted under `/admin` by the parent router).
@@ -306,46 +306,47 @@ fn reject_system_realm_write(auth: &AdminAuth) -> Result<(), Response> {
     Ok(())
 }
 
-/// Capability a cross-realm `/admin/realms/{id}/*` operation must be granted by
-/// a stored [`crate::identity::CrossRealmTrustPolicy`] before it is permitted.
-///
-/// A policy may also carry `*`, which grants every capability.
-const CROSS_REALM_ADMIN_CAPABILITY: &str = "hearth.admin";
-
 /// Enforces realm-level object authorization (BOLA guard).
 ///
-/// Returns `path_realm_id` when access is permitted:
+/// Returns `path_realm_id` when access is permitted, per the shared rule in
+/// [`crate::protocol::admin_auth::admin_realm_scope`] (also applied by gRPC
+/// `GetRealm` / `DeleteRealm`):
 /// - `auth.realm_id == path_realm_id` — no boundary is crossed, always allowed.
 /// - The **system realm** (nil UUID) is a superuser that may operate on any
-///   realm, *subject to the target realm's cross-realm trust policies* (see
-///   [`cross_realm_crossing_permitted`]).
+///   realm, *subject to the target realm's cross-realm trust policies*.
 /// - Otherwise `403 Forbidden`.
 ///
 /// Every handler that exposes a `{realm_id}` path parameter **must** obtain the
 /// realm through this function rather than using `path_realm_id` directly.
+///
+/// A tenant realm can no longer author a policy that names the system realm as
+/// source — `create_cross_realm_policy` in `advanced.rs` refuses that for a
+/// non-system actor, so a tenant cannot deny service to the platform operator.
+/// The deny branch therefore fires only on a policy stored before that rule
+/// existed, or one authored by a system-realm actor. Recovery from such a
+/// policy is `DELETE /v1/cross-realm-policies/{id}` **by that realm's own
+/// admin**: those routes are keyed on the caller's realm, so there is no
+/// operator-side path to them.
 fn scoped_realm(
     state: &AppState,
     auth: &AdminAuth,
     path_realm_id: RealmId,
 ) -> Result<RealmId, Response> {
-    if auth.realm_id == path_realm_id {
-        return Ok(path_realm_id);
-    }
-    if !auth.realm_id.as_uuid().is_nil() {
-        return Err((
+    use crate::protocol::admin_auth::{admin_realm_scope, AdminRealmScope};
+
+    match admin_realm_scope(
+        state.identity.as_ref(),
+        &auth.realm_id,
+        &path_realm_id,
+        super::now_micros(),
+    ) {
+        Ok(AdminRealmScope::Permitted) => Ok(path_realm_id),
+        Ok(AdminRealmScope::OtherRealm) => Err((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "forbidden"})),
         )
-            .into_response());
-    }
-
-    // A genuine realm crossing. Audit 2026-08-28 §4.1#8: consult the target
-    // realm's stored cross-realm trust policies instead of waving the system
-    // realm through unconditionally.
-    if cross_realm_crossing_permitted(state, &auth.realm_id, &path_realm_id)? {
-        Ok(path_realm_id)
-    } else {
-        Err((
+            .into_response()),
+        Ok(AdminRealmScope::PolicyDenied) => Err((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
                 "error": "cross_realm_capability_not_allowed",
@@ -353,74 +354,9 @@ fn scoped_realm(
                             grant this capability"
             })),
         )
-            .into_response())
+            .into_response()),
+        Err(e) => Err(identity_error_to_response(&e).into_response()),
     }
-}
-
-/// Decides whether `source` may reach into `target` for an admin operation.
-///
-/// Three-way outcome, collapsed onto a `bool`:
-/// 1. **Permitted** — a live policy in `target` names `source` and grants
-///    [`CROSS_REALM_ADMIN_CAPABILITY`] (or `*`). Returns `true`.
-/// 2. **Denied** — a live policy in `target` names `source` but withholds that
-///    capability. Returns `false`; the crossing is refused.
-/// 3. **Ungoverned** — no live policy in `target` names `source` at all. The
-///    default is *permissive-with-audit*: the crossing is allowed and a
-///    `WARN`-level record is emitted. Fail-closed here would brick the system
-///    realm's management plane on every deployment that has never authored a
-///    policy, which is every deployment today.
-///
-/// A realm therefore opts into enforcement by authoring its first policy for a
-/// given source realm; until then behaviour is unchanged.
-///
-/// A tenant realm can no longer author a policy that names the system realm as
-/// source — `create_cross_realm_policy` in `advanced.rs` refuses that for a
-/// non-system actor, so a tenant cannot deny service to the platform operator.
-/// The deny branch here therefore fires only on a policy stored before that
-/// rule existed, or one authored by a system-realm actor. Recovery from such a
-/// policy is `DELETE /v1/cross-realm-policies/{id}` **by that realm's own
-/// admin**: those routes are keyed on the caller's realm, so there is no
-/// operator-side path to them.
-fn cross_realm_crossing_permitted(
-    state: &AppState,
-    source: &RealmId,
-    target: &RealmId,
-) -> Result<bool, Response> {
-    let permitted = state
-        .identity
-        .check_cross_realm_policy(target, source, CROSS_REALM_ADMIN_CAPABILITY)
-        .map_err(|e| identity_error_to_response(&e).into_response())?;
-    if permitted {
-        return Ok(true);
-    }
-
-    let policies = state
-        .identity
-        .list_cross_realm_policies(target)
-        .map_err(|e| identity_error_to_response(&e).into_response())?;
-    let now = crate::core::Timestamp::from_micros(super::now_micros());
-    let governed = policies
-        .iter()
-        .any(|p| &p.source_realm_id == source && p.expires_at.is_none_or(|exp| now < exp));
-
-    if governed {
-        tracing::warn!(
-            source_realm = %source.as_uuid(),
-            target_realm = %target.as_uuid(),
-            capability = CROSS_REALM_ADMIN_CAPABILITY,
-            "cross-realm admin operation refused by trust policy"
-        );
-        return Ok(false);
-    }
-
-    tracing::warn!(
-        source_realm = %source.as_uuid(),
-        target_realm = %target.as_uuid(),
-        capability = CROSS_REALM_ADMIN_CAPABILITY,
-        "cross-realm admin operation permitted by default: no cross-realm trust \
-         policy governs this realm pair"
-    );
-    Ok(true)
 }
 
 /// Scans every realm page for the realm whose name equals `slug`.
@@ -1130,6 +1066,9 @@ async fn admin_update_user(
 
     let request = crate::identity::UpdateUserRequest::from(body);
     let uid = UserId::new(user_uuid);
+    if let Err(e) = require_user_admin_ceiling(&state, &auth, &auth.realm_id, &uid) {
+        return e.into_response();
+    }
     let audit_ctx = AuditContext {
         actor: Actor::User(auth.user_id.clone()),
         metadata: Some(serde_json::json!({"via": "admin_api"})),
@@ -1173,6 +1112,10 @@ async fn admin_delete_user(
         }
     };
 
+    let uid = UserId::new(user_uuid);
+    if let Err(e) = require_user_admin_ceiling(&state, &auth, &auth.realm_id, &uid) {
+        return e.into_response();
+    }
     let audit_ctx = AuditContext {
         actor: Actor::User(auth.user_id.clone()),
         metadata: Some(serde_json::json!({"via": "admin_api"})),
@@ -1180,7 +1123,7 @@ async fn admin_delete_user(
 
     match state
         .identity
-        .delete_user_attributed(&auth.realm_id, &UserId::new(user_uuid), &audit_ctx)
+        .delete_user_attributed(&auth.realm_id, &uid, &audit_ctx)
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
@@ -1218,6 +1161,9 @@ async fn admin_delete_user_device_fingerprints(
     };
 
     let user_id = UserId::new(user_uuid);
+    if let Err(e) = require_user_admin_ceiling(&state, &auth, &auth.realm_id, &user_id) {
+        return e.into_response();
+    }
 
     match state
         .identity
@@ -1318,6 +1264,14 @@ async fn admin_bulk_users(
                         )
                             .into_response()
                     }
+                }
+            }
+
+            // All-or-nothing: a batch naming any user who outranks the caller
+            // is refused before the first write.
+            for uid in &user_ids {
+                if let Err(e) = require_user_admin_ceiling(&state, &auth, &auth.realm_id, uid) {
+                    return e.into_response();
                 }
             }
 
@@ -1595,6 +1549,9 @@ async fn admin_patch_user_required_actions(
         }
     };
     let uid = UserId::new(user_uuid);
+    if let Err(e) = require_user_admin_ceiling(&state, &auth, &realm_id, &uid) {
+        return e.into_response();
+    }
 
     // Parse and validate action string arrays from the request body.
     let parse_actions = |key: &str| -> Result<Vec<RequiredAction>, axum::response::Response> {

@@ -406,6 +406,45 @@ pub(crate) fn require_admin_permission(
     Ok(())
 }
 
+/// REST face of the privilege ceiling on user administration
+/// ([`crate::protocol::admin_auth::check_user_admin_ceiling`]): the caller may
+/// not modify, re-email, reset, disable or delete a user of `realm_id` who
+/// holds an admin permission the caller lacks. Call it after
+/// [`require_admin_permission`] and before the mutation, on every
+/// user-targeting admin write.
+///
+/// Returns `403 Forbidden` when the target outranks the caller and
+/// `503 Service Unavailable` when the target's permissions cannot be resolved.
+pub(crate) fn require_user_admin_ceiling(
+    state: &AppState,
+    auth: &AdminAuth,
+    realm_id: &RealmId,
+    target: &UserId,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    use crate::protocol::admin_auth::{check_user_admin_ceiling, UserCeilingError};
+
+    check_user_admin_ceiling(state.rbac.as_ref(), realm_id, target, &auth.permissions).map_err(
+        |e| match e {
+            UserCeilingError::Exceeded => (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "forbidden",
+                    "error_description":
+                        "the target user holds admin permissions the caller lacks"
+                })),
+            ),
+            UserCeilingError::Unresolved => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "service_unavailable",
+                    "error_description":
+                        "could not resolve the target user's permissions; retry later"
+                })),
+            ),
+        },
+    )
+}
+
 /// Checks that the caller holds `hearth.admin` or **any one** of the listed
 /// granular sub-permissions. Use on read-only endpoints that are safely
 /// accessible to multiple sub-admin roles (e.g. both `hearth.realm.admin` and

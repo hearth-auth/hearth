@@ -8,6 +8,16 @@ info:
     When HEA-969 adds proto definitions for these endpoints, remove them here.
   version: 0.1.0
 
+# Proto-derived operations that the REST surface does not serve, dropped from
+# the merged spec by `scripts/merge_openapi.py` (matched by operationId; an
+# entry that matches nothing fails the merge, so this list cannot go stale).
+# Realms are declared in hearth.yaml: `POST /admin/realms` and
+# `PATCH /admin/realms/{id}` answer 405, and the gRPC CreateRealm / UpdateRealm
+# RPCs answer FAILED_PRECONDITION (GA audit round 3, G-7).
+x-hearth-omit-operations:
+  - IdentityAdminService_CreateRealm
+  - IdentityAdminService_UpdateRealm
+
 paths:
   # ── Health / liveness ────────────────────────────────────────────────────
   /health:

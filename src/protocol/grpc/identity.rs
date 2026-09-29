@@ -1,6 +1,6 @@
 //! Admin service implementations: users, realms, organizations, applications.
 
-use tonic::{Code, Request, Response, Status};
+use tonic::{Request, Response, Status};
 
 use crate::core::{AgentCredentialId, AgentId, ClientId, OrganizationId, UserId};
 use crate::identity::{
@@ -17,7 +17,9 @@ use crate::protocol::proto::identity::v1 as pb;
 use crate::protocol::proto::identity::v1::application_admin_service_server::ApplicationAdminService;
 use crate::protocol::proto::identity::v1::identity_admin_service_server::IdentityAdminService;
 
-use super::auth::{authenticate_admin, grpc_require_permission};
+use super::auth::{
+    authenticate_admin, grpc_require_permission, grpc_require_user_ceiling, grpc_scoped_realm,
+};
 use super::convert::identity_to_status;
 use super::server::GrpcState;
 
@@ -167,6 +169,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         grpc_require_permission(&auth, "hearth.users.admin")?;
         let call = req.into_inner();
         let user_id = parse_user_id(&call.id)?;
+        grpc_require_user_ceiling(&self.state, &auth, &user_id)?;
         let body: UpdateUserRequest = call
             .body
             .ok_or_else(|| Status::invalid_argument("body required"))?
@@ -187,6 +190,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         grpc_require_permission(&auth, "hearth.users.admin")?;
         let body = req.into_inner();
         let user_id = parse_user_id(&body.id)?;
+        grpc_require_user_ceiling(&self.state, &auth, &user_id)?;
         self.state
             .identity
             .delete_user(&auth.realm_id, &user_id)
@@ -243,10 +247,9 @@ impl IdentityAdminService for IdentityAdminSvc {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let body = req.into_inner();
-        let realm_id = parse_realm_id(&body.id)?;
-        if realm_id != auth.realm_id && !crate::identity::keys::is_system_realm(&auth.realm_id) {
-            return Err(Status::new(Code::PermissionDenied, "forbidden"));
-        }
+        // The shared BOLA guard, trust policies included — parity with REST
+        // `GET /admin/realms/{id}` (GA audit round 3).
+        let realm_id = grpc_scoped_realm(&self.state, &auth, parse_realm_id(&body.id)?)?;
         let realm = self
             .state
             .identity
@@ -288,10 +291,9 @@ impl IdentityAdminService for IdentityAdminSvc {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let body = req.into_inner();
-        let realm_id = parse_realm_id(&body.id)?;
-        if realm_id != auth.realm_id && !crate::identity::keys::is_system_realm(&auth.realm_id) {
-            return Err(Status::new(Code::PermissionDenied, "forbidden"));
-        }
+        // The shared BOLA guard, trust policies included — parity with REST
+        // `DELETE /admin/realms/{id}` (GA audit round 3).
+        let realm_id = grpc_scoped_realm(&self.state, &auth, parse_realm_id(&body.id)?)?;
         self.state
             .identity
             .delete_realm(&realm_id)

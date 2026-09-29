@@ -150,6 +150,32 @@ def merge_paths(base: dict, overlay: dict) -> dict:
     return dict(sorted(merged.items()))
 
 
+def omit_operations(paths: dict, operation_ids: list) -> dict:
+    """Drop the operations whose operationId is listed; drop emptied paths.
+
+    Fails when a listed operationId matches nothing, so the supplement's
+    `x-hearth-omit-operations` list cannot silently go stale.
+    """
+    methods = ("get", "post", "put", "patch", "delete", "options", "head", "trace")
+    wanted = set(operation_ids)
+    found = set()
+    out = {}
+    for path, item in paths.items():
+        kept = {}
+        for key, val in item.items():
+            op_id = val.get("operationId") if key in methods and isinstance(val, dict) else None
+            if op_id in wanted:
+                found.add(op_id)
+                continue
+            kept[key] = val
+        if any(k in methods for k in kept):
+            out[path] = kept
+    missing = wanted - found
+    if missing:
+        sys.exit(f"x-hearth-omit-operations: no operation matches {sorted(missing)}")
+    return out
+
+
 def merge_components(base: dict | None, overlay: dict | None) -> dict:
     """Merge components sections (schemas, securitySchemes, etc.)."""
     out: dict = {}
@@ -185,6 +211,10 @@ def main() -> None:
 
     # Merge: supplement paths win over proto paths
     merged_paths = merge_paths(proto_oas3.get("paths", {}), supplement.get("paths", {}))
+    # Drop proto-derived operations the REST surface does not serve.
+    merged_paths = omit_operations(
+        merged_paths, supplement.get("x-hearth-omit-operations") or []
+    )
 
     # Build the final document using supplement as the skeleton.
     # Override the title so the merged output doesn't say "supplement".
