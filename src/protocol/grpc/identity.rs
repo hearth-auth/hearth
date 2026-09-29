@@ -292,13 +292,14 @@ impl IdentityAdminService for IdentityAdminSvc {
     }
 
     /// Refused: realms are declared in `hearth.yaml` (REST `POST /admin/realms`
-    /// answers `405` for the same reason). Authenticates first, like every RPC
-    /// on this service, then answers `FAILED_PRECONDITION` without writing.
+    /// answers `405` for the same reason). Authenticates and authorizes first, like
+    /// every RPC on this service, then answers `FAILED_PRECONDITION` without writing.
     async fn create_realm(
         &self,
         req: Request<pb::CreateRealmRequest>,
     ) -> Result<Response<pb::Realm>, Status> {
-        authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         Err(realms_are_yaml_managed())
     }
 
@@ -312,7 +313,8 @@ impl IdentityAdminService for IdentityAdminSvc {
         &self,
         req: Request<pb::UpdateRealmCall>,
     ) -> Result<Response<pb::Realm>, Status> {
-        authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         Err(realms_are_yaml_managed())
     }
 
