@@ -266,9 +266,21 @@ cluster:
 
 `/admin/cluster/*` needs a token for the **system realm** (the nil UUID,
 `00000000-0000-0000-0000-000000000000`) that carries `hearth.admin`, sent with that UUID as
-`X-Realm-ID`. `hearth admin token` mints one on the host from a **stopped** node's data
-directory (see the [realm admin API](./admin-api.md#realms)), but on a cluster node it is
-limited:
+`X-Realm-ID`.
+
+**On a running cluster, mint it in the admin console** of the **leader**: sign in at
+`/ui/admin/login` with an operator-console account holding `realm.admin`, open **API Tokens**
+(`/ui/admin/api-tokens`), pick a lifetime (1 to 60 minutes, default 15) and confirm with your
+password and your second factor (see the [realm admin API](./admin-api.md#realms)). The token's
+session and its audit record are ordinary writes, proposed through Raft: once they commit, the
+token validates on **every** node, and revoking its session on the leader revokes it everywhere
+(`tests/cluster_three_node_control_coherence.rs::an_operator_token_minted_on_the_leader_validates_and_revokes_on_both_followers`).
+A follower cannot accept the write and there is no leader redirect, so on a follower the page
+answers with an error and mints nothing: sign in on another node. Signing in is a write too, so
+the console login fails on a follower the same way.
+
+**For a stopped node, use `hearth admin token`.** It mints on the host from a **stopped** node's
+data directory, and on a cluster node it is limited:
 
 - **A cluster node's data directory is refused.** The command writes a session and an audit
   record straight into the store, not through Raft, so they would exist on that node only, and
@@ -280,9 +292,8 @@ limited:
   into it **before** copying it to every node and the token validates on all of them (the
   [purged-log upgrade](./upgrading.md#upgrading-a-cluster-whose-raft-logs-were-purged), step 4).
 
-A running cluster has no other production source for a system-realm token: the commands below
-that need one (bootstrap, status, leadership transfer) work only with a token minted in one of
-those windows, which lives at most one hour.
+Neither source helps a **cold cluster with empty data directories**: it has no operator account
+yet, so there is nobody to mint for (see the bootstrap note below).
 
 ### Bootstrap Sequence
 
