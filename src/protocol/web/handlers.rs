@@ -610,6 +610,7 @@ pub(super) fn otp_factor_for(
     state: &Arc<WebState>,
     realm: &crate::identity::Realm,
     user: &crate::identity::User,
+    first: super::auth::FirstFactor,
 ) -> Option<OtpFactor> {
     // An ABSENT `mfa_methods` restricts nothing — that is the semantics
     // `EmbeddedIdentityEngine::require_mfa_method` enforces, and the same rule
@@ -619,7 +620,9 @@ pub(super) fn otp_factor_for(
     let methods = realm.config().mfa_methods.clone();
     let offers = |name: &str| methods.as_ref().is_none_or(|m| m.iter().any(|x| x == name));
     let holds_sms = offers("sms") && user.phone_verified();
-    let holds_email = offers("email_otp") && user.email_otp_enabled();
+    // An email OTP proves the inbox a magic link already proved: after a
+    // magic link it is not a second factor at all (GA audit round 3, D-4).
+    let holds_email = offers("email_otp") && user.email_otp_enabled() && first.allows_email_otp();
     let sms_deliverable = state.sms.is_some() && state.sms_otp_hmac_key.is_some();
     let email_deliverable = state.email.is_some();
     // Prefer a factor we can actually send a code for.
@@ -739,7 +742,7 @@ pub async fn mfa_otp_challenge_form(
     ) else {
         return Redirect::to("/ui/login").into_response();
     };
-    let Some(factor) = otp_factor_for(&state, &realm, &user) else {
+    let Some(factor) = otp_factor_for(&state, &realm, &user, pending.first_factor) else {
         // The factor went away between login and here — start over rather
         // than silently dropping the second-factor requirement.
         return Redirect::to("/ui/login").into_response();
@@ -913,7 +916,7 @@ pub async fn mfa_otp_challenge_submit(
     ) else {
         return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
     };
-    if otp_factor_for(&state, &realm, &user) != Some(factor) {
+    if otp_factor_for(&state, &realm, &user, pending.first_factor) != Some(factor) {
         return Redirect::to("/ui/mfa-otp-challenge").into_response();
     }
 
@@ -2245,7 +2248,12 @@ fn login_finish(
     // Neither branch decides whether the policy is met: the engine gate reads
     // factor use from `SessionContext::mfa_proof` (§4.18#3).
     let secure = state.is_secure_request(&headers);
-    let step = match super::second_factor::second_factor_step(&state, &realm, &user) {
+    let step = match super::second_factor::second_factor_step(
+        &state,
+        &realm,
+        &user,
+        super::auth::FirstFactor::Credential,
+    ) {
         Ok(step) => step,
         Err(e) => {
             // A factor lookup failed: the factors are unknown, so refuse
@@ -2291,6 +2299,7 @@ fn login_finish(
                 realm.id(),
                 user.id(),
                 other,
+                super::auth::FirstFactor::Credential,
                 return_to.as_deref(),
                 secure,
             );
@@ -2658,7 +2667,12 @@ fn passkey_second_factor_gate(
             return Some(refuse());
         }
     };
-    let owed = match super::second_factor::non_passkey_factor_step(state, realm, &user) {
+    let owed = match super::second_factor::non_passkey_factor_step(
+        state,
+        realm,
+        &user,
+        super::auth::FirstFactor::Credential,
+    ) {
         Ok(step) => step,
         Err(e) => {
             // The user's factors are unknown: refuse rather than skip one.
@@ -2673,6 +2687,7 @@ fn passkey_second_factor_gate(
             realm.id(),
             user_id,
             step,
+            super::auth::FirstFactor::Credential,
             None, // no return_to for passkey flow
             secure,
         );
@@ -3171,7 +3186,7 @@ fn forced_enrolment_refusal(
     ) else {
         return Some(Redirect::to("/ui/login").into_response());
     };
-    match super::second_factor::second_factor_step(state, &realm, &user) {
+    match super::second_factor::second_factor_step(state, &realm, &user, pending.first_factor) {
         Ok(Some(super::second_factor::SecondFactorStep::EnrolTotp)) => None,
         Ok(Some(step)) => Some(Redirect::to(step.path()).into_response()),
         Ok(None) => Some(Redirect::to("/ui/login").into_response()),
@@ -4803,13 +4818,16 @@ fn magic_link_redeem_impl(
             return internal_error_response();
         }
     };
-    match super::second_factor::second_factor_step(&state, &realm, &user) {
+    // The link proves the inbox: an email OTP cannot be its second factor.
+    let first = super::auth::FirstFactor::Inbox;
+    match super::second_factor::second_factor_step(&state, &realm, &user, first) {
         Ok(Some(step)) => {
             return super::second_factor::redirect_to_second_factor(
                 &state,
                 realm.id(),
                 &user_id,
                 step,
+                first,
                 None,
                 secure,
             );

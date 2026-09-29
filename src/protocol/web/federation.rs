@@ -921,13 +921,15 @@ fn complete_login(
     // factor — this used to send every non-TOTP user on an `mfa_required`
     // realm to TOTP enrolment. The MFA pending cookie carries the proven
     // identity across the hop, exactly as the direct login does.
-    match super::second_factor::second_factor_step(state, &realm, &user) {
+    let first = auth::FirstFactor::Credential;
+    match super::second_factor::second_factor_step(state, &realm, &user, first) {
         Ok(Some(step)) => {
             let mut response = super::second_factor::redirect_to_second_factor(
                 state,
                 realm_id,
                 user_id,
                 step,
+                first,
                 Some(return_to),
                 secure,
             );

@@ -148,6 +148,43 @@ impl std::fmt::Debug for CookieSecret {
     }
 }
 
+/// What proved the first factor of a login that now waits on its second.
+///
+/// Carried (MAC-protected) in the MFA pending cookie so the second-factor
+/// pages can refuse a factor that proves the same thing again (GA audit
+/// round 3, D-4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirstFactor {
+    /// A password, a passkey or an upstream identity provider.
+    Credential,
+    /// A magic link: control of the user's inbox. An email OTP proves the
+    /// same inbox, so it cannot be this login's second factor.
+    Inbox,
+}
+
+impl FirstFactor {
+    /// Whether an email OTP can be this login's second factor.
+    #[must_use]
+    pub fn allows_email_otp(self) -> bool {
+        self != Self::Inbox
+    }
+
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Credential => "c",
+            Self::Inbox => "i",
+        }
+    }
+
+    fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "c" => Some(Self::Credential),
+            "i" => Some(Self::Inbox),
+            _ => None,
+        }
+    }
+}
+
 /// Parsed contents of a valid MFA pending cookie.
 #[derive(Debug, Clone)]
 pub struct MfaPending {
@@ -159,6 +196,8 @@ pub struct MfaPending {
     pub return_to: Option<String>,
     /// Random nonce burned server-side after first successful MFA use.
     pub nonce: String,
+    /// What proved this login's first factor.
+    pub first_factor: FirstFactor,
 }
 
 /// Builds the full `Set-Cookie` header value for an MFA pending cookie.
@@ -167,13 +206,36 @@ pub struct MfaPending {
 /// valid for [`MFA_PENDING_TTL_SECS`]. It grants no access — only the
 /// right to attempt the second authentication factor.
 ///
-/// Pass `secure = true` when the request is over TLS.
+/// Pass `secure = true` when the request is over TLS. The first factor is
+/// recorded as [`FirstFactor::Credential`]; see
+/// [`issue_mfa_pending_cookie_after`].
 #[must_use]
 pub fn issue_mfa_pending_cookie(
     secret: &CookieSecret,
     realm_id: &RealmId,
     user_id: &UserId,
     return_to: Option<&str>,
+    secure: bool,
+) -> String {
+    issue_mfa_pending_cookie_after(
+        secret,
+        realm_id,
+        user_id,
+        return_to,
+        FirstFactor::Credential,
+        secure,
+    )
+}
+
+/// [`issue_mfa_pending_cookie`] for a login whose first factor was
+/// `first_factor`.
+#[must_use]
+pub fn issue_mfa_pending_cookie_after(
+    secret: &CookieSecret,
+    realm_id: &RealmId,
+    user_id: &UserId,
+    return_to: Option<&str>,
+    first_factor: FirstFactor,
     secure: bool,
 ) -> String {
     let now = std::time::SystemTime::now()
@@ -194,9 +256,18 @@ pub fn issue_mfa_pending_cookie(
         .expect("SystemRandom::fill must not fail");
     let nonce = BASE64URL_NOPAD.encode(&nonce_bytes);
 
-    let mac = compute_mfa_pending_mac(secret, user_id, realm_id, expires, &return_to_b64, &nonce);
+    let first = first_factor.wire();
+    let mac = compute_mfa_pending_mac(
+        secret,
+        user_id,
+        realm_id,
+        expires,
+        &return_to_b64,
+        &nonce,
+        first,
+    );
     let value = format!(
-        "{}.{}.{expires}.{return_to_b64}.{nonce}.{mac}",
+        "{}.{}.{expires}.{return_to_b64}.{nonce}.{first}.{mac}",
         user_id.as_uuid(),
         realm_id.as_uuid(),
     );
@@ -213,12 +284,13 @@ pub fn issue_mfa_pending_cookie(
 /// opaque — callers redirect to `/ui/login` on `None`.
 #[must_use]
 pub fn parse_mfa_pending_cookie(secret: &CookieSecret, value: &str) -> Option<MfaPending> {
-    let mut parts = value.splitn(6, '.');
+    let mut parts = value.splitn(7, '.');
     let uid_str = parts.next()?;
     let tid_str = parts.next()?;
     let expires_str = parts.next()?;
     let return_to_b64 = parts.next()?;
     let nonce = parts.next()?;
+    let first = parts.next()?;
     let mac_str = parts.next()?;
     if parts.next().is_some() {
         return None;
@@ -232,12 +304,20 @@ pub fn parse_mfa_pending_cookie(secret: &CookieSecret, value: &str) -> Option<Mf
     let realm_id = RealmId::new(tid);
 
     // Verify MAC first (constant-time).
-    let expected =
-        compute_mfa_pending_mac(secret, &user_id, &realm_id, expires, return_to_b64, nonce);
+    let expected = compute_mfa_pending_mac(
+        secret,
+        &user_id,
+        &realm_id,
+        expires,
+        return_to_b64,
+        nonce,
+        first,
+    );
     let mac_match: bool = expected.as_bytes().ct_eq(mac_str.as_bytes()).into();
     if !mac_match {
         return None;
     }
+    let first_factor = FirstFactor::from_wire(first)?;
 
     // Check expiry.
     let now = std::time::SystemTime::now()
@@ -260,6 +340,7 @@ pub fn parse_mfa_pending_cookie(secret: &CookieSecret, value: &str) -> Option<Mf
         realm_id,
         return_to,
         nonce: nonce.to_string(),
+        first_factor,
     })
 }
 
@@ -371,6 +452,7 @@ fn compute_mfa_pending_mac(
     expires: u64,
     return_to_b64: &str,
     nonce: &str,
+    first_factor: &str,
 ) -> String {
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes())
         .expect("HMAC-SHA256 accepts any 32-byte key");
@@ -383,6 +465,8 @@ fn compute_mfa_pending_mac(
     mac.update(return_to_b64.as_bytes());
     mac.update(b"|");
     mac.update(nonce.as_bytes());
+    mac.update(b"|");
+    mac.update(first_factor.as_bytes());
     let tag = mac.finalize().into_bytes();
     BASE64URL_NOPAD.encode(&tag)
 }
@@ -1330,6 +1414,7 @@ mod tests {
             realm_id: RealmId::new(Uuid::from_u128(2)),
             return_to: None,
             nonce: nonce.to_string(),
+            first_factor: FirstFactor::Credential,
         }
     }
 
@@ -1579,9 +1664,10 @@ mod tests {
         let expired = now.saturating_sub(10);
         let return_to_b64 = "";
         let nonce = "test-nonce";
-        let mac = compute_mfa_pending_mac(&secret, &uid, &tid, expired, return_to_b64, nonce);
+        let mac =
+            compute_mfa_pending_mac(&secret, &uid, &tid, expired, return_to_b64, nonce, "c");
         let value = format!(
-            "{}.{}.{expired}.{return_to_b64}.{nonce}.{mac}",
+            "{}.{}.{expired}.{return_to_b64}.{nonce}.c.{mac}",
             uid.as_uuid(),
             tid.as_uuid(),
         );
@@ -1589,6 +1675,43 @@ mod tests {
         assert!(
             parse_mfa_pending_cookie(&secret, &value).is_none(),
             "expired cookie should be rejected"
+        );
+    }
+
+    fn pending_value(set_cookie: &str) -> &str {
+        set_cookie
+            .strip_prefix(&format!("{MFA_PENDING_COOKIE}="))
+            .and_then(|rest| rest.split(';').next())
+            .expect("cookie value")
+    }
+
+    #[test]
+    fn mfa_pending_cookie_records_an_inbox_first_factor() {
+        let secret = CookieSecret::from_bytes([10u8; 32]);
+        let (uid, tid) = (UserId::generate(), RealmId::generate());
+        let full =
+            issue_mfa_pending_cookie_after(&secret, &tid, &uid, None, FirstFactor::Inbox, false);
+        let parsed = parse_mfa_pending_cookie(&secret, pending_value(&full)).expect("valid");
+        assert_eq!(parsed.first_factor, FirstFactor::Inbox);
+        let full = issue_mfa_pending_cookie(&secret, &tid, &uid, None, false);
+        let parsed = parse_mfa_pending_cookie(&secret, pending_value(&full)).expect("valid");
+        assert_eq!(parsed.first_factor, FirstFactor::Credential);
+    }
+
+    #[test]
+    fn mfa_pending_cookie_detects_first_factor_tampering() {
+        let secret = CookieSecret::from_bytes([11u8; 32]);
+        let (uid, tid) = (UserId::generate(), RealmId::generate());
+        let full =
+            issue_mfa_pending_cookie_after(&secret, &tid, &uid, None, FirstFactor::Inbox, false);
+        let value = pending_value(&full);
+        // Segments: uid.rid.expires.return_to.nonce.first.mac
+        let mut parts: Vec<&str> = value.split('.').collect();
+        assert_eq!(parts[5], "i");
+        parts[5] = "c";
+        assert!(
+            parse_mfa_pending_cookie(&secret, &parts.join(".")).is_none(),
+            "an inbox login must not be relabelled as a credential login"
         );
     }
 

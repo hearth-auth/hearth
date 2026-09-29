@@ -491,6 +491,58 @@ async fn magic_link_redemption_challenges_an_enrolled_passkey() {
     assert!(!has_session_cookie(&cookies), "cookies: {cookies:?}");
 }
 
+/// GA audit round 3, D-4: a magic link and an email OTP both prove the same
+/// inbox — one factor, not two. On a realm that requires MFA, a user whose
+/// only factor is email OTP must not be signed in by the link plus a code
+/// read from the same mailbox; the login is not even routed to the email
+/// code.
+#[tokio::test]
+async fn magic_link_and_email_otp_are_one_factor_not_two() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let (realm, realm_name) = create_realm(
+        &h,
+        RealmConfig {
+            mfa_required: Some(true),
+            mfa_methods: Some(vec!["email_otp".to_string(), "totp".to_string()]),
+            ..RealmConfig::default()
+        },
+    );
+    let user = create_user(&h, &realm);
+    h.identity()
+        .update_user(
+            &realm,
+            user.id(),
+            &UpdateUserRequest {
+                email_otp_enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .expect("enrol email OTP");
+    let minted = h
+        .identity()
+        .request_magic_link(&realm, user.email())
+        .expect("mint magic link");
+    let app = build_web_app(&h);
+
+    let response = redeem_magic_link(&app, &realm_name, minted.token()).await;
+    let cookies = set_cookies(&response);
+    let next = response
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    assert_ne!(
+        next.as_deref(),
+        Some("/ui/mfa-otp-challenge"),
+        "a code sent to the same inbox cannot be the second factor of an inbox login"
+    );
+    assert!(
+        cookie_pair(&cookies, "hearth_ui_mfa_pending").is_none(),
+        "no second-factor step is open to this login: {cookies:?}"
+    );
+    assert!(!has_session_cookie(&cookies), "cookies: {cookies:?}");
+}
+
 /// A user with no second factor still signs in with the link alone.
 #[tokio::test]
 async fn magic_link_redemption_still_signs_in_a_user_without_a_factor() {

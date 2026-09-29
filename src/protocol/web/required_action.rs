@@ -428,10 +428,15 @@ fn owed_factor_or_refusal(
     ) else {
         return handlers_common::server_error();
     };
-    match super::second_factor::second_factor_step(state, &realm_record, &user) {
+    // Only the passkey is routed to, and the passkey proves nothing an
+    // earlier factor proved, so what proved this login's first factor does
+    // not change the answer; recording it as an inbox keeps the email OTP
+    // out of reach of the pending cookie issued here all the same.
+    let first = super::auth::FirstFactor::Inbox;
+    match super::second_factor::second_factor_step(state, &realm_record, &user, first) {
         Ok(Some(step @ super::second_factor::SecondFactorStep::Passkey)) => {
             super::second_factor::redirect_to_second_factor(
-                state, realm, user_id, step, return_to, secure,
+                state, realm, user_id, step, first, return_to, secure,
             )
         }
         Ok(_) => forbidden_page(),
