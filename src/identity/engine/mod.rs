@@ -9962,9 +9962,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
-        session_id: &SessionId,
+        bearer: &TokenClaims,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        self.authorize_inner(realm_id, request, Some(session_id))
+        self.authorize_inner(realm_id, request, Some(bearer))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -10174,6 +10174,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Ok(crate::identity::oidc::DecidePermissionResponse { allowed: false });
         }
         self.decide_token_permission_inner(realm_id, request)
+    }
+
+    fn live_token_authority(
+        &self,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+        org_id: Option<&crate::core::OrganizationId>,
+        narrow_scope: Option<&str>,
+    ) -> Result<crate::identity::oidc::LiveTokenAuthority, IdentityError> {
+        self.live_token_authority_inner(realm_id, claims, org_id, narrow_scope)
     }
 
     // ===== MFA / TOTP (Step 23) =====

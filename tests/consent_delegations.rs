@@ -308,17 +308,23 @@ async fn revoked_delegation_is_inactive_on_introspect_and_decide() {
         )
         .expect("assign role");
 
-    // Two scopes so `decide`'s single-scope narrowing is disabled and the
-    // user's realm-scoped `tools.invoke` permission resolves.
+    // The MCP scope is not a realm RBAC scope, so it narrows nothing and the
+    // user's realm-scoped `tools.invoke` resolves live.
     let scope = "mcp:tools:invoke openid";
     let subject_token = build_subject_jwt(identity, &user_id, &realm_id, scope);
-    let (actor_client_id, actor_token) = make_actor_token(identity, &realm_id, scope);
+    // No actor token: the exchanging client acts on its own behalf, so the
+    // delegation carries the subject's `tools.invoke`. A client-credentials
+    // actor token carries no permissions, and a delegated token is capped at
+    // the actor ∩ subject intersection fixed at exchange (AUTHORIZATION.md
+    // §16) — `decide` ignoring that cap is what let this test's former
+    // fixture pass (GA audit 3 C-8).
+    let (actor_client_id, _actor_token) = make_actor_token(identity, &realm_id, scope);
     let request = Rfc8693Request {
         client_id: actor_client_id,
         subject_token,
         subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
-        actor_token: Some(actor_token),
-        actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
+        actor_token: None,
+        actor_token_type: None,
         requested_token_type: None,
         scope: Some(scope.to_string()),
         resource: None,
