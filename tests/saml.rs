@@ -11,10 +11,10 @@ use common::TestHarness;
 use hearth::core::{IdpId, Timestamp};
 use hearth::identity::federation::saml::{
     build_post_form_html, build_response_xml, sign_element, verify_signed_element, ResponseBuilder,
-    SamlIdpConfig, SamlNameIdFormat, SamlServiceProvider, SamlSpOutcome, SamlSpService,
+    SamlError, SamlIdpConfig, SamlNameIdFormat, SamlServiceProvider, SamlSpOutcome, SamlSpService,
 };
 use hearth::identity::tokens::RsaSigningKey;
-use hearth::identity::CreateRealmRequest;
+use hearth::identity::{CreateRealmRequest, IdentityError};
 
 fn cert_der_to_pem(der: &[u8]) -> String {
     use base64::engine::general_purpose::STANDARD as B64;
@@ -918,4 +918,289 @@ fn saml_identity_for(
         SamlSpOutcome::Accepted { identity, .. } => identity,
         SamlSpOutcome::Rejected { error } => panic!("expected accept, got {error:?}"),
     }
+}
+
+// ============================================================================
+// GA sweep 3, G-1 — XML-signature wrapping through the enveloped-signature
+// transform.
+//
+// The enveloped-signature transform removes ONE `<ds:Signature>` from the
+// digest input: the one being verified. Hearth's canonicalizer removed EVERY
+// direct-child `<ds:Signature>`, the verifier only ever read the first, and
+// the response parser read SAML elements wherever they sat — including inside
+// a `<ds:Signature>`. An attacker holding any account at the IdP could append
+// a second `<ds:Signature>` carrying `<saml:NameID>`, `<saml:Attribute>` or
+// `<saml:Conditions>` to an assertion the IdP signed for them: the digest was
+// unchanged, and the parser's last-write-wins fields took the forged values.
+// ============================================================================
+
+const XSW_SP_ENTITY_ID: &str = "https://hearth.example/ui/realms/acme";
+const XSW_ACS_URL: &str = "https://hearth.example/ui/realms/acme/federation/saml/acs";
+
+/// `<saml:Subject>` naming the victim — the payload every wrapping variant
+/// below tries to smuggle past the signature.
+const XSW_VICTIM_SUBJECT: &str =
+    "<saml:Subject><saml:NameID>ceo@corp.example</saml:NameID></saml:Subject>";
+
+fn xsw_now() -> Timestamp {
+    Timestamp::from_micros(1_700_000_000 * 1_000_000)
+}
+
+/// Wraps `inner` in a `<ds:Signature>` that no verifier will ever look at.
+fn xsw_extra_signature(inner: &str) -> String {
+    format!(r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">{inner}</ds:Signature>"#)
+}
+
+/// Inserts `insert` immediately before the first `anchor`, panicking when the
+/// anchor is absent so a silently skipped mutation cannot pass a test.
+fn xsw_insert_before(xml: &str, anchor: &str, insert: &str) -> String {
+    assert!(xml.contains(anchor), "anchor {anchor:?} not present");
+    xml.replacen(anchor, &format!("{insert}{anchor}"), 1)
+}
+
+/// Inserts `insert` immediately after the first `anchor`.
+fn xsw_insert_after(xml: &str, anchor: &str, insert: &str) -> String {
+    assert!(xml.contains(anchor), "anchor {anchor:?} not present");
+    xml.replacen(anchor, &format!("{anchor}{insert}"), 1)
+}
+
+/// An IdP connector trusting `idp_key`, taking the email from `email_source`
+/// (`"NameID"` or an attribute name).
+fn xsw_idp_config(
+    idp_key: &RsaSigningKey,
+    email_source: &str,
+    want_assertions_signed: bool,
+) -> SamlIdpConfig {
+    SamlIdpConfig {
+        idp_id: IdpId::generate(),
+        name: "test-idp".into(),
+        entity_id: "https://idp.example".into(),
+        sso_url: "https://idp.example/sso".into(),
+        slo_url: None,
+        idp_certificates_pem: vec![cert_der_to_pem(idp_key.cert_der())],
+        sign_authn_requests: false,
+        want_assertions_signed,
+        trust_asserted_email: false,
+        attribute_map: BTreeMap::from([("email".to_string(), email_source.to_string())]),
+    }
+}
+
+/// An unsigned `<samlp:Response>` asserting `mallory@corp.example`.
+fn xsw_response_for_mallory(attributes: &BTreeMap<String, Vec<String>>) -> String {
+    build_response_xml(&ResponseBuilder {
+        response_id: "_r1",
+        in_response_to: Some("_req1"),
+        issue_instant: xsw_now(),
+        destination: XSW_ACS_URL,
+        issuer: "https://idp.example",
+        audience: XSW_SP_ENTITY_ID,
+        assertion_id: "_signed1",
+        subject_name_id: "mallory@corp.example",
+        subject_name_id_format: SamlNameIdFormat::EmailAddress.as_uri(),
+        session_index: "sess1",
+        not_before: Timestamp::from_micros((1_700_000_000 - 10) * 1_000_000),
+        not_on_or_after: Timestamp::from_micros((1_700_000_000 + 300) * 1_000_000),
+        attributes,
+    })
+}
+
+/// A Response whose assertion the IdP signed for mallory — the attacker's own
+/// legitimate login. Returns `(response, signed_assertion)` so a test can
+/// rewrite the assertion in place.
+fn xsw_assertion_signed_for_mallory(
+    idp_key: &RsaSigningKey,
+    attributes: &BTreeMap<String, Vec<String>>,
+) -> (String, String) {
+    let response = xsw_response_for_mallory(attributes);
+    let assertion = extract_assertion(&response);
+    let signed = sign_element(assertion.as_bytes(), "_signed1", idp_key).expect("sign assertion");
+    let signed = String::from_utf8(signed).expect("utf8");
+    (response.replace(&assertion, &signed), signed)
+}
+
+/// Splits a signed element into `(element without its signature, signature)`.
+fn xsw_split_signature(signed: &str) -> (String, String) {
+    let start = signed.find("<ds:Signature").expect("signature start");
+    let end = signed.find("</ds:Signature>").expect("signature end") + "</ds:Signature>".len();
+    let without = format!("{}{}", &signed[..start], &signed[end..]);
+    (without, signed[start..end].to_string())
+}
+
+fn xsw_complete(idp_cfg: &SamlIdpConfig, xml: &str) -> SamlSpOutcome {
+    SamlSpService::complete(
+        idp_cfg,
+        XSW_SP_ENTITY_ID,
+        XSW_ACS_URL,
+        Some("_req1"),
+        xsw_now(),
+        xml.as_bytes(),
+    )
+}
+
+/// Control: the untouched document is accepted as mallory, so a rejection of
+/// its tampered twin is caused by the tampering and not by a broken fixture.
+fn xsw_assert_accepted_as_mallory(idp_cfg: &SamlIdpConfig, xml: &str, case: &str) {
+    match xsw_complete(idp_cfg, xml) {
+        SamlSpOutcome::Accepted { identity, .. } => {
+            assert_eq!(identity.email, "mallory@corp.example", "{case}: identity");
+        }
+        SamlSpOutcome::Rejected { error } => panic!("{case}: rejected: {error:?}"),
+    }
+}
+
+/// The tampered document must be refused as a signature failure.
+fn xsw_assert_rejected(idp_cfg: &SamlIdpConfig, xml: &str, case: &str) {
+    match xsw_complete(idp_cfg, xml) {
+        SamlSpOutcome::Rejected { error } => assert!(
+            matches!(error, IdentityError::Saml(SamlError::Signature)),
+            "{case}: rejected for the wrong reason: {error:?}"
+        ),
+        SamlSpOutcome::Accepted {
+            identity,
+            assertion,
+            ..
+        } => panic!(
+            "{case}: XSW ACCEPTED — consumed assertion.id={} identity.email={} \
+             not_on_or_after={:?} (IdP signed mallory@corp.example)",
+            assertion.id, identity.email, assertion.not_on_or_after
+        ),
+    }
+}
+
+/// G-1 as reported: a SECOND direct-child `<ds:Signature>`, appended as the
+/// signed assertion's last child, carries the victim's NameID. It used to log
+/// the attacker in as `ceo@corp.example`.
+#[test]
+fn sp_rejects_second_signature_carrying_a_forged_name_id() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let (response, _) = xsw_assertion_signed_for_mallory(&idp_key, &BTreeMap::new());
+    xsw_assert_accepted_as_mallory(&idp_cfg, &response, "control");
+
+    let attack = xsw_insert_before(
+        &response,
+        "</saml:Assertion>",
+        &xsw_extra_signature(XSW_VICTIM_SUBJECT),
+    );
+    xsw_assert_rejected(&idp_cfg, &attack, "second <ds:Signature> carrying a NameID");
+}
+
+/// The attribute-mapped twin: the connector takes the email from the `mail`
+/// attribute, and the second `<ds:Signature>` carries a `mail` attribute.
+#[test]
+fn sp_rejects_second_signature_carrying_a_forged_attribute() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "mail", true);
+    let attrs = BTreeMap::from([("mail".to_string(), vec!["mallory@corp.example".to_string()])]);
+    let (response, _) = xsw_assertion_signed_for_mallory(&idp_key, &attrs);
+    xsw_assert_accepted_as_mallory(&idp_cfg, &response, "control");
+
+    let forged = concat!(
+        r#"<saml:AttributeStatement><saml:Attribute Name="mail">"#,
+        "<saml:AttributeValue>ceo@corp.example</saml:AttributeValue>",
+        "</saml:Attribute></saml:AttributeStatement>",
+    );
+    let attack = xsw_insert_before(&response, "</saml:Assertion>", &xsw_extra_signature(forged));
+    xsw_assert_rejected(
+        &idp_cfg,
+        &attack,
+        "second <ds:Signature> carrying an attribute",
+    );
+}
+
+/// A second `<ds:Signature>` carrying `<saml:Conditions>` extended to 2099
+/// used to stretch the assertion's validity — and the replay sentinel derived
+/// from it — far past what the IdP signed.
+#[test]
+fn sp_rejects_second_signature_carrying_extended_conditions() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let (response, _) = xsw_assertion_signed_for_mallory(&idp_key, &BTreeMap::new());
+    xsw_assert_accepted_as_mallory(&idp_cfg, &response, "control");
+
+    let conditions = format!(
+        concat!(
+            r#"<saml:Conditions NotBefore="2023-11-14T22:13:10Z" NotOnOrAfter="2099-01-01T00:00:00Z">"#,
+            "<saml:AudienceRestriction><saml:Audience>{}</saml:Audience>",
+            "</saml:AudienceRestriction></saml:Conditions>",
+        ),
+        XSW_SP_ENTITY_ID
+    );
+    let attack = xsw_insert_before(
+        &response,
+        "</saml:Assertion>",
+        &xsw_extra_signature(&conditions),
+    );
+    xsw_assert_rejected(
+        &idp_cfg,
+        &attack,
+        "second <ds:Signature> carrying Conditions",
+    );
+}
+
+/// No second signature at all: the IdP's own `<ds:Signature>` is moved to the
+/// end of the assertion (its position is invisible to the digest) and the
+/// victim's `<saml:Subject>` is appended inside it, after `</ds:KeyInfo>`.
+/// XML-DSIG allows nothing but `SignedInfo`, `SignatureValue` and `KeyInfo`
+/// there for a signature Hearth verifies, so the signature is refused.
+#[test]
+fn sp_rejects_moved_signature_with_elements_after_key_info() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let (response, signed) = xsw_assertion_signed_for_mallory(&idp_key, &BTreeMap::new());
+    xsw_assert_accepted_as_mallory(&idp_cfg, &response, "control");
+
+    let (unsigned, signature) = xsw_split_signature(&signed);
+    let signature = xsw_insert_after(&signature, "</ds:KeyInfo>", XSW_VICTIM_SUBJECT);
+    let moved = xsw_insert_before(&unsigned, "</saml:Assertion>", &signature);
+    let attack = response.replace(&signed, &moved);
+    xsw_assert_rejected(
+        &idp_cfg,
+        &attack,
+        "moved signature with a Subject after KeyInfo",
+    );
+}
+
+/// `<ds:KeyInfo>` content is open-ended in XML-DSIG, so a `<saml:Subject>`
+/// hidden inside it is not a structural error — but it sits in the one region
+/// the digest never covers, and the response parser must never read it. The
+/// signature is moved to the end so the hidden Subject comes last, where the
+/// old last-write-wins parser took it.
+#[test]
+fn sp_never_reads_saml_elements_hidden_inside_the_verified_signature() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let (response, signed) = xsw_assertion_signed_for_mallory(&idp_key, &BTreeMap::new());
+
+    let (unsigned, signature) = xsw_split_signature(&signed);
+    let signature = xsw_insert_before(&signature, "</ds:KeyInfo>", XSW_VICTIM_SUBJECT);
+    let moved = xsw_insert_before(&unsigned, "</saml:Assertion>", &signature);
+    let attack = response.replace(&signed, &moved);
+    assert!(attack.contains("ceo@corp.example"), "injection missing");
+
+    xsw_assert_accepted_as_mallory(&idp_cfg, &attack, "Subject hidden inside KeyInfo");
+}
+
+/// The Response-level twin (`want_assertions_signed: false`): the IdP signs
+/// the whole `<samlp:Response>` and a second direct-child `<ds:Signature>` is
+/// appended to it. An element carries exactly one enveloped signature.
+#[test]
+fn sp_rejects_second_signature_on_a_response_level_signature() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", false);
+    let unsigned = xsw_response_for_mallory(&BTreeMap::new());
+    let signed = sign_element(unsigned.as_bytes(), "_r1", &idp_key).expect("sign response");
+    let signed = String::from_utf8(signed).expect("utf8");
+    xsw_assert_accepted_as_mallory(&idp_cfg, &signed, "control");
+
+    let attack = xsw_insert_before(
+        &signed,
+        "</samlp:Response>",
+        &xsw_extra_signature(XSW_VICTIM_SUBJECT),
+    );
+    xsw_assert_rejected(
+        &idp_cfg,
+        &attack,
+        "Response with two direct-child signatures",
+    );
 }

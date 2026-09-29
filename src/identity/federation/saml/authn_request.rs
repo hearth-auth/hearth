@@ -1,9 +1,6 @@
 //! `<AuthnRequest>` XML construction and parsing.
 
-use quick_xml::events::Event;
-use quick_xml::Reader;
-
-use super::xml::{attr, escape_attr, is_element, ns, parse_err, resolve_entity_ref, unescape_text};
+use super::xml::{attr, escape_attr, is_element, ns, parse_err, walk_outside_signatures, XmlStep};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 
@@ -67,60 +64,74 @@ pub fn build_authn_request_xml(p: &BuildAuthnRequestParams<'_>) -> String {
 }
 
 /// Parses a SAML `<AuthnRequest>`.
+///
+/// Reads the request's attributes from the root element only and its
+/// `<Issuer>` / `<NameIDPolicy>` from the root's direct children only. The
+/// document is read through [`walk_outside_signatures`], so nothing inside a
+/// `<ds:Signature>` — the part of a signed request its digest does not cover
+/// — is ever read, and a second `<Issuer>` is rejected rather than
+/// concatenated onto the first (GA audit 3, G-1).
+///
+/// # Errors
+///
+/// Returns [`SamlError::Parse`](crate::identity::federation::saml::SamlError)
+/// on malformed XML, a `DOCTYPE`, a duplicate `<Issuer>`, a root that is not
+/// an `<AuthnRequest>`, or a missing `ID` / `IssueInstant` / `Issuer`.
 pub fn parse_authn_request(xml: &[u8]) -> Result<AuthnRequest, IdentityError> {
-    let mut reader = Reader::from_reader(xml);
-    reader.config_mut().expand_empty_elements = false;
-
+    let mut is_request = false;
     let mut id: Option<String> = None;
     let mut issue_instant: Option<String> = None;
     let mut destination: Option<String> = None;
     let mut issuer: Option<String> = None;
+    let mut seen_issuer = false;
     let mut acs: Option<String> = None;
     let mut binding: Option<String> = None;
     let mut nameid: Option<String> = None;
     let mut in_issuer = false;
 
-    let mut buf = Vec::new();
-    loop {
-        let ev = reader.read_event_into(&mut buf);
-        match ev {
-            Ok(Event::Start(ref e) | Event::Empty(ref e)) => {
+    walk_outside_signatures(xml, |step| {
+        match step {
+            XmlStep::Open {
+                element: e,
+                depth: 1,
+            } => {
                 if is_element(e, ns::SAMLP, "AuthnRequest") {
+                    is_request = true;
                     id = attr(e, "ID");
                     issue_instant = attr(e, "IssueInstant");
                     destination = attr(e, "Destination");
                     acs = attr(e, "AssertionConsumerServiceURL");
                     binding = attr(e, "ProtocolBinding");
-                } else if is_element(e, ns::SAMLP, "NameIDPolicy") {
+                }
+            }
+            XmlStep::Open {
+                element: e,
+                depth: 2,
+            } if is_request => {
+                if is_element(e, ns::SAMLP, "NameIDPolicy") {
                     nameid = attr(e, "Format");
                 } else if is_element(e, ns::SAML, "Issuer") {
+                    if std::mem::replace(&mut seen_issuer, true) {
+                        return Err(parse_err("duplicate <saml:Issuer> in AuthnRequest"));
+                    }
                     in_issuer = true;
                 }
             }
-            Ok(Event::Text(t)) if in_issuer => {
-                if let Ok(s) = unescape_text(&t) {
-                    issuer.get_or_insert_with(String::new).push_str(&s);
-                }
+            // quick-xml 0.41 splits `&amp;`-style references out of the
+            // surrounding text; the walker resolves them and they arrive as
+            // separate steps, which accumulate here.
+            XmlStep::Text { text, depth: 2 } if in_issuer => {
+                issuer.get_or_insert_with(String::new).push_str(text);
             }
-            Ok(Event::GeneralRef(r)) if in_issuer => {
-                // quick-xml 0.41 splits `&amp;`-style references out of the
-                // surrounding text; accumulate the resolved character so an
-                // escaped Issuer value is not truncated.
-                issuer
-                    .get_or_insert_with(String::new)
-                    .push_str(&resolve_entity_ref(&r)?);
-            }
-            Ok(Event::End(_)) => {
-                in_issuer = false;
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(parse_err(format!("AuthnRequest parse: {e}"))),
-            Ok(Event::DocType(_)) => return Err(parse_err("DOCTYPE declarations are rejected")),
+            XmlStep::Close { depth: 2 } => in_issuer = false,
             _ => {}
         }
-        buf.clear();
-    }
+        Ok(())
+    })?;
 
+    if !is_request {
+        return Err(parse_err("root element is not an AuthnRequest"));
+    }
     Ok(AuthnRequest {
         id: id.ok_or_else(|| parse_err("AuthnRequest missing ID"))?,
         issue_instant: issue_instant.ok_or_else(|| parse_err("missing IssueInstant"))?,
@@ -176,6 +187,75 @@ mod tests {
             parsed.assertion_consumer_service_url.as_deref(),
             Some("https://sp.example/acs")
         );
+    }
+
+    fn sample_request() -> String {
+        build_authn_request_xml(&BuildAuthnRequestParams {
+            id: "_real",
+            destination: "https://idp.example/sso",
+            issuer: "https://sp.example",
+            acs_url: "https://sp.example/acs",
+            issue_instant: Timestamp::from_micros(1_700_000_000 * 1_000_000),
+            nameid_format: None,
+            force_authn: false,
+        })
+    }
+
+    /// GA audit 3, G-1: a `<ds:Signature>` carrying a forged request and
+    /// issuer is invisible to the parser — the root's fields are returned.
+    #[test]
+    fn parse_authn_request_never_reads_inside_a_signature() {
+        let xml = sample_request().replacen(
+            "</samlp:AuthnRequest>",
+            concat!(
+                r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">"#,
+                r#"<samlp:AuthnRequest ID="_forged" IssueInstant="2099-01-01T00:00:00Z" "#,
+                r#"AssertionConsumerServiceURL="https://evil.example/acs"/>"#,
+                "<saml:Issuer>https://evil.example</saml:Issuer></ds:Signature>",
+                "</samlp:AuthnRequest>",
+            ),
+            1,
+        );
+        let parsed = parse_authn_request(xml.as_bytes()).expect("parse");
+        assert_eq!(parsed.id, "_real");
+        assert_eq!(parsed.issuer, "https://sp.example");
+        assert_eq!(
+            parsed.assertion_consumer_service_url.as_deref(),
+            Some("https://sp.example/acs")
+        );
+    }
+
+    /// A second `<Issuer>` used to be concatenated onto the first; it is
+    /// refused.
+    #[test]
+    fn parse_authn_request_rejects_duplicate_issuer() {
+        let xml = sample_request().replacen(
+            "</saml:Issuer>",
+            "</saml:Issuer><saml:Issuer>https://evil.example</saml:Issuer>",
+            1,
+        );
+        let err = parse_authn_request(xml.as_bytes()).expect_err("two Issuers must be rejected");
+        assert!(
+            matches!(&err, IdentityError::Saml(crate::identity::federation::saml::SamlError::Parse { reason }) if reason.contains("duplicate")),
+            "wrong error: {err:?}"
+        );
+    }
+
+    /// Attributes come from the root only: an `<AuthnRequest>` nested
+    /// anywhere else (here under an extension element) is ignored.
+    #[test]
+    fn parse_authn_request_reads_only_the_root_element() {
+        let xml = sample_request().replacen(
+            "</samlp:AuthnRequest>",
+            concat!(
+                r#"<samlp:Extensions><samlp:AuthnRequest ID="_forged" "#,
+                r#"IssueInstant="2099-01-01T00:00:00Z"/></samlp:Extensions>"#,
+                "</samlp:AuthnRequest>",
+            ),
+            1,
+        );
+        let parsed = parse_authn_request(xml.as_bytes()).expect("parse");
+        assert_eq!(parsed.id, "_real");
     }
 
     #[test]
