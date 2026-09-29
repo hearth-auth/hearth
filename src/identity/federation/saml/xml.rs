@@ -408,6 +408,204 @@ pub fn count_elements(
     }
 }
 
+/// Counts the **direct children of the document's root element** with the
+/// given (namespace_uri, local_name).
+///
+/// An XML-DSIG enveloped signature is a direct child of the element it
+/// signs, and the enveloped-signature transform removes exactly that one
+/// `<ds:Signature>` from the digest input. A second direct-child
+/// `<ds:Signature>` is therefore a region of the signed element that no
+/// verifier looks at — `verify_signed_element` uses this count to refuse it.
+///
+/// # Errors
+///
+/// Returns a parse error on malformed XML, on a `DOCTYPE` declaration, or
+/// when the document exceeds `MAX_SAML_XML_EVENTS`.
+pub fn count_child_elements(
+    xml: &[u8],
+    namespace_uri: &str,
+    local: &str,
+) -> Result<usize, IdentityError> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().expand_empty_elements = false;
+
+    let mut buf = Vec::new();
+    let mut depth: usize = 0;
+    let mut count: usize = 0;
+    let mut event_count: usize = 0;
+
+    loop {
+        event_count += 1;
+        if event_count > crate::abuse::MAX_SAML_XML_EVENTS {
+            return Err(parse_err("XML document exceeds maximum element limit"));
+        }
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                depth += 1;
+                if depth == 2 && is_element(e, namespace_uri, local) {
+                    count += 1;
+                }
+            }
+            // An `Empty` event does not move `depth`: the element sits one
+            // level below the currently open one.
+            Ok(Event::Empty(ref e)) => {
+                if depth + 1 == 2 && is_element(e, namespace_uri, local) {
+                    count += 1;
+                }
+            }
+            Ok(Event::End(_)) => depth = depth.saturating_sub(1),
+            Ok(Event::DocType(_)) => {
+                return Err(parse_err("DOCTYPE declarations are rejected"));
+            }
+            Ok(Event::Eof) => return Ok(count),
+            Err(e) => return Err(parse_err(format!("XML scan error: {e}"))),
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// One step of [`walk_outside_signatures`].
+pub enum XmlStep<'a> {
+    /// An element opened. `depth` is 1 for the document's root element.
+    Open {
+        /// The element's start tag.
+        element: &'a BytesStart<'a>,
+        /// Nesting depth of the element (root = 1).
+        depth: usize,
+    },
+    /// Character data (entity and character references resolved, CDATA
+    /// included) directly inside the element open at `depth`.
+    Text {
+        /// The decoded text.
+        text: &'a str,
+        /// Depth of the innermost open element (0 outside the root).
+        depth: usize,
+    },
+    /// The element opened at `depth` closed. A self-closing element produces
+    /// an `Open` immediately followed by its `Close`.
+    Close {
+        /// Nesting depth of the element that closed.
+        depth: usize,
+    },
+}
+
+/// Walks `xml` and reports every element and text node **outside** every
+/// `<ds:Signature>` subtree, at any depth.
+///
+/// A `<ds:Signature>` is the one region of a signed SAML element that its
+/// digest does not cover: the enveloped-signature transform removes it
+/// before hashing, and only its `<ds:SignedInfo>` is covered by the signature
+/// value. Anything an attacker adds inside one — a `<saml:NameID>`, a
+/// `<saml:Attribute>`, a `<saml:Conditions>` — leaves the signature valid. A
+/// field reader that can see into it can therefore be fed unsigned values
+/// (GA audit 3, G-1). Every SAML field extractor (`parse_response`,
+/// `parse_authn_request`, `parse_logout_request`, `parse_logout_response`)
+/// reads the document through this walker, so none of them can.
+///
+/// Also enforces, for every caller: no `DOCTYPE`, at most
+/// `MAX_SAML_XML_EVENTS` events, and exactly one root element — a second
+/// top-level element would be a second document whose fields a parser could
+/// merge into the first.
+///
+/// # Errors
+///
+/// Returns a parse error on malformed XML, a `DOCTYPE` declaration, a
+/// disallowed entity reference, a second root element, or when the document
+/// exceeds `MAX_SAML_XML_EVENTS`; and any error `visit` returns.
+pub fn walk_outside_signatures<F>(xml: &[u8], mut visit: F) -> Result<(), IdentityError>
+where
+    F: FnMut(XmlStep<'_>) -> Result<(), IdentityError>,
+{
+    let mut reader = Reader::from_reader(xml);
+    let cfg = reader.config_mut();
+    cfg.expand_empty_elements = false;
+    cfg.trim_text(false);
+
+    let mut buf = Vec::new();
+    let mut depth: usize = 0;
+    // Depth of the `<ds:Signature>` whose subtree is being skipped.
+    let mut skipping: Option<usize> = None;
+    let mut root_seen = false;
+    let mut event_count: usize = 0;
+
+    loop {
+        event_count += 1;
+        if event_count > crate::abuse::MAX_SAML_XML_EVENTS {
+            return Err(parse_err("XML document exceeds maximum element limit"));
+        }
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                if depth == 0 {
+                    if root_seen {
+                        return Err(parse_err("XML document has more than one root element"));
+                    }
+                    root_seen = true;
+                }
+                depth += 1;
+                if skipping.is_none() {
+                    if is_element(e, ns::DS, "Signature") {
+                        skipping = Some(depth);
+                    } else {
+                        visit(XmlStep::Open { element: e, depth })?;
+                    }
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                if depth == 0 {
+                    if root_seen {
+                        return Err(parse_err("XML document has more than one root element"));
+                    }
+                    root_seen = true;
+                }
+                if skipping.is_none() && !is_element(e, ns::DS, "Signature") {
+                    visit(XmlStep::Open {
+                        element: e,
+                        depth: depth + 1,
+                    })?;
+                    visit(XmlStep::Close { depth: depth + 1 })?;
+                }
+            }
+            Ok(Event::End(_)) => {
+                match skipping {
+                    Some(d) if d == depth => skipping = None,
+                    Some(_) => {}
+                    None => visit(XmlStep::Close { depth })?,
+                }
+                depth = depth.saturating_sub(1);
+            }
+            Ok(Event::Text(ref t)) => {
+                if skipping.is_none() {
+                    let text = unescape_text(t).map_err(|e| parse_err(e.to_string()))?;
+                    visit(XmlStep::Text { text: &text, depth })?;
+                }
+            }
+            Ok(Event::GeneralRef(ref r)) => {
+                if skipping.is_none() {
+                    let text = resolve_entity_ref(r)?;
+                    visit(XmlStep::Text { text: &text, depth })?;
+                }
+            }
+            Ok(Event::CData(ref c)) => {
+                if skipping.is_none() {
+                    let text = std::str::from_utf8(c.as_ref())
+                        .map_err(|e| parse_err(format!("CDATA not UTF-8: {e}")))?;
+                    visit(XmlStep::Text { text, depth })?;
+                }
+            }
+            Ok(Event::DocType(_)) => {
+                return Err(parse_err("DOCTYPE declarations are rejected"));
+            }
+            Ok(Event::Eof) => return Ok(()),
+            Err(e) => return Err(parse_err(format!("XML read error: {e}"))),
+            // Comments, processing instructions and the XML declaration
+            // carry no SAML data (and exclusive C14N drops them too).
+            Ok(_) => {}
+        }
+        buf.clear();
+    }
+}
+
 fn id_match(e: &BytesStart<'_>, id_attr: Option<&str>) -> bool {
     match id_attr {
         None => true,
@@ -454,6 +652,78 @@ mod tests {
         assert!(
             slice.ends_with("</ds:Signature>"),
             "range not closed: {slice}"
+        );
+    }
+
+    /// Collects `(kind, depth, detail)` for every step the walker reports.
+    fn walk(xml: &[u8]) -> Result<Vec<(char, usize, String)>, IdentityError> {
+        let mut out = Vec::new();
+        walk_outside_signatures(xml, |step| {
+            out.push(match step {
+                XmlStep::Open { element, depth } => (
+                    'o',
+                    depth,
+                    String::from_utf8_lossy(element.name().as_ref()).into_owned(),
+                ),
+                XmlStep::Text { text, depth } => ('t', depth, text.to_string()),
+                XmlStep::Close { depth } => ('c', depth, String::new()),
+            });
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// GA audit 3, G-1: nothing inside a `<ds:Signature>` — at any depth — is
+    /// reported, and the walk resumes correctly after it.
+    #[test]
+    fn walk_outside_signatures_skips_every_signature_subtree() {
+        let xml = br#"<R xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:Signature><N>hidden</N></ds:Signature><A><ds:Signature><N>deep</N></ds:Signature><N>seen &amp; kept</N></A><ds:Signature/></R>"#;
+        let steps = walk(xml).expect("walk");
+        let names: Vec<&str> = steps
+            .iter()
+            .filter(|s| s.0 == 'o')
+            .map(|s| s.2.as_str())
+            .collect();
+        assert_eq!(names, ["R", "A", "N"]);
+        let text: String = steps
+            .iter()
+            .filter(|s| s.0 == 't')
+            .map(|s| s.2.as_str())
+            .collect();
+        assert_eq!(text, "seen & kept");
+        assert!(
+            steps.contains(&('o', 3, "N".to_string())),
+            "depth tracking broke after a skipped subtree: {steps:?}"
+        );
+    }
+
+    #[test]
+    fn walk_outside_signatures_rejects_a_second_root() {
+        let err = walk(b"<A/><B/>").expect_err("two roots must be rejected");
+        assert!(matches!(err, IdentityError::Saml(SamlError::Parse { .. })));
+    }
+
+    #[test]
+    fn walk_outside_signatures_rejects_doctype() {
+        let err = walk(b"<!DOCTYPE a []><a/>").expect_err("DOCTYPE must be rejected");
+        assert!(matches!(err, IdentityError::Saml(SamlError::Parse { .. })));
+    }
+
+    /// Only the root's direct children are counted.
+    #[test]
+    fn count_child_elements_counts_direct_children_only() {
+        let xml = br#"<Root><ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"/><Mid><ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"/></Mid><ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">x</ds:Signature></Root>"#;
+        assert_eq!(
+            count_child_elements(xml, ns::DS, "Signature").expect("count"),
+            2
+        );
+        assert_eq!(
+            count_child_elements(DIRECT, ns::DS, "Signature").expect("count"),
+            1
+        );
+        assert_eq!(
+            count_child_elements(NESTED, ns::DS, "Signature").expect("count"),
+            0
         );
     }
 

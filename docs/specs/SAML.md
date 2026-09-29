@@ -97,9 +97,15 @@ consulted now.
 
 ## 3. XML parsing hardening
 
-The XML reader (`saml/xml.rs`, `saml/response.rs`) is a purpose-built,
-namespace-aware streaming reader — **not** a general-purpose DOM parser. It
-enforces:
+The XML reader (`saml/xml.rs`, `saml/response.rs`) is a purpose-built
+streaming reader on `quick-xml` — **not** a general-purpose DOM parser, and
+**not** fully namespace-aware: an element's namespace is resolved only from an
+`xmlns` declaration on that element itself, and otherwise the conventional
+prefixes (`samlp`/`saml2p`, `saml`/`saml2`, `ds`, `md`) are accepted as their
+usual namespaces regardless of how an ancestor bound them. The canonicalizer
+(`saml/c14n.rs`) does resolve declarations through ancestors; where the two
+disagree the result fails closed (a digest mismatch, or a refused signature),
+never open. It enforces:
 
 - **No DTD / DOCTYPE.** Any document containing a `<!DOCTYPE …>` declaration
   MUST be rejected as a parse error. External and internal entity definitions
@@ -114,6 +120,19 @@ enforces:
   elements; the cap only fires on adversarial expansion.
   (Tests: `a35b_oversized_saml_xml_rejected`,
   `a29d_saml_entity_expansion_cap_constant_sentinel`.)
+- **One root element.** A document with a second top-level element is rejected;
+  its fields could otherwise be merged into the first document's.
+- **Signature-blind field extraction.** Every SAML field reader
+  (`parse_response`, `parse_authn_request`, `parse_logout_request`,
+  `parse_logout_response`) reads through `xml::walk_outside_signatures`, which
+  never reports anything inside a `<ds:Signature>` at any depth — the region the
+  enveloped-signature transform removes from the digest (§4.1).
+- **Structural field positions.** Fields are read only from the position the
+  SAML 2.0 core schema defines for them (e.g. the subject is
+  `Response/Assertion/Subject/NameID`, the requester is `AuthnRequest/Issuer`),
+  decided from the element's parent; a same-named element anywhere else is
+  ignored. A second occurrence of a single-valued field is rejected rather than
+  resolved last-write-wins (§4.1).
 - Parse failures surface as `SamlError::Parse { reason }` with a **sanitized**
   reason. Parser internals (which vector was attempted, file paths, upstream
   bodies) MUST NOT leak to the caller or logs.
@@ -126,23 +145,27 @@ Hearth requires a **valid enveloped XML signature** on inbound assertions.
   (`http://www.w3.org/2001/04/xmldsig-more#rsa-sha256`) only.
 - **Digest algorithm:** SHA-256 (`http://www.w3.org/2001/04/xmlenc#sha256`) only.
 - **Canonicalization:** Exclusive C14N (`http://www.w3.org/2001/10/xml-exc-c14n#`)
-  is the only form Hearth computes. It is applied **unconditionally** — the
-  declared `<ds:CanonicalizationMethod Algorithm>` is not read.
+  without comments is the only form Hearth computes. The declared
+  `<ds:CanonicalizationMethod Algorithm>` MUST name exactly that algorithm;
+  anything else (inclusive C14N, `#WithComments`) is rejected with
+  `SamlError::UnsupportedAlgorithm` before any digest is computed.
 - **Reference transforms:** Hearth signs with `enveloped-signature` + `exc-c14n`.
-  On the verify path the `<ds:Transforms>` list is **not** parsed or checked.
-- **Algorithm downgrade is rejected — for the signature and digest algorithms
-  only.** `verify_signed_element` rejects a `SignedInfo` containing the SHA-1 or
-  RSA-SHA1 algorithm identifiers, and requires it to name both RSA-SHA256 and
-  SHA-256, with `SamlError::UnsupportedAlgorithm`. There is no negotiation and
-  no "legacy" opt-in.
-- **Not enforced: canonicalization and transform downgrade.** A document
-  declaring inclusive C14N or an unexpected `<ds:Transform>` produces no
-  `UnsupportedAlgorithm` rejection. Because Hearth canonicalizes exclusively
-  regardless of what the document declares, such a document is very likely to
-  fail the digest or signature comparison — but that is a byte-comparison
-  side effect, not an algorithm check, and it MUST NOT be relied on as one.
-  Closing this is a code change, tracked separately; this section describes
-  what ships today.
+  On the verify path the `<ds:Transforms>` list MUST be present, MUST include
+  `enveloped-signature`, and MUST name nothing but `enveloped-signature` and
+  `exc-c14n`; anything else (XPath, XSLT, a missing list) is rejected with
+  `SamlError::UnsupportedAlgorithm`.
+  (Tests: `inclusive_canonicalization_method_rejected`,
+  `exc_c14n_with_comments_rejected`, `xslt_transform_rejected`,
+  `missing_enveloped_transform_rejected`, `missing_transforms_element_rejected`.)
+- **Algorithm downgrade is rejected.** Besides the canonicalization and
+  transform checks above, `verify_signed_element` rejects a `SignedInfo`
+  containing the SHA-1 or RSA-SHA1 algorithm identifiers, and requires it to
+  name both RSA-SHA256 and SHA-256, with `SamlError::UnsupportedAlgorithm`.
+  There is no negotiation and no "legacy" opt-in.
+- **The enveloped-signature transform removes exactly one element** — the
+  `<ds:Signature>` being verified, located by its byte offset — and nothing
+  else. Any other `<ds:Signature>` stays in the canonical form and is covered
+  by the digest.
 - **Signing key:** the IdP's registered certificate (PEM, RSA public key). No
   key material is trusted from the assertion itself (no inline cert trust).
 
@@ -183,6 +206,47 @@ but consumes another. Hearth defends structurally:
   whose signature was verified; a mismatch MUST fail with
   `SamlError::Signature`. `verify_signed_element` alone does **not** provide
   this — it only binds the Reference URI to the ID of the element it verified.
+- **Exactly one enveloped signature per element (GA audit 3, G-1).**
+  `verify_signed_element` rejects, with `SamlError::Signature`, an element
+  carrying more than one direct-child `<ds:Signature>`. The canonicalizer used
+  to remove *every* direct-child `<ds:Signature>` from the digest while the
+  verifier read only the first, so a second one appended to an assertion the
+  IdP signed for the attacker could carry the victim's `<saml:NameID>`, a
+  mapped `<saml:Attribute>`, or `<saml:Conditions>` extended to any date,
+  under an unchanged digest. Now only the verified signature is removed, a
+  second one is refused outright, and the parser never reads inside either.
+  The same primitive guards the IdP side's signed `<AuthnRequest>` and
+  `<LogoutRequest>`.
+  (Tests: `sp_rejects_second_signature_carrying_a_forged_name_id`,
+  `sp_rejects_second_signature_carrying_a_forged_attribute`,
+  `sp_rejects_second_signature_carrying_extended_conditions`,
+  `sp_rejects_second_signature_on_a_response_level_signature`,
+  `idp_sso_refuses_signed_authn_request_carrying_a_second_signature`,
+  `idp_slo_refuses_signed_logout_request_carrying_a_second_signature`,
+  `second_direct_child_signature_rejected`,
+  `canon_removes_only_the_named_signature`.)
+- **Nothing but `SignedInfo`, `SignatureValue` and `KeyInfo` in a signature.**
+  The verified `<ds:Signature>` MUST have exactly one `<ds:SignedInfo>`,
+  exactly one `<ds:SignatureValue>`, at most one `<ds:KeyInfo>`, and no other
+  child (no `<ds:Object>` either). Only `SignedInfo` is covered by the
+  signature, so anything else there is unsigned content inside the signed
+  element — the "move the signature to the end and append after
+  `</ds:KeyInfo>`" variant. Content *inside* `<ds:KeyInfo>` is open-ended in
+  XML-DSIG and is not rejected, but it is never read (§3).
+  (Tests: `sp_rejects_moved_signature_with_elements_after_key_info`,
+  `signature_with_unexpected_children_rejected`,
+  `sp_never_reads_saml_elements_hidden_inside_the_verified_signature`.)
+- **No duplicate single-valued fields.** Inside one `<Assertion>`, a second
+  `<Issuer>`, `<Subject>`, subject `<NameID>`, `<Conditions>`, or `<Attribute>`
+  with an already-seen `Name` is rejected with `SamlError::Parse`; so is a
+  second `<Response>`-level `<Issuer>`, `<Status>` or top-level `<StatusCode>`,
+  and a second `<Issuer>` / `<NameID>` in an `<AuthnRequest>` or
+  `<LogoutRequest>`.
+  (Tests: `parse_rejects_duplicate_single_valued_fields`,
+  `parse_rejects_duplicate_subject_name_id`,
+  `parse_rejects_duplicate_response_level_fields`,
+  `parse_authn_request_rejects_duplicate_issuer`,
+  `parse_logout_request_rejects_duplicate_fields`.)
 - **`WantAssertionsSigned`.** When the IdP registration sets
   `want_assertions_signed`, an assertion-level signature is **required**; a
   Response-level-only signature MUST be rejected. When it is unset, Hearth falls
@@ -357,11 +421,15 @@ All SAML failures map to `SamlError` (`saml/error.rs`), converted to
 
 1. No DTD/DOCTYPE, no entity expansion, ≤ 10 000 XML events.
 2. Ed25519-independent: signatures MUST be RSA-SHA256 with SHA-256 digests;
-   SHA-1 and RSA-SHA1 are rejected. Canonicalization is always exclusive C14N,
-   but the declared canonicalization and transform algorithms are not checked
-   — inclusive C14N is not rejected as such (§4).
-3. Exactly one `<Assertion>` in the whole document; Reference URI bound to the
-   signed element ID; the consumed assertion's ID bound to the verified one.
+   SHA-1 and RSA-SHA1 are rejected. Canonicalization is always exclusive C14N
+   without comments, and a declared canonicalization method or transform list
+   naming anything else is rejected (§4).
+3. Exactly one `<Assertion>` in the whole document; exactly one enveloped
+   `<ds:Signature>` per signed element, holding only `SignedInfo`,
+   `SignatureValue` and `KeyInfo`; the digest excludes that signature and
+   nothing else; Reference URI bound to the signed element ID; the consumed
+   assertion's ID bound to the verified one; no field is ever read from inside
+   a `<ds:Signature>`, and no single-valued field may appear twice.
 4. Mandatory `NotOnOrAfter`; 60 s skew; inclusive upper-edge rejection.
 5. Audience, Issuer, Destination, and (solicited) InResponseTo all checked.
 6. Assertion-ID replay rejected at the ACS handler.

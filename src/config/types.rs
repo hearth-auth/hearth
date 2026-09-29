@@ -2138,13 +2138,17 @@ impl Default for Http2SecurityYaml {
 }
 
 /// `security.request_shaper` — global per-IP + per-realm rate limiter (A-2).
+///
+/// The shaper is on with these defaults when the section is absent.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestShaperYaml {
-    /// Maximum requests per second per source IP.  Default: 100.
+    /// Maximum requests per second per client (IPv4 address, IPv6 `/64`).
+    /// Default: 100. `0` disables the per-client dimension.
     #[serde(default = "RequestShaperYaml::default_ip_rps")]
     pub ip_rps: u32,
-    /// Maximum requests per second per realm.  Default: 1000.
+    /// Maximum requests per second per realm, counting only requests that
+    /// name a realm. Default: 1000. `0` disables the per-realm dimension.
     #[serde(default = "RequestShaperYaml::default_realm_rps")]
     pub realm_rps: u32,
 }

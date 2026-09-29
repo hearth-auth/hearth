@@ -2443,8 +2443,16 @@ impl EmbeddedIdentityEngine {
 
     // ===== Per-IP login rate limiting helpers =====
 
+    /// The per-IP login tracker key. The address is bucketed under
+    /// [`crate::core::rate_limit_key_str`] — IPv6 per `/64` — so a host that
+    /// rotates through its `/64` does not get a fresh budget per address
+    /// (GA sweep 3, E-3).
     fn ip_login_tracker_key(realm_id: &RealmId, ip: &str) -> String {
-        format!("login-ip:{}:{ip}", realm_id.as_uuid())
+        format!(
+            "login-ip:{}:{}",
+            realm_id.as_uuid(),
+            crate::core::rate_limit_key_str(ip)
+        )
     }
 
     /// Returns the remaining window microseconds for an IP that has already hit
@@ -3071,13 +3079,15 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        // IP bucket (skipped if caller has no IP)
+        // IP bucket (skipped if caller has no IP). IPv6 is bucketed per /64
+        // (GA sweep 3, E-3).
         if let Some(ip) = client_ip {
+            let ip_key = crate::core::rate_limit_key_str(ip);
             let trackers = self
                 .registration_ip_rate_trackers
                 .lock()
                 .expect("registration ip tracker lock");
-            if let Some(tracker) = trackers.get(ip) {
+            if let Some(tracker) = trackers.get(&ip_key) {
                 if tracker.failed_count >= Self::REGISTRATION_IP_MAX_REQUESTS
                     && now - tracker.last_failure_micros < Self::REGISTRATION_RATE_WINDOW_MICROS
                 {
@@ -3130,11 +3140,12 @@ impl EmbeddedIdentityEngine {
         }
 
         if let Some(ip) = client_ip {
+            let ip_key = crate::core::rate_limit_key_str(ip);
             let mut trackers = self
                 .registration_ip_rate_trackers
                 .lock()
                 .expect("registration ip tracker lock");
-            let tracker = trackers.entry(ip.to_string()).or_insert(AttemptTracker {
+            let tracker = trackers.entry(ip_key).or_insert(AttemptTracker {
                 failed_count: 0,
                 last_failure_micros: now,
             });
@@ -9999,9 +10010,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
-        session_id: &SessionId,
+        bearer: &TokenClaims,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        self.authorize_inner(realm_id, request, Some(session_id))
+        self.authorize_inner(realm_id, request, Some(bearer))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -10211,6 +10222,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Ok(crate::identity::oidc::DecidePermissionResponse { allowed: false });
         }
         self.decide_token_permission_inner(realm_id, request)
+    }
+
+    fn live_token_authority(
+        &self,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+        org_id: Option<&crate::core::OrganizationId>,
+        narrow_scope: Option<&str>,
+    ) -> Result<crate::identity::oidc::LiveTokenAuthority, IdentityError> {
+        self.live_token_authority_inner(realm_id, claims, org_id, narrow_scope)
     }
 
     // ===== MFA / TOTP (Step 23) =====
