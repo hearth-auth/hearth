@@ -256,6 +256,44 @@
         });
     }
 
+    // Removing a passkey needs the same step-up as adding one (GA audit 3
+    // D-6). The secret field is sent when filled; otherwise an enrolled
+    // passkey is asked for an assertion.
+    var deleteForms = document.querySelectorAll('form[data-passkey-delete]');
+    Array.prototype.forEach.call(deleteForms, function (form) {
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        if (errorEl) errorEl.hidden = true;
+        var secret = secretEl ? secretEl.value.trim() : '';
+        var proof = secret
+          ? Promise.resolve({ step_up_secret: secret })
+          : assertionProof().then(function (p) {
+              return { step_up_assertion: JSON.stringify(p.assertion) };
+            });
+        proof
+          .then(function (fields) {
+            var data = new URLSearchParams(new FormData(form));
+            Object.keys(fields).forEach(function (k) { data.set(k, fields[k]); });
+            return fetch(form.action, {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: data.toString(),
+            });
+          })
+          .then(function (resp) {
+            if (resp.status === 403) {
+              throw new Error('That did not match. Enter your password or 6-digit code above, or confirm with a passkey, to remove it.');
+            }
+            if (!resp.ok) throw new Error('Could not remove the passkey');
+            window.location.reload();
+          })
+          .catch(function (e) {
+            if (e.name !== 'NotAllowedError') showError(e.message || 'Could not remove the passkey');
+          });
+      });
+    });
+
     if (!btn) return;
     btn.addEventListener('click', function () {
       if (btn.disabled) return;

@@ -857,3 +857,126 @@ async fn step_up_user_verification(rig: &WebRig) -> String {
         .unwrap_or_default()
         .to_string()
 }
+
+// ---------------------------------------------------------------------------
+// Removal (GA audit 3 D-6): removing a passkey needs the same step-up as
+// enrolling one. A session alone stripped the phishing-resistant factor.
+// ---------------------------------------------------------------------------
+
+/// Enrols a passkey for the rig's user directly through the engine.
+fn enrol_web_passkey(rig: &WebRig) -> TestAuthenticator {
+    let authenticator = TestAuthenticator::new(TEST_RP_ID);
+    let challenge = rig
+        .identity
+        .start_webauthn_registration(
+            &rig.realm_id,
+            &rig.user_id,
+            &hearth::identity::RegistrationOptions {
+                rp_id: TEST_RP_ID.to_string(),
+                discoverable: true,
+            },
+        )
+        .expect("start registration");
+    let (cdj, att) = authenticator.registration(&challenge, TEST_ORIGIN);
+    rig.identity
+        .complete_webauthn_registration(&rig.realm_id, &rig.user_id, &cdj, &att, TEST_ORIGIN, true)
+        .expect("complete registration");
+    authenticator
+}
+
+fn web_passkey_count(rig: &WebRig) -> usize {
+    rig.identity
+        .list_webauthn_credentials(&rig.realm_id, &rig.user_id)
+        .expect("list")
+        .len()
+}
+
+/// Posts the browser removal form for `credential` with extra form fields.
+async fn web_remove_passkey(
+    rig: &WebRig,
+    credential: &TestAuthenticator,
+    fields: &[(&str, &str)],
+) -> StatusCode {
+    let mut form = form_urlencoded::Serializer::new(String::new());
+    form.append_pair("_csrf", "csrf-abc");
+    for (name, value) in fields {
+        form.append_pair(name, value);
+    }
+    rig.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/ui/account/passkeys/{}/delete",
+                    b64(&credential.credential_id)
+                ))
+                .header(header::COOKIE, auth_cookie(rig, "csrf-abc"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form.finish()))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot")
+        .status()
+}
+
+#[tokio::test]
+async fn web_passkey_removal_without_a_proof_is_refused() {
+    let rig = build_web_rig(true);
+    let passkey = enrol_web_passkey(&rig);
+
+    let status = web_remove_passkey(&rig, &passkey, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a session alone must not remove a passkey"
+    );
+    let status = web_remove_passkey(&rig, &passkey, &[("step_up_secret", WRONG_PASSWORD)]).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a wrong password is no proof"
+    );
+    assert_eq!(web_passkey_count(&rig), 1, "the passkey must survive");
+}
+
+#[tokio::test]
+async fn web_passkey_removal_with_the_current_password_is_allowed() {
+    let rig = build_web_rig(true);
+    let passkey = enrol_web_passkey(&rig);
+
+    let status = web_remove_passkey(&rig, &passkey, &[("step_up_secret", PASSWORD)]).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "back to the account page");
+    assert_eq!(web_passkey_count(&rig), 0, "the passkey is removed");
+}
+
+/// A passkey-only account proves itself with an assertion.
+#[tokio::test]
+async fn web_passkey_removal_with_a_passkey_assertion_is_allowed() {
+    let rig = build_web_rig(false);
+    let passkey = enrol_web_passkey(&rig);
+    let challenge = rig
+        .identity
+        .start_webauthn_authentication(
+            &rig.realm_id,
+            Some(&rig.user_id),
+            &AuthenticationOptions {
+                rp_id: TEST_RP_ID.to_string(),
+            },
+        )
+        .expect("start authentication");
+    let (cdj, auth_data, sig) = passkey.assertion(&challenge, TEST_ORIGIN, 1);
+    let assertion = serde_json::json!({
+        "credential_id": b64(&passkey.credential_id),
+        "client_data_json": b64(&cdj),
+        "authenticator_data": b64(&auth_data),
+        "signature": b64(&sig),
+    })
+    .to_string();
+
+    let status =
+        web_remove_passkey(&rig, &passkey, &[("step_up_assertion", assertion.as_str())]).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(web_passkey_count(&rig), 0);
+}

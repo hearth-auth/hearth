@@ -982,7 +982,7 @@ fn step_up_error_response(error: &StepUpError) -> Response {
                 "error": "step_up_required",
                 "error_description":
                     "supply the account password, a current TOTP code, or an assertion from an \
-                     enrolled passkey to enrol a passkey",
+                     enrolled passkey to enrol or remove a passkey",
             })),
         )
             .into_response(),
@@ -1237,15 +1237,57 @@ pub struct DeletePasskeyForm {
     /// CSRF double-submit token.
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
+    /// Step-up secret: the account password, or a 6-digit authenticator code
+    /// (the password floor is 12 characters, so the two never collide).
+    #[serde(default)]
+    pub step_up_secret: Option<crate::core::FormSecret>,
+    /// Step-up assertion from an enrolled passkey, as the JSON object the
+    /// enrolment endpoint takes under `assertion` (filled by `passkey.js`).
+    #[serde(default)]
+    pub step_up_assertion: Option<String>,
+}
+
+impl DeletePasskeyForm {
+    /// The step-up proof the form carries (GA audit 3 D-6).
+    fn step_up(&mut self) -> StepUpProofBody {
+        let secret = self.step_up_secret.take();
+        let (password, totp_code) = match secret {
+            Some(s) if is_totp_code(s.expose()) => (None, Some(s.expose().trim().to_string())),
+            Some(s) => (Some(s), None),
+            None => (None, None),
+        };
+        StepUpProofBody {
+            password,
+            totp_code,
+            assertion: self
+                .step_up_assertion
+                .as_deref()
+                .filter(|a| !a.trim().is_empty())
+                .and_then(|a| serde_json::from_str(a).ok()),
+        }
+    }
+}
+
+/// Whether a step-up secret is a 6-digit authenticator code.
+fn is_totp_code(secret: &str) -> bool {
+    let secret = secret.trim();
+    secret.len() == 6 && secret.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// `POST /ui/account/passkeys/:cred_id/delete` — revokes the user's
 /// own passkey credential.
+///
+/// Like enrolment, removal needs a step-up proof beyond the session cookie —
+/// the password, a current TOTP code, or an assertion from an enrolled passkey
+/// (GA audit 3 D-6); otherwise a hijacked session strips the account's
+/// phishing-resistant factor. A missing or wrong proof answers
+/// `403 step_up_required` and removes nothing.
 pub async fn passkey_delete(
     State(state): State<Arc<WebState>>,
     session: UiSession,
+    headers: axum::http::HeaderMap,
     axum::extract::Path(cred_id_b64): axum::extract::Path<String>,
-    Form(form): Form<DeletePasskeyForm>,
+    Form(mut form): Form<DeletePasskeyForm>,
 ) -> Response {
     use base64::Engine as _;
 
@@ -1257,6 +1299,18 @@ pub async fn passkey_delete(
     else {
         return Redirect::to("/ui/account").into_response();
     };
+
+    let origin = state.public_origin_str(&headers);
+    if let Err(e) = verify_step_up(
+        &state.identity,
+        &session.realm_id,
+        &session.user_id,
+        form.step_up().into_proof(&origin),
+    )
+    .await
+    {
+        return step_up_error_response(&e);
+    }
 
     match state.identity.revoke_webauthn_credential(
         &session.realm_id,

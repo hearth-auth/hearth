@@ -346,6 +346,23 @@ Endpoints that enforce the sender-constraint:
 Tokens **without** `cnf.jkt` are unaffected — plain Bearer tokens continue to work at every endpoint
 above with no `DPoP` header.
 
+#### Account and realm-feed endpoints take first-party tokens only
+
+Several of the endpoints above act with the user's full authority over their own account, or read
+realm-wide data, so they also judge the client the token was issued to (RFC 9068 `client_id`; none
+means a first-party session token) — the gate the admin API applies (GA audit 3 B-5 / I-14):
+
+- `GET /oauth/consents`, `GET /webauthn/credentials`, `DELETE /webauthn/credentials/{credential_id}`,
+  `GET /oauth/session-versions[/snapshot]` and the DCR initial access token (`POST /register`, both
+  forms) refuse a **third-party** client's token with `403`, whatever permissions the realm's claim
+  profile released to it.
+- `DELETE /oauth/consents/{client_id}` refuses a third-party client's token unless `client_id` is
+  that client itself — an app may disconnect itself, never revoke the user's consent to another app.
+- `DELETE /webauthn/credentials/{credential_id}` additionally requires a **step-up proof** in its JSON
+  body — `password`, `totp_code` or `assertion`, the same proof enrolment takes — and answers
+  `403 step_up_required` without one (GA audit 3 D-6). The browser console's passkey removal
+  (`POST /ui/account/passkeys/{id}/delete`) requires the same proof.
+
 #### Proof requirements at resource endpoints
 
 The resource-endpoint proof differs from the token-endpoint proof:
@@ -714,7 +731,10 @@ Content-Type: application/json
 }
 ```
 
-The same Bearer-auth requirement applies to the equivalent gRPC `Authorize` RPC.
+The same Bearer-auth requirement applies to the equivalent gRPC `Authorize` RPC. Both JSON routes
+(`POST /authorize` with `X-Realm-ID` and `POST /realms/{realm}/authorize`) accept a pushed request
+(RFC 9126): with `request_uri` the pushed entry is consumed — single-use — and supplies every
+parameter; a `client_id` in the body must match it.
 
 **The token authorizes only its own client** (GA audit 3 B-1). These surfaces cannot show a consent
 screen, so a code is minted only for a client the bearer token may speak for:

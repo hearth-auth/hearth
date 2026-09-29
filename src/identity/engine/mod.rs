@@ -4094,14 +4094,22 @@ impl EmbeddedIdentityEngine {
         // loop (audit 2026-08-28 §4.16#4). This mirrors
         // `issue_tokens_with_context`: RBAC resolve, claim profile, size
         // validation, and the pre-token webhook all run per rotation. Scope,
-        // `oid`, resources and AMR stay bound to the original grant.
+        // `oid`, resources and AMR stay bound to the original grant — and so
+        // does the scope narrowing: resolving with no scope handed a token
+        // narrowed to a bundle at the exchange the user's full set, admin
+        // permissions included, on its first rotation (GA audit 3 B-4).
         use crate::identity::oidc::AccessTokenAuthorization;
         let user = self
             .get_user(realm_id, user_id)?
             .ok_or(IdentityError::UserNotFound)?;
+        let grant_scopes: Vec<String> = claims
+            .scope
+            .as_deref()
+            .map(|s| s.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default();
         let resolved = self
             .rbac
-            .resolve_permissions(user_id, realm_id, None, None)
+            .resolve_for_granted_scopes(user_id, realm_id, None, &grant_scopes)
             .map_err(|e| match e {
                 RbacError::TokenSizeExceeded {
                     limit,
@@ -4136,11 +4144,7 @@ impl EmbeddedIdentityEngine {
             &crate::rbac::ResolvedPermissions::default()
         };
 
-        let granted_scopes: BTreeSet<String> = claims
-            .scope
-            .as_deref()
-            .map(|s| s.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default();
+        let granted_scopes: BTreeSet<String> = grant_scopes.into_iter().collect();
         let (roles, groups, permissions, custom) = self.apply_claim_profile(
             realm_id,
             &user,
@@ -9310,10 +9314,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         let now = self.clock.now();
-        // Resolve effective permissions via RBAC at token-issue time.
+        // Resolve effective permissions via RBAC at token-issue time, narrowed
+        // by every permission-bearing granted scope — the rule the code
+        // exchange, refresh and live resolution share (GA audit 3 B-4).
+        let grant_scopes: Vec<String> = ctx.granted_scopes.iter().cloned().collect();
         let resolved = self
             .rbac
-            .resolve_permissions(user_id, realm_id, None, None)
+            .resolve_for_granted_scopes(user_id, realm_id, None, &grant_scopes)
             .map_err(|e| match e {
                 RbacError::TokenSizeExceeded {
                     limit,

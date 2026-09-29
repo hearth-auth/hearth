@@ -1096,6 +1096,57 @@ pub(crate) fn extract_user_auth(
 }
 
 /// [`extract_user_auth`] that also returns the bearer token's validated
+/// claims, for a handler that judges the client the token was issued to.
+pub(crate) fn extract_user_auth_claims(
+    headers: &HeaderMap,
+    state: &AppState,
+    realm_id: &RealmId,
+    htm: &str,
+    htu: &str,
+) -> Result<
+    (UserId, std::sync::Arc<crate::identity::TokenClaims>),
+    (StatusCode, Json<serde_json::Value>),
+> {
+    user_auth_claims(headers, state, realm_id, htm, htu)
+}
+
+/// [`extract_user_auth`] for account self-service surfaces that act with the
+/// user's full authority over their own account — consents, passkeys (GA
+/// audit 3 B-5). The token must be a first-party session token or one issued
+/// to a first-party client
+/// ([`crate::protocol::admin_auth::token_client_may_administer`], the gate the
+/// admin API applies); a third-party client's token is refused
+/// `403 forbidden`, whatever the claim profile released to it.
+pub(crate) fn extract_first_party_user_auth(
+    headers: &HeaderMap,
+    state: &AppState,
+    realm_id: &RealmId,
+    htm: &str,
+    htu: &str,
+) -> Result<UserId, (StatusCode, Json<serde_json::Value>)> {
+    let (user_id, claims) = user_auth_claims(headers, state, realm_id, htm, htu)?;
+    if !crate::protocol::admin_auth::token_client_may_administer(
+        state.identity.as_ref(),
+        realm_id,
+        &claims,
+    ) {
+        return Err(third_party_token_forbidden());
+    }
+    Ok(user_id)
+}
+
+/// The refusal of a third-party client's token on a first-party-only surface.
+pub(crate) fn third_party_token_forbidden() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "forbidden",
+            "error_description": "a token issued to a third-party client cannot use this endpoint"
+        })),
+    )
+}
+
+/// [`extract_user_auth`] that also returns the bearer token's validated
 /// claims, for a surface the engine must judge by the token itself: the
 /// non-interactive `/authorize` checks the client the token was issued to
 /// (GA audit 3 B-1) and the factor its session proved (GA audit B2/B5). A

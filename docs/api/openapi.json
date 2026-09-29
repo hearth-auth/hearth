@@ -2792,6 +2792,7 @@
     "/oauth/consents": {
       "get": {
         "summary": "List the authenticated user's active consents",
+        "description": "First-party tokens only: a token issued to a third-party client is refused with 403.",
         "operationId": "selfListConsents",
         "tags": [
           "OAuth"
@@ -2811,6 +2812,7 @@
     "/oauth/consents/{client_id}": {
       "delete": {
         "summary": "Revoke a single consent",
+        "description": "A third-party client's token may revoke only the consent granted to that client itself; any other client_id is refused with 403.",
         "operationId": "selfRevokeConsent",
         "tags": [
           "OAuth"
@@ -3469,6 +3471,7 @@
     "/webauthn/credentials": {
       "get": {
         "summary": "List the authenticated user's WebAuthn credentials",
+        "description": "First-party tokens only: a token issued to a third-party client is refused with 403.",
         "operationId": "webauthnListCredentials",
         "tags": [
           "Auth"
@@ -3481,6 +3484,9 @@
         "responses": {
           "200": {
             "description": "List of registered credentials"
+          },
+          "403": {
+            "description": "The token was issued to a third-party client"
           }
         }
       }
@@ -3488,6 +3494,7 @@
     "/webauthn/credentials/{credential_id}": {
       "delete": {
         "summary": "Delete a WebAuthn credential",
+        "description": "First-party tokens only. The body MUST carry a step-up proof \u2014 the account password, a current TOTP code, or an assertion from an enrolled passkey \u2014 as enrolment does; without one the answer is 403 step_up_required.",
         "operationId": "webauthnDeleteCredential",
         "tags": [
           "Auth"
@@ -3507,9 +3514,50 @@
             }
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string"
+                  },
+                  "totp_code": {
+                    "type": "string"
+                  },
+                  "assertion": {
+                    "type": "object",
+                    "properties": {
+                      "credential_id": {
+                        "type": "string"
+                      },
+                      "client_data_json": {
+                        "type": "string"
+                      },
+                      "authenticator_data": {
+                        "type": "string"
+                      },
+                      "signature": {
+                        "type": "string"
+                      },
+                      "user_handle": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "204": {
             "description": "Credential deleted"
+          },
+          "403": {
+            "description": "Missing or wrong step-up proof (step_up_required), or a third-party client's token"
           }
         }
       }

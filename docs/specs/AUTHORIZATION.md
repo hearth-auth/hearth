@@ -594,10 +594,15 @@ Content-Type: application/json
 
 {
   "permission": "docs.edit",
-  "organization_id": "<org_uuid>",   // optional: for org-scoped checks
+  "organization_id": "<org_uuid>",   // optional: must be the token's own `oid`
   "resource": "<resource_uri>"        // optional: RFC 8707 audience check
 }
 ```
+
+The organisation context is the token's own `oid` (absent: realm scope only). `organization_id`
+may restate it; naming any other organisation — or any organisation for a token minted without
+`oid` — answers `{"allowed": false}`. A token minted in organisation A is never answered with the
+user's authority in organisation B.
 
 `resource`, when present, MUST be named by the token's `aud` (compared in canonical form);
 otherwise the answer is `{"allowed": false}` — a token minted for resource server A is never
@@ -645,6 +650,12 @@ resolved at the time of the call:
    carries no roles or groups.
 
 A client-credentials token has no user and resolves to nothing.
+
+Issuance applies the same scope rule (rule 2): the authorization-code exchange, every refresh
+rotation (the refresh token carries the grant's `scope`) and the device grant resolve an
+`embedded` token's `permissions` with `RbacEngine::resolve_for_granted_scopes`, so a token narrowed
+to a bundle stays narrowed after refresh and live resolution never disagrees with it (GA audit 3
+B-4).
 
 ---
 

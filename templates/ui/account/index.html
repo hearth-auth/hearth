@@ -139,7 +139,7 @@
     <div id="passkey-step-up" class="mb-4 rounded-md border border-divider-subtle bg-ht-surface px-4 py-3">
       <label for="passkey-step-up-secret" class="block text-sm font-medium text-ht-content-secondary">Confirm it is you</label>
       <p class="mt-1 text-sm text-ht-content-muted">
-        Enter your password, or the 6-digit code from your authenticator app. Being signed in is not enough to add a passkey.
+        Enter your password, or the 6-digit code from your authenticator app. Being signed in is not enough to add or remove a passkey.
       </p>
       <input type="password" id="passkey-step-up-secret" autocomplete="current-password"
              placeholder="Password or 6-digit code"
@@ -195,7 +195,7 @@
             {% endif %}
           </td>
           <td class="px-3 py-2 text-right">
-            <form method="post" action="/ui/account/passkeys/{{ c.id_b64url }}/delete">
+            <form method="post" action="/ui/account/passkeys/{{ c.id_b64url }}/delete" data-passkey-delete>
               {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
               <button type="submit" class="text-xs text-danger-fg hover:text-red-300">Delete</button>
             </form>
