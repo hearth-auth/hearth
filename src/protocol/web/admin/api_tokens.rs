@@ -14,7 +14,6 @@
 use std::time::Duration;
 
 use axum::http::{header, HeaderMap, HeaderValue};
-use base64::Engine as _;
 
 use super::*;
 use crate::core::FormSecret;
