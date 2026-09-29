@@ -7445,6 +7445,125 @@ fn realm_status_label(status: RealmStatus) -> &'static str {
 }
 
 impl EmbeddedIdentityEngine {
+    /// Shared body of [`IdentityEngine::create_organization`] and
+    /// [`IdentityEngine::create_scim_organization`]; `scim_provisioned` sets
+    /// the organization's SCIM marker in the same write.
+    fn create_organization_impl(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateOrganizationRequest,
+        scim_provisioned: bool,
+    ) -> Result<Organization, IdentityError> {
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "create_organization",
+            });
+        }
+        self.require_active_realm(realm_id)?;
+        // A-24: enforce per-realm org quota before writing.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_orgs {
+                    let prefix = keys::org_id_scan_prefix();
+                    self.check_resource_quota(realm_id, "orgs", &prefix, max)?;
+                }
+            }
+        }
+        let slug = validation::validate_slug(&request.slug)?;
+        let name = validation::validate_display_name(&request.name)?;
+
+        // A-5: reject permanently reserved slugs (operator-configured list).
+        let slug_lower = slug.to_ascii_lowercase();
+        if self.config.reserved_slugs.iter().any(|r| r == &slug_lower) {
+            return Err(IdentityError::ReservedSlug { slug: slug.clone() });
+        }
+
+        // Acquire write lock before slug check to prevent TOCTOU (A-28)
+        let _slug_guard = self.org_write_lock.lock().expect("org write lock");
+        // Check slug uniqueness
+        let slug_key = keys::encode_org_slug(&slug);
+        if self
+            .storage
+            .get(realm_id, &slug_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::DuplicateOrgSlug);
+        }
+
+        // A-5: check post-delete slug cooldown reservation.
+        let reservation_key = keys::encode_org_slug_reservation(realm_id, &slug);
+        if let Some(bytes) = self
+            .storage
+            .get(realm_id, &reservation_key)
+            .map_err(Self::storage_err)?
+        {
+            if let Ok(reservation) = serde_json::from_slice::<StoredSlugReservation>(&bytes) {
+                let now_micros = self.clock.now().as_micros();
+                if now_micros < reservation.expires_at_micros {
+                    return Err(IdentityError::SlugInCooldown { slug: slug.clone() });
+                }
+                // Cooldown expired — clean up the stale reservation.
+                let _ = self.storage.delete(realm_id, &reservation_key);
+            }
+        }
+
+        let realm = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+        let org_attr_defs = realm
+            .config()
+            .attribute_definitions
+            .as_ref()
+            .map(|d| d.organizations.as_slice());
+        validation::validate_attributes(&request.attributes, org_attr_defs)?;
+
+        let now = self.clock.now();
+        let org_id = OrganizationId::generate();
+        let description = request.description.clone().unwrap_or_default();
+        let config = request.config.clone().unwrap_or_default();
+
+        let mut org = Organization::new(
+            org_id.clone(),
+            name,
+            slug.clone(),
+            description,
+            OrganizationStatus::Active,
+            config,
+            now,
+            now,
+        );
+        org.set_attributes(request.attributes.clone());
+        if scim_provisioned {
+            org.mark_scim_provisioned();
+        }
+
+        let id_key = keys::encode_org_id(&org_id);
+        let org_bytes = serde_json::to_vec(&org).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        // Atomic: primary + slug index in one WAL record (A-28)
+        self.storage
+            .put_batch(
+                realm_id,
+                &[
+                    (id_key, org_bytes),
+                    (slug_key, org_id.as_uuid().as_bytes().to_vec()),
+                ],
+            )
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::OrgCreated,
+            "org",
+            &org_id.as_uuid().to_string(),
+        )?;
+
+        Ok(org)
+    }
+
     /// Shared body of [`IdentityEngine::update_realm`] and
     /// [`IdentityEngine::set_realm_suspended`].
     ///
@@ -13066,111 +13185,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &CreateOrganizationRequest,
     ) -> Result<Organization, IdentityError> {
-        if keys::is_system_realm(realm_id) {
-            return Err(IdentityError::SystemRealmProtected {
-                operation: "create_organization",
-            });
-        }
-        self.require_active_realm(realm_id)?;
-        // A-24: enforce per-realm org quota before writing.
-        if let Ok(Some(realm)) = self.get_realm(realm_id) {
-            if let Some(quotas) = &realm.config().quotas {
-                if let Some(max) = quotas.max_orgs {
-                    let prefix = keys::org_id_scan_prefix();
-                    self.check_resource_quota(realm_id, "orgs", &prefix, max)?;
-                }
-            }
-        }
-        let slug = validation::validate_slug(&request.slug)?;
-        let name = validation::validate_display_name(&request.name)?;
+        self.create_organization_impl(realm_id, request, false)
+    }
 
-        // A-5: reject permanently reserved slugs (operator-configured list).
-        let slug_lower = slug.to_ascii_lowercase();
-        if self.config.reserved_slugs.iter().any(|r| r == &slug_lower) {
-            return Err(IdentityError::ReservedSlug { slug: slug.clone() });
-        }
-
-        // Acquire write lock before slug check to prevent TOCTOU (A-28)
-        let _slug_guard = self.org_write_lock.lock().expect("org write lock");
-        // Check slug uniqueness
-        let slug_key = keys::encode_org_slug(&slug);
-        if self
-            .storage
-            .get(realm_id, &slug_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            return Err(IdentityError::DuplicateOrgSlug);
-        }
-
-        // A-5: check post-delete slug cooldown reservation.
-        let reservation_key = keys::encode_org_slug_reservation(realm_id, &slug);
-        if let Some(bytes) = self
-            .storage
-            .get(realm_id, &reservation_key)
-            .map_err(Self::storage_err)?
-        {
-            if let Ok(reservation) = serde_json::from_slice::<StoredSlugReservation>(&bytes) {
-                let now_micros = self.clock.now().as_micros();
-                if now_micros < reservation.expires_at_micros {
-                    return Err(IdentityError::SlugInCooldown { slug: slug.clone() });
-                }
-                // Cooldown expired — clean up the stale reservation.
-                let _ = self.storage.delete(realm_id, &reservation_key);
-            }
-        }
-
-        let realm = self
-            .get_realm(realm_id)?
-            .ok_or(IdentityError::RealmNotFound)?;
-        let org_attr_defs = realm
-            .config()
-            .attribute_definitions
-            .as_ref()
-            .map(|d| d.organizations.as_slice());
-        validation::validate_attributes(&request.attributes, org_attr_defs)?;
-
-        let now = self.clock.now();
-        let org_id = OrganizationId::generate();
-        let description = request.description.clone().unwrap_or_default();
-        let config = request.config.clone().unwrap_or_default();
-
-        let mut org = Organization::new(
-            org_id.clone(),
-            name,
-            slug.clone(),
-            description,
-            OrganizationStatus::Active,
-            config,
-            now,
-            now,
-        );
-        org.set_attributes(request.attributes.clone());
-
-        let id_key = keys::encode_org_id(&org_id);
-        let org_bytes = serde_json::to_vec(&org).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        // Atomic: primary + slug index in one WAL record (A-28)
-        self.storage
-            .put_batch(
-                realm_id,
-                &[
-                    (id_key, org_bytes),
-                    (slug_key, org_id.as_uuid().as_bytes().to_vec()),
-                ],
-            )
-            .map_err(Self::storage_err)?;
-
-        self.record_audit(
-            realm_id,
-            None,
-            AuditAction::OrgCreated,
-            "org",
-            &org_id.as_uuid().to_string(),
-        )?;
-
-        Ok(org)
+    fn create_scim_organization(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateOrganizationRequest,
+    ) -> Result<Organization, IdentityError> {
+        self.create_organization_impl(realm_id, request, true)
     }
 
     fn get_organization(
