@@ -1,11 +1,10 @@
-//! Login abuse resistance in the engine (GA audit 2026-09-28, findings L14,
-//! L15 and L18).
+//! Login abuse resistance in the engine (GA audit 2026-09-28, findings L14
+//! and L15). L18's required-action token flow was removed outright; see
+//! `tests/link_token_out_of_url.rs`.
 
 use super::*;
 
 use crate::identity::hibp::{HibpError, HibpTransport};
-use crate::identity::tokens::{Audience, TokenClaims, REQUIRED_ACTION_TOKEN_TYPE};
-use crate::identity::types::RequiredAction;
 
 const PASSWORD: &str = "correct-horse-battery-staple";
 
@@ -39,122 +38,6 @@ fn user_with_password(engine: &EmbeddedIdentityEngine, realm: &RealmId) -> User 
         )
         .expect("set password");
     user
-}
-
-/// Mints a required-action token the way `complete_update_password` does.
-fn mint_ra_token(
-    engine: &EmbeddedIdentityEngine,
-    realm: &RealmId,
-    user: &User,
-    actions: Vec<RequiredAction>,
-) -> String {
-    let key = engine
-        .get_or_load_realm_signing_key(realm)
-        .expect("signing key");
-    let now_secs = engine.clock.now().as_micros() / 1_000_000;
-    let claims = TokenClaims {
-        sub: format!("user_{}", user.id().as_uuid()),
-        iss: engine.realm_issuer_url(realm),
-        aud: Audience::single(engine.config.token.audience.clone()),
-        exp: now_secs + 900,
-        iat: now_secs,
-        sid: String::new(),
-        tid: realm.to_string(),
-        oid: None,
-        token_type: REQUIRED_ACTION_TOKEN_TYPE.to_string(),
-        nbf: None,
-        jti: Some(uuid::Uuid::new_v4().to_string()),
-        fid: None,
-        scope: None,
-        nonce: None,
-        azp: None,
-        roles: Vec::new(),
-        groups: Vec::new(),
-        org_groups: Vec::new(),
-        permissions: Vec::new(),
-        required_actions: actions,
-        act: None,
-        amr: Vec::new(),
-        cnf: None,
-        custom: Default::default(),
-        sv: None,
-    };
-    key.issue_token(&claims).expect("issue ra token")
-}
-
-// ─── L18: a required-action token completes once ────────────────────────────
-
-/// A required-action token used to be replayable for its whole 15-minute
-/// life: each replay set the password again and minted a fresh session. It
-/// travels in a URL, so a copy in a proxy log or a `Referer` was a login.
-#[test]
-fn a_required_action_token_completes_only_once() {
-    let (_dir, engine, _clock) = setup_engine();
-    let realm = realm_with(&engine, RealmConfig::default());
-    let user = user_with_password(&engine, &realm);
-    engine
-        .update_user(
-            &realm,
-            user.id(),
-            &UpdateUserRequest {
-                required_actions: Some(vec![RequiredAction::UpdatePassword]),
-                ..Default::default()
-            },
-        )
-        .expect("set required action");
-    let token = mint_ra_token(&engine, &realm, &user, vec![RequiredAction::UpdatePassword]);
-
-    engine
-        .complete_update_password(
-            &realm,
-            &token,
-            CleartextPassword::from_string("a-brand-new-password-1".to_string()),
-        )
-        .expect("the first completion succeeds");
-
-    let err = engine
-        .complete_update_password(
-            &realm,
-            &token,
-            CleartextPassword::from_string("an-attackers-password-2".to_string()),
-        )
-        .expect_err("a spent required-action token must be refused");
-    assert!(matches!(err, IdentityError::InvalidToken), "got {err:?}");
-    assert!(
-        engine
-            .verify_password(
-                &realm,
-                user.id(),
-                &CleartextPassword::from_string("a-brand-new-password-1".to_string()),
-            )
-            .expect("verify"),
-        "the replay must not have changed the password"
-    );
-}
-
-/// A completion the password policy refuses does not spend the token: the
-/// user can correct the password and submit again.
-#[test]
-fn a_refused_password_does_not_spend_the_required_action_token() {
-    let (_dir, engine, _clock) = setup_engine();
-    let realm = realm_with(&engine, RealmConfig::default());
-    let user = user_with_password(&engine, &realm);
-    let token = mint_ra_token(&engine, &realm, &user, vec![RequiredAction::UpdatePassword]);
-
-    engine
-        .complete_update_password(
-            &realm,
-            &token,
-            CleartextPassword::from_string("short".to_string()),
-        )
-        .expect_err("a password under the floor is refused");
-    engine
-        .complete_update_password(
-            &realm,
-            &token,
-            CleartextPassword::from_string("a-long-enough-password-3".to_string()),
-        )
-        .expect("the corrected password completes with the same token");
 }
 
 // ─── L15: the breach check runs before the account exists ───────────────────

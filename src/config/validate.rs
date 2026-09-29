@@ -572,6 +572,8 @@ impl Config {
         validate_realm_applications_all(self.realms.as_ref(), &mut issues);
         validate_realm_organizations_all(self.realms.as_ref(), &mut issues);
         validate_realm_saml_sps_all(self.realms.as_ref(), &mut issues);
+        validate_realm_protected_resources_all(self.realms.as_ref(), self.dev_mode, &mut issues);
+        validate_realm_introspection_clients_all(self.realms.as_ref(), &mut issues);
 
         // HSEC-010: Mirror the fail-fast check in validate_all so the admin
         // config-check panel surfaces this error alongside other issues.
@@ -612,6 +614,7 @@ impl Config {
         }
 
         validate_trusted_proxies(&self.server, &mut issues);
+        validate_cidr_policies(self.realms.as_ref(), &mut issues);
         validate_argon2_costs_all(&self.auth, self.realms.as_ref(), self.dev_mode, &mut issues);
 
         // ── Checks that used to live only in `validate` (audit §4.13#8) ─────
@@ -953,12 +956,6 @@ fn is_loopback_str(addr: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn is_unspecified_str(addr: &str) -> bool {
-    addr.parse::<std::net::IpAddr>()
-        .map(|ip| ip.is_unspecified())
-        .unwrap_or(false)
-}
-
 fn is_public_listener(bind_address: &str) -> bool {
     !is_loopback_str(bind_address)
 }
@@ -1160,6 +1157,45 @@ fn validate_argon2_costs_all(
     }
 }
 
+/// Refuses every `realms.<name>.security.cidr_policy` entry the runtime would.
+///
+/// The runtime (`abuse::runtime::compile_filter`) parses each entry as a
+/// [`crate::core::IpRange`] and drops what does not parse. Nothing checked the
+/// lists at load, so a typo was silently discarded — and a typo in the only
+/// `allow` entry emptied the allow list, lifting the realm's network
+/// restriction altogether. This runs the same parser, so a policy that loads
+/// is a policy that matches.
+///
+/// Unlike `trusted_proxies`, no breadth rule applies: `deny: [0.0.0.0/0]` and
+/// `allow: [::/0]` are legitimate policies.
+fn validate_cidr_policies(
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(realms) = realms else { return };
+    let mut names: Vec<&String> = realms.keys().collect();
+    names.sort();
+    for name in names {
+        let Some(policy) = realms[name]
+            .security
+            .as_ref()
+            .and_then(|s| s.cidr_policy.as_ref())
+        else {
+            continue;
+        };
+        for (list, entries) in [("allow", &policy.allow), ("deny", &policy.deny)] {
+            for (i, entry) in entries.iter().enumerate() {
+                if let Err(reason) = entry.parse::<crate::core::IpRange>() {
+                    issues.push(ValidationIssue {
+                        field: format!("realms.{name}.security.cidr_policy.{list}[{i}]"),
+                        reason: format!("'{entry}' {reason}."),
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// A-32: Validates `server.trusted_proxies` against known dangerous configurations.
 fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIssue>) {
     // 19.12: `trust_forwarded_proto` makes `X-Forwarded-Proto` decide whether a
@@ -1184,68 +1220,30 @@ fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIs
         });
     }
 
+    // One parser for validation and runtime: `main.rs` builds the live list
+    // with `TrustedProxies::parse`, which goes through the same
+    // `TrustedProxy::from_str` as this loop. 26.24 existed because the two
+    // disagreed — the validator accepted a CIDR the runtime then silently
+    // discarded — and sharing the parser makes that impossible. The parser
+    // itself refuses malformed entries, host bits set in a range, catch-alls
+    // (`0.0.0.0/0`, `::/0`, `0.0.0.0`, `::`) and ranges broader than /8 or /16.
     for (i, entry) in server.trusted_proxies.iter().enumerate() {
         let field = format!("server.trusted_proxies[{i}]");
 
-        if entry == "0.0.0.0/0" || entry == "::/0" {
-            issues.push(ValidationIssue {
-                field,
-                reason: format!(
-                    "'{entry}' is a catch-all CIDR that trusts every IP as a proxy; \
-                     this bypasses all IP-based protections. \
-                     List only your actual reverse-proxy IP addresses."
-                ),
-            });
-            continue;
-        }
+        let proxy = match entry.parse::<crate::core::TrustedProxy>() {
+            Ok(proxy) => proxy,
+            Err(reason) => {
+                issues.push(ValidationIssue {
+                    field,
+                    reason: format!("'{entry}' {reason}."),
+                });
+                continue;
+            }
+        };
 
-        if is_unspecified_str(entry) {
-            issues.push(ValidationIssue {
-                field,
-                reason: format!(
-                    "'{entry}' is an unspecified/catch-all address that trusts every \
-                     IP as a proxy; list only your actual reverse-proxy IP addresses."
-                ),
-            });
-            continue;
-        }
-
-        // 26.24: the runtime parses each entry as a bare `IpAddr` and DISCARDS
-        // anything else with a `warn!`, so an entry this validator waves
-        // through is not necessarily an entry the server uses. CIDR is the
-        // case operators actually write; CONFIGURATION.md already says it is
-        // not supported, which made this validator the only thing claiming
-        // otherwise.
-        //
-        // Refusing here is not pedantry. A list of ranges becomes an EMPTY
-        // trusted-proxy list at runtime, which with `trust_forwarded_proto:
-        // true` is precisely the state the check above refuses: no peer's
-        // header is honoured, and the proxy's real client IPs are ignored.
-        if entry.parse::<std::net::IpAddr>().is_err() {
-            let looks_like_cidr = entry.contains('/');
-            issues.push(ValidationIssue {
-                field,
-                reason: if looks_like_cidr {
-                    format!(
-                        "'{entry}' is CIDR notation, which is not supported here. The server \
-                         parses each entry as a single IP address and silently DISCARDS \
-                         anything else, so this entry would leave the trusted-proxy list \
-                         empty at runtime — X-Forwarded-For and X-Forwarded-Proto would then \
-                         be ignored from every peer. List the reverse-proxy IP addresses \
-                         individually."
-                    )
-                } else {
-                    format!(
-                        "'{entry}' is not a valid IP address. The server parses each entry as \
-                         a single IP address and silently DISCARDS anything else, so this \
-                         entry would not be trusted at runtime."
-                    )
-                },
-            });
-            continue;
-        }
-
-        if is_loopback_str(entry) && is_public_listener(&server.bind_address) {
+        // Contextual, so it lives here rather than in the parser: a loopback
+        // proxy is only reachable when the server itself listens on loopback.
+        if proxy.is_loopback() && is_public_listener(&server.bind_address) {
             issues.push(ValidationIssue {
                 field,
                 reason: format!(
@@ -1363,6 +1361,83 @@ fn saml_sp_signing_problem(
         ));
     }
     None
+}
+
+fn validate_realm_protected_resources_all(
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    dev_mode: bool,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    // AGENT_AUTH.md §2.5: a protected resource's `resource_uri` MUST use HTTPS
+    // in production; `--dev` MAY permit HTTP. The spec carves out dev mode
+    // only, so a loopback `http://` URI is refused in production as well. The
+    // scheme is compared on the canonical (lowercased) form. Malformed URIs
+    // are reported by the realm registry check (`to_realm_config`), not here.
+    if dev_mode {
+        return;
+    }
+    let Some(realms) = realms else { return };
+    for (name, cfg) in realms {
+        for (i, resource) in cfg
+            .protected_resources
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let Ok(uri) = crate::core::Uri::try_from(resource.resource_uri.clone()) else {
+                continue;
+            };
+            if !uri.as_str().starts_with("https://") {
+                issues.push(ValidationIssue {
+                    field: format!("realms.{name}.protected_resources[{i}].resource_uri"),
+                    reason: format!(
+                        "'{}' must use https outside --dev mode (AGENT_AUTH.md §2.5)",
+                        resource.resource_uri
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// `protected_resources[].introspection_client` must be the key of an
+/// application declared in the same realm (under `applications` or its alias
+/// `oauth_clients`): reconcile derives the client's id from that key, so a
+/// typo would silently name a client that does not exist (G6).
+fn validate_realm_introspection_clients_all(
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(realms) = realms else { return };
+    for (name, cfg) in realms {
+        let declared = |key: &str| {
+            [cfg.applications.as_ref(), cfg.oauth_clients.as_ref()]
+                .into_iter()
+                .flatten()
+                .any(|apps| apps.contains_key(key))
+        };
+        for (i, resource) in cfg
+            .protected_resources
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let Some(key) = resource.introspection_client.as_deref() else {
+                continue;
+            };
+            if !declared(key) {
+                issues.push(ValidationIssue {
+                    field: format!("realms.{name}.protected_resources[{i}].introspection_client"),
+                    reason: format!(
+                        "'{key}' is not an application of realm '{name}' \
+                         (applications / oauth_clients)"
+                    ),
+                });
+            }
+        }
+    }
 }
 
 fn validate_realm_saml_sps_all(
@@ -2371,40 +2446,216 @@ mod tests {
         );
     }
 
-    // ===== 26.24: a `trusted_proxies` entry the runtime will discard =====
+    // ===== 26.24 / G3: validation accepts exactly what the runtime uses =====
 
-    /// A CIDR entry must be refused, because the runtime throws it away.
-    ///
-    /// `main.rs` parses each entry as an `IpAddr` and drops anything else with
-    /// a `warn!`. CONFIGURATION.md says so plainly — "CIDR notation is not yet
-    /// supported; supply individual IPs" — but the validator accepted it, so a
-    /// list of ranges passed `hearth config validate`, started cleanly, and ran
-    /// with an EMPTY trusted-proxy list.
-    ///
-    /// That is not merely a dropped setting. With `trust_forwarded_proto: true`
-    /// it produces exactly the state the validator two checks above refuses:
-    /// `X-Forwarded-Proto` accepted from every peer, so any client decides
-    /// whether its own session cookie carries `Secure`.
-    #[test]
-    fn a_cidr_trusted_proxy_is_refused_because_the_runtime_discards_it() {
+    /// `trusted_proxies` issues for a production config with `entries`.
+    fn trusted_proxy_issues(entries: &[&str]) -> Vec<ValidationIssue> {
+        let list = entries
+            .iter()
+            .map(|e| format!("\"{e}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         let yaml = "security:\n  key_encryption_key: \"".to_string()
             + &"ab".repeat(32)
-            + "\"\nserver:\n  trust_forwarded_proto: true\n  trusted_proxies: [\"10.0.0.0/8\"]\n\
-               storage:\n  data_dir: \"/tmp/hea-26-24\"\n";
+            + "\"\nserver:\n  bind_address: \"0.0.0.0\"\n  trust_forwarded_proto: true\n  \
+               trusted_proxies: ["
+            + &list
+            + "]\nstorage:\n  data_dir: \"/tmp/hea-g3\"\n";
         let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
-        let issues = config.validate_all();
-        let hit = issues
-            .iter()
-            .find(|i| i.field == "server.trusted_proxies[0]")
-            .unwrap_or_else(|| {
-                panic!("a CIDR entry the runtime discards must be refused: {issues:?}")
-            });
+        config
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field.starts_with("server.trusted_proxies"))
+            .collect()
+    }
+
+    /// A CIDR entry is accepted — and the runtime now uses it.
+    ///
+    /// 26.24 refused CIDR because `main.rs` parsed each entry as a bare
+    /// `IpAddr` and silently discarded the rest. Both sides now go through
+    /// `core::TrustedProxy`, so a range that validates is a range the XFF walk,
+    /// the X-Forwarded-Proto check and the connection-cap exemption match.
+    #[test]
+    fn cidr_trusted_proxies_are_accepted() {
+        let issues = trusted_proxy_issues(&["10.42.0.0/16", "2001:db8:42::/48", "10.0.0.7"]);
+        assert!(issues.is_empty(), "valid ranges and addresses: {issues:?}");
+    }
+
+    #[test]
+    fn a_malformed_trusted_proxy_is_refused() {
+        for bad in [
+            "proxy.internal",
+            "10.0.0.0/",
+            "10.0.0.0/+8",
+            "10.0.0.0/33",
+            "10.0.0.7:443",
+        ] {
+            let issues = trusted_proxy_issues(&[bad]);
+            assert_eq!(issues.len(), 1, "'{bad}' must be refused: {issues:?}");
+            assert_eq!(issues[0].field, "server.trusted_proxies[0]");
+            assert!(
+                issues[0].reason.contains(bad),
+                "reason names the entry: {issues:?}"
+            );
+        }
+    }
+
+    /// Host bits set: refused, not normalized — `10.0.0.7/8` might mean the
+    /// address or the /8, and those differ by sixteen million hosts.
+    #[test]
+    fn a_trusted_proxy_cidr_with_host_bits_is_refused_and_the_network_named() {
+        let issues = trusted_proxy_issues(&["10.0.0.1", "10.42.1.7/16"]);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].field, "server.trusted_proxies[1]");
         assert!(
-            hit.reason.contains("CIDR"),
-            "the refusal must name what is wrong with the entry; got: {}",
-            hit.reason
+            issues[0].reason.contains("10.42.0.0/16"),
+            "the refusal must name the network form; got: {}",
+            issues[0].reason
         );
-        assert!(config.validate().is_err(), "validate() must refuse it too");
+    }
+
+    #[test]
+    fn catch_all_and_overly_broad_trusted_proxies_are_refused() {
+        for bad in [
+            "0.0.0.0/0",
+            "::/0",
+            "0.0.0.0",
+            "::",
+            "0.0.0.0/8",
+            "8.0.0.0/7",
+            "2000::/3",
+        ] {
+            let issues = trusted_proxy_issues(&[bad]);
+            assert_eq!(issues.len(), 1, "'{bad}' must be refused: {issues:?}");
+        }
+    }
+
+    /// The loopback-on-a-public-listener check covers a loopback range too.
+    #[test]
+    fn a_loopback_cidr_is_refused_on_a_public_listener() {
+        let issues = trusted_proxy_issues(&["127.0.0.0/8"]);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].reason.contains("loopback"), "{issues:?}");
+    }
+
+    /// Validation and runtime share one parser: every entry `validate_all`
+    /// accepts, `TrustedProxies::parse` accepts, and vice versa.
+    #[test]
+    fn validation_agrees_with_the_runtime_parser() {
+        for entry in [
+            "10.0.0.7",
+            "10.42.0.0/16",
+            "2001:db8::/32",
+            "::ffff:10.0.0.7",
+            "10.0.0.7/8",
+            "0.0.0.0/0",
+            "10.0.0.0/08",
+            "junk",
+            " 10.0.0.7",
+        ] {
+            let validated = trusted_proxy_issues(&[entry]).is_empty();
+            let parsed = crate::core::TrustedProxies::parse([entry]).is_ok();
+            assert_eq!(
+                validated, parsed,
+                "'{entry}': validate={validated} runtime={parsed}"
+            );
+        }
+    }
+
+    // ===== G3 follow-up: realms.<name>.security.cidr_policy =====
+    //
+    // There was no validator for these lists at all. `abuse::runtime`'s
+    // `compile_filter` silently dropped any entry the old `Cidr::parse`
+    // refused — its comment claimed "the start-up validator already refused
+    // them", but none did. A typo in the only `allow` entry therefore emptied
+    // the allow list, which lifts the realm's network restriction entirely.
+
+    /// `cidr_policy` issues for realm `acme` with the given lists.
+    fn cidr_policy_issues(allow: &[&str], deny: &[&str]) -> Vec<ValidationIssue> {
+        let list = |v: &[&str]| {
+            v.iter()
+                .map(|e| format!("\"{e}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let yaml = format!(
+            "realms:\n  acme:\n    security:\n      cidr_policy:\n        allow: [{}]\n        \
+             deny: [{}]\n",
+            list(allow),
+            list(deny)
+        );
+        Config::from_yaml_str_unchecked(&yaml)
+            .expect("parses")
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field.contains("cidr_policy"))
+            .collect()
+    }
+
+    #[test]
+    fn cidr_policy_entries_the_runtime_refuses_are_refused_naming_realm_and_entry() {
+        let issues = cidr_policy_issues(
+            &["10.0.0.0/8", "10.1.2.255/24"],
+            &["198.51.100.0/+24", "fe80::1%eth0"],
+        );
+        let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
+        assert_eq!(
+            fields,
+            [
+                "realms.acme.security.cidr_policy.allow[1]",
+                "realms.acme.security.cidr_policy.deny[0]",
+                "realms.acme.security.cidr_policy.deny[1]",
+            ],
+            "{issues:?}"
+        );
+        assert!(issues[0].reason.contains("'10.1.2.255/24'"), "{issues:?}");
+        assert!(
+            issues[0].reason.contains("10.1.2.0/24"),
+            "host bits: the refusal names the network form; got {}",
+            issues[0].reason
+        );
+        assert!(
+            issues[1].reason.contains("'198.51.100.0/+24'"),
+            "{issues:?}"
+        );
+    }
+
+    /// Unlike `trusted_proxies`, a policy list may be as broad as the operator
+    /// likes: `deny: [0.0.0.0/0]` blocks all IPv4, `allow: [::/0]` admits all
+    /// IPv6. Bare addresses are single hosts.
+    #[test]
+    fn cidr_policy_accepts_broad_ranges_and_bare_addresses() {
+        let issues = cidr_policy_issues(
+            &["10.0.0.0/8", "2001:db8::/32", "192.0.2.7", "::/0"],
+            &["0.0.0.0/0", "198.51.100.0/24"],
+        );
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// Validation and runtime share one parser.
+    #[test]
+    fn cidr_policy_validation_agrees_with_the_runtime_parser() {
+        for entry in [
+            "10.0.0.0/8",
+            "192.0.2.7",
+            "0.0.0.0/0",
+            "::/0",
+            "::ffff:192.0.2.0/120",
+            "10.1.2.255/24",
+            "10.0.0.0/+8",
+            "10.0.0.0/08",
+            "[2001:db8::]/32",
+            "10.0.0.0:443/8",
+            "fe80::1%eth0",
+            "junk",
+        ] {
+            let validated = cidr_policy_issues(&[entry], &[]).is_empty();
+            let parsed = crate::abuse::cidr::parse_entry(entry).is_ok();
+            assert_eq!(
+                validated, parsed,
+                "'{entry}': validate={validated} runtime={parsed}"
+            );
+        }
     }
 
     /// Control — a bare IP is still accepted.
@@ -2713,6 +2964,40 @@ mod tests {
                 .any(|i| i.field == "auth.mfa_methods" && i.reason.contains("carrier_pigeon")),
             "an unknown global MFA method must be refused: {issues:?}"
         );
+    }
+
+    /// AGENT_AUTH.md §2.5: a protected resource's URI MUST be HTTPS in
+    /// production; `--dev` MAY permit HTTP. The spec carves out dev mode
+    /// only — a loopback `http://` resource is refused in production too.
+    #[test]
+    fn protected_resource_uri_must_be_https_outside_dev_mode() {
+        let yaml = "realms:\n  acme:\n    protected_resources:\n      \
+                    - resource_uri: \"http://rs.example.com/api\"\n        display_name: RS\n      \
+                    - resource_uri: \"https://ok.example.com\"\n        display_name: OK\n      \
+                    - resource_uri: \"http://127.0.0.1:9000/mcp\"\n        display_name: Local\n      \
+                    - resource_uri: \"HTTP://upper.example.com\"\n        display_name: Upper\n";
+        let mut cfg = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        let fields = |cfg: &Config| -> Vec<String> {
+            let mut f: Vec<String> = cfg
+                .validate_all()
+                .into_iter()
+                .map(|i| i.field)
+                .filter(|f| f.contains("protected_resources"))
+                .collect();
+            f.sort();
+            f
+        };
+        cfg.dev_mode = false;
+        assert_eq!(
+            fields(&cfg),
+            vec![
+                "realms.acme.protected_resources[0].resource_uri".to_string(),
+                "realms.acme.protected_resources[2].resource_uri".to_string(),
+                "realms.acme.protected_resources[3].resource_uri".to_string(),
+            ]
+        );
+        cfg.dev_mode = true;
+        assert_eq!(fields(&cfg), Vec::<String>::new());
     }
 
     #[test]

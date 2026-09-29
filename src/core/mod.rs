@@ -4,23 +4,30 @@
 
 mod epoch_cell;
 mod error;
+mod ip_range;
 pub mod pagination;
 pub mod secrets;
 mod swap_cell;
 mod time;
+mod trusted_proxy;
 mod types;
 
 pub use epoch_cell::{EpochCell, EpochCellOption, EpochGuard};
 pub use error::CoreError;
+pub use ip_range::{IpRange, IpRangeError};
 pub use pagination::{
     Page, PageRequest, PagedResult, DEFAULT_COUNT_CAP, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
 };
 pub use secrets::{
     ct_eq_secret, ct_eq_secret_opt, ct_eq_secret_str, random_secret_bytes, random_secret_hex,
-    random_secret_uuid, SECRET_BYTES,
+    random_secret_uuid, FormSecret, SECRET_BYTES,
 };
 pub use swap_cell::SwapCell;
 pub use time::{Clock, FakeClock, SystemClock, Timestamp};
+pub use trusted_proxy::{
+    TrustedProxies, TrustedProxy, TrustedProxyError, TrustedProxyListError, MIN_IPV4_PREFIX,
+    MIN_IPV6_PREFIX,
+};
 pub use types::{
     AgentCredentialId, AgentId, AuditEventId, ClientId, IdpId, ImportOutcome, InvitationId,
     OrganizationId, RealmId, ResourceServerId, SessionId, Uri, UriError, UserId, WebhookDeliveryId,

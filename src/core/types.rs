@@ -153,12 +153,28 @@ define_id_type!(
     ResourceServerId, "rs_"
 );
 
-/// Validated RFC 8707 resource URI.
+/// Validated RFC 8707 resource indicator, held in its one canonical form.
 ///
-/// Must be absolute (scheme present), non-empty, and MUST NOT contain a
-/// fragment component (fragment-bearing URIs are rejected at construction
-/// to prevent resource-indicator collisions).
+/// Construction (and deserialization) validates and canonicalizes, so every
+/// `Uri` compares canonical-to-canonical and every spelling of one resource is
+/// the same value. The rule (RFC 3986 §6.2.2 syntax- and §6.2.3
+/// scheme-based normalization, restricted to what is unambiguous):
+///
+/// - surrounding whitespace is trimmed;
+/// - it must be absolute (`scheme://authority...`), with a non-empty scheme
+///   and host, no userinfo and no fragment;
+/// - scheme and authority are lowercased; path and query keep their case;
+/// - the scheme's default port is dropped (`:443` for `https`, `:80` for
+///   `http`);
+/// - trailing slashes are dropped from the path, so the root is the bare
+///   authority (`https://api.example.com`) and `/v1/` is `/v1`;
+/// - the query is kept verbatim (two URIs differing only by query are
+///   different resources).
+///
+/// This is the form stored in the protected-resource registry, hashed for
+/// RBAC's resource scope keys, and minted into `aud`.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct Uri(String);
 
 /// Error returned when a URI fails validation.
@@ -170,60 +186,70 @@ pub enum UriError {
 }
 
 impl Uri {
+    /// The canonical URI string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Normalize the URI for storage-key hashing.
-    ///
-    /// Per RFC 3986 §6.2.2.1:
-    /// - Lowercase scheme + host only (not path or query).
-    /// - Strip default ports (443 for https, 80 for http).
-    /// - Remove trailing slash on the authority+path portion.
-    ///
-    /// Returns the normalized form for hashing, NOT for display
-    /// (the original exact string is stored separately).
-    pub(crate) fn normalized(&self) -> String {
-        let s = &self.0;
-        let (scheme, rest) = match s.find("://") {
-            Some(pos) => (&s[..pos], &s[pos + 3..]),
-            None => return s.to_lowercase(),
-        };
-        let scheme_lower = scheme.to_lowercase();
-        let (authority_and_path, _query) = match rest.find('?') {
-            Some(pos) => (&rest[..pos], Some(&rest[pos..])),
-            None => (rest, None),
-        };
-        let (authority, path) = match authority_and_path.find('/') {
-            Some(pos) => (&rest[..pos], &authority_and_path[pos..]),
-            None => (authority_and_path, "/"),
-        };
-        let authority_lower = authority.to_lowercase();
-        let authority_no_default_port = strip_default_port(&authority_lower);
-        let path_no_trailing = match path.strip_suffix('/') {
-            Some(stripped) if stripped.len() > 1 => stripped,
-            _ => path,
-        };
-        format!("{scheme_lower}://{authority_no_default_port}{path_no_trailing}")
-    }
-
-    /// SHA-256 first 12 hex characters of the normalized form.
+    /// SHA-256 first 12 hex characters of the canonical form.
     pub(crate) fn storage_hash(&self) -> String {
         use sha2::Digest;
         let mut hasher = sha2::Sha256::new();
-        hasher.update(self.normalized().as_bytes());
+        hasher.update(self.0.as_bytes());
         let digest = hasher.finalize();
         hex::encode(&digest[..6])
     }
-}
 
-fn strip_default_port(authority: &str) -> &str {
-    if let Some(stripped) = authority.strip_suffix(":443") {
-        stripped
-    } else if let Some(stripped) = authority.strip_suffix(":80") {
-        stripped
-    } else {
-        authority
+    /// Canonicalizes `raw` per the type-level rule, or `None` when it is not
+    /// a valid resource indicator.
+    fn canonicalize(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.contains('#') {
+            return None;
+        }
+        let (scheme, rest) = trimmed.split_once("://")?;
+        let mut scheme_chars = scheme.chars();
+        let scheme_ok = scheme_chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && scheme_chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        if !scheme_ok {
+            return None;
+        }
+        let scheme = scheme.to_ascii_lowercase();
+        let (hier, query) = match rest.split_once('?') {
+            Some((hier, query)) => (hier, Some(query)),
+            None => (rest, None),
+        };
+        let (authority, path) = match hier.find('/') {
+            Some(pos) => hier.split_at(pos),
+            None => (hier, ""),
+        };
+        if authority.contains('@') {
+            return None;
+        }
+        let mut authority = authority.to_ascii_lowercase();
+        let default_port = match scheme.as_str() {
+            "https" => Some(":443"),
+            "http" => Some(":80"),
+            _ => None,
+        };
+        if let Some(port) = default_port {
+            if let Some(stripped) = authority.strip_suffix(port) {
+                authority.truncate(stripped.len());
+            }
+        }
+        if let Some(stripped) = authority.strip_suffix(':') {
+            authority.truncate(stripped.len());
+        }
+        if authority.is_empty() {
+            return None;
+        }
+        let path = path.trim_end_matches('/');
+        let mut out = format!("{scheme}://{authority}{path}");
+        if let Some(query) = query.filter(|q| !q.is_empty()) {
+            out.push('?');
+            out.push_str(query);
+        }
+        Some(out)
     }
 }
 
@@ -231,17 +257,10 @@ impl TryFrom<String> for Uri {
     type Error = UriError;
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        let trimmed = s.trim().to_string();
-        if trimmed.is_empty() {
-            return Err(UriError::InvalidUri(s));
+        match Self::canonicalize(&s) {
+            Some(canonical) => Ok(Self(canonical)),
+            None => Err(UriError::InvalidUri(s)),
         }
-        if !trimmed.contains("://") {
-            return Err(UriError::InvalidUri(s));
-        }
-        if trimmed.contains('#') {
-            return Err(UriError::InvalidUri(s));
-        }
-        Ok(Self(trimmed))
     }
 }
 
@@ -394,28 +413,88 @@ mod tests {
         assert!(Uri::try_from("https://api.example.com#admin".to_string()).is_err());
     }
 
+    /// One canonical form for every resource indicator (RFC 3986 §6.2.2 /
+    /// §6.2.3): scheme and host lowercased, the scheme's default port
+    /// dropped, no trailing slash, path case and query kept. Both the
+    /// token-exchange allowlist and RBAC's resource scope lookup compare this
+    /// form, so every spelling of one URI behaves identically.
     #[test]
-    fn uri_normalization_lowercases_scheme_and_host() {
-        let uri = Uri::try_from("HTTPS://API.Example.COM/Path".to_string()).expect("valid URI");
-        assert_eq!(uri.normalized(), "https://api.example.com/Path");
+    fn uri_is_canonical_at_construction() {
+        for (raw, canonical) in [
+            (
+                "HTTPS://API.Example.COM/Path",
+                "https://api.example.com/Path",
+            ),
+            (
+                "https://api.example.com:443/data",
+                "https://api.example.com/data",
+            ),
+            (
+                "http://api.example.com:80/data",
+                "http://api.example.com/data",
+            ),
+            (
+                "http://api.example.com:443/data",
+                "http://api.example.com:443/data",
+            ),
+            (
+                "https://api.example.com:80/data",
+                "https://api.example.com:80/data",
+            ),
+            ("https://api.example.com/v1/", "https://api.example.com/v1"),
+            ("https://api.example.com/", "https://api.example.com"),
+            ("https://api.example.com", "https://api.example.com"),
+            (
+                "https://api.example.com/MyFiles",
+                "https://api.example.com/MyFiles",
+            ),
+            (
+                "https://Api.Example.com/v1/?b=2&a=1",
+                "https://api.example.com/v1?b=2&a=1",
+            ),
+            ("  https://api.example.com/x  ", "https://api.example.com/x"),
+        ] {
+            let uri = Uri::try_from(raw.to_string()).expect("valid URI");
+            assert_eq!(uri.as_str(), canonical, "{raw:?}");
+        }
     }
 
     #[test]
-    fn uri_normalization_strips_default_ports() {
-        let uri = Uri::try_from("https://api.example.com:443/data".to_string()).expect("valid URI");
-        assert_eq!(uri.normalized(), "https://api.example.com/data");
+    fn uri_spelling_variants_share_a_storage_hash_and_a_query_does_not() {
+        let hash = |s: &str| Uri::try_from(s.to_string()).expect("valid").storage_hash();
+        assert_eq!(
+            hash("https://api.example.com/v1"),
+            hash("HTTPS://API.EXAMPLE.COM:443/v1/")
+        );
+        assert_ne!(
+            hash("https://api.example.com/v1?tenant=a"),
+            hash("https://api.example.com/v1?tenant=b")
+        );
+        assert_ne!(
+            hash("https://api.example.com/v1"),
+            hash("http://api.example.com/v1")
+        );
     }
 
     #[test]
-    fn uri_normalization_removes_trailing_slash() {
-        let uri = Uri::try_from("https://api.example.com/v1/".to_string()).expect("valid URI");
-        assert_eq!(uri.normalized(), "https://api.example.com/v1");
+    fn uri_rejects_missing_scheme_host_or_userinfo() {
+        for bad in [
+            "://api.example.com",
+            "https://",
+            "https:///path",
+            "https://user@api.example.com",
+        ] {
+            assert!(Uri::try_from(bad.to_string()).is_err(), "{bad:?}");
+        }
     }
 
+    /// A stored URI re-canonicalizes on load, so a value persisted in another
+    /// spelling cannot defeat a canonical comparison.
     #[test]
-    fn uri_normalization_preserves_path_case() {
-        let uri = Uri::try_from("https://api.example.com/MyFiles".to_string()).expect("valid URI");
-        assert_eq!(uri.normalized(), "https://api.example.com/MyFiles");
+    fn uri_deserialize_canonicalizes_and_validates() {
+        let uri: Uri = serde_json::from_str("\"HTTPS://API.example.com:443/\"").expect("valid");
+        assert_eq!(uri.as_str(), "https://api.example.com");
+        assert!(serde_json::from_str::<Uri>("\"/relative\"").is_err());
     }
 
     #[test]

@@ -191,6 +191,21 @@ impl EmbeddedIdentityEngine {
         // Mint capability token (JWT scoped to tool+action).
         let cap_token = self.mint_capability_token(realm_id, &record, now_secs, ttl)?;
 
+        // G4: the Pending check above is a local read and the lock is
+        // node-local. Across a cluster the decision is one replicated
+        // put-if-absent shared with `deny`: whichever claims first decides
+        // the request, so one approval mints one capability token and an
+        // approval cannot land on top of a deny (or the reverse).
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_approval(request_id),
+            record.expires_at,
+        )? {
+            return Err(IdentityError::ApprovalRequestNotPending {
+                current_status: "resolved".to_string(),
+            });
+        }
+
         // Transition status.
         record.status = ApprovalRequestStatus::Approved;
         record.resolved_at = Some(now);
@@ -256,6 +271,17 @@ impl EmbeddedIdentityEngine {
         if record.status != ApprovalRequestStatus::Pending {
             return Err(IdentityError::ApprovalRequestNotPending {
                 current_status: format!("{:?}", record.status).to_lowercase(),
+            });
+        }
+
+        // G4: the same decision claim `approve` makes (see there).
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_approval(request_id),
+            record.expires_at,
+        )? {
+            return Err(IdentityError::ApprovalRequestNotPending {
+                current_status: "resolved".to_string(),
             });
         }
 
@@ -428,7 +454,6 @@ impl EmbeddedIdentityEngine {
                 format!("tool.{}.{}", request.tool, request.action),
                 format!("approval.{}.approved", request.request_id),
             ],
-            required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
             sv: None,

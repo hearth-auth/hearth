@@ -41,7 +41,7 @@ key:
 
 | Env var | Required? | Purpose |
 |---------|-----------|---------|
-| `HEARTH_MASTER_KEY` | Required in production | 32-byte host key that wraps every realm KEK on disk, and the passphrase for `hearth backup export` / `restore`. When unset, production startup fails rather than auto-generating a world-readable `hearth.host_key` file. |
+| `HEARTH_MASTER_KEY` | Required in production | 32-byte host key that wraps every realm KEK on disk, and the passphrase for `hearth backup export` / `restore`. It is the only host-key source in production: when unset, startup fails, and a `{data_dir}/hearth.host_key` file is never read (only `--dev` generates and reads one). `hearth config validate` warns when it is unset. |
 | `HEARTH_PREVIOUS_MASTER_KEY` | Only during a host-key rotation | Previous host key value. Set it when startup fails with `HostKeyMismatch` after rotating `HEARTH_MASTER_KEY`; remove it once every realm KEK has been re-wrapped. |
 | `HEARTH_KEK` | One of this or `security.key_encryption_key` | Key-encryption key for realm signing keys at rest. 64 lowercase hex characters (`openssl rand -hex 32`). |
 | `HEARTH_SMS_OTP_HMAC_KEY` | Required whenever `sms.transport` is not `"log"` | At least 32 bytes. Cryptographically binds an SMS OTP to this server; startup fails without it once a real SMS transport is configured. |
@@ -121,7 +121,7 @@ Network binding and TLS configuration.
 | `tls_key_path` | string | — | Path to the PEM-encoded private key for the TLS certificate. |
 | `tls_client_ca_path` | string | — | Path to a CA certificate for client certificate verification (mTLS). |
 | `tls_require_client_cert` | bool | `false` | When `true`, all connections must present a valid client certificate signed by `tls_client_ca_path`. |
-| `trusted_proxies` | list of strings | `[]` | IP addresses of trusted reverse proxies. When non-empty, the real client IP is extracted from `X-Forwarded-For` using the rightmost-non-trusted algorithm. When empty (the default), the peer socket address is used and `X-Forwarded-For` is ignored — the safe default for direct-to-internet deployments. CIDR notation is not yet supported; supply individual IPs. |
+| `trusted_proxies` | list of strings | `[]` | Trusted reverse proxies, each a single IP address (`10.0.0.7`, `2001:db8::7`) or a CIDR range (`10.42.0.0/16`, `2001:db8:42::/48`) — use a range when proxy addresses change, e.g. Kubernetes ingress-controller pods. When non-empty, the real client IP is extracted from `X-Forwarded-For` using the rightmost-non-trusted algorithm (a hop inside any listed range counts as trusted), `X-Forwarded-Proto` is honoured from a peer inside the list, and such peers are exempt from `operational.max_connections_per_ip`. When empty (the default), the peer socket address is used and both headers are ignored — the safe default for direct-to-internet deployments. Every entry is checked the same way by `hearth config validate` and at start-up; one bad entry refuses the whole config (nothing is silently dropped). Refused: anything that is not an address or `address/prefix`; a range with **host bits set** (`10.0.0.7/8` — write `10.0.0.0/8` for the range or `10.0.0.7` for the address; Hearth refuses rather than guess which you meant); the unspecified address or a range starting at it (`0.0.0.0`, `::`, `0.0.0.0/0`, `::/0`); and a range broader than `/8` (IPv4) or `/16` (IPv6), which would trust a large share of the internet. A loopback entry is refused on a non-loopback `bind_address`. An IPv4-mapped IPv6 entry (`::ffff:10.0.0.7`) is treated as its IPv4 form. |
 | `trust_forwarded_proto` | bool | `false` | Trust the `X-Forwarded-Proto: https` header when deciding whether a request arrived over HTTPS (session cookies carry `Secure`, HSTS is sent, the login Origin check). The header is honoured **only when the connection's TCP peer is listed in `trusted_proxies`**; from any other peer it is removed before the request is handled. **Requires a non-empty `trusted_proxies`** — setting it to `true` with an empty proxy list is refused at start-up and by `hearth config validate`, because the flag would then have no effect. |
 
 | `grpc_port` | integer | — (disabled) | TCP port for the gRPC management API. When unset, no gRPC listener is started. |
@@ -609,7 +609,7 @@ Global authentication defaults. These apply to all realms unless overridden per-
 | `mfa_required` | bool | `false` | Whether MFA is required for all users. Per-realm `auth.mfa_required` overrides. |
 | `mfa_methods` | list | — | Allowed MFA methods for every realm: `"totp"`, `"webauthn"`, `"email_otp"`, `"sms"`. A realm's `realms.<name>.auth.mfa_methods` replaces this list wholesale rather than merging with it. Absent at both levels = all methods allowed. See the per-realm key for what restriction means. |
 | `passkey_requires_mfa` | bool | `false` | Whether passkey login requires an additional TOTP challenge. Per-realm `auth.passkey_requires_mfa` overrides. |
-| `webauthn_required` | bool | — | Global default for "every user must hold a passkey". When `true`, a user with no registered passkey is intercepted by the `ENROLL_MFA` required action, **and** every session must be opened by a WebAuthn assertion that proved user verification — a TOTP code, a recovery code or an OTP is refused with `mfa_required` even when the account holds a passkey. Per-realm `realms.<name>.auth.webauthn_required` overrides. |
+| `webauthn_required` | bool | — | Global default for "every user must hold a passkey". When `true`, a user with no registered passkey is intercepted by the `ENROLL_MFA` required action, which registers one during login (user verification required; see the required-actions guide), **and** every session must be opened by a WebAuthn assertion that proved user verification — a TOTP code, a recovery code or an OTP is refused with `mfa_required` even when the account holds a passkey. Per-realm `realms.<name>.auth.webauthn_required` overrides. |
 | `webauthn_resident_key` | string | — | Global default `residentKey` preference for registration ceremonies: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup. Per-realm `realms.<name>.auth.webauthn_resident_key` overrides. |
 | `webauthn_user_verification` | string | — | Global default `userVerification` preference: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup. `"required"` is what makes a passkey a genuine second factor, and it is **enforced server-side**: an assertion whose authenticator-data UV bit is clear is rejected at completion regardless of what the challenge advertised (`realm_requires_user_verification`, `src/identity/engine/mod.rs`). Per-realm `realms.<name>.auth.webauthn_user_verification` overrides. See the note below on which challenge endpoints echo the preference. |
 
@@ -1336,14 +1336,29 @@ Per-realm security policy.
 #### `realms.<name>.security.cidr_policy` (A-9)
 
 Tenant-managed network allow/deny lists, consulted on the login form before any
-password hashing. Evaluation is **deny first, then allow**: a `deny` match
-refuses outright, and a non-empty `allow` list refuses everything it does not
-contain. Both lists empty (the default) means no network restriction.
+password hashing. Evaluation is deny first, then allow: a `deny` match refuses
+outright; otherwise a non-empty `allow` list refuses every address it does not
+contain. Both lists empty means no network restriction. (Both lists are empty by
+default.) A `deny` entry inside an allowed range therefore carves an exception
+out of it: `allow: ["10.0.0.0/8"]` with `deny: ["10.1.2.3"]` admits
+`10.1.2.4` and refuses `10.1.2.3`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `allow` | list of CIDRs | `[]` | Sources permitted to authenticate. Empty = no allow-list restriction. |
 | `deny` | list of CIDRs | `[]` | Sources refused outright. Evaluated before `allow`. |
+
+Each entry is a single IP address (`192.0.2.7`, `2001:db8::7`) or a CIDR range
+(`10.0.0.0/8`, `2001:db8::/32`), in the same strict grammar as
+`server.trusted_proxies`. `hearth config validate` and start-up refuse any
+other entry, naming the realm and position (e.g.
+`realms.acme.security.cidr_policy.allow[1]`) — nothing is silently dropped.
+Refused: a range with **host bits set** (`10.1.2.255/24` — write `10.1.2.0/24`
+or `10.1.2.255`), a signed or zero-padded prefix (`/+8`, `/08`), a zone id
+(`fe80::1%eth0`), brackets, a port, and surrounding whitespace. Unlike
+`trusted_proxies` there is no breadth limit: `deny: ["0.0.0.0/0"]` is a valid
+policy. An IPv4 client reaching a dual-stack listener as `::ffff:a.b.c.d` is
+matched as its IPv4 address.
 
 ```yaml
 realms:
@@ -1377,7 +1392,7 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 | `passkey_requires_mfa` | bool | `false` | Whether passkey (WebAuthn) login still requires a TOTP challenge. Passkeys are inherently multi-factor, but regulated environments (healthcare, finance) may require an additional TOTP step. When `true` and the user has TOTP enrolled, passkey login redirects to the MFA challenge page. When `true` but the user has no TOTP enrolled, login proceeds normally. |
 | `mfa_methods` | list | inherits `auth.mfa_methods` | Allowed MFA methods: `"totp"`, `"webauthn"`, `"email_otp"`, `"sms"`. When set, only the listed methods may be **enrolled or presented**; a request to enrol or verify a method not in the list is refused with `HEARTH_MFA_METHOD_NOT_ALLOWED` (HTTP 403). This applies to factors users already hold — dropping a method from the list stops it working for them, so check the list names every factor in use before narrowing it. Absent (here and globally) = all methods allowed. `"sms"` requires a working `sms:` transport block and `HEARTH_SMS_OTP_HMAC_KEY`. |
 | `allowed_auth_methods` | list | — | Allowed login methods: `"password"`, `"magic_link"`, `"passkey"`. |
-| `webauthn_required` | bool | inherits `auth.webauthn_required` | Whether every user in this realm must hold a passkey **and** use it. When `true`, a user with no registered WebAuthn credential is intercepted by the `ENROLL_MFA` required action, and `create_session` refuses any authentication whose second factor was not a user-verified WebAuthn assertion. A TOTP secret does **not** satisfy it, at enrolment or at use — the key names a passkey, and an operator setting it after a phishing incident is asking for a phishing-resistant factor specifically. |
+| `webauthn_required` | bool | inherits `auth.webauthn_required` | Whether every user in this realm must hold a passkey **and** use it. When `true`, a user with no registered WebAuthn credential is intercepted by the `ENROLL_MFA` required action, which registers a user-verified passkey during login (the realm's `mfa_methods`, when set, must include `webauthn`), and `create_session` refuses any authentication whose second factor was not a user-verified WebAuthn assertion. A TOTP secret does **not** satisfy it, at enrolment or at use — the key names a passkey, and an operator setting it after a phishing incident is asking for a phishing-resistant factor specifically. |
 | `webauthn_resident_key` | string | inherits `auth.webauthn_resident_key` | `residentKey` preference sent in `authenticatorSelection` during registration: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup — the browser would silently ignore it and fall back to `"preferred"`. |
 | `webauthn_user_verification` | string | inherits `auth.webauthn_user_verification` | `userVerification` preference sent during registration and authentication: `"required"`, `"preferred"` or `"discouraged"`. Set `"required"` to make a passkey a genuine second factor; a ceremony that proves user *presence* only is possession alone. |
 | `password_policy` | object | — | Password complexity requirements (see below). |
@@ -1787,13 +1802,14 @@ Declarative role, permission, group, and scope setup for the realm's RBAC model.
 | `claims.mappings[].first_party_only` | bool | `true` for Tier 3 (custom) claims; default of the overridden mapping otherwise | Release gate: emit only when `client.trust_level == FirstParty`. Tier 3 custom claims default to `true` (over-disclosure is opt-in). |
 | `claims.mappings[].required_scopes` | array of strings | — | Release gate: if set, the **granted** scope set (post-resolution, not raw request) must include ≥1 of these for the claim to emit. |
 | `claims.mappings[].allowed_clients` | array of strings | — | Release gate: if set, the requesting client's slug must be in this list. **Managed-client slugs only** — DCR-registered slugs are rejected at config load. |
+| `protected_resources` | array of resource | `[]` | OPTIONAL RFC 8707 protected-resource registrations (e.g., MCP tool servers). Each resource owns its own scope namespace; scopes declared here are NOT realm-global and apply only when a token is issued with `aud` set to this resource's URI. This list is also the realm's **only** protected-resource registry: reconcile mirrors it into the identity registry at startup and on every config reload (there is no admin write API), and an entry removed from YAML — or the whole key — is removed from the registry, and its RBAC scope bundles are removed, on the next reconcile. **Removing an entry stops its tokens:** every access token whose `aud` names it stops validating and introspects inactive, and refresh tokens bound to it stop rotating (`AGENT_AUTH.md` §2.5). The registry is the RFC 8693 token-exchange target allowlist (`OIDC.md` §3.4.1a). See `AUTHZ_EXPANSION.md` §"Architectural Model" and `AGENT_AUTH.md` §2.5. |
+| `protected_resources[].resource_uri` | string | *required* | URI of the protected resource and its identifier. Stored in **canonical form** — scheme and host lowercased, the scheme's default port and trailing slashes dropped, path and query case kept (`HTTPS://MCP.Example.com:443/api/` → `https://mcp.example.com/api`). The canonical form is the token `aud` claim, and an RFC 8693 token exchange may name any spelling of it as `audience` or `resource`; RBAC's resource scope lookup uses the same form. MUST be an absolute URI with a scheme and host, no userinfo, no fragment and no surrounding whitespace, unique within the realm after canonicalization, and — unless the server runs with `--dev` — `https` (loopback included). Config load refuses anything else, naming `protected_resources[i].resource_uri`. |
+| `protected_resources[].display_name` | string | *required* | Shown on consent screens. |
+| `protected_resources[].scopes` | array of scope bundle | `[]` | Resource-local scope bundles. Same shape as the realm-level `scopes` entries. Looked up only when a token request includes `resource = <this URI>`; the realm-level `scopes` block is NOT consulted under a resource. A bundle name starting `mcp:` MUST be `mcp:{category}:{action}` (AGENT_AUTH.md §2.6), else config load refuses `protected_resources[i].scopes`. |
+| `protected_resources[].introspection_client` | string | *none* | Key of an application (under `applications` / `oauth_clients`) in the same realm that this resource server authenticates as at the introspection endpoint. That client may introspect any access token whose `aud` names this resource — including a token exchanged with `audience=` only, which no other caller can introspect. Config load refuses a key that names no application of the realm (`protected_resources[i].introspection_client`). See `AGENT_AUTH.md` §2.5. |
+| `oauth_clients[].slug` | string | *required* | Realm-unique human-readable handle. Managed clients (declared in YAML) have admin-authored slugs; runtime-registered (DCR) clients have auto-generated slugs and cannot be referenced from `allowed_clients` mapper gates. |
 
 > **Unknown keys under a mapping are refused at boot.** A misspelled release gate (`first_party_onlyy`, `required_scope`) used to be discarded in silence, leaving the claim on the permissive default and emitting it to every client. The server now refuses to start and names the offending key.
-| `protected_resources` | array of resource | `[]` | OPTIONAL RFC 8707 protected-resource registrations (e.g., MCP tool servers). Each resource owns its own scope namespace; scopes declared here are NOT realm-global and apply only when a token is issued with `aud` set to this resource's URI. See `AUTHZ_EXPANSION.md` §"Architectural Model" and `AGENT_AUTH.md` §2.5. |
-| `protected_resources[].resource_uri` | string | *required* | Canonical URI of the protected resource (becomes the token `aud` claim). |
-| `protected_resources[].display_name` | string | *required* | Shown on consent screens. |
-| `protected_resources[].scopes` | array of scope bundle | `[]` | Resource-local scope bundles. Same shape as the realm-level `scopes` entries. Looked up only when a token request includes `resource = <this URI>`; the realm-level `scopes` block is NOT consulted under a resource. |
-| `oauth_clients[].slug` | string | *required* | Realm-unique human-readable handle. Managed clients (declared in YAML) have admin-authored slugs; runtime-registered (DCR) clients have auto-generated slugs and cannot be referenced from `allowed_clients` mapper gates. |
 
 **Example:**
 

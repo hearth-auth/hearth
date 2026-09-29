@@ -77,11 +77,9 @@ class AuthorizeError(message: String, cause: Throwable? = null) :
  *
  * @param requiredActions Pending action names from the token's `required_actions` claim
  *                        (e.g. `["VERIFY_EMAIL", "UPDATE_PASSWORD"]`).
- * @param redirectUri     Optional URL to the Hearth interstitial page for the required actions.
  */
 class RequiredActionError(
     val requiredActions: List<String>,
-    val redirectUri: String? = null,
     message: String = "Token requires completion of required actions: $requiredActions",
     cause: Throwable? = null,
 ) : HearthException(message, cause)

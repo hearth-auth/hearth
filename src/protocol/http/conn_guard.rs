@@ -24,6 +24,8 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::Sleep;
 
+use crate::core::TrustedProxies;
+
 /// The HTTP/2 client connection preface (RFC 9113 §3.4).
 const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
@@ -35,8 +37,9 @@ const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 pub(crate) struct PerIpLimiter {
     /// Maximum connections per bucket; `0` disables the cap.
     max: usize,
-    /// Peers never counted — the operator's `server.trusted_proxies`.
-    exempt: Vec<IpAddr>,
+    /// Peers never counted — the operator's `server.trusted_proxies`,
+    /// addresses and CIDR ranges alike.
+    exempt: TrustedProxies,
     /// Live connection count per bucket. Entries are removed at zero so the
     /// map is bounded by the number of distinct peers currently connected.
     counts: Mutex<HashMap<IpAddr, usize>>,
@@ -45,10 +48,10 @@ pub(crate) struct PerIpLimiter {
 impl PerIpLimiter {
     /// Builds a limiter allowing `max` connections per client (`0` = no cap),
     /// with `exempt` peers never counted.
-    pub(crate) fn new(max: u32, exempt: Vec<IpAddr>) -> Arc<Self> {
+    pub(crate) fn new(max: u32, exempt: TrustedProxies) -> Arc<Self> {
         Arc::new(Self {
             max: usize::try_from(max).unwrap_or(usize::MAX),
-            exempt: exempt.into_iter().map(|ip| ip.to_canonical()).collect(),
+            exempt,
             counts: Mutex::new(HashMap::new()),
         })
     }
@@ -58,7 +61,7 @@ impl PerIpLimiter {
     /// dropped, so it must live as long as the connection.
     pub(crate) fn try_acquire(self: &Arc<Self>, peer: IpAddr) -> Option<PerIpGuard> {
         let peer = peer.to_canonical();
-        if self.max == 0 || self.exempt.contains(&peer) {
+        if self.max == 0 || self.exempt.contains(peer) {
             return Some(PerIpGuard {
                 owner: None,
                 bucket: peer,
@@ -244,7 +247,7 @@ mod tests {
 
     #[test]
     fn the_cap_refuses_past_the_allowance_and_a_drop_readmits() {
-        let limiter = PerIpLimiter::new(2, Vec::new());
+        let limiter = PerIpLimiter::new(2, TrustedProxies::default());
         let a = limiter.try_acquire(v4(1)).expect("first");
         let _b = limiter.try_acquire(v4(1)).expect("second");
         assert!(
@@ -264,7 +267,7 @@ mod tests {
 
     #[test]
     fn released_buckets_are_removed_so_the_map_does_not_grow() {
-        let limiter = PerIpLimiter::new(4, Vec::new());
+        let limiter = PerIpLimiter::new(4, TrustedProxies::default());
         let guard = limiter.try_acquire(v4(9)).expect("admit");
         assert_eq!(limiter.count(v4(9)), 1);
         drop(guard);
@@ -275,7 +278,7 @@ mod tests {
 
     #[test]
     fn ipv6_peers_share_one_allowance_per_slash_64() {
-        let limiter = PerIpLimiter::new(1, Vec::new());
+        let limiter = PerIpLimiter::new(1, TrustedProxies::default());
         let first: IpAddr = "2001:db8:1:2::1".parse().expect("ip");
         let same_64: IpAddr = "2001:db8:1:2:ffff::9".parse().expect("ip");
         let other_64: IpAddr = "2001:db8:1:3::1".parse().expect("ip");
@@ -289,20 +292,64 @@ mod tests {
 
     #[test]
     fn mapped_ipv4_counts_as_the_ipv4_address() {
-        let limiter = PerIpLimiter::new(1, Vec::new());
+        let limiter = PerIpLimiter::new(1, TrustedProxies::default());
         let _held = limiter.try_acquire(v4(7)).expect("first");
         let mapped: IpAddr = "::ffff:192.0.2.7".parse().expect("ip");
         assert!(limiter.try_acquire(mapped).is_none());
     }
 
+    fn exempt(entries: &[&str]) -> TrustedProxies {
+        TrustedProxies::parse(entries).expect("valid trusted_proxies")
+    }
+
+    /// Every peer inside a trusted CIDR is exempt; one outside it is capped.
+    /// Ingress-controller pods are rescheduled onto new addresses inside the
+    /// range, and each carries every client behind it.
+    #[test]
+    fn peers_inside_a_trusted_cidr_are_exempt_and_peers_outside_are_capped() {
+        let limiter = PerIpLimiter::new(1, exempt(&["192.0.2.0/28"]));
+        let _a = limiter.try_acquire(v4(1)).expect("in range");
+        let _b = limiter.try_acquire(v4(1)).expect("in range, again");
+        let _c = limiter
+            .try_acquire(v4(15))
+            .expect("last address in the /28");
+        let _d = limiter.try_acquire(v4(15)).expect("last address, again");
+        assert_eq!(limiter.count(v4(1)), 0, "exempt peers are never counted");
+
+        let _e = limiter
+            .try_acquire(v4(16))
+            .expect("first connection outside");
+        assert!(
+            limiter.try_acquire(v4(16)).is_none(),
+            "one past the /28 is an ordinary client and is capped"
+        );
+
+        let mapped: IpAddr = "::ffff:192.0.2.3".parse().expect("ip");
+        let _f = limiter.try_acquire(mapped).expect("mapped, in range");
+        let _g = limiter
+            .try_acquire(mapped)
+            .expect("mapped, in range, again");
+    }
+
+    #[test]
+    fn peers_inside_a_trusted_ipv6_cidr_are_exempt() {
+        let limiter = PerIpLimiter::new(1, exempt(&["2001:db8:42::/48"]));
+        let inside: IpAddr = "2001:db8:42:7::1".parse().expect("ip");
+        let _a = limiter.try_acquire(inside).expect("in range");
+        let _b = limiter.try_acquire(inside).expect("in range, again");
+        let outside: IpAddr = "2001:db8:43::1".parse().expect("ip");
+        let _c = limiter.try_acquire(outside).expect("first outside");
+        assert!(limiter.try_acquire(outside).is_none());
+    }
+
     #[test]
     fn exempt_peers_and_a_zero_cap_are_never_counted() {
-        let limiter = PerIpLimiter::new(1, vec![v4(5)]);
+        let limiter = PerIpLimiter::new(1, exempt(&["192.0.2.5"]));
         let _a = limiter.try_acquire(v4(5)).expect("exempt");
         let _b = limiter.try_acquire(v4(5)).expect("exempt again");
         assert_eq!(limiter.count(v4(5)), 0);
 
-        let uncapped = PerIpLimiter::new(0, Vec::new());
+        let uncapped = PerIpLimiter::new(0, TrustedProxies::default());
         let _c = uncapped.try_acquire(v4(6)).expect("uncapped");
         let _d = uncapped.try_acquire(v4(6)).expect("uncapped again");
     }

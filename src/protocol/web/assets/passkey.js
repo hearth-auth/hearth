@@ -507,6 +507,95 @@
     if (btn) btn.addEventListener('click', run);
   }
 
+  // ── requiredPasskeyEnrol ────────────────────────────────────────────
+  //
+  // Login-time passkey registration on /required-action/enroll-mfa when the
+  // realm requires a passkey. Reads the endpoints from data-* on
+  // #ra-passkey-root. The X-CSRF-Token is the layout's csrf meta, which on
+  // /required-action pages is bound to the required-action session cookie.
+  // User verification is required; the server refuses a touch-only
+  // credential. On success the server answers {"next": url} and has set the
+  // cookies that continue the login.
+
+  function initRequiredPasskeyEnrol() {
+    var root = document.getElementById('ra-passkey-root');
+    if (!root) return;
+    var btn = document.getElementById('ra-passkey-btn');
+    var labelEl = document.getElementById('ra-passkey-label');
+    var errorEl = document.getElementById('ra-passkey-error');
+    var beginUrl = root.dataset.beginUrl;
+    var completeUrl = root.dataset.completeUrl;
+
+    function showError(msg) {
+      if (!errorEl) return;
+      errorEl.textContent = msg;
+      errorEl.hidden = false;
+    }
+
+    function setBusy(v) {
+      if (btn) btn.disabled = v;
+      if (labelEl) labelEl.textContent = v ? 'Waiting for your passkey…' : 'Register a passkey';
+    }
+
+    if (!window.PublicKeyCredential) {
+      showError('This browser cannot register a passkey. Use a browser or device with passkey support.');
+      if (btn) btn.disabled = true;
+      return;
+    }
+
+    function post(url, body) {
+      return fetch(url, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken(),
+        },
+        body: JSON.stringify(body),
+      });
+    }
+
+    function run() {
+      if (btn && btn.disabled) return;
+      setBusy(true);
+      if (errorEl) errorEl.hidden = true;
+      post(beginUrl, {})
+        .then(function (resp) {
+          if (!resp.ok) throw new Error('This page has expired. Reload it and try again.');
+          return resp.json();
+        })
+        .then(function (opts) {
+          opts.challenge = b64urlDecode(opts.challenge);
+          opts.user.id = b64urlDecode(opts.user.id);
+          return navigator.credentials.create({ publicKey: opts });
+        })
+        .then(function (cred) {
+          if (!cred) throw new Error('Registration cancelled');
+          return post(completeUrl, {
+            client_data_json: b64urlEncode(cred.response.clientDataJSON),
+            attestation_object: b64urlEncode(cred.response.attestationObject),
+          });
+        })
+        .then(function (resp) {
+          if (!resp.ok) {
+            throw new Error('That passkey could not be registered. It must confirm it is you with a PIN, fingerprint or face.');
+          }
+          return resp.json();
+        })
+        .then(function (result) {
+          window.location.assign(result.next || '/ui');
+        })
+        .catch(function (e) {
+          if (!e || e.name !== 'NotAllowedError') {
+            showError((e && e.message) || 'Registration failed');
+          }
+          setBusy(false);
+        });
+    }
+
+    if (btn) btn.addEventListener('click', run);
+  }
+
   // ── Boot ────────────────────────────────────────────────────────────
 
   function init() {
@@ -515,6 +604,7 @@
     initPasskeyRows();
     initLoginFormLoadingState();
     initPasskeySecondFactor();
+    initRequiredPasskeyEnrol();
   }
 
   if (document.readyState === 'loading') {

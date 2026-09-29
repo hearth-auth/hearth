@@ -61,6 +61,10 @@ test.describe('Flow 2 — self-registration', () => {
     // Hearth may build the link with 127.0.0.1 instead of localhost; accept both.
     expect(verifyLink).toMatch(/^https?:\/\/(localhost|127\.0\.0\.1)/);
     await page.goto(verifyLink);
+    // GA audit L18: the link lands on a confirmation page (a GET verifies
+    // nothing, so mail scanners cannot); the button's POST verifies.
+    await page.getByTestId('link-confirm-form').getByRole('button').click();
+    await page.waitForLoadState('domcontentloaded');
     // Verification lands on a success/sign-in page, not an error.
     await expect(page.locator('body')).not.toContainText(/invalid|expired|error/i);
 

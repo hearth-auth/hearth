@@ -25,6 +25,28 @@ use hearth::storage::{EmbeddedStorageEngine, StorageConfig};
 use tower::ServiceExt;
 
 const COOKIE_SECRET: [u8; 32] = [7u8; 32];
+
+/// Appends the `_csrf` form token a `/required-action/*` page embeds for the RA
+/// session cookie `ra_token` (bound to the cookie, not a `/ui` CSRF cookie).
+fn with_ra_csrf(ra_token: &str, body: impl std::fmt::Display) -> String {
+    let token = hearth::protocol::web::required_action::ra_form_token_for(
+        &hearth::protocol::web::CookieSecret::from_bytes(COOKIE_SECRET),
+        ra_token,
+    );
+    format!("{body}&_csrf={token}")
+}
+
+/// The confirmation page's POST body for the stashed link `token`
+/// (GA audit L18).
+fn link_binding_body(token: &str) -> String {
+    format!(
+        "link_binding={}",
+        hearth::protocol::web::link_token::link_binding(
+            &CookieSecret::from_bytes(COOKIE_SECRET),
+            token
+        )
+    )
+}
 const PASSWORD: &str = "test-password-hearth";
 const PKCE_VERIFIER: &str = "dGVzdC12ZXJpZmllci10aGlzLWlzLTQzLWNoYXJhY3RlcnM";
 
@@ -368,9 +390,12 @@ async fn single_required_action_completion_resumes_oidc_flow() {
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
-                .body(Body::from(format!(
-                    "current_password={PASSWORD}&new_password=NewSecurePass1!\
+                .body(Body::from(with_ra_csrf(
+                    &ra_token,
+                    format!(
+                        "current_password={PASSWORD}&new_password=NewSecurePass1!\
                      &confirm_password=NewSecurePass1!"
+                    ),
                 )))
                 .expect("req"),
         )
@@ -451,13 +476,16 @@ async fn multiple_required_actions_sequential_completion() {
         .clone()
         .oneshot(
             Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/required-action/VERIFY_EMAIL/confirm?token={}",
-                    urlencode(&ve_token)
-                ))
-                .header(header::COOKIE, format!("hearth_ra_session={ra_token_1}"))
-                .body(Body::empty())
+                .method("POST")
+                .uri("/required-action/VERIFY_EMAIL/confirm")
+                // GA audit L18: the link's first GET moved the token into this
+                // cookie; only the confirmation page's POST spends it.
+                .header(
+                    header::COOKIE,
+                    format!("hearth_ra_session={ra_token_1}; hearth_link_token={ve_token}"),
+                )
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(link_binding_body(&ve_token)))
                 .expect("req"),
         )
         .await
@@ -489,9 +517,12 @@ async fn multiple_required_actions_sequential_completion() {
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token_2}"))
-                .body(Body::from(format!(
-                    "current_password={PASSWORD}&new_password=NewSecurePass1!\
+                .body(Body::from(with_ra_csrf(
+                    &ra_token_2,
+                    format!(
+                        "current_password={PASSWORD}&new_password=NewSecurePass1!\
                      &confirm_password=NewSecurePass1!"
+                    ),
                 )))
                 .expect("req"),
         )
@@ -517,8 +548,8 @@ async fn multiple_required_actions_sequential_completion() {
 // Adversarial: missing / tampered RA cookie → 400
 // ==========================================================================
 
-// VERIFY_EMAIL completes via GET /confirm, not POST. Use UPDATE_PASSWORD to test
-// the generic action_complete handler's RA-cookie guard.
+// Every action completes through its own handler (there is no generic
+// "mark complete" POST). Use UPDATE_PASSWORD to test the RA-cookie guard.
 #[tokio::test]
 async fn action_complete_without_ra_cookie_returns_bad_request() {
     let rig = build_rig_with_realm_actions(vec![]);

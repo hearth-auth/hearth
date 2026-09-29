@@ -27,6 +27,7 @@
     {% endmatch %}
 
     <form method="post" action="/required-action/ENROLL_EMAIL_OTP/verify" class="space-y-5" data-testid="enroll-email-otp-verify-form">
+      {% match csrf %}{% when Some with (c) %}<input type="hidden" name="_csrf" value="{{ c }}">{% when None %}{% endmatch %}
       {% match nonce %}{% when Some with (n) %}<input type="hidden" name="nonce" value="{{ n }}" />{% when None %}{% endmatch %}
       <div>
         <label for="code" class="block text-sm font-medium text-ht-content-secondary mb-1">Verification code</label>
@@ -43,6 +44,7 @@
     <div class="mt-6 rounded-lg bg-ht-surface px-4 py-3 text-sm text-ht-content-muted ring-1 ring-divider-subtle">
       <p>Didn't receive the code?
         <form method="post" action="/required-action/ENROLL_EMAIL_OTP/send" class="inline">
+          {% match csrf %}{% when Some with (c) %}<input type="hidden" name="_csrf" value="{{ c }}">{% when None %}{% endmatch %}
           <button type="submit" class="font-medium text-accent hover:underline">Send again</button>
         </form>
       </p>

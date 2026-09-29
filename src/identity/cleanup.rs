@@ -98,6 +98,13 @@ pub struct CleanupStats {
     /// was an in-process `HashMap` swept on every `/authorize`; it is now
     /// replicated storage swept here, once per cleanup pass.
     pub oidc_nonces_deleted: u64,
+    /// Single-use redemption markers (`consumed:`) swept (G4).
+    ///
+    /// One marker is claimed per redeemed PAR `request_uri`, authorization
+    /// code and device code. It only has to outlive the artifact it guards
+    /// (plus the clock-skew grace); past that the artifact's own expiry check
+    /// refuses any second redemption.
+    pub consumed_markers_deleted: u64,
     /// Revoked-JTI blocklist entries (`oauth:revjti:`) swept (22.13).
     ///
     /// A blocklist entry only has to outlive the revoked token it names: once
@@ -141,6 +148,7 @@ impl CleanupStats {
             + self.saml_states_deleted
             + self.saml_assertions_deleted
             + self.oidc_nonces_deleted
+            + self.consumed_markers_deleted
             + self.revoked_jtis_deleted
             + self.session_family_rows_deleted
             + self.rate_trackers_pruned
@@ -277,6 +285,13 @@ pub(crate) fn sweep_expired(
         &mut errors,
         "OIDC nonce replay-sentinel",
         sweep_oidc_nonces(realm_id, storage, now_secs),
+    );
+    record(
+        realm_id,
+        &mut stats.consumed_markers_deleted,
+        &mut errors,
+        "single-use redemption marker",
+        sweep_consumed_markers(realm_id, storage, now_secs),
     );
     record(
         realm_id,
@@ -476,6 +491,12 @@ fn sweep_grant_families(
 
         if now >= family.expires_at {
             storage.delete(realm_id, &entry.key)?;
+            // The revocation tombstone lives exactly as long as the row it
+            // guards; nothing else removes it (G6).
+            storage.delete(
+                realm_id,
+                &keys::encode_grant_family_revoked(&family.family_id),
+            )?;
             deleted += 1;
         }
     }
@@ -733,6 +754,38 @@ pub(crate) fn sweep_oidc_nonces(
         };
         let expires_at = i64::from_le_bytes(bytes);
         if expires_at <= now_secs {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
+/// Reclaims expired single-use redemption markers (`consumed:` — G4).
+///
+/// The value is an 8-byte little-endian `i64` expiry in Unix seconds: the
+/// guarded artifact's own expiry plus the clock-skew grace. A marker whose
+/// value is anything else cannot be dated and is kept — deleting it could make
+/// a still-live artifact redeemable again, so the sweep fails closed.
+pub(crate) fn sweep_consumed_markers(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now_secs: i64,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::consumed_marker_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
+        let Ok(bytes) = entry.value.as_slice().try_into() else {
+            tracing::warn!(
+                realm = %realm_id,
+                "cleanup: single-use marker with an unreadable expiry kept"
+            );
+            continue;
+        };
+        if i64::from_le_bytes(bytes) <= now_secs {
             storage.delete(realm_id, &entry.key)?;
             deleted += 1;
         }
@@ -1130,11 +1183,17 @@ mod tests {
             &serde_json::to_vec(&family).expect("serialize"),
         )
         .expect("put");
+        let tombstone = keys::encode_grant_family_revoked("fid2");
+        s.put(&realm, &tombstone, &[]).expect("put tombstone");
 
         let config = CleanupConfig::default();
         let stats = sweep_expired(&realm, &s, &clock, &config);
         assert_eq!(stats.grant_families_deleted, 1);
         assert!(s.get(&realm, &key).expect("get").is_none());
+        assert!(
+            s.get(&realm, &tombstone).expect("get tombstone").is_none(),
+            "the revocation tombstone outlived the family row it guards"
+        );
     }
 
     #[test]
@@ -1166,11 +1225,17 @@ mod tests {
             &serde_json::to_vec(&family).expect("serialize"),
         )
         .expect("put");
+        let tombstone = keys::encode_grant_family_revoked("fid3");
+        s.put(&realm, &tombstone, &[]).expect("put tombstone");
 
         let config = CleanupConfig::default();
         let stats = sweep_expired(&realm, &s, &clock, &config);
         assert_eq!(stats.grant_families_deleted, 0);
         assert!(s.get(&realm, &key).expect("get").is_some());
+        assert!(
+            s.get(&realm, &tombstone).expect("get tombstone").is_some(),
+            "a live family's revocation tombstone was swept"
+        );
     }
 
     // --- max_per_type ---
@@ -1420,6 +1485,105 @@ mod tests {
             stats.jar_jtis_deleted, 1,
             "sweep_expired must include JAR JTI sweep"
         );
+    }
+
+    // ── single-use redemption markers (`consumed:`) ─────────────────────
+
+    fn seed_marker(s: &EmbeddedStorageEngine, realm: &RealmId, key: &[u8], expires_at: i64) {
+        s.put(realm, key, &expires_at.to_le_bytes())
+            .expect("put consumed marker");
+    }
+
+    #[test]
+    fn sweep_consumed_markers_deletes_expired_keeps_active_for_every_kind() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let expired = [
+            keys::encode_consumed_par("par-old"),
+            keys::encode_consumed_code("code-old"),
+            keys::encode_consumed_device_code("device-old"),
+            keys::encode_consumed_magic_link("magic-old"),
+            keys::encode_consumed_password_reset("reset-old"),
+            keys::encode_consumed_email_verify("verify-old"),
+            keys::encode_consumed_refresh("refresh-old"),
+        ];
+        let live = [
+            keys::encode_consumed_par("par-live"),
+            keys::encode_consumed_code("code-live"),
+            keys::encode_consumed_device_code("device-live"),
+            keys::encode_consumed_magic_link("magic-live"),
+            keys::encode_consumed_password_reset("reset-live"),
+            keys::encode_consumed_email_verify("verify-live"),
+            keys::encode_consumed_refresh("refresh-live"),
+        ];
+        for key in &expired {
+            seed_marker(&s, &realm, key, NOW_SECS);
+        }
+        for key in &live {
+            seed_marker(&s, &realm, key, NOW_SECS + 1);
+        }
+
+        let deleted = sweep_consumed_markers(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(deleted, 7, "exactly the markers at or past expiry go");
+        for key in &expired {
+            assert!(s.get(&realm, key).expect("get").is_none(), "{key:?} kept");
+        }
+        for key in &live {
+            assert!(s.get(&realm, key).expect("get").is_some(), "{key:?} swept");
+        }
+    }
+
+    /// A marker whose expiry cannot be read is kept: deleting it could make a
+    /// still-live artifact redeemable again, so the sweep fails closed.
+    #[test]
+    fn sweep_consumed_markers_keeps_a_marker_it_cannot_date() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let key = keys::encode_consumed_par("undatable");
+        s.put(&realm, &key, b"1").expect("put");
+
+        let deleted = sweep_consumed_markers(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(deleted, 0);
+        assert!(s.get(&realm, &key).expect("get").is_some());
+    }
+
+    #[test]
+    fn sweep_consumed_markers_is_realm_scoped() {
+        let (s, _dir) = storage();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+        let key = keys::encode_consumed_code("shared-hash");
+        seed_marker(&s, &realm_a, &key, NOW_SECS - 1);
+        seed_marker(&s, &realm_b, &key, NOW_SECS - 1);
+
+        assert_eq!(
+            sweep_consumed_markers(&realm_a, &s, NOW_SECS).expect("sweep a"),
+            1
+        );
+        assert!(
+            s.get(&realm_b, &key).expect("get").is_some(),
+            "realm_b's marker must be untouched by realm_a's sweep"
+        );
+    }
+
+    #[test]
+    fn sweep_expired_includes_consumed_markers() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let clock = fake_clock(T0 + ONE_HOUR);
+        let now_secs = (T0 + ONE_HOUR) / 1_000_000;
+        seed_marker(&s, &realm, &keys::encode_consumed_par("gone"), now_secs - 1);
+        seed_marker(
+            &s,
+            &realm,
+            &keys::encode_consumed_par("kept"),
+            now_secs + 60,
+        );
+
+        let stats = sweep_expired(&realm, &s, &clock, &CleanupConfig::default());
+        assert_eq!(stats.consumed_markers_deleted, 1);
+        assert_eq!(stats.errors, 0);
+        assert!(stats.total_deleted() >= 1);
     }
 
     #[test]

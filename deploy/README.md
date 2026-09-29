@@ -45,7 +45,7 @@ Docker, use `make dev`.
 # 1. Copy and edit the example config. Production start-up requires:
 #    - an HTTPS posture: server.tls_cert_path + tls_key_path, OR
 #      server.trust_forwarded_proto: true with server.trusted_proxies listing
-#      your reverse proxy's IP(s) — individual IPs, CIDR is refused;
+#      your reverse proxy's IP(s) or CIDR range(s);
 #    - oidc.issuer set to the public https:// URL;
 #    - a real email.transport (smtp, sendgrid, …), or
 #      email.allow_log_transport_in_production: true to evaluate with every
@@ -290,14 +290,16 @@ Open `my-values.yaml` and replace the placeholders:
 | `ingress.hosts[0].host` | `auth.company.com` | Your public domain |
 | `ingress.tls[0].hosts[0]` | `auth.company.com` | Must match the host |
 | `config.oidc.issuer` | `https://auth.company.com` | Returned in OIDC discovery |
-| `config.server.trusted_proxies` | `["10.42.1.7"]` | **Required.** The IP(s) your Ingress controller connects to the pod from. Individual IPs only — CIDR is refused. The shipped placeholder makes the server refuse to start. |
+| `config.server.trusted_proxies` | `["10.42.3.0/24"]` | **Required.** The IP(s) or CIDR range(s) your Ingress controller connects to the pod from. Use the narrowest range that holds the controller pods — every host in it is trusted to set `X-Forwarded-For`. Host bits in a range (`10.42.3.7/24`), ranges broader than `/8` (IPv4) or `/16` (IPv6), and catch-alls are refused. The shipped placeholder makes the server refuse to start. |
 | `config.email.smtp.*` | `smtp.company.com` | Mail server settings |
 | `extraEnv` | `hearth-smtp` / `password` | Secret holding the SMTP password |
 
 > **Keep `trusted_proxies` current.** Ingress-controller pod IPs change when the pods are
 > rescheduled. With a stale list Hearth ignores `X-Forwarded-For`, every client appears to come
 > from the controller, and per-IP rate limits (login lockout included) hit all users at once.
-> Prefer a controller with stable addresses (`hostNetwork`, or static pod IPs from your CNI).
+> List a CIDR range covering the addresses the controller pods can be given (for example a
+> dedicated ingress node pool's pod CIDR), or give the controller stable addresses
+> (`hostNetwork`, or static pod IPs from your CNI).
 >
 > **Direct TLS instead:** set `tls.enabled: true` and `tls.existingSecret` (a `kubernetes.io/tls`
 > Secret), drop `trust_forwarded_proto`, and add the ingress annotation
@@ -418,7 +420,7 @@ config:
     port: 8420
     trust_forwarded_proto: true
     trusted_proxies:
-      - "10.42.1.7"        # your Ingress controller's IP(s); no CIDR
+      - "10.42.3.0/24"     # your Ingress controller's IP(s) or CIDR range(s)
   oidc:
     issuer: "https://auth.example.com"
   email:

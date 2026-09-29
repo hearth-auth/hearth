@@ -36,6 +36,7 @@ use super::validate_claim_payload;
 use super::EmbeddedIdentityEngine;
 use super::CLIENT_TOKEN_CUTOFF_PREFIX;
 use super::CLOCK_SKEW_SECS;
+use super::{audience_cutoff_hash_hex, AUDIENCE_CUTOFF_HASH_HEX_LEN, AUDIENCE_TOKEN_CUTOFF_PREFIX};
 
 impl EmbeddedIdentityEngine {
     // ===== Legacy OIDC RSA key material =====
@@ -601,10 +602,19 @@ impl EmbeddedIdentityEngine {
         //
         // Records with an empty digest (written before this feature) are
         // treated as valid to preserve backward compatibility.
-        let resource_key = request
+        //
+        // The RFC 8707 resource is resolved first: it must be a registered
+        // protected resource (else `invalid_target`), and its canonical form
+        // keys the consent record and becomes the code's audience, so every
+        // spelling of one resource is the same resource here (G6).
+        let resource = request
             .resource
             .as_deref()
-            .unwrap_or(keys::CONSENT_RESOURCE_KEY_DEFAULT);
+            .map(|r| self.resolve_authorization_resource(realm_id, r))
+            .transpose()?;
+        let resource_key = resource
+            .as_ref()
+            .map_or(keys::CONSENT_RESOURCE_KEY_DEFAULT, Uri::as_str);
         if let Some(existing_consent) = self.get_consent_extended(
             realm_id,
             &request.user_id,
@@ -680,7 +690,7 @@ impl EmbeddedIdentityEngine {
             created_at: now,
             expires_at,
             nonce: request.nonce.clone(),
-            resource: request.resource.clone(),
+            resource: resource.as_ref().map(|r| r.as_str().to_string()),
             amr_values: request.amr_values.clone(),
         };
 
@@ -798,7 +808,22 @@ impl EmbeddedIdentityEngine {
                     reason: e.to_string(),
                 })?;
 
-            // Delete as the first write — second caller finds nothing here.
+            // The single use is decided HERE, as the first write: one
+            // replicated put-if-absent the Raft state machine evaluates (G4).
+            // The delete below cannot decide it across nodes — a delete of an
+            // absent key succeeds, so a redemption that read the code before
+            // another node spent it, and wrote after leadership moved to its
+            // own node, used to be served too. The lock above still queues
+            // same-node racers so they do not each propose a Raft write.
+            if !self.claim_single_use(
+                realm_id,
+                &keys::encode_consumed_code(&code_hash),
+                code.expires_at,
+            )? {
+                return Err(IdentityError::InvalidAuthorizationCode);
+            }
+
+            // The code row itself goes too; its sweep would reclaim it anyway.
             self.storage
                 .delete(realm_id, &code_key)
                 .map_err(Self::storage_err)?;
@@ -1079,7 +1104,6 @@ impl EmbeddedIdentityEngine {
             groups: access_groups,
             org_groups: Vec::new(),
             permissions: access_permissions,
-            required_actions: Vec::new(),
             act: None,
             amr: stored_code.amr_values.clone(),
             cnf: request
@@ -1111,7 +1135,6 @@ impl EmbeddedIdentityEngine {
             groups: access_claims.groups.clone(),
             org_groups: Vec::new(),
             permissions: access_claims.permissions.clone(),
-            required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
             // M1 (RFC 9449 §5): bind refresh token to the DPoP key presented at exchange.
@@ -1195,7 +1218,6 @@ impl EmbeddedIdentityEngine {
             groups: id_groups,
             org_groups: Vec::new(),
             permissions: id_permissions,
-            required_actions: Vec::new(),
             act: None,
             amr: stored_code.amr_values.clone(),
             cnf: None,
@@ -1610,7 +1632,6 @@ impl EmbeddedIdentityEngine {
             groups: Vec::new(),
             org_groups: Vec::new(),
             permissions: Vec::new(),
-            required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
             cnf: request
@@ -1771,7 +1792,6 @@ impl EmbeddedIdentityEngine {
             groups: Vec::new(),
             org_groups: Vec::new(),
             permissions: Vec::new(),
-            required_actions: Vec::new(),
             act: None,
             amr: vec!["jwtbearer".to_string()],
             cnf: request
@@ -2259,6 +2279,13 @@ impl EmbeddedIdentityEngine {
         let dc_hash = String::from_utf8(dc_hash_bytes)
             .map_err(|_| IdentityError::InvalidAuthorizationCode)?;
 
+        // The poll takes this lock across its read-modify-write of the row;
+        // without it a poll on this node could write back the `Pending` it
+        // read over this approval.
+        let lock = self.code_exchange_lock(&dc_hash);
+        // INVARIANT: sync window only — no `.await` between here and return.
+        let _decision_guard = lock.lock().expect("code_exchange_lock poisoned");
+
         // 2. Load device code
         let dc_key = keys::encode_device_code(&dc_hash);
         let dc_bytes = self
@@ -2282,7 +2309,17 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidAuthorizationCode);
         }
 
-        // 5. Approve
+        // 5. Claim the decision, then approve (G6). The status check above is
+        //    a local read: an approval on a node that had not applied another
+        //    node's denial (or approval) overwrote it. Approve and deny claim
+        //    the same replicated marker, so exactly one decides.
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_device_decision(&dc_hash),
+            stored.expires_at,
+        )? {
+            return Err(IdentityError::InvalidAuthorizationCode);
+        }
         stored.status = DeviceCodeStatus::Approved {
             user_id: user_id.clone(),
         };
@@ -2308,17 +2345,13 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Loads the still-pending device code `user_code` names, with its
-    /// storage key. `Ok(None)` when no device code carries that user code;
-    /// `DeviceCodeExpired` when it has expired; `InvalidAuthorizationCode`
-    /// when it was already approved or denied.
-    fn load_pending_device_code(
+    /// The device-code hash and row key `user_code` points at, without
+    /// loading the row. `Ok(None)` when no device code carries that user code.
+    fn device_code_key_for_user_code(
         &self,
         realm_id: &RealmId,
         user_code: &str,
-    ) -> Result<Option<(Vec<u8>, StoredDeviceCode)>, IdentityError> {
-        use crate::identity::oidc::DeviceCodeStatus;
-
+    ) -> Result<Option<(String, Vec<u8>)>, IdentityError> {
         let Some(dc_hash_bytes) = self
             .storage
             .get(realm_id, &keys::encode_user_code(user_code))
@@ -2330,6 +2363,23 @@ impl EmbeddedIdentityEngine {
             return Ok(None);
         };
         let dc_key = keys::encode_device_code(&dc_hash);
+        Ok(Some((dc_hash, dc_key)))
+    }
+
+    /// Loads the still-pending device code `user_code` names, with its
+    /// storage key. `Ok(None)` when no device code carries that user code;
+    /// `DeviceCodeExpired` when it has expired; `InvalidAuthorizationCode`
+    /// when it was already approved or denied.
+    fn load_pending_device_code(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+    ) -> Result<Option<(Vec<u8>, StoredDeviceCode)>, IdentityError> {
+        use crate::identity::oidc::DeviceCodeStatus;
+
+        let Some((_, dc_key)) = self.device_code_key_for_user_code(realm_id, user_code)? else {
+            return Ok(None);
+        };
         let Some(dc_bytes) = self
             .storage
             .get(realm_id, &dc_key)
@@ -2378,9 +2428,27 @@ impl EmbeddedIdentityEngine {
     ) -> Result<(), IdentityError> {
         use crate::identity::oidc::DeviceCodeStatus;
 
-        let (dc_key, mut stored) = self
+        let (dc_hash, dc_key) = self
+            .device_code_key_for_user_code(realm_id, user_code)?
+            .ok_or(IdentityError::DeviceCodeExpired)?;
+        // Same lock and the same decision marker as `approve_device_inner`.
+        let lock = self.code_exchange_lock(&dc_hash);
+        // INVARIANT: sync window only — no `.await` between here and return.
+        let _decision_guard = lock.lock().expect("code_exchange_lock poisoned");
+        let (dc_key_loaded, mut stored) = self
             .load_pending_device_code(realm_id, user_code)?
             .ok_or(IdentityError::DeviceCodeExpired)?;
+        if dc_key_loaded != dc_key {
+            // The user code was re-pointed between the two reads.
+            return Err(IdentityError::DeviceCodeExpired);
+        }
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_device_decision(&dc_hash),
+            stored.expires_at,
+        )? {
+            return Err(IdentityError::InvalidAuthorizationCode);
+        }
         stored.status = DeviceCodeStatus::Denied;
         let updated_bytes =
             serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
@@ -2469,15 +2537,35 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        // 5. Update last_polled_at
-        stored.last_polled_at = Some(now);
-        let updated_bytes =
-            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
-        self.storage
-            .put(realm_id, &dc_key, &updated_bytes)
-            .map_err(Self::storage_err)?;
+        // 5. Update last_polled_at — except on the approved arm, which
+        //    consumes the code below. Writing the row back there bought
+        //    nothing (it is deleted next) and, for a poll that read the code
+        //    before another node redeemed it, re-created a row that node had
+        //    already deleted (G4).
+        if !matches!(stored.status, DeviceCodeStatus::Approved { .. }) {
+            // A row read as `Pending` after the user decided (on another
+            // node, not yet applied here) must not be written back: that
+            // would put `Pending` over the decision, and the decision marker
+            // then refuses a second one, stranding the device until expiry
+            // (G6). The next poll reads the decision.
+            if stored.status == DeviceCodeStatus::Pending
+                && self
+                    .storage
+                    .get(realm_id, &keys::encode_consumed_device_decision(&dc_hash))
+                    .map_err(Self::storage_err)?
+                    .is_some()
+            {
+                return Err(IdentityError::AuthorizationPending);
+            }
+            stored.last_polled_at = Some(now);
+            let updated_bytes =
+                serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            self.storage
+                .put(realm_id, &dc_key, &updated_bytes)
+                .map_err(Self::storage_err)?;
+        }
 
         // 6. Check status
         match &stored.status {
@@ -2495,6 +2583,20 @@ impl EmbeddedIdentityEngine {
                 // pair over a device code that stayed redeemable: the caller
                 // was told the flow completed, and the code could be redeemed
                 // again, and again.
+                //
+                // The consume that DECIDES the single use is the claim, not
+                // the delete (G4): a delete of an absent key succeeds, so a
+                // poll that read the approved code before another node
+                // redeemed it, and wrote after leadership moved to its own
+                // node, used to be served too. The claim is one replicated
+                // put-if-absent the Raft state machine evaluates.
+                if !self.claim_single_use(
+                    realm_id,
+                    &keys::encode_consumed_device_code(&dc_hash),
+                    stored.expires_at,
+                )? {
+                    return Err(IdentityError::DeviceCodeExpired);
+                }
                 self.storage
                     .delete(realm_id, &dc_key)
                     .map_err(Self::storage_err)?;
@@ -2582,7 +2684,6 @@ impl EmbeddedIdentityEngine {
                     groups: Vec::new(),
                     org_groups: Vec::new(),
                     permissions: Vec::new(),
-                    required_actions: Vec::new(),
                     act: None,
                     amr: Vec::new(),
                     cnf: None,
@@ -2754,6 +2855,14 @@ impl EmbeddedIdentityEngine {
             });
         }
 
+        // RFC 8707: the resource must be a registered protected resource; it
+        // is stored in canonical form (G6).
+        let effective_resource = effective_resource
+            .as_deref()
+            .map(|r| self.resolve_authorization_resource(realm_id, r))
+            .transpose()?
+            .map(|r| r.as_str().to_string());
+
         let now = self.clock.now();
         let ttl_secs: i64 = 90;
         let expires_at = now.add_micros(ttl_secs * 1_000_000);
@@ -2776,7 +2885,6 @@ impl EmbeddedIdentityEngine {
             prompt: effective_prompt.filter(|p| !p.is_empty()),
             created_at: now,
             expires_at,
-            used: false,
         };
 
         let key = keys::encode_par_request(&request_uri_id);
@@ -2793,7 +2901,6 @@ impl EmbeddedIdentityEngine {
         })
     }
 
-    #[allow(private_interfaces)]
     pub(super) fn consume_par_inner(
         &self,
         realm_id: &RealmId,
@@ -2807,14 +2914,17 @@ impl EmbeddedIdentityEngine {
             .ok_or(IdentityError::InvalidPushedAuthorizationRequest)?;
 
         let key = keys::encode_par_request(request_uri_id);
-        // GA audit L9: read → check `used` → write back was unserialised, so
-        // concurrent authorizations presenting one `request_uri` could each
-        // consume it. The per-key advisory lock the code and device-code
-        // redemptions use makes the sequence one step on this node (the
-        // `request_uri` is 128+ random bits, so the lock map is not shared
-        // meaningfully with code hashes). Held only across this sync block.
+        // GA audit L9 made read → check `used` → write back one step on this
+        // node with the per-key advisory lock; it still is, so same-node
+        // racers queue here instead of each proposing a Raft write. The lock
+        // is node-local, though, and the flag was a read-then-write: a
+        // redemption that read the entry before another node consumed it and
+        // wrote after leadership moved to its own node consumed it again (G4).
+        // The single use is now decided by `claim_single_use` — one replicated
+        // put-if-absent the Raft state machine evaluates — and the entry
+        // itself is never rewritten; the PAR sweep reclaims it at expiry.
         let lock = self.code_exchange_lock(&format!("par:{request_uri_id}"));
-        // INVARIANT: guard held only across the sync read-check-write below; no .await in scope.
+        // INVARIANT: guard held only across the sync read-check-claim below; no .await in scope.
         let _consume_guard = lock.lock().expect("code_exchange_lock poisoned");
         let raw = self
             .storage
@@ -2822,26 +2932,23 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?
             .ok_or(IdentityError::InvalidPushedAuthorizationRequest)?;
 
-        let mut stored: crate::identity::oidc::StoredPushedAuthorizationRequest =
+        let stored: crate::identity::oidc::StoredPushedAuthorizationRequest =
             serde_json::from_slice(&raw).map_err(|e| IdentityError::Internal {
                 reason: format!("failed to deserialize PAR request: {e}"),
             })?;
 
-        if stored.used {
-            return Err(IdentityError::InvalidPushedAuthorizationRequest);
-        }
+        // Expiry first: an expired `request_uri` is refused without a write.
         let now = self.clock.now();
         if now >= stored.expires_at {
             return Err(IdentityError::InvalidPushedAuthorizationRequest);
         }
-
-        stored.used = true;
-        let updated = serde_json::to_vec(&stored).map_err(|e| IdentityError::Internal {
-            reason: format!("failed to serialize updated PAR request: {e}"),
-        })?;
-        self.storage
-            .put(realm_id, &key, &updated)
-            .map_err(Self::storage_err)?;
+        if !self.claim_single_use(
+            realm_id,
+            &keys::encode_consumed_par(request_uri_id),
+            stored.expires_at,
+        )? {
+            return Err(IdentityError::InvalidPushedAuthorizationRequest);
+        }
 
         Ok(stored)
     }
@@ -3036,6 +3143,7 @@ impl EmbeddedIdentityEngine {
                                 reason: e.to_string(),
                             }
                         })?;
+                        self.mark_grant_family_revoked(realm_id, &family)?;
                         family.revoked = true;
                         let updated = serde_json::to_vec(&family).map_err(|e| {
                             IdentityError::Serialization {
@@ -3112,8 +3220,20 @@ impl EmbeddedIdentityEngine {
             return Ok(IntrospectionResponse::inactive());
         }
 
-        // 2b. RFC 7519 §4.1.3 — audience must include the configured value.
-        if !claims.aud.contains(&self.config.token.audience) {
+        // The protected resource(s) in `aud` whose resource server introspects
+        // as the calling client (`introspection_client_id`). Such a caller is
+        // an audience member for every rule below (G6).
+        let caller_is_resource_server = match request.introspecting_client_id {
+            Some(ref cid) => self.is_resource_server_for_audience(realm_id, cid, &claims)?,
+            None => false,
+        };
+
+        // 2b. RFC 7519 §4.1.3 — audience must include the configured value,
+        // unless the caller is the resource server a token exchanged with
+        // `audience=` only was minted for: it carries no Hearth audience, and
+        // introspection is how that server learns the token is still live
+        // (AGENT_AUTH.md §2.5).
+        if !claims.aud.contains(&self.config.token.audience) && !caller_is_resource_server {
             return Ok(IntrospectionResponse::inactive());
         }
 
@@ -3130,7 +3250,11 @@ impl EmbeddedIdentityEngine {
         //   audience member, the client the token's grant family was issued
         //   to, or a declared resource server (GA audit L11 — it used to be
         //   any authenticated client, which then received live RBAC data).
-        if let Some(ref cid) = request.introspecting_client_id {
+        if let Some(ref cid) = request
+            .introspecting_client_id
+            .as_ref()
+            .filter(|_| !caller_is_resource_server)
+        {
             let cid_str = cid.to_string();
             if let Some(token_azp) = claims.azp.as_deref() {
                 if token_azp != cid_str && !claims.aud.contains(cid_str.as_str()) {
@@ -3178,6 +3302,11 @@ impl EmbeddedIdentityEngine {
         if self.is_token_jti_revoked(realm_id, &claims) {
             return Ok(IntrospectionResponse::inactive());
         }
+        // A token for a protected resource removed since it was minted is
+        // inactive (AGENT_AUTH.md §2.5), as in `validate_token`.
+        if self.is_audience_cut_off(realm_id, &claims) {
+            return Ok(IntrospectionResponse::inactive());
+        }
         if claims.sid != "none" {
             let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
             if let Ok(uuid) = uuid::Uuid::parse_str(sid_str) {
@@ -3203,7 +3332,7 @@ impl EmbeddedIdentityEngine {
                                 reason: e.to_string(),
                             }
                         })?;
-                    if family.revoked {
+                    if self.grant_family_is_revoked(realm_id, &family)? {
                         return Ok(IntrospectionResponse::inactive());
                     }
                 }
@@ -3280,6 +3409,67 @@ impl EmbeddedIdentityEngine {
     /// `access_token_authorization` is `Introspection` or `Decision`, which
     /// only an administrator can set (dynamic registration always yields
     /// `Embedded`). An unknown or archived caller is neither.
+    /// Whether `caller` is the client the resource server of a protected
+    /// resource named in the token's `aud` introspects as
+    /// ([`ProtectedResource::introspection_client_id`]). Hearth's own
+    /// audience is skipped; every other value is looked up by its canonical
+    /// form in the realm's registry.
+    ///
+    /// [`ProtectedResource::introspection_client_id`]: crate::identity::ProtectedResource
+    fn is_resource_server_for_audience(
+        &self,
+        realm_id: &RealmId,
+        caller: &ClientId,
+        claims: &TokenClaims,
+    ) -> Result<bool, IdentityError> {
+        let named: &[String] = match &claims.aud {
+            Audience::Single(a) => std::slice::from_ref(a),
+            Audience::Multi(list) => list,
+        };
+        for aud in named {
+            if *aud == self.config.token.audience {
+                continue;
+            }
+            let Ok(canonical) = Uri::try_from(aud.clone()) else {
+                continue;
+            };
+            let Some(id_bytes) = self
+                .storage
+                .get(
+                    realm_id,
+                    &keys::encode_resource_server_uri_index(canonical.as_str()),
+                )
+                .map_err(Self::storage_err)?
+            else {
+                continue;
+            };
+            let Ok(id) = uuid::Uuid::from_slice(&id_bytes) else {
+                continue;
+            };
+            let Some(bytes) = self
+                .storage
+                .get(
+                    realm_id,
+                    &keys::encode_resource_server_id(&crate::core::ResourceServerId::new(id)),
+                )
+                .map_err(Self::storage_err)?
+            else {
+                continue;
+            };
+            let resource: crate::identity::ProtectedResource = serde_json::from_slice(&bytes)
+                .map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            if resource.introspection_client_id.as_ref() == Some(caller) {
+                // The resource server must still be a live client.
+                return Ok(self
+                    .get_client(realm_id, caller)?
+                    .is_some_and(|c| Self::refuse_inactive_client(&c).is_ok()));
+            }
+        }
+        Ok(false)
+    }
+
     fn may_introspect_unbound_user_token(
         &self,
         realm_id: &RealmId,
@@ -3860,26 +4050,113 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Refuses an RFC 8693 `audience` or `resource` that is not the URI of a
-    /// protected resource registered in the realm (GA audit M8): RFC 8693
-    /// §2.2.2 `invalid_target`.
-    pub(super) fn require_registered_exchange_target(
+    /// Validates one protected-resource registration and returns its
+    /// canonical `resource_uri`: shared by the single register call and the
+    /// YAML reconcile so both accept, and store, the same thing.
+    ///
+    /// `resource_uri` must be a valid RFC 8707 resource indicator (see
+    /// [`Uri`]: absolute, scheme and host, no userinfo or fragment) with no
+    /// surrounding whitespace. The registry keys and stores the canonical
+    /// form, which is what exchange `audience` / `resource` values are
+    /// canonicalized to before the lookup. Every `mcp:`-prefixed scope must be
+    /// `{namespace}:{category}:{action}` (AGENT_AUTH.md §2.6, A-10).
+    pub(super) fn validate_protected_resource_request(
+        request: &crate::identity::types::RegisterProtectedResourceRequest,
+    ) -> Result<Uri, IdentityError> {
+        if request.resource_uri.is_empty() {
+            return Err(IdentityError::InvalidInput {
+                reason: "resource_uri must not be empty".to_string(),
+            });
+        }
+        let canonical = Uri::try_from(request.resource_uri.clone())
+            .ok()
+            .filter(|_| request.resource_uri == request.resource_uri.trim())
+            .ok_or_else(|| IdentityError::InvalidInput {
+                reason: "resource_uri must be an absolute URI with a scheme and host, no \
+                         userinfo, no fragment and no surrounding whitespace"
+                    .to_string(),
+            })?;
+        crate::identity::mcp::validate_mcp_scope_vocabulary(&request.scopes)
+            .map_err(|reason| IdentityError::InvalidInput { reason })?;
+        Ok(canonical)
+    }
+
+    /// Resolves one RFC 8693 `audience` or `resource` value to the audience
+    /// the exchanged token will carry (GA audit M8), or refuses it with RFC
+    /// 8693 §2.2.2 `invalid_target`:
+    ///
+    /// - a value the subject token already carries in `aud` is narrowing and
+    ///   is kept verbatim;
+    /// - otherwise it must parse as a resource indicator whose canonical form
+    ///   ([`Uri`]) is either already in the subject's `aud` or the
+    ///   `resource_uri` of a protected resource registered in the realm, and
+    ///   the canonical form is returned — every spelling of a registered URI
+    ///   is accepted and minted identically, matching RBAC's resource scope
+    ///   lookup.
+    /// Resolves an authorization request's RFC 8707 `resource` (at
+    /// `/authorize`, over JAR, or pushed with PAR) to the canonical URI of a
+    /// protected resource registered in the realm, or refuses it with
+    /// [`IdentityError::InvalidTarget`] (RFC 8707 §2 `invalid_target`).
+    ///
+    /// The resource becomes the `aud` of the code's access token, so an
+    /// undeclared value would let a client mint a Hearth-signed token for a
+    /// resource server the realm never declared. Every spelling of a
+    /// registered URI resolves to its one canonical form (G6).
+    pub(super) fn resolve_authorization_resource(
         &self,
         realm_id: &RealmId,
-        target: &str,
-    ) -> Result<(), IdentityError> {
+        resource: &str,
+    ) -> Result<Uri, IdentityError> {
+        let canonical =
+            Uri::try_from(resource.to_string()).map_err(|reason| IdentityError::InvalidTarget {
+                reason: format!("not a resource indicator: {reason}"),
+            })?;
         let registered = self
             .storage
-            .get(realm_id, &keys::encode_resource_server_uri_index(target))
+            .get(
+                realm_id,
+                &keys::encode_resource_server_uri_index(canonical.as_str()),
+            )
             .map_err(Self::storage_err)?
             .is_some();
         if registered {
-            Ok(())
+            Ok(canonical)
         } else {
-            Err(IdentityError::TokenExchangeRejected {
-                reason: "audience/resource is not a registered protected resource".to_string(),
-                oauth_error: "invalid_target",
+            Err(IdentityError::InvalidTarget {
+                reason: "not a registered protected resource".to_string(),
             })
+        }
+    }
+
+    pub(super) fn resolve_exchange_target(
+        &self,
+        realm_id: &RealmId,
+        subject_aud: &Audience,
+        target: &str,
+    ) -> Result<String, IdentityError> {
+        let rejected = || IdentityError::TokenExchangeRejected {
+            reason: "audience/resource is not a registered protected resource".to_string(),
+            oauth_error: "invalid_target",
+        };
+        if subject_aud.contains(target) {
+            return Ok(target.to_string());
+        }
+        let canonical = Uri::try_from(target.to_string()).map_err(|_| rejected())?;
+        if subject_aud.contains(canonical.as_str()) {
+            return Ok(canonical.as_str().to_string());
+        }
+        let registered = self
+            .storage
+            .get(
+                realm_id,
+                &keys::encode_resource_server_uri_index(canonical.as_str()),
+            )
+            .map_err(Self::storage_err)?
+            .is_some();
+        if registered {
+            Ok(canonical.as_str().to_string())
+        } else {
+            Err(rejected())
         }
     }
 
@@ -4377,6 +4654,22 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
         self.insert_revoked_jti_cache(realm_id, &cutoff_id, cutoff_exp);
 
+        self.revoke_grant_families_where(realm_id, |family| {
+            family.client_id.as_ref() == Some(client_id)
+        })
+    }
+
+    /// Marks revoked every not-yet-revoked grant family in the realm that
+    /// `matches`, so its refresh tokens stop rotating.
+    ///
+    /// Each family is re-read and written under its rotation lock, so the
+    /// revocation neither clobbers a concurrent rotation's hash write nor is
+    /// clobbered by it.
+    pub(super) fn revoke_grant_families_where(
+        &self,
+        realm_id: &RealmId,
+        matches: impl Fn(&StoredGrantFamily) -> bool,
+    ) -> Result<(), IdentityError> {
         let family_prefix = keys::grant_family_scan_prefix();
         let family_end = keys::prefix_end(&family_prefix);
         let family_entries = self
@@ -4388,12 +4681,9 @@ impl EmbeddedIdentityEngine {
                 serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
                 })?;
-            if listed.client_id.as_ref() != Some(client_id) {
+            if !matches(&listed) {
                 continue;
             }
-            // Serialize with any in-flight rotation on this family, then
-            // re-read under the lock so this revocation neither clobbers a
-            // concurrent rotation's hash write nor is clobbered by it.
             let lock = self.grant_family_lock(realm_id, &listed.family_id);
             // INVARIANT: guard held only across the sync re-read + revoke-write window; no .await in scope.
             let _guard = lock.lock().expect("grant family lock poisoned");
@@ -4408,9 +4698,10 @@ impl EmbeddedIdentityEngine {
                 serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
                 })?;
-            if family.revoked {
+            if self.grant_family_is_revoked(realm_id, &family)? {
                 continue;
             }
+            self.mark_grant_family_revoked(realm_id, &family)?;
             family.revoked = true;
             let updated =
                 serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
@@ -4421,6 +4712,65 @@ impl EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
         Ok(())
+    }
+
+    /// The revoked-JTI projection id of the audience cutoff for `aud`:
+    /// `aud-cutoff:` followed by the first 16 bytes of SHA-256(`aud`) in hex.
+    ///
+    /// Hashed so the id has a fixed length (80 bytes with the realm prefix)
+    /// that always fits `StackKeyBuf` — `validate_token` derives it for every
+    /// `aud` entry without allocating. Real `jti`s are UUIDs, so the prefix
+    /// cannot collide with one.
+    pub(super) fn audience_token_cutoff_id(aud: &str) -> String {
+        let mut hex = [0u8; AUDIENCE_CUTOFF_HASH_HEX_LEN];
+        audience_cutoff_hash_hex(aud, &mut hex);
+        let mut id = String::with_capacity(AUDIENCE_TOKEN_CUTOFF_PREFIX.len() + hex.len());
+        id.push_str(AUDIENCE_TOKEN_CUTOFF_PREFIX);
+        // INVARIANT: `audience_cutoff_hash_hex` writes only ASCII hex digits.
+        id.push_str(std::str::from_utf8(&hex).unwrap_or_default());
+        id
+    }
+
+    /// Stops every token bound to a protected resource that is being removed
+    /// (AGENT_AUTH.md §2.5):
+    ///
+    /// 1. an audience cutoff for `resource_uri` (canonical) is projected into
+    ///    the revoked-JTI cache. Its value is the latest `exp` any token minted
+    ///    for the resource so far can carry; `validate_token` and introspection
+    ///    refuse a token that names the resource in `aud` and whose `exp` is
+    ///    not after it. A token minted after the resource is re-registered is
+    ///    unaffected, and the row self-evicts once every covered token has
+    ///    expired;
+    /// 2. every grant family bound to the resource is revoked, so its refresh
+    ///    tokens cannot mint fresh (post-cutoff) tokens for it.
+    ///
+    /// Tokens whose `aud` does not include Hearth's own audience are never
+    /// validated by Hearth; a resource server that verifies them offline keeps
+    /// accepting them until they expire.
+    pub(super) fn revoke_resource_tokens(
+        &self,
+        realm_id: &RealmId,
+        resource_uri: &Uri,
+    ) -> Result<(), IdentityError> {
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        // Exchange tokens are capped by the global TTL, code/refresh tokens by
+        // the realm's effective TTL: cover the longer of the two.
+        let (realm_access_ttl, _) = self.effective_token_ttl_secs(realm_id);
+        let ttl = realm_access_ttl.max(self.config.token.access_token_ttl_secs);
+        let cutoff_exp = now_secs.saturating_add(ttl);
+        let cutoff_id = Self::audience_token_cutoff_id(resource_uri.as_str());
+        // Durable first, as for the client cutoff.
+        self.storage
+            .put(
+                realm_id,
+                &keys::encode_revoked_jti(&cutoff_id),
+                &cutoff_exp.to_le_bytes(),
+            )
+            .map_err(Self::storage_err)?;
+        self.insert_revoked_jti_cache(realm_id, &cutoff_id, cutoff_exp);
+        self.revoke_grant_families_where(realm_id, |family| {
+            family.resources.iter().any(|r| r == resource_uri)
+        })
     }
 
     // ===== OAuth consent =====
@@ -4653,9 +5003,10 @@ impl EmbeddedIdentityEngine {
                 serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
                 })?;
-            if family.revoked {
+            if self.grant_family_is_revoked(realm_id, &family)? {
                 continue;
             }
+            self.mark_grant_family_revoked(realm_id, &family)?;
             family.revoked = true;
             let updated =
                 serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
@@ -4819,21 +5170,15 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         ticket: &str,
     ) -> Result<PendingAuthorizationRequest, IdentityError> {
-        let key = keys::encode_pending_auth_key(ticket);
-        let bytes = self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .ok_or(IdentityError::ConsentTicketNotFound)?;
-        // Single-use: delete before we even validate expiry so callers can
-        // never replay the same ticket twice even on a narrow race.
-        self.storage
-            .delete(realm_id, &key)
-            .map_err(Self::storage_err)?;
-        let pending: PendingAuthorizationRequest =
-            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
+        // Single-use: claimed (G4) and deleted before we even validate expiry
+        // so callers can never replay the same ticket twice, on any node.
+        let pending: PendingAuthorizationRequest = self.take_single_use_row(
+            realm_id,
+            &keys::encode_pending_auth_key(ticket),
+            &keys::encode_consumed_pending_auth(&Self::sha256_hex(ticket.as_bytes())),
+            || IdentityError::ConsentTicketNotFound,
+            |p: &PendingAuthorizationRequest| p.expires_at,
+        )?;
         if self.clock.now().as_micros() >= pending.expires_at.as_micros() {
             return Err(IdentityError::ConsentTicketExpired);
         }

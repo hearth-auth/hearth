@@ -92,7 +92,7 @@ final class TokenVerifier implements TokenVerifierInterface
         if ($claimsObj->tokenType() === 'required_action') {
             /** @var string[] $actions */
             $actions = is_array($claims['required_actions'] ?? null) ? $claims['required_actions'] : [];
-            throw new RequiredActionException($actions, null);
+            throw new RequiredActionException($actions);
         }
 
         return $claimsObj;

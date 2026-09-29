@@ -262,6 +262,17 @@ fn admin_cookie(rig: &Rig, csrf: &str) -> String {
     )
 }
 
+/// The `Cookie` header a browser sends after an emailed reset link's first
+/// GET moved the token out of the URL (GA audit L18).
+fn link_cookie(token: &str) -> String {
+    format!("hearth_link_token={token}")
+}
+
+/// The `link_binding` form field the reset page embeds for `token`.
+fn link_binding(token: &str) -> String {
+    web::link_token::link_binding(&CookieSecret::from_bytes(COOKIE_SECRET_BYTES), token)
+}
+
 async fn post_form(app: &axum::Router, uri: &str, body: &str) -> (StatusCode, String) {
     let resp = app
         .clone()
@@ -435,7 +446,10 @@ async fn admin_reset_password_route_exists() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/ui/admin/reset-password?token=whatever")
+                .uri("/ui/admin/reset-password")
+                // GA audit L18: the link's first GET moved the token into
+                // this cookie.
+                .header(header::COOKIE, "hearth_link_token=whatever")
                 .body(Body::empty())
                 .expect("build GET"),
         )
@@ -480,11 +494,14 @@ async fn admin_forgot_password_emails_a_resolvable_link() {
     assert!(!token.is_empty(), "the emailed link must carry a token");
 
     // The emailed link must complete a reset, not 404.
-    let (status, body) = post_form(
+    let (status, body) = post_form_authed(
         &rig.app,
         "/ui/admin/reset-password",
+        &link_cookie(&token),
         &format!(
-            "token={token}&password=brand-new-passphrase&password_confirm=brand-new-passphrase"
+            "link_binding={}&password=brand-new-passphrase\
+             &password_confirm=brand-new-passphrase",
+            link_binding(&token)
         ),
     )
     .await;
@@ -525,10 +542,14 @@ async fn short_password_does_not_burn_the_reset_link() {
 
     // 11 characters: above the handler's old 8-char pre-gate, below the
     // 12-character policy floor.
-    let (status, body) = post_form(
+    let (status, body) = post_form_authed(
         &rig.app,
         "/ui/reset-password",
-        &format!("token={token}&password=elevenchar&password_confirm=elevenchar"),
+        &link_cookie(&token),
+        &format!(
+            "link_binding={}&password=elevenchar&password_confirm=elevenchar",
+            link_binding(&token)
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "the form must re-render, not error");
@@ -539,12 +560,14 @@ async fn short_password_does_not_burn_the_reset_link() {
     );
 
     // The link must still work with a compliant password.
-    let (status, body) = post_form(
+    let (status, body) = post_form_authed(
         &rig.app,
         "/ui/reset-password",
+        &link_cookie(&token),
         &format!(
-            "token={token}&password=a-perfectly-fine-passphrase\
-             &password_confirm=a-perfectly-fine-passphrase"
+            "link_binding={}&password=a-perfectly-fine-passphrase\
+             &password_confirm=a-perfectly-fine-passphrase",
+            link_binding(&token)
         ),
     )
     .await;
@@ -713,8 +736,19 @@ async fn magic_link_redemption_route_creates_a_session() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/ui/magic-link?token={}", response.token()))
-                .body(Body::empty())
+                .method("POST")
+                .uri("/ui/magic-link")
+                // GA audit L18: the link's first GET moved the token into
+                // this cookie; the confirmation page's POST redeems it.
+                .header(
+                    header::COOKIE,
+                    format!("hearth_link_token={}", response.token()),
+                )
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "link_binding={}",
+                    link_binding(response.token())
+                )))
                 .expect("build GET"),
         )
         .await
@@ -749,8 +783,19 @@ async fn magic_link_redemption_route_creates_a_session() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/ui/magic-link?token={}", response.token()))
-                .body(Body::empty())
+                .method("POST")
+                .uri("/ui/magic-link")
+                // GA audit L18: the link's first GET moved the token into
+                // this cookie; the confirmation page's POST redeems it.
+                .header(
+                    header::COOKIE,
+                    format!("hearth_link_token={}", response.token()),
+                )
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "link_binding={}",
+                    link_binding(response.token())
+                )))
                 .expect("build GET"),
         )
         .await

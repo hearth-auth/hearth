@@ -129,18 +129,12 @@ class TestRequiredActionError:
         err = RequiredActionError(required_actions=["VERIFY_EMAIL", "UPDATE_PASSWORD"])
         assert err.required_actions == ["VERIFY_EMAIL", "UPDATE_PASSWORD"]
 
-    def test_redirect_uri_optional_default_none(self):
+    def test_has_no_redirect_uri(self):
+        # The server never supplies an interstitial URL: pending actions are
+        # run by Hearth itself during /authorize.
         from hearth.errors import RequiredActionError
         err = RequiredActionError(required_actions=["VERIFY_EMAIL"])
-        assert err.redirect_uri is None
-
-    def test_redirect_uri_can_be_set(self):
-        from hearth.errors import RequiredActionError
-        err = RequiredActionError(
-            required_actions=["VERIFY_EMAIL"],
-            redirect_uri="https://app.example.com/actions",
-        )
-        assert err.redirect_uri == "https://app.example.com/actions"
+        assert not hasattr(err, "redirect_uri")
 
     def test_has_human_readable_message(self):
         from hearth.errors import RequiredActionError

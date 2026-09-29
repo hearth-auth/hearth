@@ -1,6 +1,5 @@
 /**
- * Unit tests for RequiredActionError (spec §5) and handleCallback
- * required-action detection (spec §7).
+ * Unit tests for RequiredActionError (spec §5) and handleCallback (spec §7).
  * Tests are written before implementation (TDD).
  */
 
@@ -30,21 +29,6 @@ describe("RequiredActionError", () => {
   it("has name 'RequiredActionError'", () => {
     const err = new RequiredActionError(["VERIFY_EMAIL"]);
     expect(err.name).toBe("RequiredActionError");
-  });
-
-  it("redirectUri is undefined when not provided", () => {
-    const err = new RequiredActionError(["VERIFY_EMAIL"]);
-    expect(err.redirectUri).toBeUndefined();
-  });
-
-  it("accepts an optional redirectUri", () => {
-    const err = new RequiredActionError(
-      ["VERIFY_EMAIL"],
-      "https://auth.example.com/ui/required-actions/verify-email",
-    );
-    expect(err.redirectUri).toBe(
-      "https://auth.example.com/ui/required-actions/verify-email",
-    );
   });
 
   it("works with empty required actions list", () => {
@@ -107,81 +91,16 @@ describe("HearthApiClient.handleCallback()", () => {
     expect(result.token_type).toBe("Bearer");
   });
 
-  it("throws RequiredActionError when JWT token_type is 'required_action'", async () => {
-    const requiredActionJwt = forgeJwt({
-      sub: "user_1",
-      token_type: "required_action",
-      required_actions: ["VERIFY_EMAIL", "UPDATE_PASSWORD"],
-      exp: Math.floor(Date.now() / 1000) + 300,
-    });
-    const mockResponse = {
-      access_token: requiredActionJwt,
-      id_token: "id_token_value",
-      token_type: "Bearer",
-      expires_in: 300,
-      refresh_token: "",
-    };
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify(mockResponse), { status: 200 }),
-    );
-
-    const client = makeClient();
-    await expect(
-      client.handleCallback({
-        callbackUrl: "https://app.example.com/callback?code=abc123",
-        clientId: "client_1",
-        redirectUri: "https://app.example.com/callback",
-      }),
-    ).rejects.toBeInstanceOf(RequiredActionError);
-  });
-
-  it("populates requiredActions from JWT required_actions claim", async () => {
-    const requiredActionJwt = forgeJwt({
-      sub: "user_1",
-      token_type: "required_action",
-      required_actions: ["VERIFY_EMAIL", "UPDATE_PASSWORD"],
-      exp: Math.floor(Date.now() / 1000) + 300,
-    });
+  it("performs no required-action detection: the server resolves pending actions before it issues a code", async () => {
+    // Hearth runs pending required actions at /required-action/{ACTION}
+    // during /authorize, so a callback always carries an ordinary code and the
+    // exchange yields an ordinary access token. There is no callback
+    // parameter or token type to detect.
+    const accessJwt = forgeJwt({ sub: "user_1", token_type: "access" });
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
-          access_token: requiredActionJwt,
-          id_token: "",
-          token_type: "Bearer",
-          expires_in: 300,
-          refresh_token: "",
-        }),
-        { status: 200 },
-      ),
-    );
-
-    const client = makeClient();
-    try {
-      await client.handleCallback({
-        callbackUrl: "https://app.example.com/callback?code=abc123",
-        clientId: "client_1",
-        redirectUri: "https://app.example.com/callback",
-      });
-      expect.fail("should have thrown");
-    } catch (err) {
-      expect(err).toBeInstanceOf(RequiredActionError);
-      expect((err as RequiredActionError).requiredActions).toEqual([
-        "VERIFY_EMAIL",
-        "UPDATE_PASSWORD",
-      ]);
-    }
-  });
-
-  it("throws RequiredActionError with redirectUri from required_action_redirect_uri param", async () => {
-    const normalJwt = forgeJwt({
-      sub: "user_1",
-      token_type: "access",
-      exp: Math.floor(Date.now() / 1000) + 3600,
-    });
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          access_token: normalJwt,
+          access_token: accessJwt,
           id_token: "",
           token_type: "Bearer",
           expires_in: 3600,
@@ -192,57 +111,12 @@ describe("HearthApiClient.handleCallback()", () => {
     );
 
     const client = makeClient();
-    const redirectUri = "https://auth.example.com/ui/required-actions/verify-email";
-    const callbackUrl = `https://app.example.com/callback?code=abc123&required_action_redirect_uri=${encodeURIComponent(redirectUri)}`;
-
-    try {
-      await client.handleCallback({
-        callbackUrl,
-        clientId: "client_1",
-        redirectUri: "https://app.example.com/callback",
-      });
-      expect.fail("should have thrown");
-    } catch (err) {
-      expect(err).toBeInstanceOf(RequiredActionError);
-      expect((err as RequiredActionError).redirectUri).toBe(redirectUri);
-    }
-  });
-
-  it("token_type=required_action sets redirectUri from JWT if required_action_redirect_uri also in URL", async () => {
-    const redirectUri = "https://auth.example.com/ui/actions";
-    const requiredActionJwt = forgeJwt({
-      sub: "user_1",
-      token_type: "required_action",
-      required_actions: ["VERIFY_EMAIL"],
-      exp: Math.floor(Date.now() / 1000) + 300,
+    const result = await client.handleCallback({
+      callbackUrl: "https://app.example.com/callback?code=abc123&state=xyz",
+      clientId: "client_1",
+      redirectUri: "https://app.example.com/callback",
     });
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          access_token: requiredActionJwt,
-          id_token: "",
-          token_type: "Bearer",
-          expires_in: 300,
-          refresh_token: "",
-        }),
-        { status: 200 },
-      ),
-    );
-
-    const callbackUrl = `https://app.example.com/callback?code=abc123&required_action_redirect_uri=${encodeURIComponent(redirectUri)}`;
-    const client = makeClient();
-    try {
-      await client.handleCallback({
-        callbackUrl,
-        clientId: "client_1",
-        redirectUri: "https://app.example.com/callback",
-      });
-      expect.fail("should have thrown");
-    } catch (err) {
-      expect(err).toBeInstanceOf(RequiredActionError);
-      expect((err as RequiredActionError).requiredActions).toEqual(["VERIFY_EMAIL"]);
-      expect((err as RequiredActionError).redirectUri).toBe(redirectUri);
-    }
+    expect(result.access_token).toBe(accessJwt);
   });
 
   it("passes codeVerifier to the token exchange when provided", async () => {

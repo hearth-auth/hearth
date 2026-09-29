@@ -135,7 +135,7 @@ HEARTH_CLIENT_SECRET = os.environ["HEARTH_CLIENT_SECRET"]
 
 ## Required-action tokens
 
-If a user has a pending required action (e.g. MFA enrollment, email verification), their token carries `token_type: "required_action"`. Both `HearthDjangoMiddleware` and `@require_permission` automatically return `401 Unauthorized` with `WWW-Authenticate: Bearer realm="hearth", error="required_action"` — no extra handling is needed in views.
+Hearth never issues a token to a user with pending required actions (e.g. email verification, MFA enrollment): a browser login runs them at `/required-action/{ACTION}` before any code is issued, and a REST login answers `400 required_actions_pending`. As a defence, should a token with `token_type: "required_action"` ever be presented, both `HearthDjangoMiddleware` and `@require_permission` automatically return `401 Unauthorized` with `WWW-Authenticate: Bearer realm="hearth", error="required_action"` — no extra handling is needed in views.
 
 ## Full working example
 

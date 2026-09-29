@@ -30,7 +30,7 @@ use serde::Deserialize;
 use qrcode::render::svg;
 use qrcode::QrCode;
 
-use crate::core::{SessionId, Timestamp};
+use crate::core::{FormSecret, SessionId, Timestamp};
 use crate::identity::{
     verify_step_up, AuthenticationOptions, CleartextPassword, IdentityError, RegistrationOptions,
     StepUpError,
@@ -150,13 +150,13 @@ pub async fn account_index(State(state): State<Arc<WebState>>, session: UiSessio
 pub struct ChangePasswordForm {
     /// Current password (verified before applying the change).
     #[serde(default)]
-    pub current_password: String,
+    pub current_password: FormSecret,
     /// New password (minimum length is enforced by the identity engine).
     #[serde(default)]
-    pub new_password: String,
+    pub new_password: FormSecret,
     /// Client-side confirmation of the new password. Must match.
     #[serde(default)]
-    pub confirm_password: String,
+    pub confirm_password: FormSecret,
     /// CSRF double-submit token (matches the `hearth_ui_csrf` cookie).
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
@@ -191,7 +191,7 @@ pub async fn account_change_password(
 
     // Client-side mismatch check comes before any engine call so we
     // don't exercise the password verifier needlessly.
-    if form.new_password != form.confirm_password {
+    if *form.new_password != *form.confirm_password {
         return render_with_password_error(
             &state,
             &session,
@@ -199,8 +199,8 @@ pub async fn account_change_password(
         );
     }
 
-    let current = CleartextPassword::from_string(form.current_password);
-    let new_pw = CleartextPassword::from_string(form.new_password);
+    let current = CleartextPassword::new(form.current_password.as_bytes().to_vec());
+    let new_pw = CleartextPassword::new(form.new_password.as_bytes().to_vec());
 
     // Change-password performs *two* Argon2id ops (verify current + hash new),
     // so route it through the shared KDF admission gate (HEA-1891 / F3) instead
@@ -556,7 +556,7 @@ pub struct ActivateTotpForm {
     pub csrf: String,
     /// Current account password — step-up credential required before activating MFA.
     #[serde(default)]
-    pub password: String,
+    pub password: FormSecret,
 }
 
 /// `POST /ui/account/totp/activate`.
@@ -1599,4 +1599,36 @@ fn load_session_rows(state: &Arc<WebState>, session: &UiSession) -> Vec<AccountS
 
 fn format_ts(ts: Timestamp) -> String {
     super::format_ts(ts)
+}
+
+/// Password fields are wiped on drop and never printed by `Debug`
+/// (GA audit L20).
+#[cfg(test)]
+mod secret_field_tests {
+    use super::*;
+    use crate::core::secrets::assert_zeroize_on_drop;
+
+    #[test]
+    fn change_password_form_is_zeroized_and_redacted() {
+        let form: ChangePasswordForm = serde_urlencoded::from_str(
+            "current_password=CANARY-cur&new_password=CANARY-new&confirm_password=CANARY-cfm",
+        )
+        .expect("form parses");
+        assert_zeroize_on_drop(&form.current_password);
+        assert_zeroize_on_drop(&form.new_password);
+        assert_zeroize_on_drop(&form.confirm_password);
+        assert_eq!(form.new_password.expose(), "CANARY-new");
+        let dbg = format!("{form:?}");
+        assert!(!dbg.contains("CANARY"), "Debug leaked a secret: {dbg}");
+    }
+
+    #[test]
+    fn activate_totp_form_password_is_zeroized() {
+        // `ActivateTotpForm` implements no `Debug` at all, so only the wipe
+        // needs pinning.
+        let form: ActivateTotpForm =
+            serde_urlencoded::from_str("code=123456&password=CANARY-pw").expect("form parses");
+        assert_zeroize_on_drop(&form.password);
+        assert_eq!(form.password.expose(), "CANARY-pw");
+    }
 }

@@ -117,8 +117,7 @@ pub use tokens::{
     decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
     verify_rs256_id_token_signature, verify_token_signature, CnfClaim, IssueTokenRequest, Jwk,
     JwksDocument, JwtAssertionClaims, RsaIdTokenSigningKey, SigningKey, TokenClaims, TokenConfig,
-    TokenPair, REQUIRED_ACTION_TOKEN_TYPE, RSA_ID_TOKEN_MIN_MODULUS_BITS,
-    RSA_ID_TOKEN_MODULUS_BITS,
+    TokenPair, RSA_ID_TOKEN_MIN_MODULUS_BITS, RSA_ID_TOKEN_MODULUS_BITS,
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
@@ -132,10 +131,10 @@ pub use types::{
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
     PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential,
     Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse,
-    RegistrationPolicy, RequiredAction, RequiredActionTokenResponse, ScimMappingExport,
-    ScimMappingKind, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
-    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User,
-    UserStatus, WebAuthnAttestationPolicy, Webhook,
+    RegistrationPolicy, RequiredAction, ScimMappingExport, ScimMappingKind, Session,
+    SessionContext, SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest,
+    UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
+    WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
     AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
@@ -144,10 +143,10 @@ pub use types::{
     CreateAgentApiKeyResponse, CreateAgentRequest, CreateApprovalRequestInput,
     CreateCrossRealmPolicyRequest, CreateTransactionTokenRequest, CrossRealmTrustPolicy,
     DelegationGrantEntry, DeriveAatRequest, IssueAatRequest, ListAgentsQuery, PlaintextApiKey,
-    ProtectedResource, RegisterProtectedResourceRequest, RegisterSpiffeIdRequest,
-    RetiringSigningKeyExport, RevocationExport, Rfc8693Request, Rfc8693Response,
-    SpiffeIdentityMapping, StoredDelegationGrant, TransactionTokenClaims, TransactionTokenResponse,
-    UpdateAgentRequest, UpdateProtectedResourceRequest,
+    ProtectedResource, ProtectedResourceReconcileReport, RegisterProtectedResourceRequest,
+    RegisterSpiffeIdRequest, RetiringSigningKeyExport, RevocationExport, Rfc8693Request,
+    Rfc8693Response, SpiffeIdentityMapping, StoredDelegationGrant, TransactionTokenClaims,
+    TransactionTokenResponse, UpdateAgentRequest, UpdateProtectedResourceRequest,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -262,12 +261,15 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// After all actions complete, the flow resumes by creating a session
     /// cookie and redirecting to `return_to` (or `/ui` when `None`).
+    /// `webauthn_verified` carries forward that this flow registered a
+    /// user-verified passkey (see [`ra_token::RaClaims::webauthn_verified`]).
     fn generate_browser_ra_token(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         pending_actions: Vec<RequiredAction>,
         return_to: Option<String>,
+        webauthn_verified: bool,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
 
@@ -281,48 +283,6 @@ pub trait IdentityEngine: Send + Sync {
         token: &str,
         now: Timestamp,
     ) -> Result<ra_token::RaClaims, ra_token::RaTokenError>;
-
-    /// Validates a `TokenClaims`-based Required-Action JWT issued for the new
-    /// browser interstitial flow (`/ui/required-actions/…`).
-    ///
-    /// Verifies the Ed25519 signature against the realm key, checks that
-    /// `token_type == REQUIRED_ACTION_TOKEN_TYPE`, checks expiry, and asserts
-    /// that `required_actions` contains `action`.  Returns the decoded claims.
-    fn validate_required_action_token(
-        &self,
-        realm_id: &RealmId,
-        token: &str,
-        action: RequiredAction,
-    ) -> Result<tokens::TokenClaims, IdentityError>;
-
-    /// Completes the `UPDATE_PASSWORD` required action for a browser-flow user.
-    ///
-    /// Validates the RA JWT, applies the new password (enforcing realm policy),
-    /// removes `UPDATE_PASSWORD` from the user's pending action set, then:
-    /// - if further actions remain — issues a new RA JWT for the next action;
-    /// - if all actions are satisfied — creates a session and issues a
-    ///   full-access token.
-    ///
-    /// The caller distinguishes the two outcomes by checking `token_type` in
-    /// the decoded `access_token` claims: `"ra"` vs `"access"`.
-    fn complete_update_password(
-        &self,
-        realm_id: &RealmId,
-        ra_token: &str,
-        new_password: CleartextPassword,
-    ) -> Result<types::RequiredActionTokenResponse, IdentityError>;
-
-    /// Initiates or re-sends an email-verification request for a user.
-    ///
-    /// Issues a single-use verification token (rate-limited), stores the
-    /// SHA-256 hash, and returns `Ok(())`.  Email delivery is best-effort;
-    /// callers may observe `RateLimited` when the user has requested too
-    /// many tokens in a short window.
-    fn request_email_verification(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-    ) -> Result<(), IdentityError>;
 
     /// Rotates the Ed25519 signing key for a realm.
     ///
@@ -535,6 +495,27 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         user_id: &UserId,
         old_password: &CleartextPassword,
+        new_password: &CleartextPassword,
+    ) -> Result<(), IdentityError>;
+
+    /// Completes the `UPDATE_PASSWORD` required action once per
+    /// required-action session token.
+    ///
+    /// Claims the single use of `ra_session_token` cluster-wide before
+    /// writing, then changes the password (proving `current_password`), or
+    /// sets it when the user has no password credential yet. A submission the
+    /// engine refuses — wrong current password, password policy, reuse —
+    /// releases the claim, so the user can correct it and resubmit with the
+    /// same session. Returns `Err(InvalidToken)` when the token was already
+    /// spent. `ra_expires_at` is the token's expiry; the claim marker lives
+    /// until then.
+    fn complete_required_password_update(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        ra_session_token: &str,
+        ra_expires_at: Timestamp,
+        current_password: &CleartextPassword,
         new_password: &CleartextPassword,
     ) -> Result<(), IdentityError>;
 
@@ -958,9 +939,11 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Consumes a stored PAR entry identified by its `request_uri`.
     ///
-    /// Returns the stored parameters on success. The entry is atomically
-    /// marked used; subsequent calls return `InvalidPushedAuthorizationRequest`.
-    #[allow(private_interfaces)]
+    /// Returns the stored parameters on success. Consumption is single-use
+    /// across the whole cluster: it is decided by one replicated
+    /// put-if-absent evaluated in the Raft state machine, so exactly one
+    /// caller on any node wins; every other call returns
+    /// `InvalidPushedAuthorizationRequest`.
     fn consume_par(
         &self,
         realm_id: &RealmId,
@@ -1206,6 +1189,23 @@ pub trait IdentityEngine: Send + Sync {
     /// Validates the attestation response, extracts the credential, and
     /// stores it. Returns the credential info.
     fn complete_webauthn_registration(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_data_json: &[u8],
+        attestation_object: &[u8],
+        origin: &str,
+        discoverable: bool,
+    ) -> Result<WebAuthnCredentialInfo, IdentityError>;
+
+    /// Completes a `WebAuthn` registration that MUST prove user verification,
+    /// whatever the realm's `webauthn_user_verification` policy says.
+    ///
+    /// The login-time passkey enrolment uses it: the passkey it registers is
+    /// the factor a `webauthn_required` realm accepts, so a touch-only
+    /// credential would register a factor that can never satisfy the realm.
+    /// Otherwise identical to [`Self::complete_webauthn_registration`].
+    fn complete_webauthn_registration_user_verified(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
@@ -1945,7 +1945,20 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<(), IdentityError>;
 
     /// Retrieves and deletes a confirm-to-link ticket (single-use).
+    ///
+    /// The single use is claimed with one replicated put-if-absent, so a
+    /// ticket taken once can never be taken again — not even after it is
+    /// re-put. A caller that only needs to read it uses
+    /// [`Self::get_confirm_link_ticket`].
     fn take_confirm_link_ticket(
+        &self,
+        realm_id: &RealmId,
+        ticket: &str,
+    ) -> Result<federation::ConfirmLinkTicket, IdentityError>;
+
+    /// Reads a confirm-to-link ticket without consuming it. Returns
+    /// `FederationInvalidState` for an unknown or expired ticket.
+    fn get_confirm_link_ticket(
         &self,
         realm_id: &RealmId,
         ticket: &str,
@@ -3087,16 +3100,60 @@ pub trait IdentityEngine: Send + Sync {
         request: &types::UpdateProtectedResourceRequest,
     ) -> Result<types::ProtectedResource, IdentityError>;
 
-    /// Deletes a protected resource.
+    /// Deletes a protected resource and stops its tokens (AGENT_AUTH.md §2.5).
     ///
-    /// All outstanding tokens scoped to this resource's `resource_uri` are NOT
-    /// automatically revoked in this milestone; see AGENT_AUTH.md §2.5 for the
-    /// future revocation requirement. Emits `ProtectedResourceDeleted` audit event.
+    /// Before the registry rows go, an audience cutoff for the canonical
+    /// `resource_uri` is written into the revoked-JTI projection — every
+    /// access token whose `aud` names the resource stops validating and
+    /// introspects inactive — and every grant family bound to the resource is
+    /// revoked, so its refresh tokens stop rotating. Emits
+    /// `ProtectedResourceDeleted` audit event.
     fn delete_protected_resource(
         &self,
         realm_id: &RealmId,
         resource_id: &ResourceServerId,
     ) -> Result<(), IdentityError>;
+
+    /// Makes the realm's protected-resource registry equal `declared`.
+    ///
+    /// The registry is keyed by the canonical `resource_uri` (`core::Uri`), so
+    /// two spellings of one URI are one entry. A declared URI that is not
+    /// registered is registered; a registered one whose display name, scopes
+    /// or required claims differ is updated in place (its id is kept); a
+    /// registered URI that is not declared is deleted — which, like
+    /// [`Self::delete_protected_resource`], stops every token minted for it
+    /// (AGENT_AUTH.md §2.5). The declared
+    /// set is the realm's YAML `protected_resources` and is the registry's only
+    /// source of truth: this is what `audience` / `resource` of an RFC 8693
+    /// token exchange are checked against (OIDC.md §3.4.1a).
+    ///
+    /// Every declared entry is validated before anything is written, so an
+    /// invalid set changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// - [`IdentityError::InvalidInput`] — an entry has an invalid
+    ///   `resource_uri` or MCP scope, or two entries share a `resource_uri`.
+    /// - Realm-status and storage errors from the underlying writes.
+    fn reconcile_protected_resources(
+        &self,
+        realm_id: &RealmId,
+        declared: &[types::RegisterProtectedResourceRequest],
+    ) -> Result<types::ProtectedResourceReconcileReport, IdentityError>;
+
+    /// Resolves an authorization request's RFC 8707 `resource` to the
+    /// canonical URI of a protected resource registered in the realm.
+    ///
+    /// [`IdentityError::InvalidTarget`] when the value is not a resource
+    /// indicator or names no registered resource — the protocol layer answers
+    /// `invalid_target`. `authorize` and `push_authorization_request` apply the
+    /// same rule themselves; this lets the browser entry point refuse before
+    /// running its interstitials.
+    fn canonical_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource: &str,
+    ) -> Result<String, IdentityError>;
 
     // ── B.4 RFC 8693 Token Exchange ───────────────────────────────────────────
 

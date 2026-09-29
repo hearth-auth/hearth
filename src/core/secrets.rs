@@ -34,6 +34,7 @@ use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Number of random bytes behind every Hearth-issued opaque secret.
 ///
@@ -114,6 +115,77 @@ pub fn ct_eq_secret_opt(a: Option<&str>, b: Option<&str>) -> bool {
         _ => false,
     }
 }
+
+/// A secret received in a request: a password, a one-time token, a client
+/// secret or an assertion (GA audit L20).
+///
+/// Form and JSON bodies used to hold these as plain `String`s, which are
+/// freed without being overwritten, so a password outlived the request in
+/// whatever heap page it landed on. `FormSecret` is zeroized on drop, and its
+/// `Debug` prints a placeholder so a derived `Debug` on the containing struct
+/// is safe. It deliberately implements neither `Display` nor `Serialize`.
+///
+/// It deserializes from a plain string, so it drops into an axum `Form`,
+/// `Json` or `Query` extractor unchanged. The string serde hands over is moved
+/// in, not copied.
+#[derive(Clone, Default, Zeroize, ZeroizeOnDrop)]
+pub struct FormSecret(String);
+
+impl FormSecret {
+    /// Wraps `value`.
+    #[must_use]
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    /// The secret's value. Callers must not log it or copy it into a
+    /// non-zeroizing buffer that outlives the request.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether the secret is the empty string.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The secret's length in bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+/// Reads as a `&str`, so `Option<FormSecret>::as_deref()` and `&str`
+/// parameters work unchanged. Copying the value out (`to_string()`) produces
+/// a buffer that is *not* wiped; do that only where an API demands a `String`.
+impl std::ops::Deref for FormSecret {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for FormSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FormSecret(<redacted>)")
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for FormSecret {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self)
+    }
+}
+
+/// Compile-time check that `T` is wiped on drop. Tests call it on each
+/// secret-bearing request field; the call only type-checks when the field's
+/// type is [`ZeroizeOnDrop`].
+#[cfg(test)]
+pub(crate) fn assert_zeroize_on_drop<T: ZeroizeOnDrop>(_: &T) {}
 
 #[cfg(test)]
 mod tests {
@@ -201,5 +273,57 @@ mod tests {
         assert!(!ct_eq_secret_opt(None, Some("x")));
         assert!(!ct_eq_secret_opt(Some("x"), None));
         assert!(!ct_eq_secret_opt(None, None));
+    }
+
+    // ── FormSecret (GA audit L20) ────────────────────────────────────────────
+
+    #[derive(serde::Deserialize, Debug)]
+    struct Body {
+        name: String,
+        secret: FormSecret,
+        #[serde(default)]
+        maybe: Option<FormSecret>,
+    }
+
+    #[test]
+    fn form_secret_deserializes_from_a_urlencoded_form() {
+        let body: Body = serde_urlencoded::from_str("name=a&secret=CANARY-f0rm&maybe=CANARY-opt")
+            .expect("form parses");
+        assert_eq!(body.name, "a");
+        assert_eq!(body.secret.expose(), "CANARY-f0rm");
+        assert_eq!(
+            body.maybe.as_ref().map(FormSecret::expose),
+            Some("CANARY-opt")
+        );
+        assert_zeroize_on_drop(&body.secret);
+        assert_zeroize_on_drop(&body.maybe);
+    }
+
+    #[test]
+    fn form_secret_deserializes_from_json_and_defaults_when_absent() {
+        let body: Body =
+            serde_json::from_str(r#"{"name":"a","secret":"CANARY-js0n"}"#).expect("json parses");
+        assert_eq!(body.secret.expose(), "CANARY-js0n");
+        assert!(body.maybe.is_none(), "an absent optional secret is None");
+    }
+
+    #[test]
+    fn form_secret_debug_never_prints_the_value() {
+        let body: Body = serde_urlencoded::from_str("name=a&secret=CANARY-f0rm&maybe=CANARY-opt")
+            .expect("form parses");
+        let dbg = format!("{body:?}");
+        assert!(!dbg.contains("CANARY"), "Debug leaked a secret: {dbg}");
+        assert!(
+            dbg.contains("name: \"a\""),
+            "non-secret fields still print: {dbg}"
+        );
+    }
+
+    #[test]
+    fn form_secret_zeroize_wipes_the_buffer() {
+        let mut s = FormSecret::new("CANARY-wipe".to_string());
+        assert_eq!(s.len(), 11);
+        zeroize::Zeroize::zeroize(&mut s);
+        assert!(s.is_empty(), "zeroize must leave no content behind");
     }
 }

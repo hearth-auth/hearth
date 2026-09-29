@@ -6,3 +6,28 @@ fail-fast = true
 [profile.ci]
 retries = 2
 fail-fast = false
+
+# Backup and restore tests drive real exports/restores through the engine or
+# the server. Every archive wraps its key with Argon2id, which takes seconds in
+# a debug build, so these tests take 25-60 s alone and crossed the default
+# 60 s kill (30 s x 2) under parallel load: backup_endpoint_rate_limits_after_quota
+# (10 exports), backup_http::restoring_audit_history... (26.9 s alone, 60 s
+# timeout in a full run), and the backup proptests (40-45 s). The work is the
+# point of the tests; they get a 90 s kill (30 s x 3) instead of a raised
+# global limit. 2026-09-28.
+[[profile.default.overrides]]
+filter = 'binary(backup_http) | binary(backup_system_realm) | binary(backup) | (binary(abuse_export_hardening) & test(=backup_endpoint_rate_limits_after_quota))'
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+# Real-socket three-node Raft clusters. Each test starts three nodes (Raft
+# peers, timers, loopback sockets) and waits up to 20 s for replication to
+# converge. Run in parallel with each other and the rest of the suite, 17+
+# such clusters starved each other's election and heartbeat timers, and a
+# different test timed out "replication did not converge within 20s" on most
+# full runs while every one passed alone (2026-09-28). One cluster at a time.
+[test-groups]
+three-node-cluster = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(cluster_three_node_control_coherence) | binary(cluster_grpc_loopback)'
+test-group = 'three-node-cluster'

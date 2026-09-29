@@ -487,6 +487,7 @@ mod tests;
 
 #[cfg(test)]
 mod latency_tests {
+    use std::sync::atomic::Ordering;
     use std::time::Instant;
 
     use super::{splitmix64, FaultConfig, FaultFs};
@@ -523,20 +524,33 @@ mod latency_tests {
 
     #[test]
     fn clear_latency_restores_zero_delay() {
+        // `sleep_with_jitter` advances `latency_seed` on every call that sleeps
+        // and returns before touching it when no latency is configured, so the
+        // seed tells deterministically which path a write took. A wall-clock
+        // bound could not: the old `< 10 ms` check could not tell 500 µs of
+        // injected latency from none, and still failed at 86 ms on a loaded,
+        // coverage-instrumented CI runner.
         let fs = FaultFs::new();
-        fs.config.set_latency(500, 500, 500, 100, 7);
-        fs.config.clear_latency();
-
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("no-latency.bin");
-        let start = Instant::now();
+
+        // Control: with latency configured, a write takes the sleeping path.
+        fs.config.set_latency(500, 500, 500, 100, 7);
+        let before = fs.config.latency_seed.load(Ordering::SeqCst);
         fs.write(&path, b"x").expect("write");
-        // Without latency the op should complete in well under 1 ms on any
-        // modern machine; give 10 ms to absorb CI jitter.
-        assert!(
-            start.elapsed().as_millis() < 10,
-            "expected ~zero latency after clear_latency(), got {:?}",
-            start.elapsed()
+        assert_ne!(
+            fs.config.latency_seed.load(Ordering::SeqCst),
+            before,
+            "control: a write with latency configured must take the sleeping path"
+        );
+
+        fs.config.clear_latency();
+        let before = fs.config.latency_seed.load(Ordering::SeqCst);
+        fs.write(&path, b"y").expect("write");
+        assert_eq!(
+            fs.config.latency_seed.load(Ordering::SeqCst),
+            before,
+            "a write after clear_latency() must take the zero-latency path"
         );
     }
 

@@ -93,6 +93,9 @@ No data directory is needed for a dry run.
 
 ## Step 3 — Import
 
+`--data-dir` opens the store as production does, so `HEARTH_MASTER_KEY` must be set to the
+same stable value the server will run with; the command refuses to run without it.
+
 ```bash
 hearth migrate auth0 \
   --file auth0-bundle.json \

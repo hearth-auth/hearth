@@ -1,6 +1,5 @@
 //! Application state shared across all request handlers.
 
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use crate::abuse::shaper::RequestShaper;
@@ -63,12 +62,12 @@ pub struct AppState {
     /// carries a valid `detached_signature_b64` in its manifest. Fail-closed:
     /// archives without a valid signature are rejected.
     pub backup_verify_key_bytes: Option<[u8; 32]>,
-    /// Trusted reverse-proxy IPs for `X-Forwarded-For` extraction.
+    /// Trusted reverse proxies (addresses and CIDR ranges) for `X-Forwarded-For` extraction.
     ///
     /// When non-empty, the OWASP "rightmost non-trusted" algorithm is applied
     /// to derive the real client IP. When empty (default), the peer socket
     /// IP is used directly.
-    pub trusted_proxies: Vec<IpAddr>,
+    pub trusted_proxies: crate::core::TrustedProxies,
     /// Cluster engine for Raft admin operations. `None` in single-node mode.
     ///
     /// When `None`, all `/admin/cluster/*` endpoints return `503 Service
@@ -166,7 +165,7 @@ impl AppState {
             par_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
-            trusted_proxies: Vec::new(),
+            trusted_proxies: crate::core::TrustedProxies::default(),
             cluster: None,
             // zero key is overridden in production via with_dpop_nonce_secret
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
@@ -204,7 +203,7 @@ impl AppState {
             par_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
-            trusted_proxies: Vec::new(),
+            trusted_proxies: crate::core::TrustedProxies::default(),
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
             // A-10 dev relaxation: production default (60 rps) would otherwise
@@ -248,7 +247,7 @@ impl AppState {
             par_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
-            trusted_proxies: Vec::new(),
+            trusted_proxies: crate::core::TrustedProxies::default(),
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
             jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
@@ -305,8 +304,8 @@ impl AppState {
         self
     }
 
-    /// Configures trusted reverse-proxy IPs for `X-Forwarded-For` extraction.
-    pub fn with_trusted_proxies(mut self, proxies: Vec<IpAddr>) -> Self {
+    /// Configures trusted reverse proxies (addresses and CIDR ranges) for `X-Forwarded-For` extraction.
+    pub fn with_trusted_proxies(mut self, proxies: crate::core::TrustedProxies) -> Self {
         self.trusted_proxies = proxies;
         self
     }

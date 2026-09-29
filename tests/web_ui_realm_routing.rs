@@ -131,6 +131,42 @@ async fn get(app: &axum::Router, path: &str) -> (StatusCode, String) {
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// POSTs the confirmation form at `path` carrying `token` in the link-token
+/// cookie, as a browser does after the emailed link's first hop (GA audit
+/// L18). The rig runs in dev mode, so the absent CSRF cookie is tolerated.
+async fn confirm_with_link_token(
+    app: &axum::Router,
+    path: &str,
+    token: &str,
+) -> (StatusCode, String) {
+    let binding = hearth::protocol::web::link_token::link_binding(
+        &CookieSecret::from_bytes(COOKIE_SECRET),
+        token,
+    );
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("hearth_link_token={token}"),
+                )
+                .header(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Body::from(format!("link_binding={binding}")))
+                .expect("build POST request"),
+        )
+        .await
+        .expect("send request");
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.expect("body");
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 async fn post_form(app: &axum::Router, path: &str, body: &str) -> StatusCode {
     let resp = app
         .clone()
@@ -342,22 +378,26 @@ async fn verify_email_respects_path_realm() {
         )
         .expect("register_user");
 
-    // Hitting the token under realm `beta` must NOT succeed — no walk.
-    let beta_url = format!(
-        "/ui/realms/beta/verify-email?token={}",
-        resp.verification_token
-    );
-    let (status, _) = get(&rig.app, &beta_url).await;
+    // Hitting the token under realm `beta` must NOT succeed — no walk. The
+    // link's first GET moves the token into a cookie (GA audit L18); these
+    // requests are the second hop, carrying that cookie.
+    let (status, _) = confirm_with_link_token(
+        &rig.app,
+        "/ui/realms/beta/verify-email",
+        &resp.verification_token,
+    )
+    .await;
     assert!(
         status == StatusCode::GONE || status == StatusCode::NOT_FOUND,
         "wrong-realm verify must not succeed, got {status}"
     );
 
     // Hitting it under realm `alpha` succeeds.
-    let alpha_url = format!(
-        "/ui/realms/alpha/verify-email?token={}",
-        resp.verification_token
-    );
-    let (status, _) = get(&rig.app, &alpha_url).await;
+    let (status, _) = confirm_with_link_token(
+        &rig.app,
+        "/ui/realms/alpha/verify-email",
+        &resp.verification_token,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "alpha verify should succeed");
 }
