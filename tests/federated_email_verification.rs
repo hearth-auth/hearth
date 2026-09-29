@@ -213,13 +213,13 @@ fn stub_upstream_login(
     rig: &FedRig,
     stub: &StubFederationTransport,
     state: &str,
-    sub: &str,
+    external_sub: &str,
     email: &str,
     email_verified: bool,
 ) {
     let nonce = format!("nonce-{state}");
     seed_state(rig, state, &nonce);
-    stub_id_token(stub, &nonce, sub, email, email_verified);
+    stub_id_token(stub, &nonce, external_sub, email, email_verified);
 }
 
 /// Seeds the federation state bag for `state`, expecting `nonce`.
@@ -242,7 +242,7 @@ fn seed_state(rig: &FedRig, state: &str, nonce: &str) {
 fn stub_id_token(
     stub: &StubFederationTransport,
     nonce: &str,
-    sub: &str,
+    external_sub: &str,
     email: &str,
     email_verified: bool,
 ) {
@@ -252,7 +252,7 @@ fn stub_id_token(
     let header = serde_json::json!({ "alg": "RS256", "typ": "JWT", "kid": kid });
     let payload = serde_json::json!({
         "iss": "https://idp.example",
-        "sub": sub,
+        "sub": external_sub,
         "aud": "demo-client",
         "exp": 4_102_444_800i64,
         "iat": 4_102_444_200i64,
