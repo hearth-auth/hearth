@@ -18,6 +18,13 @@
 //! a holder of `hearth.realm.admin`, `hearth.clients.admin` or
 //! `hearth.agents.admin` was fair game. The protected set must be the same
 //! list the admin gate itself accepts.
+//!
+//! ## Discovery accepts the SCIM token
+//!
+//! `/ServiceProviderConfig`, `/Schemas` and `/ResourceTypes` accepted only an
+//! admin JWT, so an IdP holding the realm's provisioning token got 401 on the
+//! documents it reads first. They now accept the SCIM token as well as admin
+//! tokens.
 
 mod common;
 
@@ -432,4 +439,65 @@ async fn scim_token_still_manages_plain_users() {
         .expect("lookup")
         .expect("plain user exists");
     assert_eq!(stored.email(), "renamed@ga3.test");
+}
+
+// ── Discovery: the realm's SCIM token reads it, as do admin tokens ───────────
+
+const DISCOVERY: [&str; 3] = [
+    "/scim/v2/ServiceProviderConfig",
+    "/scim/v2/Schemas",
+    "/scim/v2/ResourceTypes",
+];
+
+/// IdPs read discovery with the provisioning token they were given. It used
+/// to be accepted only as an admin JWT, so the realm's own SCIM token got 401.
+#[tokio::test]
+async fn scim_token_reads_discovery_endpoints() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let (realm, token) = scim_token_realm(&h);
+    let app = build_app(&h);
+
+    for uri in DISCOVERY {
+        let status = scim(&app, "GET", uri, &realm, &token, None).await;
+        assert_eq!(status, StatusCode::OK, "{uri} with the SCIM token");
+    }
+}
+
+/// Admin tokens keep working — on a realm with a SCIM token as well as on one
+/// without — and a wrong bearer is still refused.
+#[tokio::test]
+async fn discovery_accepts_admin_tokens_and_refuses_a_wrong_bearer() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let (token_realm, _token) = scim_token_realm(&h);
+    let fallback_realm = jwt_realm(&h);
+    let app = build_app(&h);
+    let admin_on_token_realm = token_with_role(&h, &token_realm, "realm.admin");
+    let admin_on_fallback_realm = token_with_role(&h, &fallback_realm, "hearth.clients.admin");
+
+    for uri in DISCOVERY {
+        let on_token_realm =
+            scim(&app, "GET", uri, &token_realm, &admin_on_token_realm, None).await;
+        let on_fallback_realm = scim(
+            &app,
+            "GET",
+            uri,
+            &fallback_realm,
+            &admin_on_fallback_realm,
+            None,
+        )
+        .await;
+        let wrong = scim(&app, "GET", uri, &token_realm, "not-the-scim-token", None).await;
+
+        assert_eq!(
+            on_token_realm,
+            StatusCode::OK,
+            "{uri}: admin token, SCIM-token realm"
+        );
+        assert_eq!(
+            on_fallback_realm,
+            StatusCode::OK,
+            "{uri}: admin token, fallback realm"
+        );
+        assert_eq!(wrong, StatusCode::UNAUTHORIZED, "{uri}: wrong bearer");
+    }
 }

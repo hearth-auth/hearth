@@ -317,7 +317,8 @@ async fn org_scoping_no_cross_org_bleed() {
 
     let org_b = make_org(&h, &realm, "org-b");
 
-    // Decision endpoint: org A context → allowed.
+    // Decision endpoint: a token minted in org A → allowed in org A. The
+    // organisation context is the token's `oid` (GA audit 3).
     let client = register_client(&h, &realm, AccessTokenAuthorization::Decision);
     let session = h
         .identity()
@@ -331,6 +332,7 @@ async fn org_scoping_no_cross_org_bleed() {
             session.id(),
             &TokenIssuanceContext {
                 client_id: Some(client.client_id().clone()),
+                oid: Some(org_a.to_string()),
                 ..Default::default()
             },
         )
@@ -624,54 +626,65 @@ async fn decision_endpoint_org_scoping() {
         .expect("assign org-scoped role");
 
     let client = register_client(&h, &realm, AccessTokenAuthorization::Decision);
-    let session = h
-        .identity()
-        .create_session(&realm, &user, &SessionContext::default())
-        .expect("session");
-    let pair = h
-        .identity()
-        .issue_tokens_with_context(
-            &realm,
-            &user,
-            session.id(),
-            &TokenIssuanceContext {
-                client_id: Some(client.client_id().clone()),
-                ..Default::default()
-            },
-        )
-        .expect("issue tokens");
+    // The organisation context is the token's `oid` (GA audit 3): mint one
+    // token in the organisation and one at realm level.
+    let token_in = |oid: Option<String>| {
+        let session = h
+            .identity()
+            .create_session(&realm, &user, &SessionContext::default())
+            .expect("session");
+        h.identity()
+            .issue_tokens_with_context(
+                &realm,
+                &user,
+                session.id(),
+                &TokenIssuanceContext {
+                    client_id: Some(client.client_id().clone()),
+                    oid,
+                    ..Default::default()
+                },
+            )
+            .expect("issue tokens")
+            .access_token()
+            .to_string()
+    };
+    let org_token = token_in(Some(org.to_string()));
+    let realm_token = token_in(None);
+    let decide = |token: &str, organization_id: Option<String>| {
+        h.identity()
+            .decide_token_permission(
+                &realm,
+                &DecidePermissionRequest {
+                    token: token.to_string(),
+                    permission: "team.manage".to_string(),
+                    organization_id,
+                    resource: None,
+                },
+            )
+            .expect("decide")
+            .allowed
+    };
 
-    // With org context → allowed.
-    let with_org = h
-        .identity()
-        .decide_token_permission(
-            &realm,
-            &DecidePermissionRequest {
-                token: pair.access_token().to_string(),
-                permission: "team.manage".to_string(),
-                organization_id: Some(org.to_string()),
-                resource: None,
-            },
-        )
-        .expect("decide with org");
-    assert!(with_org.allowed, "should be allowed with org context");
-
-    // Without org context → denied (org-scoped role doesn't apply realm-wide).
-    let without_org = h
-        .identity()
-        .decide_token_permission(
-            &realm,
-            &DecidePermissionRequest {
-                token: pair.access_token().to_string(),
-                permission: "team.manage".to_string(),
-                organization_id: None,
-                resource: None,
-            },
-        )
-        .expect("decide without org");
+    // A token minted in the organisation → allowed, whether or not the
+    // request restates the organisation.
     assert!(
-        !without_org.allowed,
+        decide(&org_token, Some(org.to_string())),
+        "should be allowed with org context"
+    );
+    assert!(
+        decide(&org_token, None),
+        "the token's own organisation applies"
+    );
+
+    // A realm-level token → denied (org-scoped role doesn't apply realm-wide),
+    // and naming the organisation cannot widen it.
+    assert!(
+        !decide(&realm_token, None),
         "org-scoped perm must not apply realm-wide"
+    );
+    assert!(
+        !decide(&realm_token, Some(org.to_string())),
+        "a realm-level token must not be answered for an organisation"
     );
 }
 

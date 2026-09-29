@@ -197,8 +197,8 @@ async fn suspended_org_does_not_block_realm_scoped_token_issuance() {
 // ---------------------------------------------------------------------------
 
 /// Grants `user` a realm-wide role and an org-scoped extra role, then returns
-/// an access token with no org context (so the decision endpoint's org
-/// parameter is the only thing under test).
+/// an access token minted in the organisation (the decision endpoint answers
+/// for the token's `oid` only).
 fn seed_decision_fixture(
     h: &common::TestHarness,
     realm: &RealmId,
@@ -260,8 +260,18 @@ fn seed_decision_fixture(
         .expect("create session")
         .id()
         .clone();
+    // Minted in the organisation: the decision endpoint answers for the
+    // token's `oid` only (GA audit 3).
     h.identity()
-        .issue_tokens_with_context(realm, user, &session, &TokenIssuanceContext::default())
+        .issue_tokens_with_context(
+            realm,
+            user,
+            &session,
+            &TokenIssuanceContext {
+                oid: Some(org.to_string()),
+                ..TokenIssuanceContext::default()
+            },
+        )
         .expect("issue token")
         .access_token()
         .to_string()

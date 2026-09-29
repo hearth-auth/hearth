@@ -353,6 +353,15 @@ pub trait RbacEngine: Send + Sync {
         assignment_id: &AssignmentId,
     ) -> Result<(), RbacError>;
 
+    /// Loads a role assignment by ID; `None` when it does not exist in
+    /// `realm_id`. Protocol handlers use it to find whom an unassignment
+    /// would demote before they perform it (the admin privilege ceiling).
+    fn get_assignment(
+        &self,
+        realm_id: &RealmId,
+        assignment_id: &AssignmentId,
+    ) -> Result<Option<RoleAssignment>, RbacError>;
+
     /// Lists all role assignments directly bound to a user.
     fn list_user_assignments(
         &self,

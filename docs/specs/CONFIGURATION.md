@@ -1673,7 +1673,7 @@ Each entry under `providers` declares one external identity provider. The `type`
 | `leeway_seconds` | integer | `60` | Clock-skew allowance in seconds applied to OIDC ID-token `exp` and `nbf` checks. The default (60 s) follows standard OIDC RP tolerance. Raise only for enterprise IdPs with known clock drift; **maximum 300 s**. |
 | `apple_team_id` | string | — | **Required for `type: apple`.** Apple Developer Team ID (10 characters, e.g. `A1B2C3D4E5`). |
 | `apple_key_id` | string | — | **Required for `type: apple`.** Key ID of the Sign In with Apple key from the Apple Developer portal. |
-| `apple_private_key_pem` | string | — | **Required for `type: apple`.** The P-256 private key in PKCS#8 PEM form (`-----BEGIN PRIVATE KEY-----`) downloaded once from the Apple Developer portal. Use `${ENV_VAR}` substitution — never commit the key. |
+| `apple_private_key_pem` | string | — | **Required for `type: apple`.** The P-256 private key in PKCS#8 PEM form (`-----BEGIN PRIVATE KEY-----`) downloaded once from the Apple Developer portal. Use `${ENV_VAR}` substitution — never commit the key. Parsed at load and reload with the same parser the token exchange uses; a key that is not P-256 PKCS#8 refuses startup, naming the realm and connector. |
 
 > **Sign In with Apple** does not use a static `client_secret`: every token-endpoint
 > call presents an ES256 `private_key_jwt` assertion built from the three

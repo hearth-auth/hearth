@@ -377,6 +377,7 @@ pub(super) mod approval;
 pub(crate) mod client_jwks;
 mod control;
 mod grant_family_revocation;
+mod host_admin;
 mod id_token_keys;
 mod mfa_single_use;
 pub(super) mod oauth;
@@ -389,6 +390,9 @@ pub(super) mod cross_realm;
 pub(super) mod spiffe;
 pub(super) mod txn;
 
+pub use host_admin::{
+    HostAdminToken, HOST_ADMIN_TOKEN_ISSUER, HOST_ADMIN_TOKEN_MAX_TTL, HOST_ADMIN_TOKEN_MIN_TTL,
+};
 use retired_keys::KeyFamily;
 use sharded_cache::ShardedEpochMap;
 
@@ -4139,14 +4143,22 @@ impl EmbeddedIdentityEngine {
         // loop (audit 2026-08-28 §4.16#4). This mirrors
         // `issue_tokens_with_context`: RBAC resolve, claim profile, size
         // validation, and the pre-token webhook all run per rotation. Scope,
-        // `oid`, resources and AMR stay bound to the original grant.
+        // `oid`, resources and AMR stay bound to the original grant — and so
+        // does the scope narrowing: resolving with no scope handed a token
+        // narrowed to a bundle at the exchange the user's full set, admin
+        // permissions included, on its first rotation (GA audit 3 B-4).
         use crate::identity::oidc::AccessTokenAuthorization;
         let user = self
             .get_user(realm_id, user_id)?
             .ok_or(IdentityError::UserNotFound)?;
+        let grant_scopes: Vec<String> = claims
+            .scope
+            .as_deref()
+            .map(|s| s.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default();
         let resolved = self
             .rbac
-            .resolve_permissions(user_id, realm_id, None, None)
+            .resolve_for_granted_scopes(user_id, realm_id, None, &grant_scopes)
             .map_err(|e| match e {
                 RbacError::TokenSizeExceeded {
                     limit,
@@ -4181,11 +4193,7 @@ impl EmbeddedIdentityEngine {
             &crate::rbac::ResolvedPermissions::default()
         };
 
-        let granted_scopes: BTreeSet<String> = claims
-            .scope
-            .as_deref()
-            .map(|s| s.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default();
+        let granted_scopes: BTreeSet<String> = grant_scopes.into_iter().collect();
         let (roles, groups, permissions, custom) = self.apply_claim_profile(
             realm_id,
             &user,
@@ -7430,6 +7438,294 @@ impl EmbeddedIdentityEngine {
     }
 }
 
+/// Stable lower-case label for a realm status in audit metadata.
+fn realm_status_label(status: RealmStatus) -> &'static str {
+    match status {
+        RealmStatus::Active => "active",
+        RealmStatus::Suspended => "suspended",
+        RealmStatus::Archived => "archived",
+        RealmStatus::DeletingInProgress => "deleting_in_progress",
+    }
+}
+
+impl EmbeddedIdentityEngine {
+    /// Shared body of [`IdentityEngine::create_organization`] and
+    /// [`IdentityEngine::create_scim_organization`]; `scim_provisioned` sets
+    /// the organization's SCIM marker in the same write.
+    fn create_organization_impl(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateOrganizationRequest,
+        scim_provisioned: bool,
+    ) -> Result<Organization, IdentityError> {
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "create_organization",
+            });
+        }
+        self.require_active_realm(realm_id)?;
+        // A-24: enforce per-realm org quota before writing.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_orgs {
+                    let prefix = keys::org_id_scan_prefix();
+                    self.check_resource_quota(realm_id, "orgs", &prefix, max)?;
+                }
+            }
+        }
+        let slug = validation::validate_slug(&request.slug)?;
+        let name = validation::validate_display_name(&request.name)?;
+
+        // A-5: reject permanently reserved slugs (operator-configured list).
+        let slug_lower = slug.to_ascii_lowercase();
+        if self.config.reserved_slugs.iter().any(|r| r == &slug_lower) {
+            return Err(IdentityError::ReservedSlug { slug: slug.clone() });
+        }
+
+        // Acquire write lock before slug check to prevent TOCTOU (A-28)
+        let _slug_guard = self.org_write_lock.lock().expect("org write lock");
+        // Check slug uniqueness
+        let slug_key = keys::encode_org_slug(&slug);
+        if self
+            .storage
+            .get(realm_id, &slug_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::DuplicateOrgSlug);
+        }
+
+        // A-5: check post-delete slug cooldown reservation.
+        let reservation_key = keys::encode_org_slug_reservation(realm_id, &slug);
+        if let Some(bytes) = self
+            .storage
+            .get(realm_id, &reservation_key)
+            .map_err(Self::storage_err)?
+        {
+            if let Ok(reservation) = serde_json::from_slice::<StoredSlugReservation>(&bytes) {
+                let now_micros = self.clock.now().as_micros();
+                if now_micros < reservation.expires_at_micros {
+                    return Err(IdentityError::SlugInCooldown { slug: slug.clone() });
+                }
+                // Cooldown expired — clean up the stale reservation.
+                let _ = self.storage.delete(realm_id, &reservation_key);
+            }
+        }
+
+        let realm = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+        let org_attr_defs = realm
+            .config()
+            .attribute_definitions
+            .as_ref()
+            .map(|d| d.organizations.as_slice());
+        validation::validate_attributes(&request.attributes, org_attr_defs)?;
+
+        let now = self.clock.now();
+        let org_id = OrganizationId::generate();
+        let description = request.description.clone().unwrap_or_default();
+        let config = request.config.clone().unwrap_or_default();
+
+        let mut org = Organization::new(
+            org_id.clone(),
+            name,
+            slug.clone(),
+            description,
+            OrganizationStatus::Active,
+            config,
+            now,
+            now,
+        );
+        org.set_attributes(request.attributes.clone());
+        if scim_provisioned {
+            org.mark_scim_provisioned();
+        }
+
+        let id_key = keys::encode_org_id(&org_id);
+        let org_bytes = serde_json::to_vec(&org).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        // Atomic: primary + slug index in one WAL record (A-28)
+        self.storage
+            .put_batch(
+                realm_id,
+                &[
+                    (id_key, org_bytes),
+                    (slug_key, org_id.as_uuid().as_bytes().to_vec()),
+                ],
+            )
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::OrgCreated,
+            "org",
+            &org_id.as_uuid().to_string(),
+        )?;
+
+        Ok(org)
+    }
+
+    /// Shared body of [`IdentityEngine::update_realm`] and
+    /// [`IdentityEngine::set_realm_suspended`].
+    ///
+    /// `precondition` runs on the stored realm under the realm-ops lock, so a
+    /// lifecycle check cannot race a concurrent status change. `audit_ctx`
+    /// attributes the `RealmUpdated` event; on a status change its metadata
+    /// gains `previous_status` and `status`. Returns the status the realm had
+    /// before the update, and the updated realm.
+    fn update_realm_impl(
+        &self,
+        realm_id: &RealmId,
+        request: &UpdateRealmRequest,
+        operation: &'static str,
+        audit_ctx: Option<&AuditContext>,
+        precondition: impl FnOnce(&Realm) -> Result<(), IdentityError>,
+    ) -> Result<(RealmStatus, Realm), IdentityError> {
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected { operation });
+        }
+        if matches!(request.name.as_deref(), Some(n) if n == keys::SYSTEM_REALM_NAME) {
+            return Err(IdentityError::SystemRealmProtected { operation });
+        }
+        // If the rename targets a new name, validate it the same way
+        // create_realm does — including the admin-URL reserved-keyword
+        // set (UI_ROUTING.md R-4). Skip when name is unchanged.
+        if let Some(ref new_name) = request.name {
+            super::validation::validate_realm_name(new_name)?;
+        }
+        // Serialize against create/delete so an in-flight delete can't
+        // race with this read-modify-write and resurrect an orphaned
+        // record after its signing key has already been removed.
+        let _ops_guard = self.realm_ops_lock.lock().expect("realm ops lock");
+        let mut realm = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+
+        // Refuse updates against a realm whose cascade has already started.
+        // `delete_realm` releases the ops_lock after stamping
+        // `DeletingInProgress` so its (potentially long) cascade does not
+        // block create/update of *other* realms. Without this guard the
+        // update could re-put the realm record between the cascade's
+        // record-delete and signing-key-delete, leaving record=Some /
+        // key=None — the exact invariant the
+        // `simulation_concurrent_realm_ops_under_io_delay` test asserts.
+        if realm.status() == RealmStatus::DeletingInProgress {
+            return Err(IdentityError::RealmSuspended);
+        }
+        precondition(&realm)?;
+        let previous_status = realm.status();
+
+        let now = self.clock.now();
+        let old_name = realm.name().to_string();
+
+        // SEC-20: reject webhook config without HMAC secret before mutating state.
+        // M7: also reject approval webhook URL with non-HTTPS scheme.
+        if let Some(ref config) = request.config {
+            if let Some(ref wh) = config.pre_token_webhook {
+                wh.validate()
+                    .map_err(|reason| IdentityError::InvalidInput { reason })?;
+            }
+            if let Some(ref wh) = config.approval_webhook {
+                wh.validate()
+                    .map_err(|reason| IdentityError::InvalidInput { reason })?;
+            }
+            // 19.11: refuse an Argon2id override below the OWASP floor.
+            self.check_realm_argon2_floor(config)?;
+        }
+
+        if let Some(ref name) = request.name {
+            realm.set_name(name.clone());
+        }
+        if let Some(status) = request.status {
+            realm.set_status(status);
+        }
+        if let Some(ref config) = request.config {
+            realm.set_config(config.clone());
+        }
+        realm.set_updated_at(now);
+
+        let sys_realm = keys::system_realm_id();
+        let realm_key = keys::encode_realm_id(realm_id);
+        let realm_bytes = Self::serialize_realm(&realm)?;
+
+        // If the name changed, update the name index atomically
+        if realm.name() == old_name {
+            self.storage
+                .put(&sys_realm, &realm_key, &realm_bytes)
+                .map_err(Self::storage_err)?;
+        } else {
+            let old_name_key = keys::encode_realm_name(&old_name);
+            let new_name_key = keys::encode_realm_name(realm.name());
+            let name_value = realm_id.as_uuid().as_bytes().to_vec();
+            self.storage
+                .put_batch(
+                    &sys_realm,
+                    &[(realm_key, realm_bytes), (new_name_key, name_value)],
+                )
+                .map_err(Self::storage_err)?;
+            // Best-effort: remove old name index
+            let _ = self.storage.delete(&sys_realm, &old_name_key);
+        }
+
+        // Propagate status change to the lock-free cache so validate_token
+        // immediately reflects the new lifecycle state. Ordered before
+        // record_audit so the cache is consistent before any further writes,
+        // matching the ordering used in create_realm.
+        if request.status.is_some() {
+            let id = realm_id.clone();
+            let status = realm.status();
+            // A status change decided here binds on every node only via the
+            // control epoch: `realm_status_cache` answers "active" on a miss
+            // and is written by the serving node alone (task 24.6).
+            self.publish_control(Some(control::ControlOp::SetRealmStatus(id, status)));
+        }
+
+        let attributed = audit_ctx.map(|ctx| {
+            let mut metadata = ctx
+                .metadata
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let (Some(status), Some(map)) = (request.status, metadata.as_object_mut()) {
+                map.insert(
+                    "previous_status".to_string(),
+                    serde_json::Value::from(realm_status_label(previous_status)),
+                );
+                map.insert(
+                    "status".to_string(),
+                    serde_json::Value::from(realm_status_label(status)),
+                );
+            }
+            AuditContext {
+                actor: ctx.actor.clone(),
+                metadata: Some(metadata),
+            }
+        });
+        self.record_audit(
+            realm_id,
+            attributed.as_ref(),
+            AuditAction::RealmUpdated,
+            "realm",
+            &realm_id.as_uuid().to_string(),
+        )?;
+
+        // When suspending or archiving a realm, revoke all active sessions so
+        // existing tokens backed by those sessions fail immediately on the
+        // session-validity check inside validate_token (defense-in-depth on
+        // top of the realm-status check added to validate_token).
+        if matches!(
+            request.status,
+            Some(RealmStatus::Suspended | RealmStatus::Archived | RealmStatus::DeletingInProgress)
+        ) {
+            self.bulk_revoke_sessions(realm_id);
+        }
+
+        Ok((previous_status, realm))
+    }
+}
+
 impl IdentityEngine for EmbeddedIdentityEngine {
     fn check_ip_login_rate_limit(&self, realm_id: &RealmId, ip: &str) -> Result<(), IdentityError> {
         self.check_ip_login_rate_limit(realm_id, ip)
@@ -7638,127 +7934,38 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &UpdateRealmRequest,
     ) -> Result<Realm, IdentityError> {
-        if keys::is_system_realm(realm_id) {
-            return Err(IdentityError::SystemRealmProtected {
-                operation: "update_realm",
-            });
-        }
-        if matches!(request.name.as_deref(), Some(n) if n == keys::SYSTEM_REALM_NAME) {
-            return Err(IdentityError::SystemRealmProtected {
-                operation: "update_realm",
-            });
-        }
-        // If the rename targets a new name, validate it the same way
-        // create_realm does — including the admin-URL reserved-keyword
-        // set (UI_ROUTING.md R-4). Skip when name is unchanged.
-        if let Some(ref new_name) = request.name {
-            super::validation::validate_realm_name(new_name)?;
-        }
-        // Serialize against create/delete so an in-flight delete can't
-        // race with this read-modify-write and resurrect an orphaned
-        // record after its signing key has already been removed.
-        let _ops_guard = self.realm_ops_lock.lock().expect("realm ops lock");
-        let mut realm = self
-            .get_realm(realm_id)?
-            .ok_or(IdentityError::RealmNotFound)?;
+        self.update_realm_impl(realm_id, request, "update_realm", None, |_| Ok(()))
+            .map(|(_, realm)| realm)
+    }
 
-        // Refuse updates against a realm whose cascade has already started.
-        // `delete_realm` releases the ops_lock after stamping
-        // `DeletingInProgress` so its (potentially long) cascade does not
-        // block create/update of *other* realms. Without this guard the
-        // update could re-put the realm record between the cascade's
-        // record-delete and signing-key-delete, leaving record=Some /
-        // key=None — the exact invariant the
-        // `simulation_concurrent_realm_ops_under_io_delay` test asserts.
-        if realm.status() == RealmStatus::DeletingInProgress {
-            return Err(IdentityError::RealmSuspended);
-        }
-
-        let now = self.clock.now();
-        let old_name = realm.name().to_string();
-
-        // SEC-20: reject webhook config without HMAC secret before mutating state.
-        // M7: also reject approval webhook URL with non-HTTPS scheme.
-        if let Some(ref config) = request.config {
-            if let Some(ref wh) = config.pre_token_webhook {
-                wh.validate()
-                    .map_err(|reason| IdentityError::InvalidInput { reason })?;
-            }
-            if let Some(ref wh) = config.approval_webhook {
-                wh.validate()
-                    .map_err(|reason| IdentityError::InvalidInput { reason })?;
-            }
-            // 19.11: refuse an Argon2id override below the OWASP floor.
-            self.check_realm_argon2_floor(config)?;
-        }
-
-        if let Some(ref name) = request.name {
-            realm.set_name(name.clone());
-        }
-        if let Some(status) = request.status {
-            realm.set_status(status);
-        }
-        if let Some(ref config) = request.config {
-            realm.set_config(config.clone());
-        }
-        realm.set_updated_at(now);
-
-        let sys_realm = keys::system_realm_id();
-        let realm_key = keys::encode_realm_id(realm_id);
-        let realm_bytes = Self::serialize_realm(&realm)?;
-
-        // If the name changed, update the name index atomically
-        if realm.name() == old_name {
-            self.storage
-                .put(&sys_realm, &realm_key, &realm_bytes)
-                .map_err(Self::storage_err)?;
+    fn set_realm_suspended(
+        &self,
+        realm_id: &RealmId,
+        suspended: bool,
+        audit_ctx: &AuditContext,
+    ) -> Result<(RealmStatus, Realm), IdentityError> {
+        let (status, operation) = if suspended {
+            (RealmStatus::Suspended, "suspend_realm")
         } else {
-            let old_name_key = keys::encode_realm_name(&old_name);
-            let new_name_key = keys::encode_realm_name(realm.name());
-            let name_value = realm_id.as_uuid().as_bytes().to_vec();
-            self.storage
-                .put_batch(
-                    &sys_realm,
-                    &[(realm_key, realm_bytes), (new_name_key, name_value)],
-                )
-                .map_err(Self::storage_err)?;
-            // Best-effort: remove old name index
-            let _ = self.storage.delete(&sys_realm, &old_name_key);
-        }
-
-        // Propagate status change to the lock-free cache so validate_token
-        // immediately reflects the new lifecycle state. Ordered before
-        // record_audit so the cache is consistent before any further writes,
-        // matching the ordering used in create_realm.
-        if request.status.is_some() {
-            let id = realm_id.clone();
-            let status = realm.status();
-            // A status change decided here binds on every node only via the
-            // control epoch: `realm_status_cache` answers "active" on a miss
-            // and is written by the serving node alone (task 24.6).
-            self.publish_control(Some(control::ControlOp::SetRealmStatus(id, status)));
-        }
-
-        self.record_audit(
+            (RealmStatus::Active, "unsuspend_realm")
+        };
+        let request = UpdateRealmRequest {
+            status: Some(status),
+            ..UpdateRealmRequest::default()
+        };
+        // Only the runtime freeze moves: an archived (or deleting) realm
+        // follows `hearth.yaml` alone, so unsuspend must not revive it and
+        // suspend must not mask its archival.
+        self.update_realm_impl(
             realm_id,
-            None,
-            AuditAction::RealmUpdated,
-            "realm",
-            &realm_id.as_uuid().to_string(),
-        )?;
-
-        // When suspending or archiving a realm, revoke all active sessions so
-        // existing tokens backed by those sessions fail immediately on the
-        // session-validity check inside validate_token (defense-in-depth on
-        // top of the realm-status check added to validate_token).
-        if matches!(
-            request.status,
-            Some(RealmStatus::Suspended | RealmStatus::Archived | RealmStatus::DeletingInProgress)
-        ) {
-            self.bulk_revoke_sessions(realm_id);
-        }
-
-        Ok(realm)
+            &request,
+            operation,
+            Some(audit_ctx),
+            |realm| match realm.status() {
+                RealmStatus::Active | RealmStatus::Suspended => Ok(()),
+                _ => Err(IdentityError::RealmArchived),
+            },
+        )
     }
 
     #[allow(clippy::too_many_lines)]
@@ -9039,10 +9246,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         let now = self.clock.now();
-        // Resolve effective permissions via RBAC at token-issue time.
+        // Resolve effective permissions via RBAC at token-issue time, narrowed
+        // by every permission-bearing granted scope — the rule the code
+        // exchange, refresh and live resolution share (GA audit 3 B-4).
+        let grant_scopes: Vec<String> = ctx.granted_scopes.iter().cloned().collect();
         let resolved = self
             .rbac
-            .resolve_permissions(user_id, realm_id, None, None)
+            .resolve_for_granted_scopes(user_id, realm_id, None, &grant_scopes)
             .map_err(|e| match e {
                 RbacError::TokenSizeExceeded {
                     limit,
@@ -12707,111 +12917,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &CreateOrganizationRequest,
     ) -> Result<Organization, IdentityError> {
-        if keys::is_system_realm(realm_id) {
-            return Err(IdentityError::SystemRealmProtected {
-                operation: "create_organization",
-            });
-        }
-        self.require_active_realm(realm_id)?;
-        // A-24: enforce per-realm org quota before writing.
-        if let Ok(Some(realm)) = self.get_realm(realm_id) {
-            if let Some(quotas) = &realm.config().quotas {
-                if let Some(max) = quotas.max_orgs {
-                    let prefix = keys::org_id_scan_prefix();
-                    self.check_resource_quota(realm_id, "orgs", &prefix, max)?;
-                }
-            }
-        }
-        let slug = validation::validate_slug(&request.slug)?;
-        let name = validation::validate_display_name(&request.name)?;
+        self.create_organization_impl(realm_id, request, false)
+    }
 
-        // A-5: reject permanently reserved slugs (operator-configured list).
-        let slug_lower = slug.to_ascii_lowercase();
-        if self.config.reserved_slugs.iter().any(|r| r == &slug_lower) {
-            return Err(IdentityError::ReservedSlug { slug: slug.clone() });
-        }
-
-        // Acquire write lock before slug check to prevent TOCTOU (A-28)
-        let _slug_guard = self.org_write_lock.lock().expect("org write lock");
-        // Check slug uniqueness
-        let slug_key = keys::encode_org_slug(&slug);
-        if self
-            .storage
-            .get(realm_id, &slug_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            return Err(IdentityError::DuplicateOrgSlug);
-        }
-
-        // A-5: check post-delete slug cooldown reservation.
-        let reservation_key = keys::encode_org_slug_reservation(realm_id, &slug);
-        if let Some(bytes) = self
-            .storage
-            .get(realm_id, &reservation_key)
-            .map_err(Self::storage_err)?
-        {
-            if let Ok(reservation) = serde_json::from_slice::<StoredSlugReservation>(&bytes) {
-                let now_micros = self.clock.now().as_micros();
-                if now_micros < reservation.expires_at_micros {
-                    return Err(IdentityError::SlugInCooldown { slug: slug.clone() });
-                }
-                // Cooldown expired — clean up the stale reservation.
-                let _ = self.storage.delete(realm_id, &reservation_key);
-            }
-        }
-
-        let realm = self
-            .get_realm(realm_id)?
-            .ok_or(IdentityError::RealmNotFound)?;
-        let org_attr_defs = realm
-            .config()
-            .attribute_definitions
-            .as_ref()
-            .map(|d| d.organizations.as_slice());
-        validation::validate_attributes(&request.attributes, org_attr_defs)?;
-
-        let now = self.clock.now();
-        let org_id = OrganizationId::generate();
-        let description = request.description.clone().unwrap_or_default();
-        let config = request.config.clone().unwrap_or_default();
-
-        let mut org = Organization::new(
-            org_id.clone(),
-            name,
-            slug.clone(),
-            description,
-            OrganizationStatus::Active,
-            config,
-            now,
-            now,
-        );
-        org.set_attributes(request.attributes.clone());
-
-        let id_key = keys::encode_org_id(&org_id);
-        let org_bytes = serde_json::to_vec(&org).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        // Atomic: primary + slug index in one WAL record (A-28)
-        self.storage
-            .put_batch(
-                realm_id,
-                &[
-                    (id_key, org_bytes),
-                    (slug_key, org_id.as_uuid().as_bytes().to_vec()),
-                ],
-            )
-            .map_err(Self::storage_err)?;
-
-        self.record_audit(
-            realm_id,
-            None,
-            AuditAction::OrgCreated,
-            "org",
-            &org_id.as_uuid().to_string(),
-        )?;
-
-        Ok(org)
+    fn create_scim_organization(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateOrganizationRequest,
+    ) -> Result<Organization, IdentityError> {
+        self.create_organization_impl(realm_id, request, true)
     }
 
     fn get_organization(

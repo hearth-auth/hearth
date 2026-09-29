@@ -46,6 +46,13 @@ pub struct Organization {
     config: OrganizationConfig,
     created_at: Timestamp,
     updated_at: Timestamp,
+    /// `true` when SCIM created this organization. Set once, by
+    /// [`crate::identity::IdentityEngine::create_scim_organization`]; no
+    /// request field sets or clears it, and every update preserves it. A
+    /// realm's SCIM provisioning token may modify or delete only organizations
+    /// that carry it. Part of the stored record, so backups carry it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    scim_provisioned: bool,
 }
 
 impl Organization {
@@ -71,7 +78,21 @@ impl Organization {
             config,
             created_at,
             updated_at,
+            scim_provisioned: false,
         }
+    }
+
+    /// Whether SCIM provisioned this organization (see the field docs): only
+    /// then may a SCIM provisioning token modify or delete it.
+    #[must_use]
+    pub fn scim_provisioned(&self) -> bool {
+        self.scim_provisioned
+    }
+
+    /// Marks the organization as provisioned by SCIM. Engine-internal: only
+    /// SCIM's create path calls it.
+    pub(crate) fn mark_scim_provisioned(&mut self) {
+        self.scim_provisioned = true;
     }
 
     /// Returns the organization's unique identifier.

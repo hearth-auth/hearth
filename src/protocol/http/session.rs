@@ -312,6 +312,27 @@ struct SvDeltaQuery {
     limit: Option<usize>,
 }
 
+/// Whether `claims` may read the realm-wide session-version feed: the token
+/// carries `hearth.sv_feed` or `hearth.admin`, and was not issued to a
+/// third-party client — the feed is an administrative read that a third-party
+/// token never gets, even when a claim profile releases those permissions to
+/// it (GA audit 3 I-14; the admin API's B1 gate).
+fn may_read_sv_feed(
+    state: &AppState,
+    realm_id: &crate::core::RealmId,
+    claims: &crate::identity::TokenClaims,
+) -> bool {
+    claims
+        .permissions
+        .iter()
+        .any(|p| p == "hearth.sv_feed" || p == "hearth.admin")
+        && crate::protocol::admin_auth::token_client_may_administer(
+            state.identity.as_ref(),
+            realm_id,
+            claims,
+        )
+}
+
 /// `GET /oauth/session-versions?since=<seq>` — session-version delta feed.
 ///
 /// Returns all bump events with `seq > since`, up to `limit` (default: 1000).
@@ -357,9 +378,7 @@ async fn oauth_sv_delta_feed(
         Err(e) => return e.into_response(),
     };
 
-    let has_feed_perm = claims.permissions.iter().any(|p| p == "hearth.sv_feed");
-    let is_admin = claims.permissions.iter().any(|p| p == "hearth.admin");
-    if !has_feed_perm && !is_admin {
+    if !may_read_sv_feed(&state, &realm_id, &claims) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "requires hearth.sv_feed permission"})),
@@ -451,9 +470,7 @@ async fn oauth_sv_snapshot(
         Err(e) => return e.into_response(),
     };
 
-    let has_feed_perm = claims.permissions.iter().any(|p| p == "hearth.sv_feed");
-    let is_admin = claims.permissions.iter().any(|p| p == "hearth.admin");
-    if !has_feed_perm && !is_admin {
+    if !may_read_sv_feed(&state, &realm_id, &claims) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "requires hearth.sv_feed permission"})),

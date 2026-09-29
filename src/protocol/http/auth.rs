@@ -406,6 +406,56 @@ pub(crate) fn require_admin_permission(
     Ok(())
 }
 
+/// REST face of the privilege ceiling on user administration
+/// ([`crate::protocol::admin_auth::check_user_admin_ceiling`]): the caller may
+/// not modify, re-email, reset, disable, delete, demote or sign out a user of
+/// `realm_id` who holds an admin permission the caller lacks. Call it after
+/// [`require_admin_permission`] and before the mutation, on every
+/// user-targeting admin write.
+///
+/// Returns `403 Forbidden` when the target outranks the caller and
+/// `503 Service Unavailable` when the target's permissions cannot be resolved.
+pub(crate) fn require_user_admin_ceiling(
+    state: &AppState,
+    auth: &AdminAuth,
+    realm_id: &RealmId,
+    target: &UserId,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    crate::protocol::admin_auth::check_user_admin_ceiling(
+        state.identity.as_ref(),
+        state.rbac.as_ref(),
+        realm_id,
+        target,
+        &auth.permissions,
+    )
+    .map_err(ceiling_refusal)
+}
+
+/// Maps a privilege-ceiling refusal onto the REST error response: `403` when
+/// the target outranks the caller, `503` when it could not be resolved.
+pub(crate) fn ceiling_refusal(
+    e: crate::protocol::admin_auth::UserCeilingError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::protocol::admin_auth::UserCeilingError;
+    match e {
+        UserCeilingError::Exceeded => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "error_description": "the target user holds admin permissions the caller lacks"
+            })),
+        ),
+        UserCeilingError::Unresolved => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "service_unavailable",
+                "error_description":
+                    "could not resolve the target user's permissions; retry later"
+            })),
+        ),
+    }
+}
+
 /// Checks that the caller holds `hearth.admin` or **any one** of the listed
 /// granular sub-permissions. Use on read-only endpoints that are safely
 /// accessible to multiple sub-admin roles (e.g. both `hearth.realm.admin` and
@@ -658,6 +708,11 @@ pub(crate) fn identity_error_to_response(
         IdentityError::RealmNotArchived => (
             StatusCode::CONFLICT,
             "only archived realms can be permanently deleted",
+        ),
+        IdentityError::RealmArchived => (
+            StatusCode::CONFLICT,
+            "the realm is archived or being deleted; only an active or suspended realm can \
+             be suspended or reinstated",
         ),
         IdentityError::YamlManagedResource { .. } => (
             StatusCode::CONFLICT,
@@ -1093,6 +1148,57 @@ pub(crate) fn extract_user_auth(
     htu: &str,
 ) -> Result<UserId, (StatusCode, Json<serde_json::Value>)> {
     user_auth_claims(headers, state, realm_id, htm, htu).map(|(user_id, _)| user_id)
+}
+
+/// [`extract_user_auth`] that also returns the bearer token's validated
+/// claims, for a handler that judges the client the token was issued to.
+pub(crate) fn extract_user_auth_claims(
+    headers: &HeaderMap,
+    state: &AppState,
+    realm_id: &RealmId,
+    htm: &str,
+    htu: &str,
+) -> Result<
+    (UserId, std::sync::Arc<crate::identity::TokenClaims>),
+    (StatusCode, Json<serde_json::Value>),
+> {
+    user_auth_claims(headers, state, realm_id, htm, htu)
+}
+
+/// [`extract_user_auth`] for account self-service surfaces that act with the
+/// user's full authority over their own account — consents, passkeys (GA
+/// audit 3 B-5). The token must be a first-party session token or one issued
+/// to a first-party client
+/// ([`crate::protocol::admin_auth::token_client_may_administer`], the gate the
+/// admin API applies); a third-party client's token is refused
+/// `403 forbidden`, whatever the claim profile released to it.
+pub(crate) fn extract_first_party_user_auth(
+    headers: &HeaderMap,
+    state: &AppState,
+    realm_id: &RealmId,
+    htm: &str,
+    htu: &str,
+) -> Result<UserId, (StatusCode, Json<serde_json::Value>)> {
+    let (user_id, claims) = user_auth_claims(headers, state, realm_id, htm, htu)?;
+    if !crate::protocol::admin_auth::token_client_may_administer(
+        state.identity.as_ref(),
+        realm_id,
+        &claims,
+    ) {
+        return Err(third_party_token_forbidden());
+    }
+    Ok(user_id)
+}
+
+/// The refusal of a third-party client's token on a first-party-only surface.
+pub(crate) fn third_party_token_forbidden() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "forbidden",
+            "error_description": "a token issued to a third-party client cannot use this endpoint"
+        })),
+    )
 }
 
 /// [`extract_user_auth`] that also returns the bearer token's validated

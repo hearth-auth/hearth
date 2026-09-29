@@ -55,8 +55,8 @@ pub use state::AppState;
 
 pub(crate) use auth::AdminAuth;
 pub(crate) use auth::{
-    extract_admin_auth, extract_cluster_admin_auth, require_admin_permission,
-    require_any_admin_permission, require_superuser,
+    ceiling_refusal, extract_admin_auth, extract_cluster_admin_auth, require_admin_permission,
+    require_any_admin_permission, require_superuser, require_user_admin_ceiling,
 };
 
 // Re-export all shared helpers so child handler modules can use `super::name`.

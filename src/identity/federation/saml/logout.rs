@@ -1,9 +1,7 @@
 //! `<LogoutRequest>` and `<LogoutResponse>` construction and parsing.
 
 use super::authn_request::format_xsd_datetime;
-use super::xml::{
-    attr, escape_attr, escape_text, is_element, ns, parse_err, walk_outside_signatures, XmlStep,
-};
+use super::xml::{escape_attr, escape_text, ns, parse_err, walk_outside_signatures, XmlStep};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 
@@ -133,29 +131,29 @@ pub fn parse_logout_request(xml: &[u8]) -> Result<LogoutRequest, IdentityError> 
                 element: e,
                 depth: 1,
             } => {
-                if is_element(e, ns::SAMLP, "LogoutRequest") {
+                if e.is(ns::SAMLP, "LogoutRequest") {
                     is_request = true;
-                    id = attr(e, "ID");
-                    issue_instant = attr(e, "IssueInstant");
-                    destination = attr(e, "Destination");
+                    id = e.attr("ID");
+                    issue_instant = e.attr("IssueInstant");
+                    destination = e.attr("Destination");
                 }
             }
             XmlStep::Open {
                 element: e,
                 depth: 2,
             } if is_request => {
-                if is_element(e, ns::SAML, "Issuer") {
+                if e.is(ns::SAML, "Issuer") {
                     if std::mem::replace(&mut seen_issuer, true) {
                         return Err(parse_err("duplicate <saml:Issuer> in LogoutRequest"));
                     }
                     capture = Some(Capture::Issuer);
-                } else if is_element(e, ns::SAML, "NameID") {
+                } else if e.is(ns::SAML, "NameID") {
                     if std::mem::replace(&mut seen_name_id, true) {
                         return Err(parse_err("duplicate <saml:NameID> in LogoutRequest"));
                     }
-                    name_id_format = attr(e, "Format");
+                    name_id_format = e.attr("Format");
                     capture = Some(Capture::NameId);
-                } else if is_element(e, ns::SAMLP, "SessionIndex")
+                } else if e.is(ns::SAMLP, "SessionIndex")
                     && !std::mem::replace(&mut seen_session_index, true)
                 {
                     capture = Some(Capture::SessionIndex);
@@ -222,24 +220,24 @@ pub fn parse_logout_response(xml: &[u8]) -> Result<LogoutResponse, IdentityError
                 element: e,
                 depth: 1,
             } => {
-                if is_element(e, ns::SAMLP, "LogoutResponse") {
+                if e.is(ns::SAMLP, "LogoutResponse") {
                     is_response = true;
-                    id = attr(e, "ID");
-                    in_response_to = attr(e, "InResponseTo");
-                    issue_instant = attr(e, "IssueInstant");
-                    destination = attr(e, "Destination");
+                    id = e.attr("ID");
+                    in_response_to = e.attr("InResponseTo");
+                    issue_instant = e.attr("IssueInstant");
+                    destination = e.attr("Destination");
                 }
             }
             XmlStep::Open {
                 element: e,
                 depth: 2,
             } if is_response => {
-                if is_element(e, ns::SAML, "Issuer") {
+                if e.is(ns::SAML, "Issuer") {
                     if std::mem::replace(&mut seen_issuer, true) {
                         return Err(parse_err("duplicate <saml:Issuer> in LogoutResponse"));
                     }
                     in_issuer = true;
-                } else if is_element(e, ns::SAMLP, "Status") {
+                } else if e.is(ns::SAMLP, "Status") {
                     if std::mem::replace(&mut seen_status, true) {
                         return Err(parse_err("duplicate <samlp:Status> in LogoutResponse"));
                     }
@@ -249,11 +247,11 @@ pub fn parse_logout_response(xml: &[u8]) -> Result<LogoutResponse, IdentityError
             XmlStep::Open {
                 element: e,
                 depth: 3,
-            } if in_status && is_element(e, ns::SAMLP, "StatusCode") => {
+            } if in_status && e.is(ns::SAMLP, "StatusCode") => {
                 if std::mem::replace(&mut seen_status_code, true) {
                     return Err(parse_err("duplicate <samlp:StatusCode> in Status"));
                 }
-                status_code = attr(e, "Value");
+                status_code = e.attr("Value");
             }
             XmlStep::Text { text, depth: 2 } if in_issuer => {
                 issuer.get_or_insert_with(String::new).push_str(text);
