@@ -153,7 +153,9 @@ async fn oidc_core_required_claims_and_signing() {
     assert!(!claims.sub.is_empty(), "sub claim MUST be present");
     assert!(!claims.iss.is_empty(), "iss claim MUST be present");
     assert!(
-        claims.aud.contains(&client.client_id().to_string()),
+        claims
+            .aud
+            .contains(&client.client_id().as_uuid().to_string()),
         "aud must contain client_id"
     );
     assert!(
@@ -164,7 +166,9 @@ async fn oidc_core_required_claims_and_signing() {
 
     // 3. aud MUST contain the client_id
     assert!(
-        claims.aud.contains(&client.client_id().to_string()),
+        claims
+            .aud
+            .contains(&client.client_id().as_uuid().to_string()),
         "aud must match client_id"
     );
 
@@ -439,7 +443,9 @@ async fn oidc_id_token_required_claims_with_nonce() {
 
     // aud — MUST contain the client_id
     assert!(
-        claims.aud.contains(&client.client_id().to_string()),
+        claims
+            .aud
+            .contains(&client.client_id().as_uuid().to_string()),
         "aud must contain the client_id"
     );
 

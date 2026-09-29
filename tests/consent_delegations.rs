@@ -176,7 +176,7 @@ async fn delegation_grant_persisted_after_exchange() {
     let g = &grants[0];
     assert_eq!(
         g.actor_sub,
-        actor_client_id.to_string(),
+        actor_client_id.as_uuid().to_string(),
         "actor_sub must equal the actor's client_id"
     );
     assert!(

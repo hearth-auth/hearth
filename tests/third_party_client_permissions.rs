@@ -335,8 +335,8 @@ async fn access_tokens_name_the_client_they_were_issued_to() {
         .to_string();
     let device = device_grant(&h, &realm, &device_client, user.id());
 
-    let code_cid = code_client.to_string();
-    let device_cid = device_client.to_string();
+    let code_cid = code_client.as_uuid().to_string();
+    let device_cid = device_client.as_uuid().to_string();
     for (what, token, expected) in [
         ("code exchange", &access, &code_cid),
         ("refresh", &refreshed, &code_cid),

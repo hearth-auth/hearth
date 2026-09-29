@@ -139,6 +139,14 @@ async fn end_session(
             )
                 .into_response();
         }
+        Err(crate::identity::IdentityError::ClientMismatch) => {
+            // RP-Initiated Logout §2: the hint was issued to another client.
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid_request", "error_description": "id_token_hint was not issued to client_id"})),
+            )
+                .into_response();
+        }
         Err(e) => return identity_error_to_response(&e).into_response(),
     };
 
