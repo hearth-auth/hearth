@@ -271,6 +271,86 @@ fn serve_prints_field_level_diagnostic_when_config_invalid() {
     );
 }
 
+// === GA audit 3 round 3: federation PEMs are checked by `config validate` ===
+
+/// `VALID_CONFIG` plus a realm `acme` with a SAML connector `corp` whose
+/// `idp_certificate_pem` is `pem`.
+fn config_with_saml_idp_certificate(pem: &str) -> String {
+    format!(
+        concat!(
+            "{base}realms:\n",
+            "  acme:\n",
+            "    federation:\n",
+            "      providers:\n",
+            "        corp:\n",
+            "          type: saml\n",
+            "          entity_id: \"https://idp.corp.example\"\n",
+            "          sso_url: \"https://idp.corp.example/sso\"\n",
+            "          idp_certificate_pem: {pem:?}\n",
+        ),
+        base = VALID_CONFIG,
+        pem = pem,
+    )
+}
+
+fn certificate_pem(name: &str) -> String {
+    use base64::Engine as _;
+    let key = hearth::identity::tokens::RsaSigningKey::generate(name, 365).expect("key");
+    let b64 = base64::engine::general_purpose::STANDARD.encode(key.cert_der());
+    let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
+        out.push('\n');
+    }
+    out.push_str("-----END CERTIFICATE-----\n");
+    out
+}
+
+fn run_validate(config: &str) -> std::process::Output {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("hearth.yaml");
+    std::fs::write(&config_path, config).expect("write config");
+    Command::new(hearth_bin())
+        .args([
+            "config",
+            "validate",
+            config_path.to_str().expect("valid UTF-8 path"),
+        ])
+        .output()
+        .expect("spawn hearth")
+}
+
+/// An unusable SAML IdP certificate fails `config validate`, naming the
+/// field, the realm and the connector — not the first federated login.
+#[test]
+fn validate_returns_1_for_an_unusable_saml_idp_certificate() {
+    let output = run_validate(&config_with_saml_idp_certificate(
+        "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydA==\n-----END CERTIFICATE-----\n",
+    ));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("realms.acme.federation.providers.corp.idp_certificate_pem"),
+        "the report must name the field: {stderr}"
+    );
+    assert!(
+        stderr.contains("'corp'") && stderr.contains("'acme'"),
+        "the report must name the IdP and the realm: {stderr}"
+    );
+}
+
+/// Control and rollover shape: two concatenated certificates validate.
+#[test]
+fn validate_accepts_a_saml_idp_certificate_bundle() {
+    let bundle = format!("{}{}", certificate_pem("old"), certificate_pem("new"));
+    let output = run_validate(&config_with_saml_idp_certificate(&bundle));
+    assert!(
+        output.status.success(),
+        "a two-certificate bundle must validate; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // === hearth config example ===
 
 #[test]
