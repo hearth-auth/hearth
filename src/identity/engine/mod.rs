@@ -377,6 +377,7 @@ pub(super) mod approval;
 pub(crate) mod client_jwks;
 mod control;
 mod grant_family_revocation;
+mod host_admin;
 mod id_token_keys;
 mod mfa_single_use;
 pub(super) mod oauth;
@@ -389,6 +390,9 @@ pub(super) mod cross_realm;
 pub(super) mod spiffe;
 pub(super) mod txn;
 
+pub use host_admin::{
+    HostAdminToken, HOST_ADMIN_TOKEN_ISSUER, HOST_ADMIN_TOKEN_MAX_TTL, HOST_ADMIN_TOKEN_MIN_TTL,
+};
 use retired_keys::KeyFamily;
 use sharded_cache::ShardedEpochMap;
 
