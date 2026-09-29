@@ -2675,11 +2675,9 @@ async fn run_serve(
         hearth::abuse::shaper::RequestShaper::disabled()
     } else {
         match config.security.request_shaper.as_ref() {
+            // `0` disables a dimension (GA sweep 3): `Some(0)` shed every request.
             Some(cfg) => hearth::abuse::shaper::RequestShaper::with_config(
-                hearth::abuse::shaper::ShaperConfig {
-                    ip_rps: Some(cfg.ip_rps),
-                    realm_rps: Some(cfg.realm_rps),
-                },
+                hearth::abuse::shaper::ShaperConfig::from_operator(cfg.ip_rps, cfg.realm_rps),
             ),
             None => hearth::abuse::shaper::RequestShaper::new(),
         }

@@ -17,7 +17,7 @@ use tokio::net::TcpListener;
 use tonic::transport::Server;
 use tracing::{debug, info};
 
-use crate::abuse::shaper::{RequestShaper, ShaperOutcome};
+use crate::abuse::shaper::{RealmKey, RequestShaper, ShaperOutcome};
 use crate::audit::AuditEngine;
 use crate::identity::IdentityEngine;
 use crate::protocol::admin_auth::AdminRateLimiter;
@@ -38,12 +38,15 @@ use super::rbac_admin::RbacAdminSvc;
 ///
 /// The per-realm arm is keyed on the caller's `x-realm-id` metadata, the same
 /// value every RPC on this surface already uses to select its realm. It was
-/// keyed on `""` for every request, which is one shared bucket: with
-/// `security.request_shaper.realm_rps` set, a single busy tenant spent the
-/// whole realm budget and every *other* tenant's gRPC calls answered
-/// `RESOURCE_EXHAUSTED` (task 23.9). `""` remains the key for a call that
-/// carries no realm header — those RPCs are rejected by their own handler
-/// anyway, so they share one bucket by design.
+/// keyed on `""` for every request, which is one shared bucket: a single busy
+/// tenant spent the whole realm budget and every *other* tenant's gRPC calls
+/// answered `RESOURCE_EXHAUSTED` (task 23.9).
+///
+/// Only a UUID can name a realm, so only a UUID opens a realm bucket (GA
+/// sweep 3, E-2): the raw metadata string used to become the map key, one
+/// never-evicted entry of up to the header-list limit per request. A call
+/// with no (or a non-UUID) `x-realm-id` is limited per IP only; its handler
+/// rejects it anyway.
 pub fn grpc_rate_limit_interceptor(
     shaper: Arc<RequestShaper>,
 ) -> impl Fn(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> + Clone {
@@ -66,15 +69,15 @@ pub fn grpc_rate_limit_interceptor(
     }
 }
 
-/// Returns the per-realm shaper bucket key for a gRPC request.
+/// Returns the per-realm shaper bucket for a gRPC request: the `x-realm-id`
+/// metadata when it is a UUID, `None` otherwise.
 ///
-/// The raw `x-realm-id` metadata value, or `""` when the header is absent or
-/// not ASCII. The value is only ever used as a `HashMap` key, never parsed or
-/// trusted for authorization — every handler re-extracts and validates it.
-fn grpc_realm_key(md: &tonic::metadata::MetadataMap) -> &str {
+/// The value is only a bucket key, never trusted for authorization — every
+/// handler re-extracts and validates it.
+fn grpc_realm_key(md: &tonic::metadata::MetadataMap) -> Option<RealmKey> {
     md.get("x-realm-id")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
+        .and_then(RealmKey::from_id_header)
 }
 
 /// Extracts the source IP from a tonic request's remote address or metadata.
