@@ -923,7 +923,8 @@ pub(crate) fn token_client_may_administer(
     let Some(raw) = claims.client_id() else {
         return true;
     };
-    let Ok(client_id) = raw.parse::<ClientId>() else {
+    // The claim carries the issued client_id; any other form fails closed.
+    let Some(client_id) = crate::identity::tokens::parse_issued_client_id(raw) else {
         return false;
     };
     matches!(

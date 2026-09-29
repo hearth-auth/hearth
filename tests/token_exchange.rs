@@ -525,7 +525,7 @@ async fn token_exchange_produces_act_claim() {
     let act = claims.act.expect("expected act claim in issued token");
     assert_eq!(
         act.sub,
-        actor_client_id.to_string(),
+        actor_client_id.as_uuid().to_string(),
         "act.sub must equal the actor's client_id"
     );
     assert!(act.act.is_none(), "single-hop: no nested act");
@@ -761,10 +761,10 @@ async fn token_exchange_nested_act_chain_two_hops() {
     let act = claims.act.expect("act claim present");
 
     // Outer act is second_actor — identified by its client_id string.
-    assert_eq!(act.sub, second_actor_id.to_string());
+    assert_eq!(act.sub, second_actor_id.as_uuid().to_string());
     // Inner act is first_actor (preserved from the first exchange).
     let inner = act.act.expect("inner act present for 2-hop chain");
-    assert_eq!(inner.sub, first_actor_id.to_string());
+    assert_eq!(inner.sub, first_actor_id.as_uuid().to_string());
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

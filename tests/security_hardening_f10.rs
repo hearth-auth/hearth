@@ -276,7 +276,7 @@ async fn id_token_contains_azp_claim() {
         .expect("azp MUST be present in ID tokens");
     assert_eq!(
         azp,
-        &client.client_id().to_string(),
+        &client.client_id().as_uuid().to_string(),
         "azp must equal client_id"
     );
 }

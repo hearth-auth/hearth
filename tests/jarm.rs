@@ -182,7 +182,7 @@ async fn jarm_jwt_claims_are_correct() {
 
     assert_eq!(
         claims["aud"].as_str().unwrap_or(""),
-        env.client_id.to_string(),
+        env.client_id.as_uuid().to_string(),
         "aud must be the client_id"
     );
     assert_eq!(

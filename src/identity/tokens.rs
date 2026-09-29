@@ -397,9 +397,37 @@ impl TokenClaims {
     ) {
         custom.insert(
             CLIENT_ID_CLAIM.to_string(),
-            serde_json::Value::String(client_id.to_string()),
+            serde_json::Value::String(issued_client_id(client_id)),
         );
     }
+}
+
+/// The `client_id` exactly as the client was issued it at registration: the
+/// bare, lower-case, hyphenated UUID the admin API and dynamic registration
+/// return and the client sends as its `client_id` parameter.
+///
+/// Every protocol field that names a client carries this form — an ID
+/// token's `aud`/`azp` (OIDC Core §2), an access token's `client_id` (RFC 9068
+/// §2.2), introspection's `client_id` (RFC 7662 §2.2), a JARM response's
+/// `aud`, a logout token's `aud`, an exchanged token's `act.sub` — and a
+/// client-authored JWT must use it too (RFC 7523 §3, RFC 9101 §4).
+/// [`crate::core::ClientId`]'s `Display` (`client_<uuid>`) is Hearth's
+/// internal subject form and never appears in those fields (GA audit 3
+/// rounds 4–5).
+#[must_use]
+pub(crate) fn issued_client_id(client_id: &crate::core::ClientId) -> String {
+    client_id.as_uuid().to_string()
+}
+
+/// Parses a token field that names a client, accepting only the issued form
+/// ([`issued_client_id`]): exactly the lower-case hyphenated UUID. The
+/// internal `client_<uuid>` form and every other spelling of a UUID are
+/// refused, so a claim has one meaning.
+#[must_use]
+pub(crate) fn parse_issued_client_id(raw: &str) -> Option<crate::core::ClientId> {
+    let uuid = Uuid::parse_str(raw).ok()?;
+    let client_id = crate::core::ClientId::new(uuid);
+    (issued_client_id(&client_id) == raw).then_some(client_id)
 }
 
 /// Minimal JWT claims for RFC 7523 JWT Bearer assertion validation.

@@ -22,7 +22,9 @@ use crate::identity::oidc::{
     OidcTokenResponse, RegisterClientRequest, ResponseMode, RpLogoutRequest, RpLogoutResult,
     StoredAuthorizationCode, StoredDeviceCode, StoredGrantFamily, TokenExchangeRequest,
 };
-use crate::identity::tokens::{self, Audience, LogoutTokenClaims, TokenClaims};
+use crate::identity::tokens::{
+    self, issued_client_id, parse_issued_client_id, Audience, LogoutTokenClaims, TokenClaims,
+};
 use crate::identity::types::{
     BulkResult, ConsentListEntry, ConsentRecord, CreateUserRequest, DelegationGrantEntry,
     PendingAuthorizationRequest, StoredDelegationGrant, UpdateUserRequest, User, UserStatus,
@@ -37,17 +39,23 @@ use super::CLIENT_TOKEN_CUTOFF_PREFIX;
 use super::CLOCK_SKEW_SECS;
 use super::{audience_cutoff_hash_hex, AUDIENCE_CUTOFF_HASH_HEX_LEN, AUDIENCE_TOKEN_CUTOFF_PREFIX};
 
-/// The `client_id` exactly as the client knows it: the bare UUID that
-/// registration returns and the client sends as its `client_id` parameter.
-///
-/// A client-authored JWT names the client by this value — a client
-/// assertion's `iss` and `sub` (RFC 7523 §3, OIDC Core §9), a request
-/// object's `iss` and `client_id` (RFC 9101 §4). [`ClientId`]'s `Display`
-/// form (`client_<uuid>`) is Hearth's internal subject form and is never
-/// accepted there (GA audit 3 round 4). The comparison is exact: no other
-/// spelling of the same UUID (upper case, braces, `urn:uuid:`) matches.
-fn issued_client_id(client_id: &ClientId) -> String {
-    client_id.as_uuid().to_string()
+/// The client an introspected access token was issued to, in its issued
+/// form (RFC 7662 §2.2 `client_id`): the token's `client_id` claim, else — for
+/// a sessionless client token (`client_credentials`, JWT-bearer) — the client
+/// its `sub` names in Hearth's `client_<uuid>` subject form. `None` for a
+/// first-party session token.
+fn token_client_for_introspection(claims: &TokenClaims) -> Option<String> {
+    if let Some(raw) = claims.client_id() {
+        return parse_issued_client_id(raw).map(|c| issued_client_id(&c));
+    }
+    if claims.sid == "none" {
+        return claims
+            .sub
+            .strip_prefix("client_")
+            .and_then(parse_issued_client_id)
+            .map(|c| issued_client_id(&c));
+    }
+    None
 }
 
 impl EmbeddedIdentityEngine {
@@ -316,7 +324,7 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidToken);
         }
         if let Some(raw) = claims.client_id() {
-            if raw.parse::<ClientId>().ok().as_ref() != Some(&request.client_id) {
+            if parse_issued_client_id(raw).as_ref() != Some(&request.client_id) {
                 return Err(IdentityError::ClientMismatch);
             }
         }
@@ -793,7 +801,7 @@ impl EmbeddedIdentityEngine {
             };
             let jarm_claims = JarmClaims {
                 iss: issuer.clone(),
-                aud: request.client_id.to_string(),
+                aud: issued_client_id(&request.client_id),
                 // FAPI 2.0 §5.3.2.2 requires JARM JWT lifetime ≤ 5 minutes.
                 exp: now_secs + 300,
                 iat: now_secs,
@@ -1065,7 +1073,7 @@ impl EmbeddedIdentityEngine {
         let webhook_extra = self.fire_pre_token_webhook(
             realm_id,
             &stored_code.user_id.to_string(),
-            &request.client_id.to_string(),
+            &issued_client_id(&request.client_id),
             "authorization_code",
             (!scope_value.is_empty()).then_some(scope_value.as_str()),
             None, // session created below — not yet available
@@ -1260,7 +1268,7 @@ impl EmbeddedIdentityEngine {
         let id_token_claims = TokenClaims {
             sub: stored_code.user_id.to_string(),
             iss: self.config.oidc.issuer.clone(),
-            aud: Audience::single(request.client_id.to_string()),
+            aud: Audience::single(issued_client_id(&request.client_id)),
             exp: iat + access_ttl_secs,
             iat,
             nbf: None,
@@ -1272,7 +1280,7 @@ impl EmbeddedIdentityEngine {
             fid: None,
             scope: (!scope_value.is_empty()).then(|| scope_value.clone()),
             nonce: stored_code.nonce.clone(),
-            azp: Some(request.client_id.to_string()),
+            azp: Some(issued_client_id(&request.client_id)),
             roles: id_roles,
             groups: id_groups,
             org_groups: Vec::new(),
@@ -2744,7 +2752,7 @@ impl EmbeddedIdentityEngine {
                 let id_token_claims = TokenClaims {
                     sub: user_id.to_string(),
                     iss: self.config.oidc.issuer.clone(),
-                    aud: Audience::single(client_id.to_string()),
+                    aud: Audience::single(issued_client_id(client_id)),
                     exp: iat + self.config.token.access_token_ttl_secs,
                     iat,
                     nbf: None,
@@ -2756,7 +2764,7 @@ impl EmbeddedIdentityEngine {
                     fid: None,
                     scope: stored.scope.clone(),
                     nonce: None,
-                    azp: Some(client_id.to_string()),
+                    azp: Some(issued_client_id(client_id)),
                     roles: Vec::new(),
                     groups: Vec::new(),
                     org_groups: Vec::new(),
@@ -3073,11 +3081,10 @@ impl EmbeddedIdentityEngine {
         client: &crate::core::ClientId,
     ) -> Result<bool, IdentityError> {
         if let Some(act) = claims.act.as_ref() {
-            return Ok(act.sub.parse::<crate::core::ClientId>().ok().as_ref() == Some(client));
+            return Ok(parse_issued_client_id(&act.sub).as_ref() == Some(client));
         }
-        let client_str = client.to_string();
         if let Some(azp) = claims.azp.as_deref() {
-            return Ok(azp == client_str);
+            return Ok(parse_issued_client_id(azp).as_ref() == Some(client));
         }
         if let Some(ref fid) = claims.fid {
             let family_key = keys::encode_grant_family(fid);
@@ -3095,7 +3102,9 @@ impl EmbeddedIdentityEngine {
             return Ok(family.client_id.as_ref() == Some(client));
         }
         if claims.sid == "none" {
-            return Ok(claims.sub == client_str);
+            // A sessionless client token's `sub` is Hearth's `client_<uuid>`
+            // subject form.
+            return Ok(claims.sub == client.to_string());
         }
         Ok(false)
     }
@@ -3326,18 +3335,20 @@ impl EmbeddedIdentityEngine {
             .as_ref()
             .filter(|_| !caller_is_resource_server)
         {
-            let cid_str = cid.to_string();
+            // `azp` and `aud` name a client by its issued client_id; an M2M
+            // token's `sub` is Hearth's `client_<uuid>` subject form.
+            let issued = issued_client_id(cid);
             if let Some(token_azp) = claims.azp.as_deref() {
-                if token_azp != cid_str && !claims.aud.contains(cid_str.as_str()) {
+                if token_azp != issued && !claims.aud.contains(issued.as_str()) {
                     return Ok(IntrospectionResponse::inactive());
                 }
             } else if claims.sid == "none" {
                 // M2M token: only the issuing client or an explicit audience member
                 // may introspect it.
-                if claims.sub != cid_str && !claims.aud.contains(cid_str.as_str()) {
+                if claims.sub != cid.to_string() && !claims.aud.contains(issued.as_str()) {
                     return Ok(IntrospectionResponse::inactive());
                 }
-            } else if !claims.aud.contains(cid_str.as_str())
+            } else if !claims.aud.contains(issued.as_str())
                 && !self.may_introspect_unbound_user_token(realm_id, cid, &claims)?
             {
                 return Ok(IntrospectionResponse::inactive());
@@ -3443,11 +3454,13 @@ impl EmbeddedIdentityEngine {
                 .unwrap_or_default()
         };
 
-        // 7. Active — return metadata
+        // 7. Active — return metadata. RFC 7662 §2.2 `client_id`: the client
+        //    the token was issued to, in its issued form.
+        let introspected_client = token_client_for_introspection(&claims);
         Ok(IntrospectionResponse {
             active: true,
             scope: claims.scope,
-            client_id: None, // Not stored in claims for session-bound tokens
+            client_id: introspected_client,
             sub: Some(claims.sub),
             exp: Some(claims.exp),
             iat: Some(claims.iat),
@@ -3547,10 +3560,9 @@ impl EmbeddedIdentityEngine {
             return Ok(true);
         }
         // An RFC 8693 exchanged token was issued to the exchanging client,
-        // which its outermost `act.sub` records (as the bare UUID, or as the
-        // `client_…` subject of an actor token).
+        // which its outermost `act.sub` records by its issued client_id.
         if let Some(act) = claims.act.as_ref() {
-            if act.sub == caller.to_string() || act.sub == caller.as_uuid().to_string() {
+            if parse_issued_client_id(&act.sub).as_ref() == Some(caller) {
                 return Ok(true);
             }
         }
@@ -3687,7 +3699,7 @@ impl EmbeddedIdentityEngine {
         let issued_to = match claims.client_id() {
             None => None,
             Some(raw) => {
-                let Ok(client_id) = raw.parse::<ClientId>() else {
+                let Some(client_id) = parse_issued_client_id(raw) else {
                     return Ok(LiveTokenAuthority::default());
                 };
                 match self.get_client(realm_id, &client_id)? {
@@ -3811,10 +3823,7 @@ impl EmbeddedIdentityEngine {
         claims: &TokenClaims,
     ) -> Result<Option<OAuthClient>, IdentityError> {
         let named: Option<ClientId> = if let Some(raw) = claims.client_id() {
-            Some(
-                raw.parse::<ClientId>()
-                    .map_err(|_| IdentityError::InvalidToken)?,
-            )
+            Some(parse_issued_client_id(raw).ok_or(IdentityError::InvalidToken)?)
         } else if let Some(fid) = claims.fid.as_deref() {
             self.storage
                 .get(realm_id, &keys::encode_grant_family(fid))
@@ -5480,6 +5489,14 @@ impl EmbeddedIdentityEngine {
             // caller sets `sub`/`sid` freely and gets a realm-signed logout
             // token for a victim (audit 2026-08-28 §4.2#3, §4.19#1).
             let claims = self.verify_realm_issued_id_token(realm_id, hint)?;
+            // OIDC RP-Initiated Logout §2: with both parameters, the hint must
+            // have been issued to `client_id` — its `aud` names the client by
+            // its issued client_id. Checked before anything is revoked.
+            if let Some(ref client_id) = request.client_id {
+                if !claims.aud.contains(issued_client_id(client_id).as_str()) {
+                    return Err(IdentityError::ClientMismatch);
+                }
+            }
             let sid = Self::parse_session_id_claim(&claims)?.ok_or(IdentityError::InvalidToken)?;
             let uid = Self::parse_user_id_claim(&claims)?;
             (sid, uid)

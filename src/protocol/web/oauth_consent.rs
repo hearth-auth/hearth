@@ -1103,7 +1103,7 @@ pub(super) fn authorization_error_redirect(
     if mode.is_jarm() {
         match state.identity.sign_jarm_error_jwt(
             realm,
-            &to.client_id.to_string(),
+            &crate::identity::tokens::issued_client_id(&to.client_id),
             error,
             description,
             to.state,

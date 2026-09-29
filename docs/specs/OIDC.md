@@ -236,7 +236,19 @@ client, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min). "The cl
 `client_id` exactly as registration returned it — the bare UUID it also sends as the `client_id`
 parameter (RFC 7523 §3, OIDC Core §9). Hearth's internal `client_<uuid>` subject form, or any
 other spelling of the UUID, is refused; the same rule covers a request object's `iss` and
-`client_id` claims (RFC 9101 §4) and the JWT-bearer grant's `iss`/`sub`. Under FAPI 2.0 — a FAPI 2.0
+`client_id` claims (RFC 9101 §4) and the JWT-bearer grant's `iss`/`sub`.
+
+**Every field Hearth issues that names a client carries the same issued `client_id`:** an ID
+token's `aud` and `azp` (OIDC Core §2), an access token's `client_id` claim (RFC 9068 §2.2), the
+introspection response's `client_id` (RFC 7662 §2.2), a JARM response's `aud` (success and
+error), a back-channel logout token's `aud`, an exchanged token's `act.sub` (RFC 8693 §4.1), and
+the pre-token webhook payload's `client_id`. Hearth parses these back (first-party gate,
+non-interactive `/authorize` client match, revocation and introspection ownership) in that form
+only. The one exception is `sub` of a sessionless client token (`client_credentials`,
+JWT-bearer), which stays in Hearth's subject namespace (`client_<uuid>`, beside `user_<uuid>`) so
+a client subject can never be read as a user. `end_session` with both `id_token_hint` and
+`client_id` refuses a hint whose `aud` does not contain that client (`400 invalid_request`,
+RP-Initiated Logout §2). Under FAPI 2.0 — a FAPI 2.0
 client, or any client of a realm with a `fapi_profile` — `aud` MUST be the realm issuer as a
 single JSON string (FAPI 2.0 Security Profile §5.3.2.1); an array is refused even when it holds
 only the issuer. Other clients follow RFC 7523 §3: `aud` may be an array that contains the issuer.

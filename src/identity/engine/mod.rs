@@ -4205,7 +4205,7 @@ impl EmbeddedIdentityEngine {
         let client_id_str = family
             .client_id
             .as_ref()
-            .map(|c| c.to_string())
+            .map(crate::identity::tokens::issued_client_id)
             .unwrap_or_default();
         let extra_claims = self.fire_pre_token_webhook(
             realm_id,
@@ -9374,7 +9374,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let client_id_str = ctx
             .client_id
             .as_ref()
-            .map(|c| c.to_string())
+            .map(crate::identity::tokens::issued_client_id)
             .unwrap_or_default();
         let extra_claims = self.fire_pre_token_webhook(
             realm_id,
@@ -18099,13 +18099,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .scope
                     .unwrap_or_else(|| subject_claims.scope.clone().unwrap_or_default());
 
-                (actor_claims.sub, scope, actor_claims.permissions.clone())
+                // `act.sub` names the acting client by its issued client_id
+                // (the actor token's own `sub` is Hearth's `client_<uuid>`
+                // subject form, checked above).
+                (
+                    crate::identity::tokens::issued_client_id(&request.client_id),
+                    scope,
+                    actor_claims.permissions.clone(),
+                )
             } else {
                 // No actor_token: the client is acting on its own behalf (no delegation chain).
                 // Preserve the original behavior — actor ceiling matches the subject's own scope
                 // so this path doesn't further restrict scope beyond subject ∩ requested.
                 // For permissions, use the subject's full set as the ceiling (no attenuation).
-                let actor_sub = request.client_id.as_uuid().to_string();
+                let actor_sub = crate::identity::tokens::issued_client_id(&request.client_id);
                 let actor_scope = subject_claims.scope.clone().unwrap_or_default();
                 (actor_sub, actor_scope, subject_claims.permissions.clone())
             };
