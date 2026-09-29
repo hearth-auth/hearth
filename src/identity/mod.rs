@@ -85,7 +85,9 @@ pub use email::{
 pub(crate) use engine::client_jwks::validate_client_jwks;
 pub use engine::cross_realm::{find_system_sourced_cross_realm_policies, SystemSourcedPolicy};
 pub use engine::{
-    EmbeddedIdentityEngine, IdentityConfig, RateLimitConfig, SessionConfig, TokenIssuanceContext,
+    EmbeddedIdentityEngine, HostAdminToken, IdentityConfig, RateLimitConfig, SessionConfig,
+    TokenIssuanceContext, HOST_ADMIN_TOKEN_ISSUER, HOST_ADMIN_TOKEN_MAX_TTL,
+    HOST_ADMIN_TOKEN_MIN_TTL,
 };
 pub use error::IdentityError;
 pub use kdf_gate::{
