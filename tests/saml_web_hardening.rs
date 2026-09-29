@@ -1326,3 +1326,67 @@ fn idp_slo_refuses_signed_logout_request_carrying_a_second_signature() {
     );
     assert_eq!(status, 403, "expected 403, got {status}: {body}");
 }
+
+// ============================================================================
+// GA sweep 3, round 2 — IdP signing-certificate rollover through the ACS.
+//
+// The connector's `idp_certificate_pem` may hold a bundle — the outgoing and
+// the incoming certificate concatenated — while an IdP rolls its key. The
+// ACS used to hand the whole bundle to the verifier as one certificate, which
+// read only the first block, so every assertion signed with the new key was
+// refused until the operator swapped the PEM at exactly the right moment.
+// ============================================================================
+
+#[test]
+fn sp_acs_accepts_an_assertion_signed_by_the_second_certificate_of_a_bundle() {
+    let (app, identity, realm_id) = build_app_full();
+    let old_key = hearth::identity::tokens::RsaSigningKey::generate("corp-old", 365).expect("key");
+    let new_key = hearth::identity::tokens::RsaSigningKey::generate("corp-new", 365).expect("key");
+    let bundle = format!(
+        "{}{}",
+        cert_der_to_pem(old_key.cert_der()),
+        cert_der_to_pem(new_key.cert_der())
+    );
+    let idp_id = register_saml_idp(
+        identity.as_ref(),
+        &realm_id,
+        "corp",
+        "https://corp-idp.example",
+        bundle,
+    );
+    seed_saml_state(
+        identity.as_ref(),
+        &realm_id,
+        &idp_id,
+        "relay-roll",
+        "_req_roll",
+    );
+
+    let sp_entity_id = "http://localhost:8420/ui/realms/demo";
+    let acs_url = format!("{sp_entity_id}/federation/saml/acs");
+    let b64 = signed_saml_response_b64(
+        &new_key,
+        "_req_roll",
+        &acs_url,
+        sp_entity_id,
+        "https://corp-idp.example",
+        "rollover-user@corp.example",
+    );
+
+    let resp = post_acs(&app, &b64, "relay-roll", &[]);
+    let status = resp.status().as_u16();
+    let cookies: Vec<String> = resp
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        status, 303,
+        "an assertion signed by the bundle's second certificate must be accepted"
+    );
+    assert!(
+        cookies.iter().any(|c| c.starts_with("hearth_ui_session=")),
+        "the accepted assertion must produce a session; got {cookies:?}"
+    );
+}

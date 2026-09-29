@@ -1,6 +1,6 @@
 //! `<AuthnRequest>` XML construction and parsing.
 
-use super::xml::{attr, escape_attr, is_element, ns, parse_err, walk_outside_signatures, XmlStep};
+use super::xml::{escape_attr, ns, parse_err, walk_outside_signatures, XmlStep};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 
@@ -95,22 +95,22 @@ pub fn parse_authn_request(xml: &[u8]) -> Result<AuthnRequest, IdentityError> {
                 element: e,
                 depth: 1,
             } => {
-                if is_element(e, ns::SAMLP, "AuthnRequest") {
+                if e.is(ns::SAMLP, "AuthnRequest") {
                     is_request = true;
-                    id = attr(e, "ID");
-                    issue_instant = attr(e, "IssueInstant");
-                    destination = attr(e, "Destination");
-                    acs = attr(e, "AssertionConsumerServiceURL");
-                    binding = attr(e, "ProtocolBinding");
+                    id = e.attr("ID");
+                    issue_instant = e.attr("IssueInstant");
+                    destination = e.attr("Destination");
+                    acs = e.attr("AssertionConsumerServiceURL");
+                    binding = e.attr("ProtocolBinding");
                 }
             }
             XmlStep::Open {
                 element: e,
                 depth: 2,
             } if is_request => {
-                if is_element(e, ns::SAMLP, "NameIDPolicy") {
-                    nameid = attr(e, "Format");
-                } else if is_element(e, ns::SAML, "Issuer") {
+                if e.is(ns::SAMLP, "NameIDPolicy") {
+                    nameid = e.attr("Format");
+                } else if e.is(ns::SAML, "Issuer") {
                     if std::mem::replace(&mut seen_issuer, true) {
                         return Err(parse_err("duplicate <saml:Issuer> in AuthnRequest"));
                     }

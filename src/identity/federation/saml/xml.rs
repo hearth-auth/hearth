@@ -13,6 +13,7 @@ use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
 use quick_xml::Reader;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::BufRead;
 
 use crate::identity::error::IdentityError;
@@ -50,55 +51,116 @@ pub fn make_reader<R: BufRead>(reader: R) -> Reader<R> {
     r
 }
 
-/// Returns `true` iff the given [`BytesStart`] represents an element in
-/// the given namespace and with the given local name.
-pub fn is_element(start: &BytesStart<'_>, namespace_uri: &str, local: &str) -> bool {
-    let qname = start.name();
-    // Split prefix and local — we need to resolve the prefix against the
-    // accumulated namespace context. `quick_xml::NsReader` handles this
-    // natively; we rely on callers using it where namespace awareness is
-    // required. For simple cases we accept either `{ns}local` comparison
-    // or prefix:local matching when the ns is one of the well-known ones.
-    let name_bytes = qname.as_ref();
-    if let Some(colon) = name_bytes.iter().position(|&b| b == b':') {
-        let local_bytes = &name_bytes[colon + 1..];
-        local_bytes == local.as_bytes()
-            && namespace_matches_prefix(&name_bytes[..colon], namespace_uri, start)
-    } else {
-        name_bytes == local.as_bytes() && has_default_namespace(start, namespace_uri)
+/// Prefix → namespace-URI bindings in scope at some point of a document.
+/// The empty prefix is the default namespace.
+pub type Namespaces = BTreeMap<Vec<u8>, Vec<u8>>;
+
+/// The namespace bindings in scope while scanning: one frame per open
+/// element, each the complete scope for that element.
+///
+/// Element matching keys on the namespace URI a prefix is bound to here —
+/// never on how the prefix is spelled. Hearth used to resolve a prefix only
+/// from an `xmlns` on the element itself and otherwise accept `ds`, `saml`,
+/// `samlp`, … as their conventional namespaces whatever they were bound to.
+/// That both rejected legitimate IdP output (Entra ID's unprefixed
+/// `<Signature xmlns="…xmldsig#">` whose children inherit the default
+/// namespace) and let a scanner disagree with the canonicalizer, which does
+/// resolve through ancestors (GA audit 3, round 2).
+struct NsScope {
+    base: Namespaces,
+    frames: Vec<Namespaces>,
+}
+
+impl NsScope {
+    /// Starts a scan whose first element inherits `inherited` (the bindings
+    /// in scope for it in the enclosing document, if the scan is of a slice).
+    fn new(inherited: &Namespaces) -> Self {
+        Self {
+            base: inherited.clone(),
+            frames: Vec::new(),
+        }
+    }
+
+    /// The bindings in scope at the current position.
+    fn current(&self) -> &Namespaces {
+        self.frames.last().unwrap_or(&self.base)
+    }
+
+    /// Enters `e`: its own `xmlns` declarations apply to it and to its
+    /// descendants until the matching [`NsScope::leave`].
+    fn enter(&mut self, e: &BytesStart<'_>) -> Result<(), IdentityError> {
+        let mut scope = self.current().clone();
+        for a in e.attributes().with_checks(false) {
+            let a = a.map_err(|err| parse_err(format!("bad attribute: {err}")))?;
+            let key = a.key.as_ref();
+            let prefix = if key == b"xmlns" {
+                Some(&key[..0])
+            } else {
+                key.strip_prefix(b"xmlns:")
+            };
+            if let Some(prefix) = prefix {
+                scope.insert(prefix.to_vec(), unescape_attr_value(&a)?.into_bytes());
+            }
+        }
+        self.frames.push(scope);
+        Ok(())
+    }
+
+    /// Leaves the innermost entered element.
+    fn leave(&mut self) {
+        self.frames.pop();
+    }
+
+    /// Whether `e` — already [entered](NsScope::enter) — is `{namespace_uri}local`.
+    fn is(&self, e: &BytesStart<'_>, namespace_uri: &str, local: &str) -> bool {
+        e.local_name().as_ref() == local.as_bytes()
+            && element_namespace(self.current(), e) == Some(namespace_uri.as_bytes())
     }
 }
 
-fn namespace_matches_prefix(prefix: &[u8], expected_uri: &str, start: &BytesStart<'_>) -> bool {
-    let attr_name = [b"xmlns:", prefix].concat();
-    for attr in start.attributes().with_checks(false).flatten() {
-        if attr.key.as_ref() == attr_name {
-            if let Ok(v) = unescape_attr_value(&attr) {
-                return v == expected_uri;
-            }
-        }
-    }
-    // Fall back to prefix-match for the common SAML prefixes even when
-    // the xmlns isn't declared on this element (it would be on an
-    // ancestor in a proper parse). Accept standard prefixes.
-    matches!(
-        (prefix, expected_uri),
-        (b"samlp" | b"saml2p", ns::SAMLP)
-            | (b"saml" | b"saml2", ns::SAML)
-            | (b"ds", ns::DS)
-            | (b"md", ns::MD)
-    )
+/// The namespace URI `e`'s prefix is bound to in `scope`, or `None` when the
+/// element is in no namespace (unbound prefix, no default namespace, or the
+/// default namespace undeclared with `xmlns=""`).
+fn element_namespace<'s>(scope: &'s Namespaces, e: &BytesStart<'_>) -> Option<&'s [u8]> {
+    let name = e.name();
+    let qname = name.as_ref();
+    let prefix = match qname.iter().position(|&b| b == b':') {
+        Some(colon) => &qname[..colon],
+        None => &[],
+    };
+    scope
+        .get(prefix)
+        .map(Vec::as_slice)
+        .filter(|uri| !uri.is_empty())
 }
 
-fn has_default_namespace(start: &BytesStart<'_>, expected_uri: &str) -> bool {
-    for attr in start.attributes().with_checks(false).flatten() {
-        if attr.key.as_ref() == b"xmlns" {
-            if let Ok(v) = unescape_attr_value(&attr) {
-                return v == expected_uri;
-            }
-        }
+/// An element's start tag together with the namespace URI it resolves to in
+/// its document — what [`walk_outside_signatures`] reports.
+#[derive(Clone, Copy)]
+pub struct ElementRef<'a> {
+    start: &'a BytesStart<'a>,
+    namespace: Option<&'a [u8]>,
+}
+
+impl ElementRef<'_> {
+    /// Whether this is the element `{namespace_uri}local`, by namespace URI.
+    #[must_use]
+    pub fn is(&self, namespace_uri: &str, local: &str) -> bool {
+        self.start.local_name().as_ref() == local.as_bytes()
+            && self.namespace == Some(namespace_uri.as_bytes())
     }
-    false
+
+    /// The value of the unprefixed attribute `name`, if present.
+    #[must_use]
+    pub fn attr(&self, name: &str) -> Option<String> {
+        attr(self.start, name)
+    }
+
+    /// The element's local name (without prefix).
+    #[must_use]
+    pub fn local_name(&self) -> &[u8] {
+        self.start.local_name().into_inner()
+    }
 }
 
 /// Extracts the value of a specific attribute from a start tag.
@@ -180,39 +242,6 @@ pub fn parse_err(reason: impl Into<String>) -> IdentityError {
     })
 }
 
-/// Reads the textual content between the current start and its matching
-/// end tag. Simplified — does not support nested elements (which the
-/// SAML fields we extract with this don't contain).
-pub fn read_text<R: BufRead>(reader: &mut Reader<R>) -> Result<String, IdentityError> {
-    let mut buf = Vec::new();
-    let mut out = String::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Text(t)) => {
-                if let Ok(s) = unescape_text(&t) {
-                    out.push_str(s.as_ref());
-                }
-            }
-            Ok(Event::GeneralRef(r)) => {
-                out.push_str(&resolve_entity_ref(&r)?);
-            }
-            Ok(Event::CData(c)) => {
-                if let Ok(s) = std::str::from_utf8(c.as_ref()) {
-                    out.push_str(s);
-                }
-            }
-            Ok(Event::End(_)) => return Ok(out),
-            Ok(Event::Eof) => return Err(parse_err("unexpected EOF in text content")),
-            Ok(Event::Start(_)) => {
-                return Err(parse_err("unexpected child element in text content"));
-            }
-            Err(e) => return Err(parse_err(format!("XML read error: {e}"))),
-            _ => {}
-        }
-        buf.clear();
-    }
-}
-
 /// XML escape for element content (`<`, `>`, `&`, and CR).
 ///
 /// Per exclusive C14N: CR `&#x0D;` must be escaped; NL and tab are left.
@@ -258,13 +287,18 @@ pub fn escape_attr(s: &str) -> String {
 /// Returns the first matching element at **any** depth. Callers that need a
 /// structural guarantee about where the element sits — signature discovery,
 /// for one — must use [`find_child_element_range`] instead.
+///
+/// # Errors
+///
+/// Returns a parse error on malformed XML, on a `DOCTYPE` declaration, or
+/// when the document exceeds `MAX_SAML_XML_EVENTS`.
 pub fn find_element_range(
     xml: &[u8],
     namespace_uri: &str,
     local: &str,
     id_attr: Option<&str>,
 ) -> Result<Option<(usize, usize)>, IdentityError> {
-    find_element_range_at_depth(xml, namespace_uri, local, id_attr, None)
+    find_element_range_at_depth(xml, &Namespaces::new(), namespace_uri, local, id_attr, None)
 }
 
 /// Locates a **direct child of the document's root element** by
@@ -277,6 +311,9 @@ pub fn find_element_range(
 /// `Reference URI` bindings then have to carry the whole defence alone.
 /// Constraining discovery to the declared depth removes that class outright.
 ///
+/// `xml` is scanned as a whole document; for a slice of a larger document
+/// use [`find_child_element_range_in`] with the slice's inherited bindings.
+///
 /// # Errors
 ///
 /// Returns a parse error on malformed XML, on a `DOCTYPE` declaration, or
@@ -286,8 +323,24 @@ pub fn find_child_element_range(
     namespace_uri: &str,
     local: &str,
 ) -> Result<Option<(usize, usize)>, IdentityError> {
+    find_child_element_range_in(xml, &Namespaces::new(), namespace_uri, local)
+}
+
+/// [`find_child_element_range`] over a slice of a larger document whose root
+/// element inherits the namespace bindings `inherited` (see
+/// [`in_scope_namespaces`]).
+///
+/// # Errors
+///
+/// As [`find_child_element_range`].
+pub fn find_child_element_range_in(
+    xml: &[u8],
+    inherited: &Namespaces,
+    namespace_uri: &str,
+    local: &str,
+) -> Result<Option<(usize, usize)>, IdentityError> {
     // Root element is depth 1, so its direct children sit at depth 2.
-    find_element_range_at_depth(xml, namespace_uri, local, None, Some(2))
+    find_element_range_at_depth(xml, inherited, namespace_uri, local, None, Some(2))
 }
 
 /// Shared scanner for [`find_element_range`] and [`find_child_element_range`].
@@ -296,19 +349,21 @@ pub fn find_child_element_range(
 /// exactly that depth (the document's root element is depth 1).
 fn find_element_range_at_depth(
     xml: &[u8],
+    inherited: &Namespaces,
     namespace_uri: &str,
     local: &str,
     id_attr: Option<&str>,
-    required_depth: Option<i32>,
+    required_depth: Option<usize>,
 ) -> Result<Option<(usize, usize)>, IdentityError> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().expand_empty_elements = false;
 
+    let mut scope = NsScope::new(inherited);
     let mut buf = Vec::new();
-    let mut depth: i32 = 0;
+    let mut depth: usize = 0;
     // Depth at which we found the first matching Start. We emit when the
     // corresponding End closes at this depth.
-    let mut target_depth: Option<i32> = None;
+    let mut target_depth: Option<usize> = None;
     let mut target_start: usize = 0;
     // A-35: cap total element events to prevent resource exhaustion.
     let mut event_count: usize = 0;
@@ -322,9 +377,10 @@ fn find_element_range_at_depth(
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 depth += 1;
+                scope.enter(e)?;
                 if target_depth.is_none()
                     && required_depth.is_none_or(|want| want == depth)
-                    && is_element(e, namespace_uri, local)
+                    && scope.is(e, namespace_uri, local)
                     && id_match(e, id_attr)
                 {
                     target_depth = Some(depth);
@@ -336,17 +392,20 @@ fn find_element_range_at_depth(
                 if target_depth == Some(depth) {
                     return Ok(Some((target_start, pos_after)));
                 }
-                depth -= 1;
+                scope.leave();
+                depth = depth.saturating_sub(1);
             }
             Ok(Event::Empty(ref e)) => {
                 let pos_after = reader.buffer_position() as usize;
                 // An `Empty` event does not move `depth`, so the element it
                 // represents sits one level below the currently-open element.
-                if target_depth.is_none()
+                scope.enter(e)?;
+                let hit = target_depth.is_none()
                     && required_depth.is_none_or(|want| want == depth + 1)
-                    && is_element(e, namespace_uri, local)
-                    && id_match(e, id_attr)
-                {
+                    && scope.is(e, namespace_uri, local)
+                    && id_match(e, id_attr);
+                scope.leave();
+                if hit {
                     return Ok(Some((pos_before, pos_after)));
                 }
             }
@@ -354,6 +413,57 @@ fn find_element_range_at_depth(
                 return Err(parse_err("DOCTYPE declarations are rejected"));
             }
             Ok(Event::Eof) => return Ok(None),
+            Err(e) => return Err(parse_err(format!("XML scan error: {e}"))),
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// The namespace bindings in scope for the element whose start tag begins at
+/// byte `offset` of `xml` — its parent's scope, before its own declarations.
+///
+/// Pass the result as `inherited` when scanning or canonicalizing that
+/// element as a slice: exclusive C14N renders a visibly used namespace
+/// declaration on the apex of a canonicalized subtree even when it was
+/// declared on an ancestor, and element matching must see the same bindings.
+///
+/// # Errors
+///
+/// Returns a parse error on malformed XML, a `DOCTYPE`, more than
+/// `MAX_SAML_XML_EVENTS` events, or when no element starts at `offset`.
+pub fn in_scope_namespaces(
+    xml: &[u8],
+    inherited: &Namespaces,
+    offset: usize,
+) -> Result<Namespaces, IdentityError> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().expand_empty_elements = false;
+
+    let mut scope = NsScope::new(inherited);
+    let mut buf = Vec::new();
+    let mut event_count: usize = 0;
+    loop {
+        let pos_before = reader.buffer_position() as usize;
+        event_count += 1;
+        if event_count > crate::abuse::MAX_SAML_XML_EVENTS {
+            return Err(parse_err("XML document exceeds maximum element limit"));
+        }
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                if pos_before == offset {
+                    return Ok(scope.current().clone());
+                }
+                scope.enter(e)?;
+            }
+            Ok(Event::Empty(_)) if pos_before == offset => {
+                return Ok(scope.current().clone());
+            }
+            Ok(Event::End(_)) => scope.leave(),
+            Ok(Event::DocType(_)) => {
+                return Err(parse_err("DOCTYPE declarations are rejected"));
+            }
+            Ok(Event::Eof) => return Err(parse_err("no element starts at the given offset")),
             Err(e) => return Err(parse_err(format!("XML scan error: {e}"))),
             _ => {}
         }
@@ -382,6 +492,7 @@ pub fn count_elements(
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().expand_empty_elements = false;
 
+    let mut scope = NsScope::new(&Namespaces::new());
     let mut buf = Vec::new();
     let mut count: usize = 0;
     let mut event_count: usize = 0;
@@ -392,11 +503,20 @@ pub fn count_elements(
             return Err(parse_err("XML document exceeds maximum element limit"));
         }
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e) | Event::Empty(ref e)) => {
-                if is_element(e, namespace_uri, local) {
+            Ok(Event::Start(ref e)) => {
+                scope.enter(e)?;
+                if scope.is(e, namespace_uri, local) {
                     count += 1;
                 }
             }
+            Ok(Event::Empty(ref e)) => {
+                scope.enter(e)?;
+                if scope.is(e, namespace_uri, local) {
+                    count += 1;
+                }
+                scope.leave();
+            }
+            Ok(Event::End(_)) => scope.leave(),
             Ok(Event::DocType(_)) => {
                 return Err(parse_err("DOCTYPE declarations are rejected"));
             }
@@ -408,8 +528,9 @@ pub fn count_elements(
     }
 }
 
-/// Counts the **direct children of the document's root element** with the
-/// given (namespace_uri, local_name).
+/// Counts the **direct children of the root element** of `xml` (a slice
+/// whose root inherits `inherited`) with the given (namespace_uri,
+/// local_name).
 ///
 /// An XML-DSIG enveloped signature is a direct child of the element it
 /// signs, and the enveloped-signature transform removes exactly that one
@@ -423,12 +544,14 @@ pub fn count_elements(
 /// when the document exceeds `MAX_SAML_XML_EVENTS`.
 pub fn count_child_elements(
     xml: &[u8],
+    inherited: &Namespaces,
     namespace_uri: &str,
     local: &str,
 ) -> Result<usize, IdentityError> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().expand_empty_elements = false;
 
+    let mut scope = NsScope::new(inherited);
     let mut buf = Vec::new();
     let mut depth: usize = 0;
     let mut count: usize = 0;
@@ -442,18 +565,24 @@ pub fn count_child_elements(
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 depth += 1;
-                if depth == 2 && is_element(e, namespace_uri, local) {
+                scope.enter(e)?;
+                if depth == 2 && scope.is(e, namespace_uri, local) {
                     count += 1;
                 }
             }
             // An `Empty` event does not move `depth`: the element sits one
             // level below the currently open one.
             Ok(Event::Empty(ref e)) => {
-                if depth + 1 == 2 && is_element(e, namespace_uri, local) {
+                scope.enter(e)?;
+                if depth + 1 == 2 && scope.is(e, namespace_uri, local) {
                     count += 1;
                 }
+                scope.leave();
             }
-            Ok(Event::End(_)) => depth = depth.saturating_sub(1),
+            Ok(Event::End(_)) => {
+                scope.leave();
+                depth = depth.saturating_sub(1);
+            }
             Ok(Event::DocType(_)) => {
                 return Err(parse_err("DOCTYPE declarations are rejected"));
             }
@@ -465,12 +594,112 @@ pub fn count_child_elements(
     }
 }
 
+/// A direct child of a slice's root element, as [`child_elements`] reports it.
+pub struct ChildElement {
+    /// The namespace URI the child's prefix is bound to, if any.
+    pub namespace: Option<Vec<u8>>,
+    /// The child's local name.
+    pub local_name: Vec<u8>,
+    /// The child's byte range in the scanned slice (start and end tags
+    /// included).
+    pub range: (usize, usize),
+    /// The child's own text content (entity references resolved; the text of
+    /// its descendants is not included).
+    pub text: String,
+}
+
+/// Lists the direct children of the root element of `xml` — a slice whose
+/// root inherits the bindings `inherited` — each with the namespace it
+/// resolves to, in document order.
+///
+/// # Errors
+///
+/// Returns a parse error on malformed XML, a `DOCTYPE`, a disallowed entity
+/// reference, or more than `MAX_SAML_XML_EVENTS` events.
+pub fn child_elements(
+    xml: &[u8],
+    inherited: &Namespaces,
+) -> Result<Vec<ChildElement>, IdentityError> {
+    let mut reader = Reader::from_reader(xml);
+    let cfg = reader.config_mut();
+    cfg.expand_empty_elements = false;
+    cfg.trim_text(false);
+
+    let mut scope = NsScope::new(inherited);
+    let mut buf = Vec::new();
+    let mut depth: usize = 0;
+    let mut children: Vec<ChildElement> = Vec::new();
+    let mut event_count: usize = 0;
+
+    loop {
+        let pos_before = reader.buffer_position() as usize;
+        event_count += 1;
+        if event_count > crate::abuse::MAX_SAML_XML_EVENTS {
+            return Err(parse_err("XML document exceeds maximum element limit"));
+        }
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                depth += 1;
+                scope.enter(e)?;
+                if depth == 2 {
+                    children.push(ChildElement {
+                        namespace: element_namespace(scope.current(), e).map(<[u8]>::to_vec),
+                        local_name: e.local_name().as_ref().to_vec(),
+                        range: (pos_before, pos_before),
+                        text: String::new(),
+                    });
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                scope.enter(e)?;
+                if depth + 1 == 2 {
+                    children.push(ChildElement {
+                        namespace: element_namespace(scope.current(), e).map(<[u8]>::to_vec),
+                        local_name: e.local_name().as_ref().to_vec(),
+                        range: (pos_before, reader.buffer_position() as usize),
+                        text: String::new(),
+                    });
+                }
+                scope.leave();
+            }
+            Ok(Event::End(_)) => {
+                if depth == 2 {
+                    if let Some(child) = children.last_mut() {
+                        child.range.1 = reader.buffer_position() as usize;
+                    }
+                }
+                scope.leave();
+                depth = depth.saturating_sub(1);
+            }
+            Ok(Event::Text(ref t)) if depth == 2 => {
+                let text = unescape_text(t).map_err(|e| parse_err(e.to_string()))?;
+                if let Some(child) = children.last_mut() {
+                    child.text.push_str(&text);
+                }
+            }
+            Ok(Event::GeneralRef(ref r)) if depth == 2 => {
+                let text = resolve_entity_ref(r)?;
+                if let Some(child) = children.last_mut() {
+                    child.text.push_str(&text);
+                }
+            }
+            Ok(Event::DocType(_)) => {
+                return Err(parse_err("DOCTYPE declarations are rejected"));
+            }
+            Ok(Event::Eof) => return Ok(children),
+            Err(e) => return Err(parse_err(format!("XML scan error: {e}"))),
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
 /// One step of [`walk_outside_signatures`].
 pub enum XmlStep<'a> {
     /// An element opened. `depth` is 1 for the document's root element.
     Open {
-        /// The element's start tag.
-        element: &'a BytesStart<'a>,
+        /// The element, with the namespace it resolves to.
+        element: ElementRef<'a>,
         /// Nesting depth of the element (root = 1).
         depth: usize,
     },
@@ -500,8 +729,13 @@ pub enum XmlStep<'a> {
 /// `<saml:Attribute>`, a `<saml:Conditions>` — leaves the signature valid. A
 /// field reader that can see into it can therefore be fed unsigned values
 /// (GA audit 3, G-1). Every SAML field extractor (`parse_response`,
-/// `parse_authn_request`, `parse_logout_request`, `parse_logout_response`)
-/// reads the document through this walker, so none of them can.
+/// `parse_authn_request`, `parse_logout_request`, `parse_logout_response`,
+/// `parse_idp_metadata`) reads the document through this walker, so none of
+/// them can.
+///
+/// Elements are identified by the namespace URI their prefix is bound to in
+/// scope ([`ElementRef::is`]), so a `<Signature>` in an inherited default
+/// DSIG namespace is recognised and skipped exactly like a `<ds:Signature>`.
 ///
 /// Also enforces, for every caller: no `DOCTYPE`, at most
 /// `MAX_SAML_XML_EVENTS` events, and exactly one root element — a second
@@ -522,6 +756,7 @@ where
     cfg.expand_empty_elements = false;
     cfg.trim_text(false);
 
+    let mut scope = NsScope::new(&Namespaces::new());
     let mut buf = Vec::new();
     let mut depth: usize = 0;
     // Depth of the `<ds:Signature>` whose subtree is being skipped.
@@ -543,11 +778,16 @@ where
                     root_seen = true;
                 }
                 depth += 1;
+                scope.enter(e)?;
                 if skipping.is_none() {
-                    if is_element(e, ns::DS, "Signature") {
+                    if scope.is(e, ns::DS, "Signature") {
                         skipping = Some(depth);
                     } else {
-                        visit(XmlStep::Open { element: e, depth })?;
+                        let element = ElementRef {
+                            start: e,
+                            namespace: element_namespace(scope.current(), e),
+                        };
+                        visit(XmlStep::Open { element, depth })?;
                     }
                 }
             }
@@ -558,13 +798,19 @@ where
                     }
                     root_seen = true;
                 }
-                if skipping.is_none() && !is_element(e, ns::DS, "Signature") {
+                scope.enter(e)?;
+                if skipping.is_none() && !scope.is(e, ns::DS, "Signature") {
+                    let element = ElementRef {
+                        start: e,
+                        namespace: element_namespace(scope.current(), e),
+                    };
                     visit(XmlStep::Open {
-                        element: e,
+                        element,
                         depth: depth + 1,
                     })?;
                     visit(XmlStep::Close { depth: depth + 1 })?;
                 }
+                scope.leave();
             }
             Ok(Event::End(_)) => {
                 match skipping {
@@ -572,6 +818,7 @@ where
                     Some(_) => {}
                     None => visit(XmlStep::Close { depth })?,
                 }
+                scope.leave();
                 depth = depth.saturating_sub(1);
             }
             Ok(Event::Text(ref t)) => {
@@ -663,7 +910,7 @@ mod tests {
                 XmlStep::Open { element, depth } => (
                     'o',
                     depth,
-                    String::from_utf8_lossy(element.name().as_ref()).into_owned(),
+                    String::from_utf8_lossy(element.local_name()).into_owned(),
                 ),
                 XmlStep::Text { text, depth } => ('t', depth, text.to_string()),
                 XmlStep::Close { depth } => ('c', depth, String::new()),
@@ -714,16 +961,62 @@ mod tests {
     fn count_child_elements_counts_direct_children_only() {
         let xml = br#"<Root><ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"/><Mid><ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"/></Mid><ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">x</ds:Signature></Root>"#;
         assert_eq!(
-            count_child_elements(xml, ns::DS, "Signature").expect("count"),
+            count_child_elements(xml, &Namespaces::new(), ns::DS, "Signature").expect("count"),
             2
         );
         assert_eq!(
-            count_child_elements(DIRECT, ns::DS, "Signature").expect("count"),
+            count_child_elements(DIRECT, &Namespaces::new(), ns::DS, "Signature").expect("count"),
             1
         );
         assert_eq!(
-            count_child_elements(NESTED, ns::DS, "Signature").expect("count"),
+            count_child_elements(NESTED, &Namespaces::new(), ns::DS, "Signature").expect("count"),
             0
+        );
+    }
+
+    // GA audit 3 round 2 — element matching keys on the namespace URI in
+    // scope, never on the prefix spelling.
+
+    /// `ds:` bound (on an ancestor) to some other namespace is not XML-DSIG.
+    #[test]
+    fn ds_prefix_bound_elsewhere_is_not_a_signature() {
+        let xml = br#"<R xmlns:ds="urn:not-dsig"><ds:Signature/></R>"#;
+        let found = find_child_element_range(xml, ns::DS, "Signature").expect("scan");
+        assert!(found.is_none(), "prefix `ds` matched without the DSIG URI");
+    }
+
+    /// Any prefix bound to the DSIG URI on an ancestor is XML-DSIG.
+    #[test]
+    fn any_prefix_bound_to_dsig_on_an_ancestor_is_a_signature() {
+        let xml = br#"<R xmlns:x="http://www.w3.org/2000/09/xmldsig#"><x:Signature/></R>"#;
+        let found = find_child_element_range(xml, ns::DS, "Signature").expect("scan");
+        assert!(
+            found.is_some(),
+            "a DSIG-bound prefix declared on an ancestor was missed"
+        );
+    }
+
+    /// The Entra ID shape: an unprefixed element in an inherited default
+    /// namespace.
+    #[test]
+    fn inherited_default_namespace_is_resolved() {
+        let xml = br#"<Signature xmlns="http://www.w3.org/2000/09/xmldsig#"><SignedInfo>x</SignedInfo></Signature>"#;
+        let found = find_child_element_range(xml, ns::DS, "SignedInfo").expect("scan");
+        assert!(
+            found.is_some(),
+            "an inherited default namespace was not applied"
+        );
+    }
+
+    /// An unbound prefix is in no namespace — it is not guessed from its
+    /// spelling.
+    #[test]
+    fn unbound_prefix_matches_nothing() {
+        let xml = br"<R><ds:Signature>x</ds:Signature></R>";
+        let found = find_child_element_range(xml, ns::DS, "Signature").expect("scan");
+        assert!(
+            found.is_none(),
+            "an unbound `ds:` prefix was treated as DSIG"
         );
     }
 

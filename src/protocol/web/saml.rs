@@ -166,7 +166,11 @@ pub async fn sp_acs(
         entity_id: idp_cfg.issuer.clone(),
         sso_url: idp_cfg.authorization_endpoint.clone(),
         slo_url: idp_cfg.userinfo_endpoint.clone(),
-        idp_certificates_pem: vec![idp_cfg.client_secret.expose_secret().to_string()],
+        // `idp_certificate_pem` may be a bundle (outgoing + incoming
+        // certificate during an IdP key rollover); each block is trusted.
+        idp_certificates_pem: crate::identity::federation::saml::split_pem_certificates(
+            idp_cfg.client_secret.expose_secret(),
+        ),
         sign_authn_requests: false,
         want_assertions_signed: idp_cfg.want_assertions_signed,
         trust_asserted_email: idp_cfg.trust_asserted_email,
