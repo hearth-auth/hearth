@@ -570,7 +570,7 @@ Constraints:
 
 When a client is in `introspection` mode, issued JWTs carry only standard identity claims (`sub`, `tid`, `sid`, `iss`, `exp`, `iat`, `jti`, `scope`). The RBAC claim fields (`roles`, `groups`, `permissions`) are OMITTED from the token.
 
-Resource servers MUST call `POST /realms/{realm}/introspect` to obtain current RBAC data. Hearth resolves live permissions at introspection time and includes them in the response body alongside standard RFC 7662 fields, **only** when the introspecting client (`client_id` in HTTP Basic Auth) itself has `access_token_authorization: introspection`. Introspecting clients in `embedded` mode receive a standard RFC 7662 response without RBAC extension fields.
+Resource servers MUST call `POST /realms/{realm}/introspect` to obtain current RBAC data. Hearth resolves live permissions at introspection time and includes them in the response body alongside standard RFC 7662 fields, **only** when the introspecting client (`client_id` in HTTP Basic Auth) itself has `access_token_authorization: introspection` (or `decision`). Introspecting clients in `embedded` mode receive a standard RFC 7662 response without RBAC extension fields.
 
 Resource server contract:
 1. Forward the bearer token in the `token` form-parameter.
