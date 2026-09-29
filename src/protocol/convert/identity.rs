@@ -133,17 +133,6 @@ pub(crate) fn domain_realm_status_to_proto(s: domain::RealmStatus) -> pb::RealmS
     }
 }
 
-/// Converts proto `RealmStatus` i32 to domain `RealmStatus`.
-///
-/// Returns `None` for `UNSPECIFIED` or unknown values.
-pub(crate) fn proto_realm_status_to_domain(v: i32) -> Option<domain::RealmStatus> {
-    match pb::RealmStatus::try_from(v).ok()? {
-        pb::RealmStatus::Unspecified => None,
-        pb::RealmStatus::Active => Some(domain::RealmStatus::Active),
-        pb::RealmStatus::Suspended => Some(domain::RealmStatus::Suspended),
-    }
-}
-
 // ==================== RealmConfig ====================
 
 impl From<&domain::RealmConfig> for pb::RealmConfig {
@@ -152,40 +141,6 @@ impl From<&domain::RealmConfig> for pb::RealmConfig {
             session_ttl_micros: c.session_ttl_micros,
             password_memory_cost: c.password_memory_cost,
             password_time_cost: c.password_time_cost,
-        }
-    }
-}
-
-impl From<pb::RealmConfig> for domain::RealmConfig {
-    fn from(c: pb::RealmConfig) -> Self {
-        Self {
-            session_ttl_micros: c.session_ttl_micros,
-            password_memory_cost: c.password_memory_cost,
-            password_time_cost: c.password_time_cost,
-            ..Self::default()
-        }
-    }
-}
-
-// ==================== CreateRealmRequest ====================
-
-impl From<pb::CreateRealmRequest> for domain::CreateRealmRequest {
-    fn from(r: pb::CreateRealmRequest) -> Self {
-        Self {
-            name: r.name,
-            config: r.config.map(domain::RealmConfig::from),
-        }
-    }
-}
-
-// ==================== UpdateRealmRequest ====================
-
-impl From<pb::UpdateRealmRequest> for domain::UpdateRealmRequest {
-    fn from(r: pb::UpdateRealmRequest) -> Self {
-        Self {
-            name: r.name,
-            status: r.status.and_then(proto_realm_status_to_domain),
-            config: r.config.map(domain::RealmConfig::from),
         }
     }
 }
@@ -385,8 +340,10 @@ mod tests {
         assert_eq!(domain_req.status, Some(DomainUserStatus::Disabled));
     }
 
+    /// Realm config only flows domain → proto: realms are YAML-managed, so no
+    /// RPC accepts a proto `RealmConfig` (GA audit round 3, G-7).
     #[test]
-    fn realm_config_round_trip() {
+    fn realm_config_domain_to_proto() {
         let domain_cfg = domain::RealmConfig {
             session_ttl_micros: Some(7_200_000_000),
             password_memory_cost: Some(65536),
@@ -394,8 +351,9 @@ mod tests {
             ..domain::RealmConfig::default()
         };
         let proto_cfg = pb::RealmConfig::from(&domain_cfg);
-        let back = domain::RealmConfig::from(proto_cfg);
-        assert_eq!(domain_cfg, back);
+        assert_eq!(proto_cfg.session_ttl_micros, Some(7_200_000_000));
+        assert_eq!(proto_cfg.password_memory_cost, Some(65536));
+        assert_eq!(proto_cfg.password_time_cost, Some(3));
     }
 
     /// Helper: parse a UUID string into a `UserId`.

@@ -5,6 +5,10 @@
 //!
 //! [`TokenRateLimiter`] tracks per-`(realm, client_id)` request counts on the
 //! OAuth token, introspection, and device-authorization endpoints.
+//!
+//! The module also holds the admission rules every admin surface (REST, gRPC,
+//! SCIM) shares, so the surfaces cannot drift apart: [`ADMIN_PERMISSIONS`],
+//! [`grants_admin_permission`] and [`REALMS_ARE_YAML_MANAGED`].
 
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
@@ -465,6 +469,62 @@ impl JwksRateLimiter {
         );
         count <= self.rps_limit
     }
+}
+
+/// The refusal every admin surface returns for a realm create or update.
+///
+/// Realms are declared in `hearth.yaml` and reconciled from it, so no API
+/// writes them: REST `POST /admin/realms` and `PATCH /admin/realms/{id}`
+/// answer `405`, gRPC `CreateRealm` and `UpdateRealm` answer
+/// `FAILED_PRECONDITION`, all with this message. gRPC `UpdateRealm` used to
+/// replace the realm's whole config with the three fields its proto carries
+/// plus defaults, silently dropping the MFA, CIDR, lockout, SCIM-token and
+/// webhook settings until the next reload (GA audit round 3, G-7).
+pub const REALMS_ARE_YAML_MANAGED: &str =
+    "Realms are managed via hearth.yaml. Remove this endpoint from your client.";
+
+/// The full-superuser admin permission. It opens every admin surface and
+/// satisfies every per-endpoint sub-permission check.
+pub const SUPERUSER_PERMISSION: &str = "hearth.admin";
+
+/// Every admin-grade permission. Holding any one of them admits a token to the
+/// administrative plane: REST `extract_admin_auth`, gRPC `authenticate_admin`
+/// and the SCIM admin-JWT fallback all test against this list, and each
+/// endpoint then narrows to the one sub-permission it needs.
+///
+/// The same list is the set of principals a SCIM provisioning token may not
+/// modify or delete. That guard used to carry its own copy, which covered two
+/// of the five, so a provisioning token could take over any realm, clients or
+/// agents sub-admin (GA audit round 3, G-6). Both now read this constant.
+///
+/// `hearth.export` is deliberately absent: it never admits a caller on its
+/// own, since every export and restore endpoint also demands one of these.
+pub const ADMIN_PERMISSIONS: &[&str] = &[
+    SUPERUSER_PERMISSION,
+    "hearth.users.admin",
+    "hearth.clients.admin",
+    "hearth.realm.admin",
+    "hearth.agents.admin",
+];
+
+/// Returns whether `permission` is admin-grade, i.e. one of
+/// [`ADMIN_PERMISSIONS`].
+#[must_use]
+pub fn is_admin_permission(permission: &str) -> bool {
+    ADMIN_PERMISSIONS.contains(&permission)
+}
+
+/// Returns whether `permissions` satisfies an admin endpoint that requires the
+/// sub-permission `required`. [`SUPERUSER_PERMISSION`] always does; otherwise
+/// `required` itself must be present.
+///
+/// This is the one per-endpoint rule shared by REST
+/// (`require_admin_permission`), gRPC (`grpc_require_permission`) and SCIM.
+#[must_use]
+pub fn grants_admin_permission(permissions: &[String], required: &str) -> bool {
+    permissions
+        .iter()
+        .any(|p| p == SUPERUSER_PERMISSION || p == required)
 }
 
 /// Returns whether an access token may be used against an administrative
@@ -1020,5 +1080,73 @@ mod tests {
             TokenRateLimiter::anonymous_ip_bucket("203.0.113.5"),
             "ip:203.0.113.5"
         );
+    }
+
+    // --- Admin permission set (GA audit round 3, G-6) ---
+
+    /// Every seeded `hearth.admin` / `hearth.*.admin` permission is admin-grade.
+    /// A future `hearth.<x>.admin` added to the seed but not to
+    /// `ADMIN_PERMISSIONS` would be unreachable on the admin plane AND left
+    /// unprotected from SCIM provisioning tokens; this fails first.
+    #[test]
+    fn every_seeded_admin_permission_is_admin_grade() {
+        let seeded_admin: Vec<&str> = crate::rbac::SEED_PERMISSIONS
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|n| {
+                let parts: Vec<&str> = n.split('.').collect();
+                *n == SUPERUSER_PERMISSION || matches!(parts.as_slice(), ["hearth", _, "admin"])
+            })
+            .collect();
+        assert_eq!(seeded_admin.len(), ADMIN_PERMISSIONS.len());
+        for name in seeded_admin {
+            assert!(
+                is_admin_permission(name),
+                "{name} missing from ADMIN_PERMISSIONS"
+            );
+        }
+    }
+
+    /// The converse: nothing in the list is a typo the seed never grants.
+    #[test]
+    fn every_admin_permission_is_seeded() {
+        for name in ADMIN_PERMISSIONS {
+            assert!(
+                crate::rbac::seed_permission_description(name).is_some(),
+                "{name} is not a seeded permission"
+            );
+        }
+    }
+
+    #[test]
+    fn non_admin_permissions_are_not_admin_grade() {
+        for name in [
+            "hearth.export",
+            "hearth.sv_feed",
+            "realm.admin",
+            "user.write",
+            "",
+        ] {
+            assert!(!is_admin_permission(name), "{name} must not be admin-grade");
+        }
+    }
+
+    #[test]
+    fn grants_admin_permission_requires_superuser_or_the_named_permission() {
+        let perms = |ps: &[&str]| ps.iter().map(|p| (*p).to_string()).collect::<Vec<_>>();
+
+        assert!(grants_admin_permission(
+            &perms(&["hearth.users.admin"]),
+            "hearth.users.admin"
+        ));
+        assert!(grants_admin_permission(
+            &perms(&["hearth.admin"]),
+            "hearth.users.admin"
+        ));
+        assert!(!grants_admin_permission(
+            &perms(&["hearth.clients.admin", "hearth.realm.admin"]),
+            "hearth.users.admin"
+        ));
+        assert!(!grants_admin_permission(&[], "hearth.users.admin"));
     }
 }

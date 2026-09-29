@@ -17,6 +17,17 @@
 //!
 //! Both paths are gated on realm status first: a realm that is not `Active` is
 //! refused with `403` before either credential is examined.
+//!
+//! # Authorization on the admin-JWT fallback
+//!
+//! The fallback admits the same tokens the admin plane does — any
+//! admin-grade permission — so it must then narrow exactly as each resource's
+//! admin twin narrows. [`authenticate`] takes the [`ScimResource`] being
+//! served and demands its [`ScimResource::required_admin_permission`] (or
+//! `hearth.admin`) before returning. It used to return after the outer gate,
+//! so a `hearth.clients.admin`-only token could create, rewrite and delete
+//! every user in the realm, superusers included (GA audit round 3, G-5).
+//! Taking the resource as a parameter means no handler can forget the check.
 
 use axum::http::{HeaderMap, StatusCode};
 use sha2::{Digest, Sha256};
@@ -24,14 +35,41 @@ use subtle::ConstantTimeEq;
 
 use crate::core::{RealmId, UserId};
 use crate::identity::RealmStatus;
-use crate::protocol::admin_auth::RateLimitOutcome;
+use crate::protocol::admin_auth::{grants_admin_permission, RateLimitOutcome};
 use crate::protocol::http::{extract_admin_auth, AppState};
 use crate::protocol::scim::error::ScimError;
+
+/// The SCIM resource family a request addresses. It decides which admin
+/// permission the admin-JWT fallback must hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScimResource {
+    /// `/scim/v2/Users` — the user directory.
+    Users,
+    /// `/scim/v2/Groups` — organizations and their memberships.
+    Groups,
+}
+
+impl ScimResource {
+    /// The admin sub-permission the admin-JWT fallback must hold (besides
+    /// `hearth.admin`, which always suffices) — the one the resource's admin
+    /// twin requires:
+    ///
+    /// - `Users` → `hearth.users.admin`, as on every REST `/admin/users*` route.
+    /// - `Groups` → `hearth.realm.admin`, as on every gRPC organization RPC.
+    #[must_use]
+    pub const fn required_admin_permission(self) -> &'static str {
+        match self {
+            Self::Users => "hearth.users.admin",
+            Self::Groups => "hearth.realm.admin",
+        }
+    }
+}
 
 /// Authenticated SCIM principal — either a realm-scoped service account or an
 /// admin user who accessed SCIM via the JWT fallback path.
 #[derive(Debug, Clone)]
 pub struct ScimAuth {
+    /// The realm named by `X-Realm-ID` (and, on the JWT path, by the token).
     pub realm_id: RealmId,
     /// Opaque actor string for audit events.
     ///
@@ -47,13 +85,20 @@ pub struct ScimAuth {
     pub is_scim_token: bool,
 }
 
-/// Authenticate a SCIM request using the dual-path model.
+/// Authenticate and authorize a SCIM request for `resource` using the
+/// dual-path model.
 ///
 /// When the realm has a `scim_bearer_token_hash` configured, only the
-/// matching SCIM bearer token is accepted and admin JWTs are rejected. When
-/// no SCIM token is configured, falls back to admin JWT authentication so
-/// existing deployments continue to work.
-pub fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<ScimAuth, ScimError> {
+/// matching SCIM bearer token is accepted and admin JWTs are rejected; the
+/// token is a provisioning credential for every SCIM resource. When no SCIM
+/// token is configured, falls back to admin JWT authentication, and the token
+/// must then hold `hearth.admin` or `resource`'s
+/// [`ScimResource::required_admin_permission`] — `403` otherwise.
+pub fn authenticate(
+    headers: &HeaderMap,
+    state: &AppState,
+    resource: ScimResource,
+) -> Result<ScimAuth, ScimError> {
     let realm_id = extract_realm_id(headers)?;
 
     let realm = state
@@ -114,6 +159,14 @@ pub fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<ScimAuth, S
         // Apply the same per-realm rate limiter to the admin-JWT fallback path
         // so it cannot be used to bypass SCIM throttling (defect 3 / HEA-2032).
         check_scim_rate_limit(state, &realm_id)?;
+        // Narrow to the resource's admin permission, exactly as its admin twin
+        // does: the outer gate above admits every admin-grade permission.
+        let required = resource.required_admin_permission();
+        if !grants_admin_permission(&admin.permissions, required) {
+            return Err(ScimError::forbidden(format!(
+                "{required} or hearth.admin permission required"
+            )));
+        }
         Ok(ScimAuth {
             actor: admin.user_id.as_uuid().to_string(),
             realm_id,
