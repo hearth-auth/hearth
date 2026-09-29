@@ -172,7 +172,13 @@ Hearth requires a **valid enveloped XML signature** on inbound assertions.
   key material is trusted from the assertion itself (no inline cert trust).
   The connector's `idp_certificate_pem` may hold several concatenated
   certificates — during an IdP key rollover, the outgoing and the incoming one
-  — and a signature is accepted when it verifies under **any** of them.
+  — and a signature is accepted when it verifies under **any** of them. Every
+  block is parsed when the configuration is loaded or reloaded, with the
+  verifier's own parser (`validate_idp_certificate_bundle`): a missing or
+  unusable certificate refuses startup, and `hearth config validate` reports it
+  naming the realm and connector (tests: `saml_idp_certificate_must_be_usable_at_load`,
+  `saml_idp_certificate_bundle_with_an_unusable_block_is_refused`,
+  `validate_returns_1_for_an_unusable_saml_idp_certificate`).
   (Tests: `sp_accepts_an_assertion_signed_by_any_configured_idp_certificate`,
   `sp_acs_accepts_an_assertion_signed_by_the_second_certificate_of_a_bundle`.)
 - **Canonical form in context.** The signed element is canonicalized with the

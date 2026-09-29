@@ -361,6 +361,35 @@ pub fn split_pem_certificates(pem: &str) -> Vec<String> {
     out
 }
 
+/// Checks a connector's `idp_certificate_pem` exactly as the assertion
+/// consumer will use it: split with [`split_pem_certificates`], each block
+/// parsed by the verifier's own certificate parser. Returns the number of
+/// certificates.
+///
+/// Stricter than login in one way, deliberately: login skips a block it
+/// cannot use as long as another verifies, but configuration refuses a
+/// bundle with any unusable block — a broken incoming certificate would
+/// otherwise surface only when the IdP switches keys.
+///
+/// # Errors
+///
+/// Returns a parse error naming the failing block (`certificate N of M`).
+/// Certificates are public, but the reason still carries no PEM content.
+pub fn validate_idp_certificate_bundle(pem: &str) -> Result<usize, IdentityError> {
+    let blocks = split_pem_certificates(pem);
+    let total = blocks.len();
+    for (i, block) in blocks.iter().enumerate() {
+        parse_cert_public_key(block).map_err(|e| {
+            let why = match e {
+                IdentityError::Saml(SamlError::Parse { reason }) => reason,
+                other => other.to_string(),
+            };
+            parse_err(format!("certificate {} of {total}: {why}", i + 1))
+        })?;
+    }
+    Ok(total)
+}
+
 fn extract_id_attr(element_bytes: &[u8]) -> Result<String, IdentityError> {
     // naive but adequate: find the first ID="…" or Id="…" in the root
     // tag (before the first `>`).
