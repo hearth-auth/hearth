@@ -621,8 +621,10 @@ fn ceiling_too_large(realm_id: &RealmId, what: &str) -> UserCeilingError {
 /// The target's admin permissions are its realm-level set **plus** every
 /// organization-scoped set: a user may hold `hearth.admin` only through an
 /// organization role or grant, and an admin token issued in that
-/// organization's context carries it. Each organization the user belongs to
-/// is resolved (at most [`MAX_CEILING_ORGS`]).
+/// organization's context carries it. Each organization the user belongs to,
+/// and each one named by an org-scoped assignment or grant of the user (which
+/// resolution honours without membership), is resolved (at most
+/// [`MAX_CEILING_ORGS`]).
 ///
 /// Every user-administration surface calls this function, or one of the
 /// multi-user forms built on it for operations that affect several users:
@@ -726,23 +728,39 @@ fn target_admin_permissions(
     };
     collect(None)?;
 
+    // The organizations to resolve: every membership, plus every org named by
+    // an org-scoped assignment or grant. Resolution honours those whether or
+    // not the user is a member (`GET /v1/me/permissions?org_id=`,
+    // `RbacEngine::list_user_org_contexts`), so they count too.
+    let mut orgs = std::collections::BTreeSet::new();
+    let mut add = |org: crate::core::OrganizationId| {
+        orgs.insert(org);
+        if orgs.len() > MAX_CEILING_ORGS {
+            return Err(ceiling_too_large(realm_id, "the target's organizations"));
+        }
+        Ok(())
+    };
     let mut cursor: Option<String> = None;
-    let mut seen = 0usize;
     loop {
         let page = identity
             .list_user_organizations(realm_id, target, cursor.as_deref(), CEILING_PAGE)
             .map_err(|e| ceiling_unresolved(realm_id, "the target's organizations", &e))?;
         for membership in &page.items {
-            seen += 1;
-            if seen > MAX_CEILING_ORGS {
-                return Err(ceiling_too_large(realm_id, "the target's organizations"));
-            }
-            collect(Some(membership.org_id()))?;
+            add(membership.org_id().clone())?;
         }
         match page.next_cursor {
             Some(next) => cursor = Some(next),
             None => break,
         }
+    }
+    for org in rbac
+        .list_user_org_contexts(realm_id, target)
+        .map_err(|e| ceiling_unresolved(realm_id, "the target's org-scoped grants", &e))?
+    {
+        add(org)?;
+    }
+    for org in &orgs {
+        collect(Some(org))?;
     }
     Ok(held)
 }

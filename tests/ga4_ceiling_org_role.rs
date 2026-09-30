@@ -36,7 +36,8 @@ use hearth::protocol::proto::identity::v1::{
 };
 use hearth::protocol::proto::rbac::v1::{self as pb, rbac_admin_service_server::RbacAdminService};
 use hearth::rbac::{
-    AssignRoleRequest, CreateRoleRequest, Permission, RoleId, Scope, Subject, UserPermissionGrant,
+    AssignRoleRequest, CreateGroupRequest, CreateRoleRequest, GroupMember, Permission, RoleId,
+    Scope, Subject, UserPermissionGrant,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -551,7 +552,7 @@ async fn rest_realm_sub_admin_cannot_demote_through_a_role_definition() {
     let delete_plain = f
         .rest(
             "DELETE",
-            &format!("/admin/roles/{}", plain_role.as_uuid()),
+            &format!("/admin/roles/{}?cascade=true", plain_role.as_uuid()),
             &token,
             None,
         )
@@ -561,7 +562,9 @@ async fn rest_realm_sub_admin_cannot_demote_through_a_role_definition() {
     assert!(!f.role_exists(&plain_role));
 
     let peer = f.sub_admin("realm.admin");
-    let peer_delete = f.rest("DELETE", &child_uri, &peer, None).await;
+    let peer_delete = f
+        .rest("DELETE", &format!("{child_uri}?cascade=true"), &peer, None)
+        .await;
     assert_eq!(peer_delete, StatusCode::NO_CONTENT, "a peer superuser");
 }
 
@@ -641,4 +644,536 @@ async fn grpc_realm_sub_admin_cannot_demote_through_a_role_definition() {
     assert_eq!(delete.code(), tonic::Code::PermissionDenied, "DeleteRole");
     assert!(f.role_exists(&admin_role));
     assert!(f.holds_superuser(&root, None));
+}
+
+// ── round 2: SCIM Groups see the whole membership ────────────────────────────
+
+impl Fixture {
+    /// Adds `n` fresh plain users to `org`, on several threads so the
+    /// storage engine coalesces their durable writes.
+    fn fill(&self, org: &OrganizationId, n: usize) {
+        const THREADS: usize = 16;
+        let identity = self.h.identity_arc();
+        std::thread::scope(|scope| {
+            for t in 0..THREADS {
+                let identity = identity.clone();
+                scope.spawn(move || {
+                    for i in (t..n).step_by(THREADS) {
+                        let user = identity
+                            .create_user(
+                                &self.realm,
+                                &CreateUserRequest {
+                                    email: format!("m{i}-{}@ga4.test", uuid::Uuid::new_v4()),
+                                    display_name: format!("m{i}"),
+                                    first_name: String::new(),
+                                    last_name: String::new(),
+                                    attributes: Default::default(),
+                                },
+                            )
+                            .expect("create user");
+                        identity
+                            .add_member(&self.realm, org, user.id(), OrganizationRole::Member)
+                            .expect("add member");
+                    }
+                });
+            }
+        });
+    }
+
+    fn member_count(&self, org: &OrganizationId) -> usize {
+        let mut n = 0;
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self
+                .h
+                .identity()
+                .list_members(&self.realm, org, cursor.as_deref(), 500)
+                .expect("list members");
+            n += page.items.len();
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => return n,
+            }
+        }
+    }
+
+    fn org_name(&self, org: &OrganizationId) -> String {
+        self.h
+            .identity()
+            .get_organization(&self.realm, org)
+            .expect("lookup")
+            .expect("exists")
+            .name()
+            .to_string()
+    }
+}
+
+/// An organization larger than one 1,000-member page. SCIM used to read only
+/// the first page: `GET` showed 1,000 members, the ceiling checked only the
+/// removals it could see, and `PUT` could not remove the members beyond it.
+#[tokio::test]
+async fn scim_groups_handle_every_member_beyond_the_first_page() {
+    const MEMBERS: usize = 1_030;
+    let f = Fixture::new().await;
+    let org = f.org("big");
+    f.fill(&org, MEMBERS);
+    // An out-ranking member who is NOT on the first page of the listing.
+    let first_page: std::collections::HashSet<UserId> =
+        f.h.identity()
+            .list_members(&f.realm, &org, None, 1000)
+            .expect("first page")
+            .items
+            .iter()
+            .map(|m| m.user_id().clone())
+            .collect();
+    let (hidden, all_but_hidden, keep) = {
+        let mut cursor: Option<String> = None;
+        let mut all = Vec::new();
+        loop {
+            let page =
+                f.h.identity()
+                    .list_members(&f.realm, &org, cursor.as_deref(), 500)
+                    .expect("list");
+            all.extend(page.items.iter().map(|m| m.user_id().clone()));
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        let hidden = all
+            .iter()
+            .find(|u| !first_page.contains(*u))
+            .expect("a member beyond the first page")
+            .clone();
+        // Keep everyone but the hidden member and two members of page one,
+        // so the PUT must remove on both pages (and stays quick).
+        let dropped_first: Vec<&UserId> = all
+            .iter()
+            .filter(|u| first_page.contains(*u))
+            .take(2)
+            .collect();
+        let keep: Vec<UserId> = all
+            .iter()
+            .filter(|u| **u != hidden && !dropped_first.contains(u))
+            .cloned()
+            .collect();
+        let all_but_hidden: Vec<UserId> = all.iter().filter(|u| **u != hidden).cloned().collect();
+        (hidden, all_but_hidden, keep)
+    };
+    f.h.rbac()
+        .grant_user_permission(
+            &f.realm,
+            &UserPermissionGrant {
+                realm_id: f.realm.clone(),
+                user_id: hidden.clone(),
+                permission: Permission::new("hearth.admin").expect("perm"),
+                scope: Scope::Org {
+                    org_id: org.clone(),
+                },
+                granted_at: hearth::core::Timestamp::from_micros(0),
+                granted_by: None,
+            },
+        )
+        .expect("org-scoped grant");
+    let sub = f.sub_admin("hearth.realm.admin");
+    let root = f.sub_admin("realm.admin");
+    let uri = group_uri(&org);
+
+    // The ceiling sees the out-ranking member beyond page one. (Only that
+    // member is dropped: each ceiling check resolves the user's permissions,
+    // so a walk over the whole org would dominate the test's runtime.)
+    let others: Vec<&UserId> = all_but_hidden.iter().collect();
+    let refused = f
+        .scim("PUT", &uri, &sub, Some(&group_body("big", &others)))
+        .await;
+    assert_eq!(
+        refused,
+        StatusCode::FORBIDDEN,
+        "sub-admin dropping the admin"
+    );
+    assert_eq!(f.member_count(&org), MEMBERS, "nothing was removed");
+    assert!(f.is_member(&org, &hidden));
+
+    // GET shows every member.
+    let (status, body) = f
+        .call("GET", &uri, "application/scim+json", &root, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["members"].as_array().map(Vec::len),
+        Some(MEMBERS),
+        "every member is listed"
+    );
+
+    // PUT removes members on every page.
+    let keep_refs: Vec<&UserId> = keep.iter().collect();
+    let put = f
+        .scim("PUT", &uri, &root, Some(&group_body("big", &keep_refs)))
+        .await;
+    assert_eq!(put, StatusCode::OK);
+    assert_eq!(f.member_count(&org), MEMBERS - 3, "three members removed");
+    assert!(
+        !f.is_member(&org, &hidden),
+        "the member beyond page one too"
+    );
+    assert!(
+        keep.iter().all(|u| f.is_member(&org, u)),
+        "the rest are kept"
+    );
+}
+
+/// A membership change that names an unknown user is refused before
+/// anything is written — not after the group was renamed.
+#[tokio::test]
+async fn scim_put_with_an_unknown_member_changes_nothing() {
+    let f = Fixture::new().await;
+    let org = f.org("acme");
+    let plain = f.user("plain");
+    f.join(&org, &plain);
+    let root = f.sub_admin("realm.admin");
+    let ghost = UserId::new(uuid::Uuid::new_v4());
+
+    let status = f
+        .scim(
+            "PUT",
+            &group_uri(&org),
+            &root,
+            Some(&group_body("renamed", &[&ghost])),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_ne!(f.org_name(&org), "renamed", "the rename was not applied");
+    assert!(f.is_member(&org, &plain), "no member was removed");
+}
+
+// ── round 2: role deletion never leaves dangling references ──────────────────
+
+/// A role with an assignment, a group assignment, a child role and an extra
+/// org-role row.
+struct ReferencedRole {
+    role: RoleId,
+    child: RoleId,
+    user: UserId,
+    group: hearth::rbac::GroupId,
+    org: OrganizationId,
+    member: UserId,
+}
+
+impl Fixture {
+    fn referenced_role(&self, name: &str) -> ReferencedRole {
+        let rbac = self.h.rbac();
+        let role = rbac
+            .create_role(
+                &self.realm,
+                &CreateRoleRequest {
+                    name: name.into(),
+                    description: None,
+                    permissions: vec![Permission::new("docs.read").expect("perm")],
+                    parent_roles: vec![],
+                    scope_kind: Default::default(),
+                    allow_reserved_permissions: false,
+                },
+            )
+            .expect("role")
+            .id;
+        let child = rbac
+            .create_role(
+                &self.realm,
+                &CreateRoleRequest {
+                    name: format!("{name}-child"),
+                    description: None,
+                    permissions: vec![],
+                    parent_roles: vec![role.clone()],
+                    scope_kind: Default::default(),
+                    allow_reserved_permissions: false,
+                },
+            )
+            .expect("child")
+            .id;
+        let user = self.user("holder");
+        self.assign(&user, &role);
+        let group = rbac
+            .create_group(
+                &self.realm,
+                &CreateGroupRequest {
+                    name: format!("{name}-g"),
+                    slug: format!("{name}-g"),
+                    description: None,
+                },
+            )
+            .expect("group")
+            .id;
+        rbac.add_group_member(&self.realm, &group, &GroupMember::User(self.user("gm")))
+            .expect("group member");
+        rbac.assign_role(
+            &self.realm,
+            &AssignRoleRequest {
+                subject: Subject::Group(group.clone()),
+                role_id: role.clone(),
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("group assignment");
+        let org = self.org(name);
+        let member = self.user("extra");
+        self.join(&org, &member);
+        rbac.add_additional_role(&self.realm, &org, &member, name, None)
+            .expect("extra role");
+        ReferencedRole {
+            role,
+            child,
+            user,
+            group,
+            org,
+            member,
+        }
+    }
+
+    /// Asserts nothing refers to the deleted role any more.
+    fn assert_no_references(&self, r: &ReferencedRole, name: &str) {
+        let rbac = self.h.rbac();
+        assert!(!self.role_exists(&r.role), "the role is gone");
+        assert!(
+            rbac.list_role_members(&self.realm, &r.role, None, 10)
+                .expect("members")
+                .items
+                .is_empty(),
+            "no by-role assignment index remains"
+        );
+        assert!(
+            rbac.list_user_assignments(&self.realm, &r.user)
+                .expect("user assignments")
+                .iter()
+                .all(|a| a.role_id != r.role),
+            "the user's assignment is gone"
+        );
+        assert!(
+            rbac.list_group_assignments(&self.realm, &r.group)
+                .expect("group assignments")
+                .iter()
+                .all(|a| a.role_id != r.role),
+            "the group's assignment is gone"
+        );
+        let child = rbac
+            .get_role(&self.realm, &r.child)
+            .expect("lookup")
+            .expect("the child role survives");
+        assert!(
+            !child.parent_roles.contains(&r.role),
+            "the parent link is gone: {:?}",
+            child.parent_roles
+        );
+        assert!(
+            !rbac
+                .list_additional_roles(&self.realm, &r.org, &r.member)
+                .expect("extra roles")
+                .iter()
+                .any(|n| n == name),
+            "the extra org-role row is gone"
+        );
+    }
+}
+
+/// `DELETE /admin/roles/{id}` refuses a referenced role without `cascade`
+/// (it used to delete the role and leave every reference dangling) and, with
+/// `?cascade=true`, removes every reference with it.
+#[tokio::test]
+async fn rest_role_delete_refuses_references_or_cascades_them() {
+    let f = Fixture::new().await;
+    let r = f.referenced_role("editor");
+    let root = f.sub_admin("realm.admin");
+    let uri = format!("/admin/roles/{}", r.role.as_uuid());
+
+    let (status, body) = f
+        .call("DELETE", &uri, "application/json", &root, None)
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "role_in_use");
+    assert!(f.role_exists(&r.role), "a refused delete keeps the role");
+
+    let cascaded = f
+        .rest("DELETE", &format!("{uri}?cascade=true"), &root, None)
+        .await;
+    assert_eq!(cascaded, StatusCode::NO_CONTENT);
+    f.assert_no_references(&r, "editor");
+
+    // An unreferenced role needs no cascade.
+    let lone =
+        f.h.rbac()
+            .create_role(
+                &f.realm,
+                &CreateRoleRequest {
+                    name: "lone".into(),
+                    description: None,
+                    permissions: vec![],
+                    parent_roles: vec![],
+                    scope_kind: Default::default(),
+                    allow_reserved_permissions: false,
+                },
+            )
+            .expect("role")
+            .id;
+    let plain = f
+        .rest(
+            "DELETE",
+            &format!("/admin/roles/{}", lone.as_uuid()),
+            &root,
+            None,
+        )
+        .await;
+    assert_eq!(plain, StatusCode::NO_CONTENT);
+}
+
+/// gRPC `DeleteRole` honours `cascade` the same way, and the ceiling covers
+/// a cascade: a sub-admin may not cascade-delete a role a superuser holds.
+#[tokio::test]
+async fn grpc_role_delete_honours_cascade_under_the_ceiling() {
+    let f = Fixture::new().await;
+    let svc = RbacAdminSvc::new(f.state());
+    let r = f.referenced_role("auditor");
+    let root = f.sub_admin("realm.admin");
+    let realm_id = f.realm.as_uuid().to_string();
+    let delete = |token: &str, role: &RoleId, cascade: bool| {
+        f.grpc_req(
+            token,
+            pb::DeleteRoleRequest {
+                realm_id: realm_id.clone(),
+                role_id: role.as_uuid().to_string(),
+                cascade,
+            },
+        )
+    };
+
+    let refused = svc
+        .delete_role(delete(&root, &r.role, false))
+        .await
+        .expect_err("a referenced role without cascade");
+    assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+    assert!(f.role_exists(&r.role));
+
+    // The ceiling: the superuser's own role, cascade or not.
+    let sub = f.sub_admin("hearth.realm.admin");
+    let admin_role = f.role_id("realm.admin");
+    let denied = svc
+        .delete_role(delete(&sub, &admin_role, true))
+        .await
+        .expect_err("cascade-deleting the superuser role");
+    assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+    assert!(f.role_exists(&admin_role));
+
+    svc.delete_role(delete(&root, &r.role, true))
+        .await
+        .expect("cascade delete");
+    f.assert_no_references(&r, "auditor");
+}
+
+// ── round 2: org-scoped authority of non-members ─────────────────────────────
+
+/// Permission resolution honours an org-scoped grant or group assignment of a
+/// user who is NOT a member of that organization (`GET
+/// /v1/me/permissions?org_id=` reports it), so the ceiling counts it too; and
+/// an additional org role can no longer be given to a non-member.
+#[tokio::test]
+async fn non_member_org_scoped_authority_counts_for_the_ceiling() {
+    let f = Fixture::new().await;
+    let org = f.org("acme");
+    // Direct org-scoped grant, no membership.
+    let granted = f.user("granted");
+    f.h.rbac()
+        .grant_user_permission(
+            &f.realm,
+            &UserPermissionGrant {
+                realm_id: f.realm.clone(),
+                user_id: granted.clone(),
+                permission: Permission::new("hearth.admin").expect("perm"),
+                scope: Scope::Org {
+                    org_id: org.clone(),
+                },
+                granted_at: hearth::core::Timestamp::from_micros(0),
+                granted_by: None,
+            },
+        )
+        .expect("grant");
+    // Org-scoped assignment through a group, no membership.
+    let grouped = f.user("grouped");
+    let group =
+        f.h.rbac()
+            .create_group(
+                &f.realm,
+                &CreateGroupRequest {
+                    name: "ops".into(),
+                    slug: "ops".into(),
+                    description: None,
+                },
+            )
+            .expect("group")
+            .id;
+    f.h.rbac()
+        .add_group_member(&f.realm, &group, &GroupMember::User(grouped.clone()))
+        .expect("group member");
+    f.h.rbac()
+        .assign_role(
+            &f.realm,
+            &AssignRoleRequest {
+                subject: Subject::Group(group),
+                role_id: f.role_id("realm.admin"),
+                scope: Scope::Org {
+                    org_id: org.clone(),
+                },
+                assigned_by: None,
+            },
+        )
+        .expect("org-scoped group assignment");
+    assert!(!f.is_member(&org, &granted) && !f.is_member(&org, &grouped));
+
+    // Evidence: resolution honours it without membership.
+    let (status, body) = f
+        .call(
+            "GET",
+            &format!("/v1/me/permissions?org_id={}", org.as_uuid()),
+            "application/json",
+            &f.token(&granted),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["permissions"]
+            .as_array()
+            .is_some_and(|p| p.iter().any(|v| v == "hearth.admin")),
+        "a non-member's org-scoped grant is honoured: {body}"
+    );
+
+    let token = f.sub_admin("hearth.users.admin");
+    for target in [&granted, &grouped] {
+        let status = f
+            .rest(
+                "PATCH",
+                &format!("/admin/users/{}", target.as_uuid()),
+                &token,
+                Some(&json!({"email": format!("x-{}@evil.test", target.as_uuid())})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{}", target.as_uuid());
+    }
+
+    // An additional org role belongs to a membership.
+    let svc = RbacAdminSvc::new(f.state());
+    let stranger = f.user("stranger");
+    let err = svc
+        .add_additional_role(f.grpc_req(
+            &f.sub_admin("realm.admin"),
+            pb::AddAdditionalRoleRequest {
+                realm_id: f.realm.as_uuid().to_string(),
+                org_id: org.as_uuid().to_string(),
+                user_id: stranger.as_uuid().to_string(),
+                role_name: "realm.admin".into(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect_err("an additional role for a non-member");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
 }

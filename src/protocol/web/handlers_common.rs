@@ -214,6 +214,46 @@ pub(crate) fn bad_request(msg: &str) -> Response {
     )
 }
 
+/// Generic "Too many attempts" HTML page (a lockout), rendered with `429`.
+#[derive(Template)]
+#[template(path = "ui/errors/too_many_requests.html")]
+pub(crate) struct TooManyRequestsTemplate {
+    pub(crate) message: String,
+    pub(crate) chrome: bool,
+    pub(crate) active: &'static str,
+    pub(crate) user_email: Option<String>,
+    pub(crate) is_admin: bool,
+    pub(crate) flash: Option<Flash>,
+    pub(crate) csrf: Option<String>,
+    pub(crate) narrow: bool,
+    pub(crate) product_name: String,
+    pub(crate) logo_url: String,
+    pub(crate) realm_theme_url: Option<String>,
+    pub(crate) inline_theme_css: Option<String>,
+}
+
+/// Renders the themed `429 Too Many Requests` lockout page with `msg`. The
+/// caller sets `Retry-After`.
+pub(crate) fn too_many_requests(state: &super::WebState, msg: &str) -> Response {
+    render_status(
+        &TooManyRequestsTemplate {
+            message: msg.to_string(),
+            chrome: false,
+            active: "",
+            user_email: None,
+            is_admin: false,
+            flash: None,
+            csrf: None,
+            narrow: true,
+            product_name: state.product_name.clone(),
+            logo_url: state.logo_url.clone(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
+        },
+        StatusCode::TOO_MANY_REQUESTS,
+    )
+}
+
 /// Renders a generic 500 page.
 pub(crate) fn server_error() -> Response {
     render_status(

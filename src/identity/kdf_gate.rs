@@ -437,6 +437,19 @@ pub fn admin_gate() -> &'static KdfGate {
     ADMIN_GATE.get_or_init(|| KdfGate::new_admin(admin_default_config()))
 }
 
+/// The gate a credential check for an account in `realm_id` runs on: the
+/// admin-reserved [`admin_gate`] for the system realm (operators), the shared
+/// [`gate`] for every tenant realm. One choice for every surface an operator
+/// proves a credential on (console login, step-ups, account page), so a
+/// tenant-login flood cannot shed any of them (HEA-1892 / F2; GA sweep 4).
+pub fn gate_for_realm(realm_id: &crate::core::RealmId) -> &'static KdfGate {
+    if realm_id.as_uuid().is_nil() {
+        admin_gate()
+    } else {
+        gate()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

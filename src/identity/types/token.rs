@@ -224,6 +224,20 @@ pub enum RevocationExport {
         /// The user's generation at export time.
         generation: u64,
     },
+    /// A spent required-action single-use marker: the end of one
+    /// required-action flow (`ra-flow`) or one token's forced password
+    /// update (`ra-password`). Without it a restored store let a flow that
+    /// had already ended end again while its token lived (GA sweep 4
+    /// round 2).
+    RaConsumed {
+        /// The marker kind: `ra-flow` or `ra-password`.
+        marker: String,
+        /// The SHA-256 hex digest the marker is keyed by (of the flow id, or
+        /// of the RA token) — never the flow id or token itself.
+        hash: String,
+        /// Unix seconds after which the marker is inert and swept.
+        expires_at: i64,
+    },
 }
 
 /// One persisted consent record plus the exact storage key it was read from,

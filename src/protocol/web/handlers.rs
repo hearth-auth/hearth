@@ -1010,6 +1010,7 @@ pub async fn mfa_otp_challenge_submit(
             mfa_proof: MfaProof::Proved,
             ..session_ctx.clone()
         },
+        pending.first_factor,
         &headers,
         now_ra,
     ) {
@@ -2337,6 +2338,7 @@ fn login_finish(
         return_to.as_deref(),
         // The password alone: nothing proved beyond the first factor.
         &session_ctx,
+        super::auth::FirstFactor::Credential,
         &headers,
         now,
     ) {
@@ -2833,6 +2835,7 @@ fn passkey_complete_for_user(
         auth_result.user_id(),
         None,
         &session_ctx,
+        super::auth::FirstFactor::Credential,
         headers,
         now,
     ) {
@@ -3107,6 +3110,7 @@ pub async fn mfa_challenge_submit(
             mfa_proof: MfaProof::Proved,
             ..session_ctx.clone()
         },
+        pending.first_factor,
         &headers,
         now_ra,
     ) {
@@ -3466,6 +3470,7 @@ pub async fn mfa_enroll_required_submit(
             mfa_proof: MfaProof::Proved,
             ..session_ctx.clone()
         },
+        pending.first_factor,
         &headers,
         now_ra,
     ) {
@@ -4867,6 +4872,7 @@ fn magic_link_redeem_impl(
         None,
         // The link proves the inbox, one factor; nothing was owed above.
         &build_session_context(headers, peer_addr, &state.trusted_proxies),
+        super::auth::FirstFactor::Inbox,
         headers,
         now,
     ) {
@@ -6168,6 +6174,10 @@ pub async fn device_approve_submit(
             mfa_proof: session.mfa_proof,
             ..build_session_context(&headers, peer_addr, &state.trusted_proxies)
         },
+        // The session does not record what proved its first factor;
+        // reading it as a magic link keeps an email OTP enrolled on the
+        // way from counting as a second factor (GA sweep 4 round 2).
+        super::auth::FirstFactor::Inbox,
         &headers,
         now,
     ) {
