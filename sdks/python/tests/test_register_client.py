@@ -98,3 +98,34 @@ def test_register_client_sends_trust_level_as_proto_enum_name(respx_mock):
 
     body = json.loads(route.calls.last.request.content)
     assert body["trust_level"] == "CLIENT_TRUST_LEVEL_FIRST_PARTY"
+
+
+def test_register_client_requests_and_returns_a_generated_secret(respx_mock):
+    """``token_endpoint_auth_method`` asks the server to generate the secret;
+    the create response carries it once, as ``client_secret``."""
+    route = respx_mock.post(f"{BASE}/clients").mock(
+        return_value=httpx.Response(
+            201, json={**CREATED, "is_confidential": True, "client_secret": "generated-once"}
+        )
+    )
+    client = HearthClient(BASE, "realm-1", access_token="admin-token")
+
+    created = client.register_client(
+        RegisterClientRequest(
+            name="My App",
+            redirect_uris=["https://app.example.com/cb"],
+            token_endpoint_auth_method="client_secret_basic",
+        )
+    )
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["token_endpoint_auth_method"] == "client_secret_basic"
+    assert created.secret == "generated-once"
+
+
+def test_register_client_omits_unset_auth_method(respx_mock):
+    route = respx_mock.post(f"{BASE}/clients").mock(
+        return_value=httpx.Response(201, json=CREATED)
+    )
+    HearthClient(BASE, "realm-1", access_token="t").register_client(_req())
+    assert "token_endpoint_auth_method" not in json.loads(route.calls.last.request.content)

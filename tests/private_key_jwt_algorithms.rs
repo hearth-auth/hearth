@@ -299,6 +299,7 @@ async fn token_exchange_accepts_an_assertion() {
                 granted_scopes: std::collections::BTreeSet::from(["openid".to_string()]),
                 oid: None,
                 resource: None,
+                dpop_jkt: None,
             },
         )
         .unwrap()

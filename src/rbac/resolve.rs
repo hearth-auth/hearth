@@ -658,6 +658,38 @@ fn assignment_applies(ra: &RoleAssignment, org_id: Option<&OrganizationId>) -> b
     }
 }
 
+/// Every organization named by an org-scoped source of `user_id`'s
+/// permissions: its own org-scoped role assignments, those of every group it
+/// belongs to (transitively), and its org-scoped direct grants.
+///
+/// [`resolve_full`] honours these for any requested organization without
+/// consulting organization membership, so a caller that must see all of a
+/// user's authority (the admin privilege ceiling) resolves each of them.
+pub(crate) fn org_contexts<R: Resolver + ?Sized>(
+    resolver: &R,
+    realm_id: &RealmId,
+    user_id: &UserId,
+) -> Result<BTreeSet<OrganizationId>, RbacError> {
+    let mut orgs = BTreeSet::new();
+    let mut note = |scope: &Scope| {
+        if let Scope::Org { org_id } = scope {
+            orgs.insert(org_id.clone());
+        }
+    };
+    for ra in resolver.user_assignments(realm_id, user_id)? {
+        note(&ra.scope);
+    }
+    for gid in bfs_groups(resolver, realm_id, user_id)? {
+        for ra in resolver.group_assignments(realm_id, &gid)? {
+            note(&ra.scope);
+        }
+    }
+    for grant in resolver.user_permissions(realm_id, user_id)? {
+        note(&grant.scope);
+    }
+    Ok(orgs)
+}
+
 /// Transitive group-membership BFS with cycle detection and breadth cap.
 ///
 /// Walks reverse edges (member → containing-group) starting from the user.

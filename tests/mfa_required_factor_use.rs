@@ -240,6 +240,7 @@ async fn step_up_mfa_grant_still_issues_tokens_when_the_realm_requires_mfa() {
                 scope: None,
                 client_ip: Some("10.1.2.5".to_string()),
                 user_agent: Some("UA/1".to_string()),
+                dpop_jkt: None,
             },
         )
         .expect("a verified TOTP code must issue tokens");

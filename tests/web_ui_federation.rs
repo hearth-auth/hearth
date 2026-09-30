@@ -1311,3 +1311,91 @@ fn begin_transmits_the_absolute_realm_scoped_callback_as_redirect_uri() {
         "a relative redirect_uri is not a routable callback: {decoded}"
     );
 }
+
+/// GA sweep 4 round 2: the confirm-link password check applies the
+/// account's login lockout. A locked account's right password used to read
+/// as a wrong one (`/ui/login?error=fed_link_failed`); it is now reported as
+/// what it is — `429 Too Many Requests` with `Retry-After` and a lockout
+/// message — and nothing is linked.
+#[test]
+fn confirm_link_submit_reports_a_locked_account_as_locked() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+    add_second_realm(&rig);
+
+    let (uri, cookie_header, csrf, ticket) = confirm_page_context(&rig, &stub);
+    let user = rig
+        .identity
+        .get_user_by_email(&rig.realm_id, "scoped@example.com")
+        .expect("lookup")
+        .expect("the local user");
+    let password = "correct-horse-battery";
+    rig.identity
+        .set_password(
+            &rig.realm_id,
+            user.id(),
+            &hearth::identity::CleartextPassword::from_string(password.to_string()),
+        )
+        .expect("set password");
+    rig.identity
+        .update_user(
+            &rig.realm_id,
+            user.id(),
+            &hearth::identity::UpdateUserRequest {
+                status: Some(hearth::identity::UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .expect("activate");
+    let wrong =
+        hearth::identity::CleartextPassword::from_string("not-the-password-at-all".to_string());
+    let locked = (0..20).any(|_| {
+        matches!(
+            rig.identity
+                .verify_password(&rig.realm_id, user.id(), &wrong),
+            Err(hearth::identity::IdentityError::RateLimited)
+        )
+    });
+    assert!(locked, "the login lockout engaged");
+
+    let resp = send(
+        &rig.app,
+        Request::builder()
+            .method("POST")
+            .header("cookie", cookie_header)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .uri(&uri)
+            .body(Body::from(format!(
+                "ticket={ticket}&password={password}&_csrf={csrf}"
+            )))
+            .unwrap(),
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a locked account is told it is locked, not that its password was wrong"
+    );
+    let retry_after: u64 = resp
+        .headers()
+        .get("retry-after")
+        .expect("a 429 carries Retry-After")
+        .to_str()
+        .unwrap()
+        .parse()
+        .expect("delta-seconds");
+    assert!(
+        (1..=300).contains(&retry_after),
+        "Retry-After {retry_after}"
+    );
+    assert!(
+        body_text(resp).contains("Too many failed"),
+        "the page says why"
+    );
+    assert!(
+        rig.identity
+            .list_external_identities_for_user(&rig.realm_id, user.id())
+            .expect("links")
+            .is_empty(),
+        "nothing is linked"
+    );
+}

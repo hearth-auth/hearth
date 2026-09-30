@@ -449,7 +449,7 @@ fn device_pair(h: &common::TestHarness, realm: &RealmId, client: &ClientId) -> (
         .expect("approve device");
     let resp = h
         .identity()
-        .poll_device_token(realm, &auth.device_code, client)
+        .poll_device_token(realm, &auth.device_code, client, None)
         .expect("poll device token");
     (
         resp.access_token().to_string(),

@@ -260,7 +260,7 @@ async fn the_device_grant_narrows_to_its_scope() {
         .expect("approve");
     let tokens =
         f.h.identity()
-            .poll_device_token(&f.realm, &started.device_code, &f.client)
+            .poll_device_token(&f.realm, &started.device_code, &f.client, None)
             .expect("poll");
 
     let claims = decode_claims_unverified(tokens.access_token()).expect("decode");

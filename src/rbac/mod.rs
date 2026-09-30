@@ -274,7 +274,20 @@ pub trait RbacEngine: Send + Sync {
     ) -> Result<Role, RbacError>;
 
     /// Deletes a role and its indexes.
-    fn delete_role(&self, realm_id: &RealmId, role_id: &RoleId) -> Result<(), RbacError>;
+    ///
+    /// A role is *referenced* while it has role assignments (user or group,
+    /// realm- or org-scoped), is a parent of another role, or is held as an
+    /// extra org-scoped role (stored by name). Without `cascade` a referenced
+    /// role is refused with [`RbacError::RoleInUse`]; with `cascade` every
+    /// reference is removed in the same atomic batch as the role, so no
+    /// assignment, parent link or extra-role row is left dangling
+    /// (AUTHORIZATION.md § 8.2).
+    fn delete_role(
+        &self,
+        realm_id: &RealmId,
+        role_id: &RoleId,
+        cascade: bool,
+    ) -> Result<(), RbacError>;
 
     /// Lists roles in a realm with paging.
     fn list_roles(
@@ -376,6 +389,19 @@ pub trait RbacEngine: Send + Sync {
         realm_id: &RealmId,
         assignment_id: &AssignmentId,
     ) -> Result<Option<RoleAssignment>, RbacError>;
+
+    /// The organizations named by an org-scoped source of the user's
+    /// permissions: its org-scoped role assignments (direct and through its
+    /// groups, transitively) and its org-scoped direct grants.
+    ///
+    /// Permission resolution honours these for any requested organization
+    /// without consulting organization membership, so the admin privilege
+    /// ceiling resolves each of them in addition to the user's memberships.
+    fn list_user_org_contexts(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<Vec<OrganizationId>, RbacError>;
 
     /// Lists all role assignments directly bound to a user.
     fn list_user_assignments(

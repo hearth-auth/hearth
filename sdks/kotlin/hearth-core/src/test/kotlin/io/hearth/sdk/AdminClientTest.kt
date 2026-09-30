@@ -155,6 +155,36 @@ class AdminClientTest {
     }
 
     @Test
+    fun `registerClient requests and returns a generated secret`() = runTest {
+        // token_endpoint_auth_method asks the server to generate the secret;
+        // the 201 create response carries it once, as client_secret.
+        server.enqueue(
+            MockResponse().setResponseCode(201).setBody(
+                """{"client_id":"c1","client_name":"svc","redirect_uris":[],""" +
+                    """"grant_types":["client_credentials"],"client_secret":"generated-once"}""",
+            ),
+        )
+        val created = client.registerClient(
+            RegisterClientRequest(
+                clientName = "svc",
+                redirectUris = emptyList(),
+                tokenEndpointAuthMethod = TokenEndpointAuthMethod.CLIENT_SECRET_BASIC,
+            ),
+        )
+        val body = server.takeRequest().body.readUtf8()
+        assertTrue(body.contains(""""token_endpoint_auth_method":"client_secret_basic"""), body)
+        assertEquals("generated-once", created.clientSecret)
+    }
+
+    @Test
+    fun `registerClient omits an unset auth method`() = runTest {
+        server.enqueue(MockResponse().setBody(clientJson()).setResponseCode(201))
+        client.registerClient(RegisterClientRequest("My App", listOf("https://app.example.com/callback")))
+        val body = server.takeRequest().body.readUtf8()
+        assertTrue(!body.contains("token_endpoint_auth_method"), body)
+    }
+
+    @Test
     fun `getClient GETs admin slash clients slash id`() = runTest {
         server.enqueue(MockResponse().setBody(clientJson()).setResponseCode(200))
         client.getClient("c1")

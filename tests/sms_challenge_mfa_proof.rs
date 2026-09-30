@@ -369,7 +369,7 @@ async fn device_proof_after_sms(rig: &Rig) -> MfaProof {
     );
     let tokens = rig
         .identity
-        .poll_device_token(&rig.realm_id, &started.device_code, &client_id)
+        .poll_device_token(&rig.realm_id, &started.device_code, &client_id, None)
         .expect("the device collects its tokens");
     token_session_proof(rig, tokens.access_token())
 }

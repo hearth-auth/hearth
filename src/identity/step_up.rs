@@ -169,11 +169,7 @@ pub async fn verify_step_up(
             // `verify_password` applies the account's login lockout itself:
             // a wrong password here counts as a failed login, and a locked
             // account is refused before its credential is checked.
-            let kdf_gate = if realm_id.as_uuid().is_nil() {
-                crate::identity::admin_gate()
-            } else {
-                crate::identity::gate()
-            };
+            let kdf_gate = crate::identity::gate_for_realm(realm_id);
             let engine = Arc::clone(identity);
             let realm = realm_id.clone();
             let user = user_id.clone();

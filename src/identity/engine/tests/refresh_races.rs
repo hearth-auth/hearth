@@ -948,7 +948,7 @@ fn a_device_code_that_cannot_be_consumed_does_not_mint_tokens() {
     // below cannot pass merely because this fixture never works.
     let good = issue(&engine);
     engine
-        .poll_device_token(&realm_id, &good, client.client_id())
+        .poll_device_token(&realm_id, &good, client.client_id(), None)
         .expect("an unarmed approved device code must redeem");
 
     // Arm the delete of the SECOND code's storage key only.
@@ -956,7 +956,7 @@ fn a_device_code_that_cannot_be_consumed_does_not_mint_tokens() {
     let hash = EmbeddedIdentityEngine::sha256_hex(doomed.as_bytes());
     failing.arm_delete(&keys::encode_device_code(&hash));
 
-    let result = engine.poll_device_token(&realm_id, &doomed, client.client_id());
+    let result = engine.poll_device_token(&realm_id, &doomed, client.client_id(), None);
     assert!(
         result.is_err(),
         "a device code that could not be consumed must not mint a token pair — \

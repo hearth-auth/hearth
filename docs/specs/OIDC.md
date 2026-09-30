@@ -138,7 +138,15 @@ Enforced for every authorization request in the realm:
 1. **PAR required** — authorization requests MUST be submitted via Pushed Authorization Requests
    (RFC 9126). Direct `/authorize` calls without a `request_uri` are rejected with `invalid_request`.
 2. **PKCE S256 required** — `code_challenge` MUST be present; `code_challenge_method` MUST be `S256`.
-3. **`iss` in responses** — all redirect responses include `iss` per RFC 9207.
+3. **`iss` in responses** — all redirect responses, success and error alike, include `iss` per RFC 9207
+   (a JARM response carries it as the JWT's `iss` claim). Hearth sends it in every realm, FAPI or not.
+
+Both profiles also require **sender-constrained tokens**: every token request in the realm — the
+`authorization_code`, `refresh_token`, `client_credentials`, `device_code`, `jwt-bearer` and the
+clientless `urn:hearth:params:grant-type:step-up-mfa` grants, and the refresh of a clientless grant
+family — MUST carry a valid `DPoP` proof (§3), whatever the client's own profile. A request without
+one is refused with `400 invalid_request` before anything is consumed: an approved device code or
+a jwt-bearer assertion stays redeemable with a proof.
 
 #### 2.1.2 Advanced (`FapiProfile::Advanced`)
 
@@ -211,7 +219,8 @@ GET /authorize?request_uri=urn:...&client_id=fapi2-client
 
 #### 2.2.3 Token Endpoint Enforcement
 
-FAPI 2.0 clients MUST provide a DPoP proof header at the token endpoint.
+FAPI 2.0 clients MUST provide a DPoP proof header at the token endpoint, on every grant
+(`authorization_code`, `refresh_token`, `client_credentials`, `device_code`, `jwt-bearer`).
 Requests without the `DPoP` header are rejected:
 
 ```
@@ -306,7 +315,7 @@ DPoP is required for FAPI 2.0 clients (§2.2) and RECOMMENDED for all public cli
 
 ### 3.1 Access Token Binding
 
-When a token request includes a `DPoP` proof header, the issued access token carries a `cnf.jkt` claim containing the SHA-256 JWK thumbprint of the DPoP public key:
+When a token request includes a `DPoP` proof header, the issued access token carries a `cnf.jkt` claim containing the SHA-256 JWK thumbprint of the DPoP public key, and the response's `token_type` is `DPoP`. This holds for every grant: `authorization_code`, `device_code`, `refresh_token`, `client_credentials`, `jwt-bearer` and `urn:hearth:params:grant-type:step-up-mfa`:
 
 ```json
 {
@@ -318,7 +327,7 @@ Resource servers MUST verify that incoming DPoP proofs are signed by the key who
 
 ### 3.2 Refresh Token Binding (RFC 9449 §5)
 
-When the initial token request includes a DPoP proof, Hearth binds the entire grant family to the JWK thumbprint of the proving key. This binding is enforced on every subsequent use of the grant family:
+When the initial token request (`authorization_code`, `device_code` or step-up-MFA grant) includes a DPoP proof, Hearth binds the entire grant family to the JWK thumbprint of the proving key. This binding is enforced on every subsequent use of the grant family:
 
 - The issued refresh token is stored against the same `cnf.jkt`. Subsequent `refresh_token` grant requests MUST include a `DPoP` proof signed by the **same key pair** used at grant issuance.
 - A mismatch between the stored thumbprint and the presented proof is rejected with `invalid_dpop_proof`.
@@ -941,7 +950,7 @@ and a FAPI 2.0 Advanced realm accepts nothing else from any client (§2.1.2 item
 | `tests/jar.rs` | JAR (RFC 9101) request JWT parsing, signature verification |
 | `tests/private_key_jwt.rs` | `private_key_jwt` client authentication |
 | `tests/fapi_client_auth.rs` | A JWKS-only FAPI 2.0 client authenticates with an ES256/EdDSA assertion from its JWKS and is refused with nothing at `/as/par` and `/token` (`authorization_code`, `refresh_token`, `client_credentials`), on both routes; a FAPI 2.0 Advanced realm refuses `client_secret_*` at `/token`, `/as/par`, `/introspect`, `/revoke` and `none` at `/as/par`, `/token`, `/revoke`, and accepts `private_key_jwt` |
-| `tests/rfc9207_iss.rs` | `iss` in authorization responses per RFC 9207 |
+| `tests/rfc9207_iss.rs` | `iss` in authorization responses per RFC 9207 (error redirects: `tests/oauth_consent.rs`) |
 | `tests/oauth_form_encoding.rs` | Form + JSON content-type acceptance on token/revoke/introspect/PAR/device-authorization and their realm twins (HEA-2077) |
 | `tests/device_grant_client_auth.rs` | Confidential-client authentication on both device-grant endpoints and both realm twins (audit 2026-08-28 §4.19#4, §4.22#6) |
 | `tests/par_client_auth.rs` | RFC 9126 §2 client authentication at `/as/par` and its realm twin: confidential clients refused without or with wrong credentials, `client_secret_basic`/`client_secret_post`/`private_key_jwt` accepted, public client by `client_id` only and refused when presenting a secret, authenticated client bound to the body and request object, FAPI 2.0 client and FAPI realm, KDF-gate shed |

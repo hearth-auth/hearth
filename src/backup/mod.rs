@@ -29,7 +29,7 @@
 //! realms/<realm-slug>/saml_signing_key.json     (AES-256-GCM encrypted)
 //! realms/<realm-slug>/scim_mappings.ndjson
 //! realms/<realm-slug>/invitations.ndjson
-//! realms/<realm-slug>/revocations.ndjson   (revoked JTIs, blocked DPoP keys, revoked AAT JTIs, RA generations)
+//! realms/<realm-slug>/revocations.ndjson   (revoked JTIs, blocked DPoP keys, revoked AAT JTIs, RA generations, spent RA markers)
 //! realms/<realm-slug>/retiring_signing_keys.json (AES-256-GCM encrypted)
 //! realms/<realm-slug>/signing_key.json   (AES-256-GCM encrypted)
 //! realms/<realm-slug>/id_token_signing_key.json           (RS256 ID-token key; encrypted)

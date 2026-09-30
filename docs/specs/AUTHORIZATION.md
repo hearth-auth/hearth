@@ -700,7 +700,7 @@ All admin endpoints require the `hearth.admin` permission in the caller's access
   ```
 - `GET /admin/roles/{id}` — fetch a role.
 - `PATCH /admin/roles/{id}` — update name/description/permissions/parents.
-- `DELETE /admin/roles/{id}` — delete a role (fails if it is assigned or is a parent of another role; use `?cascade=true` to remove assignments and parent links in the same transaction).
+- `DELETE /admin/roles/{id}` — delete a role. It fails with `409 role_in_use` (gRPC `DeleteRole`: `FAILED_PRECONDITION`) while the role has assignments (user or group, realm- or org-scoped), is a parent of another role, or is held as an extra org role; `?cascade=true` (gRPC `cascade: true`) removes the assignments, the parent links and the extra org-role rows in the same atomic batch as the role. The web console always cascades. The demotion ceiling below covers everything a cascade removes.
 
 #### Groups
 
@@ -748,11 +748,11 @@ Callers holding `hearth.admin` bypass this check — `hearth.admin` implicitly c
 **Applies to:**
 - `POST /admin/roles` and `PATCH /admin/roles/{id}` — role permission set must be ⊆ caller's permissions
 - gRPC `GrantUserPermission` — granted permission must be held by caller
-- gRPC `AddAdditionalRole` — role permissions must be ⊆ caller's permissions
+- gRPC `AddAdditionalRole` — role permissions must be ⊆ caller's permissions; the user must be a member of the organization (`FAILED_PRECONDITION` otherwise)
 
 #### Demotion ceiling (GA audit rounds 3–4)
 
-The reverse direction is covered too: a sub-admin MUST NOT demote, modify or sign out a user who holds an admin-grade permission (`hearth.admin`, `hearth.users.admin`, `hearth.clients.admin`, `hearth.realm.admin`, `hearth.agents.admin`) the sub-admin lacks, counting permissions held at realm level and in each of the user's organizations. The rule is `protocol::admin_auth::check_user_admin_ceiling`; operations that affect several users apply it to each (`check_group_admin_ceiling`, `check_users_admin_ceiling`, `check_org_admin_ceiling`, `check_role_change_admin_ceiling`):
+The reverse direction is covered too: a sub-admin MUST NOT demote, modify or sign out a user who holds an admin-grade permission (`hearth.admin`, `hearth.users.admin`, `hearth.clients.admin`, `hearth.realm.admin`, `hearth.agents.admin`) the sub-admin lacks, counting permissions held at realm level and in each of the user's organizations. Org-scoped permissions count for every organization the user belongs to **and** every organization named by one of its org-scoped role assignments (direct or through a group) or direct grants: permission resolution (`GET /v1/me/permissions?org_id=`, the admin effective-permissions endpoints) honours those without checking membership. The rule is `protocol::admin_auth::check_user_admin_ceiling`; operations that affect several users apply it to each (`check_group_admin_ceiling`, `check_users_admin_ceiling`, `check_org_admin_ceiling`, `check_role_change_admin_ceiling`):
 
 - role unassignment, permission revocation, extra-role removal, group-member removal and group deletion;
 - organization member removal (SCIM `PUT`/`PATCH /Groups`) and organization deletion (gRPC `DeleteOrganization`, SCIM `DELETE /Groups`) — every affected member;

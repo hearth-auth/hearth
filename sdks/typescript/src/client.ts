@@ -95,6 +95,9 @@ export class HearthApiClient {
               ? "CLIENT_TRUST_LEVEL_FIRST_PARTY"
               : "CLIENT_TRUST_LEVEL_THIRD_PARTY",
         }),
+        ...(params.tokenEndpointAuthMethod && {
+          token_endpoint_auth_method: params.tokenEndpointAuthMethod,
+        }),
       },
       accessToken,
     );

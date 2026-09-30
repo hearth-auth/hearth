@@ -493,6 +493,7 @@ mod tests {
             redirect_uris: vec!["https://app.example.com/cb".into()],
             trust_level: Some("first_party".into()),
             access_token_authorization: AccessTokenAuthorization::Introspection,
+            token_endpoint_auth_method: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(
@@ -513,10 +514,43 @@ mod tests {
             redirect_uris: vec![],
             trust_level: Some("third_party".into()),
             access_token_authorization: AccessTokenAuthorization::Embedded,
+            token_endpoint_auth_method: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["access_token_authorization"], "EMBEDDED");
         assert_eq!(json["trust_level"], "CLIENT_TRUST_LEVEL_THIRD_PARTY");
+    }
+
+    #[test]
+    fn client_requests_carry_the_auth_method_and_the_record_its_generated_secret() {
+        let req = CreateClientRequest {
+            name: "svc".into(),
+            redirect_uris: vec![],
+            trust_level: None,
+            access_token_authorization: AccessTokenAuthorization::Embedded,
+            token_endpoint_auth_method: Some("client_secret_basic".into()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["token_endpoint_auth_method"], "client_secret_basic");
+
+        let req = RegisterClientRequest {
+            name: "svc".into(),
+            redirect_uris: vec![],
+            trust_level: None,
+            token_endpoint_auth_method: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("token_endpoint_auth_method").is_none(), "{json}");
+
+        // The create (or regenerate) response carries the generated secret
+        // once, under the wire key `client_secret`.
+        let client: OAuthClient = serde_json::from_value(serde_json::json!({
+            "client_id": "c1",
+            "client_name": "svc",
+            "client_secret": "generated-once",
+        }))
+        .unwrap();
+        assert_eq!(client.secret.as_deref(), Some("generated-once"));
     }
 
     #[test]
@@ -526,6 +560,7 @@ mod tests {
             name: "My App".into(),
             redirect_uris: vec![],
             trust_level: Some("first_party".into()),
+            token_endpoint_auth_method: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["trust_level"], "CLIENT_TRUST_LEVEL_FIRST_PARTY");

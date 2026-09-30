@@ -117,11 +117,33 @@ data class MePermissionsResponse(
 
 // ── OAuth Client registration ─────────────────────────────────────────────────
 
+/**
+ * Body of `POST /admin/applications`.
+ *
+ * [tokenEndpointAuthMethod] [TokenEndpointAuthMethod.CLIENT_SECRET_BASIC] or
+ * [TokenEndpointAuthMethod.CLIENT_SECRET_POST] creates a confidential client:
+ * the server generates its secret and returns it once, as
+ * [OAuthClient.clientSecret]. `null` registers a public client.
+ */
 @Serializable
 data class RegisterClientRequest(
     @SerialName("client_name") val clientName: String,
     @SerialName("redirect_uris") val redirectUris: List<String>,
+    @SerialName("token_endpoint_auth_method") val tokenEndpointAuthMethod: TokenEndpointAuthMethod? = null,
 )
+
+/** How a client authenticates at the token endpoint (RFC 7591 §2). */
+@Serializable
+enum class TokenEndpointAuthMethod {
+    /** Server-generated secret, sent with HTTP Basic auth. */
+    @SerialName("client_secret_basic") CLIENT_SECRET_BASIC,
+    /** Server-generated secret, sent in the request body. */
+    @SerialName("client_secret_post") CLIENT_SECRET_POST,
+    /** `private_key_jwt` (requires the client's keys in `jwks`). */
+    @SerialName("private_key_jwt") PRIVATE_KEY_JWT,
+    /** A public client. */
+    @SerialName("none") NONE,
+}
 
 @Serializable
 data class OAuthClient(
@@ -130,6 +152,12 @@ data class OAuthClient(
     @SerialName("redirect_uris") val redirectUris: List<String>,
     @SerialName("grant_types") val grantTypes: List<String>,
     @SerialName("created_at") val createdAt: Long? = null,
+    /**
+     * The generated secret: present only on the response that created a
+     * confidential client (or regenerated its secret), never again. Store it
+     * on receipt.
+     */
+    @SerialName("client_secret") val clientSecret: String? = null,
 )
 
 // ── Admin — Users ─────────────────────────────────────────────────────────────

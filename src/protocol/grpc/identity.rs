@@ -799,13 +799,21 @@ impl ApplicationAdminService for AppAdminSvc {
     ) -> Result<Response<pb::OAuthClient>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
         grpc_require_permission(&auth, "hearth.clients.admin")?;
-        let body: RegisterClientRequest = req.into_inner().into();
+        let wire = req.into_inner();
+        let method = wire.token_endpoint_auth_method.clone();
+        let mut body: RegisterClientRequest = wire.into();
+        // `client_secret_basic` / `client_secret_post`: Hearth generates the
+        // secret, stores its hash and returns it here, once.
+        body.apply_token_endpoint_auth_method(method.as_deref())
+            .map_err(identity_to_status)?;
         let client = self
             .state
             .identity
             .register_client(&auth.realm_id, &body)
             .map_err(identity_to_status)?;
-        Ok(Response::new(pb::OAuthClient::from(&client)))
+        Ok(Response::new(
+            crate::protocol::client_admin::created_client_record(&client, &body),
+        ))
     }
 
     async fn update_application(
@@ -826,6 +834,25 @@ impl ApplicationAdminService for AppAdminSvc {
             .update_client(&auth.realm_id, &client_id, &body)
             .map_err(identity_to_status)?;
         Ok(Response::new(pb::OAuthClient::from(&client)))
+    }
+
+    async fn regenerate_application_secret(
+        &self,
+        req: Request<pb::RegenerateApplicationSecretRequest>,
+    ) -> Result<Response<pb::OAuthClient>, Status> {
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.clients.admin")?;
+        let client_id = parse_client_id(&req.into_inner().client_id)?;
+        let record = crate::protocol::client_admin::regenerate_client_secret(
+            self.state.identity.as_ref(),
+            self.state.audit.as_ref(),
+            &auth.realm_id,
+            &auth.user_id,
+            &client_id,
+            "grpc",
+        )
+        .map_err(identity_to_status)?;
+        Ok(Response::new(record))
     }
 
     async fn delete_application(

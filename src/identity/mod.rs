@@ -90,8 +90,8 @@ pub use engine::{
 };
 pub use error::IdentityError;
 pub use kdf_gate::{
-    admin_gate, gate, init_admin_gate, init_gate, KdfGate, KdfGateConfig, KdfGateError,
-    DEFAULT_ADMIN_MAX_IN_FLIGHT, DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS,
+    admin_gate, gate, gate_for_realm, init_admin_gate, init_gate, KdfGate, KdfGateConfig,
+    KdfGateError, DEFAULT_ADMIN_MAX_IN_FLIGHT, DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS,
 };
 pub use magic_link::MagicLinkResponse;
 pub use oidc::{
@@ -298,6 +298,7 @@ pub trait IdentityEngine: Send + Sync {
     /// when the flow ends records it (see [`ra_token::RaClaims::mfa_proof`]).
     /// `flow` as for [`Self::generate_ra_token`].
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn generate_browser_ra_token(
         &self,
         realm_id: &RealmId,
@@ -305,6 +306,7 @@ pub trait IdentityEngine: Send + Sync {
         pending_actions: Vec<RequiredAction>,
         return_to: Option<String>,
         mfa_proof: MfaProof,
+        inbox_first_factor: bool,
         flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
@@ -1069,11 +1071,21 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Returns tokens if the user has approved, or an appropriate error
     /// (`AuthorizationPending`, `SlowDown`, `DeviceCodeExpired`, `DeviceCodeDenied`).
+    ///
+    /// `dpop_jkt` is the thumbprint of a DPoP proof (RFC 9449) the caller has
+    /// already validated on the token request. When present, the access and
+    /// refresh tokens carry `cnf.jkt`, the grant family is bound to that key
+    /// and the response's `token_type` is `DPoP` — as for the
+    /// authorization-code grant. In a realm with a `fapi_profile`, or for a
+    /// FAPI 2.0 client, `None` is refused with
+    /// [`IdentityError::FapiViolation`] and the approved code stays
+    /// redeemable.
     fn poll_device_token(
         &self,
         realm_id: &RealmId,
         device_code: &str,
         client_id: &crate::core::ClientId,
+        dpop_jkt: Option<&str>,
     ) -> Result<OidcTokenResponse, IdentityError>;
 
     /// Revokes a token (RFC 7009).
@@ -3069,7 +3081,8 @@ pub trait IdentityEngine: Send + Sync {
     /// Returns the realm's live token revocations — revoked access-token
     /// JTIs, blocked DPoP key thumbprints and revoked AAT JTIs — for backup
     /// export (audit GA 2026-09-28 M3) — and every non-zero user
-    /// required-action generation (GA sweep 4). JTIs already past their
+    /// required-action generation and every live spent required-action
+    /// marker (GA sweep 4). JTIs already past their
     /// `exp` are omitted: the token they name can no longer validate
     /// anywhere.
     ///
@@ -3083,7 +3096,9 @@ pub trait IdentityEngine: Send + Sync {
     /// blocklists, so a token revoked before the backup stays dead after the
     /// restore. A JTI whose `exp` has passed is [`ImportOutcome::Skipped`].
     /// A required-action generation only ever raises the node's counter; one
-    /// at or below it is [`ImportOutcome::Skipped`] in either restore mode.
+    /// at or below it is [`ImportOutcome::Skipped`] in either restore mode. A
+    /// spent required-action marker is written if absent; an expired or
+    /// present one is [`ImportOutcome::Skipped`].
     fn import_revocation(
         &self,
         realm_id: &RealmId,

@@ -420,6 +420,13 @@ pub struct TokenIssuanceContext {
     ///
     /// `None` means no resource audience restriction.
     pub resource: Option<crate::core::Uri>,
+    /// RFC 7638 thumbprint of a DPoP key (RFC 9449) the caller validated on
+    /// the token request.
+    ///
+    /// When present, the access and refresh tokens carry `cnf.jkt` and the
+    /// grant family is bound to the key, so the refresh token rotates only
+    /// with a proof by the same key. `None` mints Bearer tokens.
+    pub dpop_jkt: Option<String>,
 }
 
 /// Configuration for credential rate limiting.
@@ -3991,6 +3998,13 @@ impl EmbeddedIdentityEngine {
         // Check both per-client profile AND realm-level fapi_profile so that
         // standard-profile clients in a Baseline/Advanced realm cannot bypass
         // the sender-constraint requirement on refresh (mirrors HEA-1022 fix).
+        // A clientless family (step-up-MFA grant, first-party session
+        // tokens) is governed by the realm profile alone. Only a family with
+        // a client was checked, so such refresh tokens rotated without a
+        // proof in a FAPI realm.
+        if family.client_id.is_none() {
+            self.require_fapi_sender_constraint(realm_id, None, dpop_jkt)?;
+        }
         if let Some(ref client_id) = family.client_id {
             // Fail closed when the owning client no longer exists. Skipping
             // this arm on a missing client stripped the confidential-client
@@ -4009,19 +4023,7 @@ impl EmbeddedIdentityEngine {
             if !client.allows_refresh_token() {
                 return Err(IdentityError::UnsupportedGrantType);
             }
-            let realm_fapi = self
-                .get_realm(realm_id)?
-                .ok_or(IdentityError::RealmNotFound)?
-                .config()
-                .fapi_profile;
-            let fapi_enforced = client.profile().is_fapi2() || realm_fapi.is_some();
-            if fapi_enforced && dpop_jkt.is_none() {
-                return Err(IdentityError::FapiViolation {
-                    reason: "FAPI 2.0 requires sender-constrained tokens; \
-                             include a DPoP proof and dpop_jkt in the token request"
-                        .to_string(),
-                });
-            }
+            self.require_fapi_sender_constraint(realm_id, Some(&client), dpop_jkt)?;
 
             // O1 (HEA-1755): confidential-client refresh binding.
             //
@@ -8301,6 +8303,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         pending_actions: Vec<crate::identity::types::RequiredAction>,
         return_to: Option<String>,
         mfa_proof: crate::identity::MfaProof,
+        inbox_first_factor: bool,
         flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError> {
@@ -8312,6 +8315,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             pending_actions,
             return_to,
             mfa_proof,
+            inbox_first_factor,
             flow.map_or_else(crate::identity::ra_token::new_flow_id, str::to_string),
             generation,
             &key,
@@ -9539,7 +9543,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             permissions: effective_perms,
             custom,
             resource: ctx.resource.as_ref(),
-            dpop_jkt: None,
+            dpop_jkt: ctx.dpop_jkt.clone(),
             sv: sv_claim,
             scope: if scope_str.is_empty() {
                 None
@@ -9564,7 +9568,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             amr_values: Vec::new(),
             ua_hash: None,
             bound_asn: None,
-            bound_jkt: None,
+            // RFC 9449 §5: the refresh path refuses a proof by any other key.
+            bound_jkt: ctx.dpop_jkt.clone(),
         };
         let family_bytes =
             serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
@@ -10163,8 +10168,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         device_code: &str,
         client_id: &ClientId,
+        dpop_jkt: Option<&str>,
     ) -> Result<OidcTokenResponse, IdentityError> {
-        self.poll_device_token_inner(realm_id, device_code, client_id)
+        self.poll_device_token_inner(realm_id, device_code, client_id, dpop_jkt)
     }
 
     fn push_authorization_request(
@@ -14068,6 +14074,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 });
             }
         }
+        // Spent required-action markers (GA sweep 4 round 2); an expired one
+        // guards nothing and is left to the sweep.
+        for kind in keys::RA_CONSUMED_KINDS {
+            for (hash, value) in scan(keys::consumed_ra_scan_prefix(kind))? {
+                let Ok(bytes) = <[u8; 8]>::try_from(value.as_slice()) else {
+                    continue;
+                };
+                let expires_at = i64::from_le_bytes(bytes);
+                if now_secs < expires_at {
+                    out.push(RevocationExport::RaConsumed {
+                        marker: kind.to_string(),
+                        hash,
+                        expires_at,
+                    });
+                }
+            }
+        }
         Ok(out)
     }
 
@@ -14087,6 +14110,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 user_id,
                 generation,
             } => return self.import_ra_generation(realm_id, user_id, *generation),
+            RevocationExport::RaConsumed {
+                marker,
+                hash,
+                expires_at,
+            } => return self.import_ra_consumed(realm_id, marker, hash, *expires_at),
         };
         if id.is_empty() || id.len() > MAX_ID_LEN {
             return Err(IdentityError::InvalidInput {
@@ -14125,8 +14153,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .put(realm_id, &key, b"1")
                     .map_err(Self::storage_err)?;
             }
-            // Restored by `import_ra_generation`, which returned above.
-            RevocationExport::RaGeneration { .. } => {}
+            // Restored by `import_ra_generation` / `import_ra_consumed`,
+            // which returned above.
+            RevocationExport::RaGeneration { .. } | RevocationExport::RaConsumed { .. } => {}
         }
         Ok(if exists {
             ImportOutcome::Overwritten
@@ -19303,6 +19332,12 @@ impl EmbeddedIdentityEngine {
         let _guard = lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A user that does not exist has no flow to end, and a row written
+        // for it would name a user that is gone (GA sweep 4 round 2):
+        // `revoke_all_user_sessions` accepts any user id.
+        if self.get_user(realm_id, user_id)?.is_none() {
+            return Ok(());
+        }
         let next = self.ra_generation(realm_id, user_id)?.wrapping_add(1);
         self.storage
             .put(
@@ -19340,6 +19375,49 @@ impl EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
         Ok(existed)
+    }
+
+    /// Restores a spent required-action marker from a backup (GA sweep 4
+    /// round 2), so a flow — or a token's forced password update — that
+    /// ended before the backup cannot end again on the restored store.
+    ///
+    /// Only the two required-action kinds are accepted and the hash must be
+    /// a SHA-256 hex digest, so an archive cannot use this member to write
+    /// any other key. An expired marker, or one already present, is
+    /// [`ImportOutcome::Skipped`]; a present marker is the fact itself, so
+    /// there is nothing to overwrite.
+    fn import_ra_consumed(
+        &self,
+        realm_id: &RealmId,
+        kind: &str,
+        hash: &str,
+        expires_at: i64,
+    ) -> Result<ImportOutcome, IdentityError> {
+        let hex_digest = hash.len() == 64
+            && hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !keys::RA_CONSUMED_KINDS.contains(&kind) || !hex_digest {
+            return Err(IdentityError::InvalidInput {
+                reason: "required-action marker is not one Hearth wrote".to_string(),
+            });
+        }
+        if self.clock.now().as_micros() / 1_000_000 >= expires_at {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let written = self
+            .storage
+            .put_if_absent(
+                realm_id,
+                &keys::encode_consumed_ra(kind, hash),
+                &expires_at.to_le_bytes(),
+            )
+            .map_err(Self::storage_err)?;
+        Ok(if written {
+            ImportOutcome::Created
+        } else {
+            ImportOutcome::Skipped
+        })
     }
 
     /// Restores a user's required-action generation from a backup
@@ -21711,9 +21789,15 @@ mod tests {
         let user = create_test_user(&engine, &realm);
         let user_id = user.id().clone();
         engine.delete_user(&realm, &user_id).expect("delete");
+        // A revocation that raced the delete wrote the row back.
         engine
-            .bump_ra_generation(&realm, &user_id)
-            .expect("a late revocation re-creates the generation");
+            .storage
+            .put(
+                &realm,
+                &keys::encode_ra_generation(&user_id),
+                &3u64.to_le_bytes(),
+            )
+            .expect("a raced revocation re-creates the generation");
 
         assert!(matches!(
             engine.delete_user(&realm, &user_id),
@@ -21726,6 +21810,47 @@ mod tests {
                 .expect("get ra generation")
                 .is_none(),
             "the generation must not outlive the user"
+        );
+    }
+
+    #[test]
+    fn revoking_a_deleted_users_sessions_does_not_recreate_the_generation() {
+        // GA sweep 4 round 2: `revoke_all_user_sessions` bumped `ra:gen` for
+        // any user id, so revoking a deleted (or never-existing) user's
+        // sessions wrote a row naming a user that is gone.
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let user_id = user.id().clone();
+        engine.delete_user(&realm, &user_id).expect("delete");
+
+        engine
+            .revoke_all_user_sessions(&realm, &user_id, None)
+            .expect("revoking nobody's sessions is not an error");
+        let stranger = UserId::new(uuid::Uuid::new_v4());
+        engine
+            .revoke_all_user_sessions(&realm, &stranger, None)
+            .expect("revoking nobody's sessions is not an error");
+
+        for id in [&user_id, &stranger] {
+            assert!(
+                engine
+                    .storage
+                    .get(&realm, &keys::encode_ra_generation(id))
+                    .expect("get ra generation")
+                    .is_none(),
+                "no generation row for a user that does not exist"
+            );
+        }
+        // The control: a live user's revocation still bumps it.
+        let live = create_test_user(&engine, &realm);
+        let before = engine.ra_generation(&realm, live.id()).expect("read");
+        engine
+            .revoke_all_user_sessions(&realm, live.id(), None)
+            .expect("revoke");
+        assert_eq!(
+            engine.ra_generation(&realm, live.id()).expect("read"),
+            before + 1
         );
     }
 
@@ -27510,6 +27635,7 @@ mod tests {
             scope: None,
             client_ip: Some(test_ip.to_string()),
             user_agent: None,
+            dpop_jkt: None,
         };
         let err = engine
             .step_up_mfa_grant_token(&realm, &request)
@@ -28169,6 +28295,7 @@ mod tests {
                     granted_scopes: granted,
                     oid: None,
                     resource: None,
+                    dpop_jkt: None,
                 },
             )
             .expect("issue subject token");

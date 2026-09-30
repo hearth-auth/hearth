@@ -74,6 +74,8 @@ enum ClientTrustLevel {
 message RegisterClientRequest {
   string client_name = 1;
   repeated string redirect_uris = 2;
+  // Not accepted on the admin create paths (REST and gRPC refuse it): Hearth
+  // generates client secrets. Request one with token_endpoint_auth_method.
   optional string client_secret = 3;
   repeated string grant_types = 4;
   AccessTokenAuthorization access_token_authorization = 5;
@@ -86,6 +88,17 @@ message RegisterClientRequest {
   // and EdDSA on the authenticated admin path. Only ID tokens are affected;
   // access and refresh tokens are always EdDSA.
   optional string id_token_signed_response_alg = 7 [json_name = "id_token_signed_response_alg"];
+  // How the client authenticates at the token endpoint (RFC 7591 s2):
+  // "client_secret_basic", "client_secret_post", "private_key_jwt" or "none".
+  // On the authenticated admin create paths (POST /admin/applications,
+  // POST /clients, gRPC CreateApplication and RegisterClient) a
+  // "client_secret_*" value creates a confidential client whose secret Hearth
+  // generates (256 bits from the OS CSPRNG) and returns exactly once, in the
+  // response's client_secret. Only a hash is stored. "private_key_jwt"
+  // requires jwks. Omitted or "none" registers a public client (or a
+  // private_key_jwt client when jwks is given). A client_secret_* method is
+  // refused in a FAPI 2.0 Advanced realm, which accepts private_key_jwt only.
+  optional string token_endpoint_auth_method = 8 [json_name = "token_endpoint_auth_method"];
 }
 
 // Request to update an existing OAuth 2.0 client.
@@ -111,6 +124,12 @@ message OAuthClient {
   AccessTokenAuthorization access_token_authorization = 7;
   // The algorithm this client's ID tokens are signed with: "RS256" or "EdDSA".
   string id_token_signed_response_alg = 8 [json_name = "id_token_signed_response_alg"];
+  // The client secret Hearth generated for a confidential client. Present
+  // only in the response that created the client (token_endpoint_auth_method
+  // "client_secret_basic" or "client_secret_post"); never returned again.
+  // Store it on receipt: Hearth keeps only its hash. Also set, once, by
+  // RegenerateApplicationSecret.
+  optional string client_secret = 9 [json_name = "client_secret"];
 }
 
 // A cursor-based page of OAuth clients.
@@ -291,6 +310,11 @@ message DeleteApplicationRequest {
   string client_id = 1;
 }
 
+// Request to regenerate a confidential client's secret.
+message RegenerateApplicationSecretRequest {
+  string client_id = 1;
+}
+
 message UpdateApplicationCall {
   string client_id = 1;
   UpdateClientRequest body = 2;
@@ -324,6 +348,14 @@ service ApplicationAdminService {
   }
   rpc DeleteApplication(DeleteApplicationRequest) returns (OAuthEmpty) {
     option (google.api.http) = {delete: "/admin/applications/{client_id}"};
+  }
+  // Replaces a confidential client's secret with a new Hearth-generated one
+  // (256 bits from the OS CSPRNG, stored only as a hash). The new secret is
+  // returned once, in the response's client_secret; the old one stops
+  // authenticating at once. Refused for a public client, a FAPI 2.0 client
+  // and in a FAPI 2.0 Advanced realm (private_key_jwt only). Audited.
+  rpc RegenerateApplicationSecret(RegenerateApplicationSecretRequest) returns (OAuthClient) {
+    option (google.api.http) = {post: "/admin/applications/{client_id}/regenerate-secret"};
   }
 }
 
