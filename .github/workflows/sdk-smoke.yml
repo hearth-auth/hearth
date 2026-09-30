@@ -1,6 +1,7 @@
 name: SDK smoke
 
-# Verify that both quickstart examples run against the current Hearth binary.
+# Verify that both quickstart examples run against the current Hearth binary,
+# and run the PHP SDK's integration suite against it.
 # Runs on PRs that touch SDK code or the examples, and on every push to main.
 
 # Audit 2026-08-28 §4.12#12: the PR run reached no required check, so a broken
@@ -244,17 +245,79 @@ jobs:
           kill $GIN_PID 2>/dev/null || true
           kill $HEARTH_PID 2>/dev/null || true
 
+  # ── PHP SDK integration suite ──────────────────────────────────────────────
+  # sdks/php/tests/Integration needs a live `serve --dev`, and the sdk-php job
+  # in ci.yml runs only the unit suite. Nothing ran it, so all three tests
+  # drifted from the server API (bootstrap reuse, RFC 7591 registration,
+  # realm-scoped issuer) unnoticed. It runs here, on the binary this workflow
+  # already builds, so it cannot rot again.
+  php-integration:
+    name: integration / php
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build-hearth
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: "8.3"
+          tools: composer:v2
+
+      - name: composer install
+        working-directory: sdks/php
+        run: composer install --prefer-dist --no-interaction
+
+      - name: Download Hearth binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hearth-binary
+          path: /tmp/hearth-bin
+
+      - name: Make binary executable
+        run: chmod +x /tmp/hearth-bin/hearth
+
+      # From an empty directory: `serve --dev` auto-detects ./hearth.yaml, and
+      # the suite must see the defaults (scripts/check-dev-server-config-isolation.sh).
+      # The suite bootstraps the server itself; bootstrap is anonymous only on
+      # its first call, so nothing else may call it first.
+      - name: Start Hearth dev server
+        run: |
+          RUN_DIR="$(mktemp -d)"
+          (cd "$RUN_DIR" && exec /tmp/hearth-bin/hearth serve --dev --port $HEARTH_PORT) &
+          echo "HEARTH_PID=$!" >> $GITHUB_ENV
+          for i in $(seq 1 30); do
+            if curl -sf "$HEARTH_BASE_URL/health" > /dev/null 2>&1; then
+              echo "Hearth ready after ${i}×0.5s"
+              break
+            fi
+            sleep 0.5
+          done
+          curl -sf "$HEARTH_BASE_URL/health" || (echo "Hearth failed to start" && exit 1)
+
+      - name: composer test-integration
+        working-directory: sdks/php
+        env:
+          HEARTH_TEST_URL: ${{ env.HEARTH_BASE_URL }}
+        run: composer test-integration
+
+      - name: Stop server
+        if: always()
+        run: kill $HEARTH_PID 2>/dev/null || true
+
   # ── Required summary gate ──────────────────────────────────────────────────
   sdk-smoke-ok:
     name: sdk-smoke-ok
     runs-on: ubuntu-latest
-    needs: [typescript-nextjs, go-gin]
+    needs: [typescript-nextjs, go-gin, php-integration]
     if: always()
     steps:
       - name: All smoke jobs passed
         run: |
           if [ "${{ needs.typescript-nextjs.result }}" != "success" ] || \
-             [ "${{ needs.go-gin.result }}" != "success" ]; then
+             [ "${{ needs.go-gin.result }}" != "success" ] || \
+             [ "${{ needs.php-integration.result }}" != "success" ]; then
             echo "One or more SDK smoke jobs failed"
             exit 1
           fi

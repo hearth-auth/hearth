@@ -168,6 +168,9 @@ jobs:
             sdks-rust:
               - 'sdks/rust/**'
               - 'proto/**'
+              # sdks/rust has no rustfmt.toml of its own; `cargo fmt` in the
+              # sdk-rust job reads the repository's.
+              - 'rustfmt.toml'
               - '.github/workflows/ci.yml'
             sdks-php:
               - 'sdks/php/**'
@@ -182,6 +185,11 @@ jobs:
               - 'scripts/check-sdk-conformance.sh'
               - 'docs/specs/SDK.md'
               - '.github/workflows/ci.yml'
+              # sdk-smoke gates on this filter: its own workflow file and the
+              # two quickstart examples it runs must re-run it when edited.
+              - '.github/workflows/sdk-smoke.yml'
+              - 'examples/typescript-nextjs/**'
+              - 'examples/go-gin/**'
             # Gates the proto-freshness job. Audit §4.8#8: generated SDK types
             # could drift from proto/ past the PR gate, because the only
             # freshness check lived in `quality` — gated on the `rust` filter,
@@ -981,12 +989,11 @@ jobs:
   # method the server 405s shipped in all seven SDKs and two integration suites
   # sat red at HEAD unnoticed. Every SDK now runs its own suite here.
   #
-  # Gating: sdk-rust, sdk-python, and sdk-php are green and wired into the
-  # required-summary gate. sdk-go and sdk-typescript run but are NOT gated yet —
-  # their auth-code/refresh/jwks integration tests are red at HEAD for an
-  # unrelated reason (registerClient returns 401 "missing authorization header").
-  # sdk-kotlin runs but is not gated pending a first green CI run. Promotion of
-  # these three into the required gate is tracked as a follow-up (see the issue).
+  # Gating: every sdk-* job is in required-summary's `needs:` and results loop
+  # (audit §4.12#12; scripts/check-required-summary-coverage.sh fails CI if one
+  # drops out), so a red SDK suite blocks the merge. That includes sdk-go,
+  # sdk-typescript and sdk-kotlin, which HEA-2171 first added as run-only.
+  # The PHP integration suite needs a live server and runs in sdk-smoke.yml.
   #
   # Lint (GA sweep 4): every SDK job also runs its language's linter and
   # formatter check, with the tool version pinned in the SDK's own manifest:
@@ -997,7 +1004,8 @@ jobs:
   # failure is reported without waiting for a server build. Kotlin declares
   # no linter (no ktlint/detekt in its Gradle build), so sdk-kotlin has none.
 
-  # Rust SDK — unit suite (client logic, no server). Gated.
+  # Rust SDK — unit suite (client logic, no server). Gated. All features, so
+  # the tower/actix middleware modules and their tests are compiled and run.
   sdk-rust:
     name: sdk-rust
     needs: filter
@@ -1021,9 +1029,9 @@ jobs:
       - name: cargo clippy (all targets, all features)
         working-directory: sdks/rust
         run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: cargo test
+      - name: cargo test (all features)
         working-directory: sdks/rust
-        run: cargo test
+        run: cargo test --all-features
 
   # Python SDK — unit suite (respx-mocked). Gated.
   sdk-python:
@@ -1082,8 +1090,7 @@ jobs:
         working-directory: sdks/php
         run: composer test
 
-  # Kotlin SDK — unit suite (MockWebServer). Runs; promotion to the gate tracked
-  # as a follow-up (no local JVM to confirm the first green run).
+  # Kotlin SDK — unit suite (MockWebServer). Gated.
   sdk-kotlin:
     name: sdk-kotlin
     needs: filter
@@ -1109,9 +1116,7 @@ jobs:
         run: gradle test
 
   # Go SDK — integration suite; the tests build and boot the hearth server, so
-  # Rust + protoc are provisioned. Runs but NOT gated: the auth-code/refresh/
-  # verify-token tests are red at HEAD (registerClient 401), unrelated to the
-  # createRealm removal. Promotion to the gate is tracked as a follow-up.
+  # Rust + protoc are provisioned. Gated.
   sdk-go:
     name: sdk-go
     needs: filter
@@ -1146,9 +1151,7 @@ jobs:
         run: go test ./...
 
   # TypeScript SDK — integration suite; the tests build and boot the hearth
-  # server, so Rust + protoc + Node are provisioned. Runs but NOT gated: the
-  # auth-flow and jwks integration tests are red at HEAD (registerClient 401),
-  # unrelated to the createRealm removal. Promotion tracked as a follow-up.
+  # server, so Rust + protoc + Node are provisioned. Gated.
   sdk-typescript:
     name: sdk-typescript
     needs: filter
@@ -1677,7 +1680,7 @@ jobs:
     name: sdk-smoke
     needs: [filter]
     # Old trigger: sdks/**, examples/{typescript-nextjs,go-gin}/**, src/**.
-    # `sdks-any` covers the first, `rust` covers src/**.
+    # `sdks-any` covers the first two (and sdk-smoke.yml), `rust` covers src/**.
     if: (needs.filter.result == 'success' && (needs.filter.outputs.sdks-any == 'true' || needs.filter.outputs.rust == 'true')) || github.ref == 'refs/heads/main'
     uses: ./.github/workflows/sdk-smoke.yml
     permissions:

@@ -8,29 +8,45 @@ use Hearth\AdminClient;
 use Hearth\Claims;
 use Hearth\HearthClient;
 use Hearth\Types\IntrospectionResult;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
 /**
  * Integration tests for HearthClient + AdminClient against a live Hearth dev server.
  *
- * @group integration
+ * These tests require a running `hearth serve --dev` instance (a binary built
+ * with the `dev-endpoints` feature). They are skipped automatically when
+ * HEARTH_TEST_URL is not set in the environment.
  *
- * These tests require a running `hearth serve --dev` instance. They are skipped
- * automatically when HEARTH_TEST_URL is not set in the environment.
- *
- * Quick start:
+ * Quick start (a FRESH server: only the first bootstrap call is anonymous):
  *   make dev &
- *   HEARTH_TEST_URL=http://127.0.0.1:8420 vendor/bin/phpunit --group integration
+ *   HEARTH_TEST_URL=http://127.0.0.1:8420 composer test-integration
+ *
+ * Against a server that was already bootstrapped, pass the admin access token
+ * from that first call as HEARTH_TEST_ADMIN_TOKEN; re-bootstrap then refreshes
+ * the tokens instead of answering 401.
  */
+#[Group('integration')]
 final class HearthClientTest extends TestCase
 {
+    /**
+     * One bootstrap per process: `POST /admin/bootstrap` is anonymous only on
+     * its first call, so every test shares the credentials it returned.
+     *
+     * @var array{realmId: string, token: string, realmName: string}|null
+     */
+    private static ?array $bootstrapped = null;
+
     private string $baseUrl;
 
-    /** Bootstrap token from POST /admin/bootstrap — used for all admin API calls. */
+    /** Admin access token from POST /admin/bootstrap — used for all admin API calls. */
     private string $bootstrapToken;
 
-    /** Realm ID created during bootstrap. */
+    /** ID of the dev realm created during bootstrap. */
     private string $realmId;
+
+    /** Base URL of the dev realm: its issuer, discovery document and token endpoint. */
+    private string $realmUrl;
 
     protected function setUp(): void
     {
@@ -41,7 +57,12 @@ final class HearthClientTest extends TestCase
 
         $this->baseUrl = rtrim($url, '/');
 
-        [$this->realmId, $this->bootstrapToken] = $this->bootstrap();
+        self::$bootstrapped ??= $this->bootstrap();
+        $this->realmId        = self::$bootstrapped['realmId'];
+        $this->bootstrapToken = self::$bootstrapped['token'];
+        // A realm signs with its own key and issues `iss = {base}/realms/{name}`;
+        // the server root is a different issuer with a different JWKS.
+        $this->realmUrl = $this->baseUrl . '/realms/' . rawurlencode(self::$bootstrapped['realmName']);
     }
 
     // -------------------------------------------------------------------------
@@ -54,16 +75,15 @@ final class HearthClientTest extends TestCase
 
         $accessToken = $this->issueClientCredentialsToken($clientId, $clientSecret);
 
-        $hearth = new HearthClient(
-            issuerUrl: $this->baseUrl,
-            clientId: $clientId,
-        );
+        // No clientId: a client_credentials token is not audience-bound to the
+        // client that requested it, so the audience check is skipped.
+        $hearth = new HearthClient(issuerUrl: $this->realmUrl);
 
         $claims = $hearth->verifyToken($accessToken);
 
         self::assertInstanceOf(Claims::class, $claims);
-        self::assertNotEmpty($claims->subject());
-        self::assertSame($this->baseUrl, $claims->issuer());
+        self::assertSame('client_' . $clientId, $claims->subject());
+        self::assertSame($this->realmUrl, $claims->issuer());
     }
 
     // -------------------------------------------------------------------------
@@ -77,7 +97,7 @@ final class HearthClientTest extends TestCase
         $accessToken = $this->issueClientCredentialsToken($clientId, $clientSecret);
 
         $hearth = new HearthClient(
-            issuerUrl: $this->baseUrl,
+            issuerUrl: $this->realmUrl,
             clientId: $clientId,
             clientSecret: $clientSecret,
         );
@@ -101,13 +121,12 @@ final class HearthClientTest extends TestCase
             accessToken: $this->bootstrapToken,
         );
 
-        $email    = 'integration-test-' . uniqid() . '@example.com';
-        $username = 'itest-' . uniqid();
+        $email = 'integration-test-' . uniqid() . '@example.com';
 
         // Create
         $created = $admin->createUser([
-            'email'    => $email,
-            'username' => $username,
+            'email'        => $email,
+            'display_name' => 'PHP Integration Test',
         ]);
         self::assertArrayHasKey('id', $created);
         self::assertSame($email, $created['email'] ?? null);
@@ -132,15 +151,21 @@ final class HearthClientTest extends TestCase
     // -------------------------------------------------------------------------
 
     /**
-     * Calls POST /admin/bootstrap (dev-mode only) and returns [realmId, token].
+     * Calls POST /admin/bootstrap (dev-mode only) and resolves the dev realm's name.
      *
-     * @return array{string, string}
+     * @return array{realmId: string, token: string, realmName: string}
      */
     private function bootstrap(): array
     {
+        $headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
+        $adminToken = getenv('HEARTH_TEST_ADMIN_TOKEN');
+        if ($adminToken !== false && $adminToken !== '') {
+            $headers .= "Authorization: Bearer {$adminToken}\r\n";
+        }
+
         $ctx  = stream_context_create(['http' => [
             'method'  => 'POST',
-            'header'  => "Content-Type: application/json\r\nAccept: application/json\r\n",
+            'header'  => $headers,
             'content' => '{}',
             'ignore_errors' => true,
         ]]);
@@ -152,10 +177,20 @@ final class HearthClientTest extends TestCase
 
         $data = json_decode($body, true);
         if (!is_array($data) || !isset($data['access_token'], $data['realm_id'])) {
-            self::fail('Unexpected bootstrap response: ' . $body);
+            self::fail(
+                'Unexpected bootstrap response: ' . $body
+                . ' (an already-bootstrapped server needs HEARTH_TEST_ADMIN_TOKEN)',
+            );
         }
 
-        return [(string) $data['realm_id'], (string) $data['access_token']];
+        $realmId = (string) $data['realm_id'];
+        $token   = (string) $data['access_token'];
+
+        $admin = new AdminClient(baseUrl: $this->baseUrl, realmId: $realmId, accessToken: $token);
+        $realm = $admin->getRealm($realmId);
+        self::assertArrayHasKey('name', $realm);
+
+        return ['realmId' => $realmId, 'token' => $token, 'realmName' => (string) $realm['name']];
     }
 
     /**
@@ -171,11 +206,12 @@ final class HearthClientTest extends TestCase
             accessToken: $this->bootstrapToken,
         );
 
-        $name   = 'test-client-' . uniqid();
+        // RFC 7591 registration metadata. The auth method makes the client
+        // confidential, so the response carries a client_secret.
         $result = $admin->createClient([
-            'name'          => $name,
-            'client_type'   => 'confidential',
-            'grant_types'   => ['client_credentials'],
+            'client_name'                => 'php-it-' . uniqid(),
+            'grant_types'                => ['client_credentials'],
+            'token_endpoint_auth_method' => 'client_secret_basic',
         ]);
 
         self::assertArrayHasKey('client_id', $result);
@@ -185,21 +221,21 @@ final class HearthClientTest extends TestCase
     }
 
     /**
-     * Issues a client_credentials access token from the OIDC token endpoint.
+     * Issues a client_credentials access token from the realm's token endpoint.
      */
     private function issueClientCredentialsToken(string $clientId, string $clientSecret): string
     {
-        $tokenUrl = $this->baseUrl . '/oauth/token';
+        $tokenUrl = $this->realmUrl . '/token';
         $body     = http_build_query([
-            'grant_type'    => 'client_credentials',
-            'client_id'     => $clientId,
-            'client_secret' => $clientSecret,
-            'scope'         => 'openid',
+            'grant_type' => 'client_credentials',
+            'scope'      => 'openid',
         ]);
+        $basic = base64_encode(rawurlencode($clientId) . ':' . rawurlencode($clientSecret));
 
         $ctx = stream_context_create(['http' => [
             'method'  => 'POST',
-            'header'  => "Content-Type: application/x-www-form-urlencoded\r\nAccept: application/json\r\n",
+            'header'  => "Content-Type: application/x-www-form-urlencoded\r\nAccept: application/json\r\n"
+                . "Authorization: Basic {$basic}\r\n",
             'content' => $body,
             'ignore_errors' => true,
         ]]);
