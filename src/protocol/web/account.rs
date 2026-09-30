@@ -210,7 +210,9 @@ pub async fn account_change_password(
     let identity = state.identity.clone();
     let realm_id = session.realm_id.clone();
     let user_id = session.user_id.clone();
-    let change_result = match crate::identity::gate()
+    // A system-realm operator draws from the admin-reserved pool, as at the
+    // console login and every other operator step-up (GA sweep 4).
+    let change_result = match crate::identity::gate_for_realm(&session.realm_id)
         .run(move || identity.change_password(&realm_id, &user_id, &current, &new_pw))
         .await
     {
@@ -587,7 +589,8 @@ pub async fn totp_activate(
     let identity = state.identity.clone();
     // Step-up password verify is an Argon2id op — route it through the shared
     // KDF admission gate (HEA-1891 / F3) rather than an ungated spawn_blocking.
-    let pw_result = crate::identity::gate()
+    // A system-realm operator draws from the admin-reserved pool (GA sweep 4).
+    let pw_result = crate::identity::gate_for_realm(&session.realm_id)
         .run(move || identity.verify_password(&realm_id, &user_id, &password))
         .await;
     match pw_result {

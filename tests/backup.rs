@@ -3728,6 +3728,7 @@ async fn restore_keeps_required_action_generations() {
                 vec![RequiredAction::UpdatePassword],
                 None,
                 MfaProof::None,
+                false,
                 None,
                 now,
             )
@@ -3782,4 +3783,117 @@ async fn restore_keeps_required_action_generations() {
         "a second restore lowered the generation and revived a revoked RA token ({:?})",
         after.map(|c| c.generation)
     );
+}
+
+/// GA sweep 4 round 2: a required-action flow ends once — its end claims a
+/// single-use marker (`consumed:ra-flow:*`), and a forced password update
+/// claims one per token (`consumed:ra-password:*`). The archive carried
+/// neither, so on a restored store a flow (or an RA password update) that
+/// had already ended before the backup could end a second time while its
+/// token lived.
+#[tokio::test]
+async fn restore_keeps_ended_required_action_flows() {
+    use hearth::core::Timestamp;
+    use hearth::identity::{IdentityError, MfaProof, RequiredAction};
+
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, email, password) = seeded_realm(&src);
+    let user = src
+        .identity()
+        .get_user_by_email(&realm, &email)
+        .expect("lookup")
+        .expect("seeded user")
+        .id()
+        .clone();
+    let now = Timestamp::from_micros(
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_micros(),
+        )
+        .expect("micros"),
+    );
+    let ra_expires = Timestamp::from_micros(now.as_micros() + 600 * 1_000_000);
+
+    // A forced password update completed on the source with this RA token.
+    let pw_token = src
+        .identity()
+        .generate_browser_ra_token(
+            &realm,
+            &user,
+            vec![RequiredAction::UpdatePassword],
+            None,
+            MfaProof::None,
+            false,
+            None,
+            now,
+        )
+        .expect("mint RA token");
+    let new_password = CleartextPassword::from_string("An0ther-Sup3rS3cret!".to_string());
+    src.identity()
+        .complete_required_password_update(
+            &realm,
+            &user,
+            &pw_token,
+            ra_expires,
+            &password,
+            &new_password,
+        )
+        .expect("the password update completes once");
+
+    // Minted after the update (which revoked the user's sessions): one flow
+    // ends on the source, the other is still open at backup time.
+    let mint = || {
+        let token = src
+            .identity()
+            .generate_browser_ra_token(
+                &realm,
+                &user,
+                vec![RequiredAction::UpdatePassword],
+                None,
+                MfaProof::None,
+                false,
+                None,
+                now,
+            )
+            .expect("mint RA token");
+        src.identity()
+            .validate_ra_token(&realm, &token, now)
+            .expect("valid RA token")
+    };
+    let ended = mint();
+    let open = mint();
+    src.identity()
+        .consume_required_action_flow(&realm, &ended)
+        .expect("the flow ends once");
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open archive");
+    make_importer(&dst)
+        .import_realm(&slug, &reader, &import_opts_with_passphrase())
+        .expect("import realm");
+
+    let again = dst.identity().consume_required_action_flow(&realm, &ended);
+    assert!(
+        matches!(again, Err(IdentityError::InvalidToken)),
+        "a flow that ended before the backup ends again on the restored store ({again:?})"
+    );
+    let again = dst.identity().complete_required_password_update(
+        &realm,
+        &user,
+        &pw_token,
+        ra_expires,
+        &new_password,
+        &CleartextPassword::from_string("Yet-An0ther-S3cret!".to_string()),
+    );
+    assert!(
+        matches!(again, Err(IdentityError::InvalidToken)),
+        "an RA password update completed before the backup completes again ({again:?})"
+    );
+    dst.identity()
+        .consume_required_action_flow(&realm, &open)
+        .expect("a flow still open at backup time can end on the restored store");
 }
