@@ -106,3 +106,75 @@ mod secret_field_tests {
         );
     }
 }
+
+/// The `error` every JSON step-up surface answers a locked account with
+/// (GA sweep 4). The body's `error_code` is
+/// [`crate::protocol::error_codes::RATE_LIMITED`], as on every other
+/// rate-limit or lockout refusal.
+pub const STEP_UP_LOCKED_ERROR: &str = "too_many_attempts";
+
+/// Sets `Retry-After` on `response`: `retry_after` in whole seconds, rounded
+/// up, at least one.
+pub(crate) fn set_retry_after(
+    response: &mut axum::response::Response,
+    retry_after: std::time::Duration,
+) {
+    let secs = retry_after
+        .as_secs()
+        .saturating_add(u64::from(retry_after.subsec_nanos() > 0))
+        .max(1);
+    response.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from(secs),
+    );
+}
+
+/// The one response every JSON step-up surface answers a locked account
+/// with: `429 Too Many Requests`, `Retry-After`, and
+/// `{"error": "too_many_attempts", "error_code": "HEARTH_RATE_LIMITED"}`.
+///
+/// A locked account's proof is never checked, so the answer must not read as
+/// "wrong proof" (`403 step_up_required`): that tells the client to try
+/// another credential, and every try is refused until the window passes.
+pub(crate) fn locked_json_response(retry_after: std::time::Duration) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let mut response = (
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        axum::Json(serde_json::json!({
+            "error": STEP_UP_LOCKED_ERROR,
+            "error_description":
+                "too many failed attempts; the account is locked — retry after the \
+                 Retry-After interval",
+            "error_code": crate::protocol::error_codes::RATE_LIMITED,
+        })),
+    )
+        .into_response();
+    set_retry_after(&mut response, retry_after);
+    response
+}
+
+#[cfg(test)]
+mod locked_response_tests {
+    use super::*;
+
+    #[test]
+    fn retry_after_rounds_up_to_whole_seconds_and_is_never_zero() {
+        for (given, expected) in [
+            (std::time::Duration::from_millis(1), "1"),
+            (std::time::Duration::ZERO, "1"),
+            (std::time::Duration::from_millis(1_500), "2"),
+            (std::time::Duration::from_secs(300), "300"),
+        ] {
+            let response = locked_json_response(given);
+            assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
+                Some(expected),
+                "from {given:?}"
+            );
+        }
+    }
+}

@@ -246,6 +246,16 @@ pub async fn account_change_password(
         Err(IdentityError::InvalidCredential { .. }) => {
             render_with_password_error(&state, &session, "Current password is incorrect.")
         }
+        // The account's login lockout refused the current password before it
+        // was checked (GA sweep 4): say so, and when to come back.
+        Err(IdentityError::RateLimited) => locked_page(
+            render_with_password_error(&state, &session, LOCKED_MESSAGE),
+            crate::identity::password_retry_after(
+                state.identity.as_ref(),
+                &session.realm_id,
+                &session.user_id,
+            ),
+        ),
         Err(IdentityError::InvalidInput { reason }) => {
             render_with_password_error(&state, &session, &reason)
         }
@@ -582,6 +592,16 @@ pub async fn totp_activate(
         .await;
     match pw_result {
         Ok(Ok(true)) => {} // password correct, proceed
+        Ok(Err(IdentityError::RateLimited)) => {
+            return locked_page(
+                render_totp_error(&state, &session, LOCKED_MESSAGE),
+                crate::identity::password_retry_after(
+                    state.identity.as_ref(),
+                    &session.realm_id,
+                    &session.user_id,
+                ),
+            );
+        }
         Ok(Ok(false) | Err(_)) => {
             return render_totp_error(
                 &state,
@@ -676,7 +696,17 @@ pub async fn totp_disable(
         tokio::task::spawn_blocking(move || identity.verify_totp(&realm_id, &user_id, &code)).await;
     match totp_result {
         Ok(Ok(())) => {} // code correct, proceed
-        Ok(Err(IdentityError::InvalidMfaCode | IdentityError::RateLimited)) => {
+        Ok(Err(IdentityError::RateLimited)) => {
+            return locked_page(
+                render_disable_error(&state, &session, LOCKED_MESSAGE),
+                crate::identity::totp_retry_after(
+                    state.identity.as_ref(),
+                    &session.realm_id,
+                    &session.user_id,
+                ),
+            );
+        }
+        Ok(Err(IdentityError::InvalidMfaCode)) => {
             return render_disable_error(
                 &state,
                 &session,
@@ -768,7 +798,17 @@ pub async fn totp_regenerate_codes(
             .await;
     match totp_result {
         Ok(Ok(())) => {} // code correct, proceed
-        Ok(Err(IdentityError::InvalidMfaCode | IdentityError::RateLimited)) => {
+        Ok(Err(IdentityError::RateLimited)) => {
+            return locked_page(
+                render_disable_error(&state, &session, LOCKED_MESSAGE),
+                crate::identity::totp_retry_after(
+                    state.identity.as_ref(),
+                    &session.realm_id,
+                    &session.user_id,
+                ),
+            );
+        }
+        Ok(Err(IdentityError::InvalidMfaCode)) => {
             return render_disable_error(
                 &state,
                 &session,
@@ -832,6 +872,20 @@ pub async fn totp_regenerate_codes(
 
 /// Re-renders the TOTP disable / regenerate page with an inline error.
 /// Used when the step-up TOTP verification fails on the MFA-enabled form.
+/// What a console step-up page says when the account is locked out.
+const LOCKED_MESSAGE: &str =
+    "Too many failed attempts. Your account is locked for a few minutes; try again later.";
+
+/// Marks a re-rendered step-up page as a lockout: `429 Too Many Requests`
+/// with `Retry-After`, as every step-up surface answers a locked account
+/// (GA sweep 4). The page used to say the code or password was wrong, with
+/// `200`, although it was never checked.
+fn locked_page(mut page: Response, retry_after: std::time::Duration) -> Response {
+    *page.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    crate::protocol::step_up::set_retry_after(&mut page, retry_after);
+    page
+}
+
 fn render_disable_error(state: &Arc<WebState>, session: &UiSession, msg: &str) -> Response {
     let admin = super::handlers::is_admin(state, session);
     let mut tmpl = TotpEnrollTemplate::new(
@@ -960,7 +1014,9 @@ fn load_passkey_rows(state: &Arc<WebState>, session: &UiSession) -> Vec<PasskeyR
 ///
 /// `403 step_up_required` when the proof is absent or wrong. `503` with
 /// `Retry-After` when the KDF admission gate shed the password verification —
-/// the caller may retry, so it MUST NOT read as a credential failure.
+/// the caller may retry, so it MUST NOT read as a credential failure. `429`
+/// with `Retry-After` when the account is locked out
+/// ([`crate::protocol::step_up::locked_json_response`], GA sweep 4).
 fn step_up_error_response(error: &StepUpError) -> Response {
     use axum::Json;
     match error {
@@ -976,6 +1032,9 @@ fn step_up_error_response(error: &StepUpError) -> Response {
             })),
         )
             .into_response(),
+        StepUpError::Locked { retry_after } => {
+            crate::protocol::step_up::locked_json_response(*retry_after)
+        }
         _ => (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({

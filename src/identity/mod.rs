@@ -116,8 +116,8 @@ pub use sms::{
     StubSmsHttpTransport, TwilioSmsSender,
 };
 pub use step_up::{
-    has_step_up_credential, verify_operator_step_up, verify_step_up, SecondFactorProof,
-    StepUpAssertion, StepUpError, StepUpProof,
+    has_step_up_credential, password_retry_after, totp_retry_after, verify_operator_step_up,
+    verify_step_up, SecondFactorProof, StepUpAssertion, StepUpError, StepUpProof,
 };
 pub use tokens::{
     decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
@@ -530,6 +530,23 @@ pub trait IdentityEngine: Send + Sync {
     /// dummy answered measurably faster for an address with no account
     /// (GA audit L14).
     fn dummy_verify_password_for_realm(&self, realm_id: &RealmId, password: &CleartextPassword);
+
+    /// How long the account's login lockout still runs — the lockout
+    /// [`Self::verify_password`] answers with [`IdentityError::RateLimited`]
+    /// — or `None` when it is not engaged. Feeds the `Retry-After` of a
+    /// locked step-up (GA sweep 4).
+    fn login_lockout_remaining(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Option<std::time::Duration>;
+
+    /// How long until [`Self::verify_totp`] checks a code for this account
+    /// again after answering [`IdentityError::RateLimited`]: the node-local
+    /// TOTP lockout's remaining time, or the end of the cluster-wide guess
+    /// window, whichever is later. An upper bound, at most the 5-minute TOTP
+    /// window. Feeds the `Retry-After` of a locked step-up (GA sweep 4).
+    fn mfa_lockout_remaining(&self, realm_id: &RealmId, user_id: &UserId) -> std::time::Duration;
 
     /// Checks whether the given IP has exceeded the per-IP login rate limit
     /// for a realm. Returns `Err(RateLimited)` when blocked.

@@ -571,6 +571,27 @@ struct AttemptTracker {
     last_failure_micros: i64,
 }
 
+/// How long `tracker`'s lockout still runs at `now_micros`, or `None` when it
+/// is not engaged (fewer than `max_attempts` failures, or the window has
+/// passed). Mirrors the refusal test in `check_rate_limit` /
+/// `check_mfa_rate_limit`.
+fn remaining_lockout(
+    tracker: &AttemptTracker,
+    max_attempts: u32,
+    lockout_micros: i64,
+    now_micros: i64,
+) -> Option<std::time::Duration> {
+    if tracker.failed_count < max_attempts {
+        return None;
+    }
+    let left =
+        lockout_micros.saturating_sub(now_micros.saturating_sub(tracker.last_failure_micros));
+    u64::try_from(left)
+        .ok()
+        .filter(|&micros| micros > 0)
+        .map(std::time::Duration::from_micros)
+}
+
 /// Prunes stale entries from an in-memory rate-tracker `HashMap`.
 ///
 /// Removes all entries whose `last_failure_micros` is strictly before
@@ -8666,6 +8687,39 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
     fn dummy_verify_password_for_realm(&self, realm_id: &RealmId, password: &CleartextPassword) {
         self.dummy_verify_for_realm(realm_id, password);
+    }
+
+    fn login_lockout_remaining(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Option<std::time::Duration> {
+        let (max_attempts, lockout_micros) = self.effective_rate_limit(realm_id);
+        let trackers = self.attempt_trackers.lock().expect("tracker lock");
+        let tracker = trackers.get(&Self::tracker_key(realm_id, user_id))?;
+        remaining_lockout(
+            tracker,
+            max_attempts,
+            lockout_micros,
+            self.clock.now().as_micros(),
+        )
+    }
+
+    fn mfa_lockout_remaining(&self, realm_id: &RealmId, user_id: &UserId) -> std::time::Duration {
+        let now = self.clock.now().as_micros();
+        let tracker = {
+            let trackers = self.mfa_attempt_trackers.lock().expect("mfa tracker lock");
+            trackers
+                .get(&Self::mfa_tracker_key(realm_id, user_id))
+                .and_then(|t| {
+                    remaining_lockout(t, Self::MFA_MAX_ATTEMPTS, Self::MFA_LOCKOUT_MICROS, now)
+                })
+        };
+        let (_, window_ends) = self.mfa_guess_window(user_id);
+        let window = std::time::Duration::from_micros(
+            u64::try_from(window_ends.as_micros().saturating_sub(now)).unwrap_or(0),
+        );
+        tracker.map_or(window, |t| t.max(window))
     }
 
     fn dummy_verify_password(&self, password: &CleartextPassword) {
