@@ -190,6 +190,18 @@ This lock is process-scoped and cannot be shared across nodes. Each node in a cl
 
 **In Kubernetes:** Use `accessMode: ReadWriteOnce` and a separate PVC per pod. A `ReadWriteMany` mount shared between pods will trigger the lock and prevent startup.
 
+### P-1 — Replicated write throughput is low
+
+Every Raft entry a node applies is synced to disk on its own; applies are not batched into one sync. On the development machine used for the 2026-09-30 measurement this capped cluster writes at about **27 writes per second**. Logins, token issuance and admin changes are all writes, so a cluster handles far less write traffic than a single node.
+
+**Consequence:** size cluster evaluations for low write rates. A single node does not have this limit.
+
+### P-2 — Raft snapshots are kept in memory only
+
+A node holds its latest Raft snapshot in memory. After a restart, it has no snapshot on disk: it rebuilds state from its local store and log, and a lagging follower may need the leader to build and send a fresh snapshot. No committed data is lost, because the storage engine and the Raft log are durable, but catch-up after a restart costs more than it needs to.
+
+**Consequence:** expect slower recovery of a restarted node in a large realm.
+
 ---
 
 ## When Clustering Will Be Production-Ready
@@ -198,8 +210,10 @@ The Wave 5 roadmap items covering clustering are:
 - **HEA-2177 (W5-1)** — RBAC/claims cache invalidation on followers (C-5; partially addressed — RBAC, audit, revoked-token and control-epoch rows are now forwarded, see C-5)
 - **HEA-2178 (W5-2)** — Online membership changes via `add_learner` / `change_membership` (C-6)
 - ~~**HEA-2173 (W3-3)** — Follower-write 307 redirect to leader instead of HTTP 500 (H-3)~~ — superseded: followers forward writes to the leader inside the cluster (H-3, fixed)
+- **P-1** — Batch the disk sync per applied batch of Raft entries (group commit on apply)
+- **P-2** — Persist Raft snapshots to disk
 
-The remaining two are post-GA. Because Hearth 1.x ships **no supported multi-node path**, none of
+The remaining items are post-GA. Because Hearth 1.x ships **no supported multi-node path**, none of
 them gate the 1.0 release.
 
 Until these ship, the production deployment model is single-node with external backups and a planned failover procedure. If your reliability requirements exceed what a single node provides, contact us to understand the timeline.
