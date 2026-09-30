@@ -79,6 +79,31 @@ struct StoredSnapshot {
     data: Vec<u8>,
 }
 
+/// The node's current snapshot, shared by the state machine (install, serve)
+/// and its snapshot builders (build). The lock is held only to swap or clone
+/// the `Arc`, never across an `.await` or while copying snapshot bytes.
+type SnapshotSlot = Arc<std::sync::Mutex<Option<Arc<StoredSnapshot>>>>;
+
+fn snapshot_slot_get(slot: &SnapshotSlot) -> Option<Arc<StoredSnapshot>> {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Stores `snap` unless the slot already holds a snapshot that covers more
+/// of the log (a build racing an install must not roll the slot back).
+fn snapshot_slot_offer(slot: &SnapshotSlot, snap: StoredSnapshot) {
+    let mut guard = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let newer = guard
+        .as_ref()
+        .is_none_or(|cur| cur.meta.last_log_id <= snap.meta.last_log_id);
+    if newer {
+        *guard = Some(Arc::new(snap));
+    }
+}
+
 // ── HearthSnapshotBuilder ─────────────────────────────────────────────────────
 
 /// Builds a snapshot by scanning the full key-space of every realm on disk.
@@ -97,6 +122,8 @@ pub struct HearthSnapshotBuilder {
     engine: Arc<dyn StorageEngine>,
     last_applied: Option<LogId<u64>>,
     last_membership: StoredMembership<u64, HearthNode>,
+    /// Where the built snapshot is kept, so the node can serve it.
+    current: SnapshotSlot,
 }
 
 impl RaftSnapshotBuilder<HearthRaftConfig> for HearthSnapshotBuilder {
@@ -159,6 +186,18 @@ impl RaftSnapshotBuilder<HearthRaftConfig> for HearthSnapshotBuilder {
             "snapshot built"
         );
 
+        // Keep it: this node serves it to any follower whose next entry the
+        // log no longer holds. Returning it to openraft alone kept nothing, so
+        // a leader that had purged its log failed "snapshot not found" and its
+        // Raft core stopped.
+        snapshot_slot_offer(
+            &self.current,
+            StoredSnapshot {
+                meta: meta.clone(),
+                data: compressed.clone(),
+            },
+        );
+
         Ok(Snapshot {
             meta,
             snapshot: Box::new(Cursor::new(compressed)),
@@ -186,7 +225,7 @@ pub struct HearthStateMachine {
     /// Last applied membership config.
     last_membership: StoredMembership<u64, HearthNode>,
     /// Most recently built or installed snapshot (kept for `get_current_snapshot`).
-    current_snapshot: Option<StoredSnapshot>,
+    current_snapshot: SnapshotSlot,
     /// Slot for the node-local projection observer (audit 2026-08-28 §4.16#5).
     ///
     /// A shared `OnceLock` rather than a direct field because the state
@@ -229,7 +268,7 @@ impl HearthStateMachine {
             engine,
             last_applied,
             last_membership,
-            current_snapshot: None,
+            current_snapshot: Arc::default(),
             observer,
         })
     }
@@ -318,6 +357,7 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
             engine: Arc::clone(&self.engine),
             last_applied: self.last_applied,
             last_membership: self.last_membership.clone(),
+            current: Arc::clone(&self.current_snapshot),
         }
     }
 
@@ -381,10 +421,13 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
         self.last_applied = meta.last_log_id;
         self.last_membership = meta.last_membership.clone();
 
-        self.current_snapshot = Some(StoredSnapshot {
-            meta: meta.clone(),
-            data: compressed,
-        });
+        snapshot_slot_offer(
+            &self.current_snapshot,
+            StoredSnapshot {
+                meta: meta.clone(),
+                data: compressed,
+            },
+        );
 
         info!(
             snapshot_id = %meta.snapshot_id,
@@ -398,13 +441,12 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<HearthRaftConfig>>, StorageError<u64>> {
-        match &self.current_snapshot {
-            None => Ok(None),
-            Some(snap) => Ok(Some(Snapshot {
+        Ok(
+            snapshot_slot_get(&self.current_snapshot).map(|snap| Snapshot {
                 meta: snap.meta.clone(),
                 snapshot: Box::new(Cursor::new(snap.data.clone())),
-            })),
-        }
+            }),
+        )
     }
 }
 
@@ -1391,6 +1433,43 @@ mod tests {
 
         sm.install_snapshot(&meta, data).await.unwrap();
         assert!(sm.get_current_snapshot().await.unwrap().is_some());
+    }
+
+    /// A leader serves lagging followers the snapshot it BUILT, not only one
+    /// it installed. The builder returned the snapshot to openraft and kept
+    /// nothing, so `get_current_snapshot` answered `None` on every node that
+    /// had never installed one — and a leader that had purged its log (as it
+    /// does after every snapshot) failed with "snapshot not found" as soon as
+    /// a follower needed it, which openraft treats as a fatal storage error:
+    /// the leader's Raft core stopped.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn get_current_snapshot_returns_the_snapshot_this_node_built() {
+        let dir = tempdir().unwrap();
+        let mut sm = open_sm(dir.path().join("data").as_path());
+        sm.apply([make_put_entry(
+            1,
+            make_realm(),
+            b"k".to_vec(),
+            b"v".to_vec(),
+        )])
+        .await
+        .unwrap();
+
+        let built = sm
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+
+        let current = sm
+            .get_current_snapshot()
+            .await
+            .unwrap()
+            .expect("the snapshot this node built must be served to followers");
+        assert_eq!(current.meta.snapshot_id, built.meta.snapshot_id);
+        assert_eq!(current.snapshot.into_inner(), built.snapshot.into_inner());
     }
 
     // ── HEA-2131 regression pins ──────────────────────────────────────────────

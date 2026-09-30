@@ -119,26 +119,68 @@ client-request forwarding, as in etcd and Consul (`src/cluster/engine.rs`,
 provably never entered the Raft log: the leader could not be reached at all, or it answered that
 it is no longer the leader without proposing the write. Once the request may have reached a
 leader that proposed it (the connection dropped mid-call, the leader's commit wait timed out, the
-leader died), the outcome is unknown and the write fails with
-`the write was forwarded to the leader at <addr> and its outcome is unknown` instead of being
-retried: a retried single-use claim would answer "already used" for the caller's own write, and a
-retried counter increment would count twice. The caller (and the HTTP client) should re-read
-before retrying, exactly as for a `cluster.write_timeout_ms` timeout on the leader itself.
+leader died), the outcome is unknown and the write fails instead of being retried: a retried single-use claim
+would answer "already used" for the caller's own write, and a retried counter increment would
+count twice. The caller should re-read before retrying, exactly as for a
+`cluster.write_timeout_ms` timeout on the leader itself.
+
+**What clients see.** A write the cluster cannot serve right now answers **`503 Service
+Unavailable`** with a `Retry-After` header (2 s) and one of two stable codes
+([error codes](./error-codes.md#cluster-availability)); gRPC answers **`UNAVAILABLE`**:
+
+| `error_code` | When | What to do |
+|---|---|---|
+| `HEARTH_CLUSTER_UNAVAILABLE` | No leader reachable within the bound, the leader at its forwarding limit, or this node's reads fenced by replication lag. Nothing was written. | Retry after `Retry-After`. |
+| `HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN` | The leader died or the connection dropped mid-call, a commit wait expired, or the write committed but this node has not applied it yet. | Re-read, then retry only if the write is absent. |
+
+Neither body carries peer addresses or other internals; those are logged at `WARN` on the node.
+Earlier builds answered all of these with a generic `500`.
+
+**Metric.** `hearth_cluster_forwarded_writes_total{outcome}` counts every forwarded write on the
+forwarding node, by one of a fixed set of outcomes: `committed`, `not_applied_locally`,
+`not_leader`, `unreachable`, `busy`, `rejected`, `outcome_unknown`. All seven series exist (at 0)
+from the first scrape. Alert on a sustained rate of `outcome_unknown`, `unreachable` or `busy`.
 
 **Bounds.** Finding a leader plus the forwarded call are bounded by `cluster.write_timeout_ms`
 (default 10 s) plus 2 s; the follower's wait for its own apply is bounded by
 `cluster.write_timeout_ms` again (on expiry the write is durable but the call fails with
 `...did not apply it within ... ms`, and the write appears on that node once it catches up). A
-leader serves at most **256** forwarded writes at once and refuses the next one immediately; a
-forwarded command is limited to **3 MiB** serialized (a larger write fails on a follower with a
-message to send it to the leader). While no leader is elected, a follower's write waits for the
-election within that bound and then fails with `raft: not the leader`.
+leader serves at most **256** forwarded writes at once and refuses the next one immediately
+(`busy`). A single replicated write — on the leader or a follower — is limited to **4 MiB**
+(see [Peer transport](#peer-transport-and-message-sizes)). While no leader is elected, a
+follower's write waits for the election within that bound and then fails with
+`HEARTH_CLUSTER_UNAVAILABLE`.
 
 **What did not change.** Only writes are forwarded. Reads are still served locally by every node
 and may be stale (C-5); the cold-start write set still runs only on the leader
 ([G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed)). Covered by
 `tests/cluster_follower_write_forwarding.rs` (writes, a login and a single-use claim issued to a
 follower; a lost reply applied once and never retried; the leader killed mid-forwarding).
+
+### Peer transport and message sizes
+
+Peer RPCs (`AppendEntries`, `Vote`, `InstallSnapshot`, `ForwardWrite`) are **CBOR**, with keys,
+values and snapshot chunks written as byte strings (one byte per byte). The limits fit together
+so that no message a node builds exceeds what its peers accept (`src/cluster/wire.rs`):
+
+| Limit | Value | Effect |
+|---|---|---|
+| Peer gRPC message (server and client, both directions) | 16 MiB | Hard ceiling on any peer message. |
+| One replicated write | 4 MiB (estimated before proposing) | A larger write is refused up front, on the leader or a follower, instead of stalling replication. |
+| One `AppendEntries` batch | 2 MiB | openraft batches up to 300 entries; a batch over 2 MiB is cut and the rest sent next (openraft's partial success). An entry over 2 MiB travels alone. |
+| Snapshot chunk | 4 MiB | A snapshot of any size is sent in chunks. |
+
+Earlier builds sent JSON, where a byte string costs ~3.6 bytes per byte, under tonic's default
+4 MiB limit: a follower more than ~1 MiB behind, a single write over ~1 MiB, or any snapshot over
+~1 MiB produced a message the peer refused on every retry, and replication to it **stalled
+silently for good** (`tests/cluster_peer_message_size.rs`). Earlier builds also served a lagging
+follower only a snapshot the leader had *installed*, never one it had *built*: a leader that had
+purged its log (as it does after every snapshot) failed with `snapshot not found` the first time a
+follower needed one, which stopped that leader's Raft core. Both are fixed; the encoding change
+means every node must run the same build (a full-cluster restart, as the
+[upgrading guide](./upgrading.md) already requires).
+
+Raft log entries in `raft.db` are still stored as JSON (unchanged on disk).
 
 ### Exclusive `data_dir` lock
 
@@ -386,7 +428,8 @@ costs one extra peer round trip; routing writes to the leader avoids it.
 
 Reads from followers may be stale: follower cache invalidation covers only the row types listed
 under C-5. For consistent reads, route all traffic to the leader. A write whose forwarded outcome
-is unknown (the leader died mid-call) fails rather than being retried — re-read before retrying it.
+is unknown (the leader died mid-call) fails with `503` / `HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN`
+rather than being retried — re-read before retrying it.
 
 ---
 

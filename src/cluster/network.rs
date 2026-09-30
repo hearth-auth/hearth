@@ -18,7 +18,7 @@ use openraft::{
         InstallSnapshotResponse, VoteRequest, VoteResponse,
     },
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::Serialize;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::{debug, warn};
 
@@ -28,6 +28,7 @@ use crate::cluster::rpc::{
     ForwardWriteRequest as GrpcFwr, InstallSnapshotRequest as GrpcIsr, VoteRequest as GrpcVr,
 };
 use crate::cluster::types::{HearthNode, HearthRaftConfig};
+use crate::cluster::wire::{self, APPEND_BATCH_BYTES, MAX_PEER_MESSAGE_BYTES};
 
 // ── TLS credential bundle ────────────────────────────────────────────────────
 
@@ -356,15 +357,23 @@ impl HearthPeerNetwork {
 // ── RaftNetwork impl ─────────────────────────────────────────────────────────
 
 impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
+    /// Sends `rpc`, or — when its entries would make the message larger than
+    /// [`APPEND_BATCH_BYTES`] — the longest prefix that fits (at least one
+    /// entry), reporting the rest as openraft's `PartialSuccess` so it sends
+    /// them next. A follower clamps its commit index to the entries it has
+    /// accepted, so `leader_commit` needs no adjustment.
     async fn append_entries(
         &mut self,
-        rpc: AppendEntriesRequest<HearthRaftConfig>,
+        mut rpc: AppendEntriesRequest<HearthRaftConfig>,
         _option: RPCOption,
     ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, HearthNode, RaftError<u64>>> {
         self.gate().await.map_err(net_err)?;
-        let payload = json_enc(&rpc).map_err(|e| net_err(TransportError::Serialize(e)))?;
+        let sent_through = fit_append_batch(&mut rpc).map_err(net_err)?;
+        let payload = encode_bounded(&rpc).map_err(net_err)?;
         let ch = self.get_or_connect().await.map_err(net_err)?;
-        let mut client = RaftServiceClient::new(ch);
+        let mut client = RaftServiceClient::new(ch)
+            .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
+            .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
 
         let resp = client
             .append_entries(GrpcAer { payload })
@@ -375,7 +384,14 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
                 net_err(TransportError::Rpc(e))
             })?;
 
-        json_dec(&resp.into_inner().payload).map_err(|e| net_err(TransportError::Deserialize(e)))
+        let resp: AppendEntriesResponse<u64> = wire::decode(&resp.into_inner().payload)
+            .map_err(|e| net_err(TransportError::Deserialize(e)))?;
+        Ok(match (resp, sent_through) {
+            (AppendEntriesResponse::Success, Some(last)) => {
+                AppendEntriesResponse::PartialSuccess(Some(last))
+            }
+            (other, _) => other,
+        })
     }
 
     async fn install_snapshot(
@@ -387,9 +403,11 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
         RPCError<u64, HearthNode, RaftError<u64, InstallSnapshotError>>,
     > {
         self.gate().await.map_err(net_err_ise)?;
-        let payload = json_enc(&rpc).map_err(|e| net_err_ise(TransportError::Serialize(e)))?;
+        let payload = encode_bounded(&wire::WireInstallSnapshot::from(rpc)).map_err(net_err_ise)?;
         let ch = self.get_or_connect().await.map_err(net_err_ise)?;
-        let mut client = RaftServiceClient::new(ch);
+        let mut client = RaftServiceClient::new(ch)
+            .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
+            .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
 
         let resp = client
             .install_snapshot(GrpcIsr { payload })
@@ -399,7 +417,7 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
                 net_err_ise(TransportError::Rpc(e))
             })?;
 
-        json_dec(&resp.into_inner().payload)
+        wire::decode(&resp.into_inner().payload)
             .map_err(|e| net_err_ise(TransportError::Deserialize(e)))
     }
 
@@ -409,17 +427,51 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
         _option: RPCOption,
     ) -> Result<VoteResponse<u64>, RPCError<u64, HearthNode, RaftError<u64>>> {
         self.gate().await.map_err(net_err)?;
-        let payload = json_enc(&rpc).map_err(|e| net_err(TransportError::Serialize(e)))?;
+        let payload = encode_bounded(&rpc).map_err(net_err)?;
         let ch = self.get_or_connect().await.map_err(net_err)?;
-        let mut client = RaftServiceClient::new(ch);
+        let mut client = RaftServiceClient::new(ch)
+            .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
+            .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
 
         let resp = client.vote(GrpcVr { payload }).await.map_err(|e| {
             self.invalidate_channel();
             net_err(TransportError::Rpc(e))
         })?;
 
-        json_dec(&resp.into_inner().payload).map_err(|e| net_err(TransportError::Deserialize(e)))
+        wire::decode(&resp.into_inner().payload)
+            .map_err(|e| net_err(TransportError::Deserialize(e)))
     }
+}
+
+/// Cuts `rpc`'s entries to the longest prefix whose encoding fits
+/// [`APPEND_BATCH_BYTES`] (never fewer than one entry). Returns the last
+/// entry kept when anything was cut.
+fn fit_append_batch(
+    rpc: &mut AppendEntriesRequest<HearthRaftConfig>,
+) -> Result<Option<openraft::LogId<u64>>, TransportError> {
+    let mut total = 0_usize;
+    let mut keep = rpc.entries.len();
+    for (i, entry) in rpc.entries.iter().enumerate() {
+        total += wire::encoded_len(entry).map_err(TransportError::Serialize)?;
+        if total > APPEND_BATCH_BYTES && i > 0 {
+            keep = i;
+            break;
+        }
+    }
+    if keep == rpc.entries.len() {
+        return Ok(None);
+    }
+    rpc.entries.truncate(keep);
+    Ok(rpc.entries.last().map(|e| e.log_id))
+}
+
+/// Encodes a peer payload, refusing one the receiver would not accept.
+fn encode_bounded<T: Serialize>(value: &T) -> Result<Vec<u8>, TransportError> {
+    let payload = wire::encode(value).map_err(TransportError::Serialize)?;
+    if payload.len() > MAX_PEER_MESSAGE_BYTES {
+        return Err(TransportError::TooLarge(payload.len()));
+    }
+    Ok(payload)
 }
 
 // ── Leader forwarding (follower side) ────────────────────────────────────────
@@ -486,7 +538,9 @@ impl LeaderForwarder {
             .as_ref()
             .is_some_and(|f| f.on_forward_sent(leader_id));
 
-        let mut client = RaftServiceClient::new(channel);
+        let mut client = RaftServiceClient::new(channel)
+            .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
+            .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
         let answer = tokio::time::timeout(timeout, client.forward_write(GrpcFwr { payload })).await;
         let reply = match answer {
             Ok(Ok(resp)) => resp.into_inner().payload,
@@ -567,14 +621,6 @@ async fn connect_mtls(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn json_enc<T: Serialize>(val: &T) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(val)
-}
-
-fn json_dec<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, serde_json::Error> {
-    serde_json::from_slice(bytes)
-}
-
 /// Whether `status` is a peer refusing an entry because it does not know one of
 /// its [`RaftCommand`](crate::cluster::types::RaftCommand) variants — the peer
 /// runs an older build. The receiving side maps its decode error to
@@ -620,6 +666,64 @@ mod tests {
         assert!(!is_unknown_command_refusal(&tonic::Status::unavailable(
             "unknown variant"
         )));
+    }
+
+    fn entry(index: u64, value_len: usize) -> openraft::Entry<HearthRaftConfig> {
+        openraft::Entry {
+            log_id: LogId::new(openraft::CommittedLeaderId::new(1, 1), index),
+            payload: openraft::EntryPayload::Normal(crate::cluster::RaftCommand::Put {
+                leader_timestamp: 1,
+                realm: crate::core::RealmId::new(uuid::Uuid::nil()),
+                key: b"k".to_vec(),
+                value: vec![7; value_len],
+            }),
+        }
+    }
+
+    fn request(
+        entries: Vec<openraft::Entry<HearthRaftConfig>>,
+    ) -> AppendEntriesRequest<HearthRaftConfig> {
+        AppendEntriesRequest {
+            vote: openraft::Vote::new_committed(1, 1),
+            prev_log_id: None,
+            entries,
+            leader_commit: None,
+        }
+    }
+
+    /// A batch whose entries exceed `APPEND_BATCH_BYTES` is cut to the
+    /// longest prefix that fits and reports the last entry kept, which the
+    /// caller turns into openraft's `PartialSuccess`.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn an_oversized_append_batch_is_cut_to_the_budget() {
+        let size = 700 * 1024;
+        let mut rpc = request((1..=10).map(|i| entry(i, size)).collect());
+        let last = fit_append_batch(&mut rpc).unwrap();
+        let kept = rpc.entries.len();
+        assert!((1..10).contains(&kept), "kept {kept} of 10");
+        assert_eq!(last.map(|l| l.index), Some(kept as u64));
+        assert!(wire::encode(&rpc).unwrap().len() <= APPEND_BATCH_BYTES);
+        // One more entry would not have fitted.
+        let mut one_more = request((1..=kept as u64 + 1).map(|i| entry(i, size)).collect());
+        assert!(wire::encode(&one_more.entries).unwrap().len() > APPEND_BATCH_BYTES);
+        assert!(fit_append_batch(&mut one_more).unwrap().is_some());
+    }
+
+    /// A batch that fits is sent whole, and an entry larger than the budget
+    /// still travels (alone) rather than never.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_fitting_batch_is_untouched_and_a_huge_entry_travels_alone() {
+        let mut small = request((1..=3).map(|i| entry(i, 1024)).collect());
+        assert_eq!(fit_append_batch(&mut small).unwrap(), None);
+        assert_eq!(small.entries.len(), 3);
+
+        let mut huge = request(vec![entry(1, 3 * 1024 * 1024), entry(2, 10)]);
+        let last = fit_append_batch(&mut huge).unwrap();
+        assert_eq!(huge.entries.len(), 1);
+        assert_eq!(last.map(|l| l.index), Some(1));
+        assert!(encode_bounded(&huge).unwrap().len() <= MAX_PEER_MESSAGE_BYTES);
     }
 
     /// Verifies factory produces a peer network with the expected address.

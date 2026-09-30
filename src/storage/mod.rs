@@ -28,7 +28,7 @@ mod tiered;
 pub mod wal;
 
 pub use engine::{CompactionConfig, EmbeddedStorageEngine, StorageConfig};
-pub use error::StorageError;
+pub use error::{ClusterUnavailableCause, RetryClass, StorageError};
 pub use fs::{Fs, FsFile, RealFs};
 
 use crate::core::RealmId;

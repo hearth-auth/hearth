@@ -10,10 +10,12 @@ pub enum TransportError {
     Connect(Box<dyn std::error::Error + Send + Sync>),
     /// An established gRPC call returned a non-OK status.
     Rpc(tonic::Status),
-    /// Serializing an outgoing payload to JSON failed.
-    Serialize(serde_json::Error),
-    /// Deserializing an incoming payload from JSON failed.
-    Deserialize(serde_json::Error),
+    /// Encoding an outgoing payload failed.
+    Serialize(String),
+    /// Decoding an incoming payload failed.
+    Deserialize(String),
+    /// An outgoing message would exceed the peer message limit.
+    TooLarge(usize),
     /// TLS configuration or certificate error.
     Tls(String),
     /// Internal error (e.g. poisoned mutex).
@@ -43,6 +45,11 @@ impl fmt::Display for TransportError {
             Self::Deserialize(e) => write!(f, "payload deserialize: {e}"),
             Self::Tls(e) => write!(f, "TLS: {e}"),
             Self::Internal(e) => write!(f, "internal: {e}"),
+            Self::TooLarge(n) => write!(
+                f,
+                "a {n}-byte peer message exceeds the {}-byte limit",
+                crate::cluster::wire::MAX_PEER_MESSAGE_BYTES
+            ),
             Self::Timeout(d) => write!(f, "no answer within {} ms", d.as_millis()),
             Self::InjectedLostReply(peer) => {
                 write!(f, "injected fault: the reply from peer {peer} was lost")

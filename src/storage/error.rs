@@ -113,6 +113,83 @@ pub enum StorageError {
     /// under the release profile's `panic=abort`. Callers that take either
     /// bound from a request MUST validate it themselves as well.
     InvalidRange,
+
+    /// Cluster mode: the operation was not served and **nothing was
+    /// written** — no Raft leader could be reached, the leader refused a
+    /// forwarded write because it was at its limit, or this follower's reads
+    /// are fenced by replication lag. Safe to retry after a short wait.
+    ClusterUnavailable {
+        /// Why it was not served.
+        cause: ClusterUnavailableCause,
+        /// Operator-facing detail (peer addresses, bounds). Never sent to a
+        /// client: the protocol layer answers with a fixed message.
+        reason: String,
+    },
+
+    /// Cluster mode: a write whose outcome is unknown — it may or may not
+    /// have been applied (the connection to the leader was lost mid-call, the
+    /// commit wait expired, or it committed but this node has not applied it
+    /// yet). A caller must re-read before retrying: a retried conditional
+    /// write could apply twice.
+    ClusterWriteOutcomeUnknown {
+        /// Operator-facing detail. Never sent to a client.
+        reason: String,
+    },
+}
+
+/// Why a cluster-mode operation was not served
+/// ([`StorageError::ClusterUnavailable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ClusterUnavailableCause {
+    /// No Raft leader could be reached within the write bound.
+    NoLeader,
+    /// The leader refused a forwarded write at its concurrency limit.
+    LeaderBusy,
+    /// This node's reads are fenced: it lags the leader beyond
+    /// `cluster.read_lag_threshold_ms`.
+    ReplicationLag,
+}
+
+impl fmt::Display for ClusterUnavailableCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NoLeader => "no leader reachable",
+            Self::LeaderBusy => "leader busy",
+            Self::ReplicationLag => "replication lag",
+        })
+    }
+}
+
+/// How a client should treat a storage error that means "try again later"
+/// ([`StorageError::retry_class`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RetryClass {
+    /// Nothing was written; retry.
+    Unavailable,
+    /// The write may have been applied; re-read before retrying.
+    OutcomeUnknown,
+}
+
+impl StorageError {
+    /// The retry class of a transient cluster error; `None` for every other
+    /// error (which a client cannot fix by waiting).
+    #[must_use]
+    pub fn retry_class(&self) -> Option<RetryClass> {
+        match self {
+            Self::ClusterUnavailable { .. } => Some(RetryClass::Unavailable),
+            Self::ClusterWriteOutcomeUnknown { .. } => Some(RetryClass::OutcomeUnknown),
+            _ => None,
+        }
+    }
+
+    /// [`Self::retry_class`] of `err` when it is a [`StorageError`] — the
+    /// shape the identity and RBAC layers carry storage errors in.
+    #[must_use]
+    pub fn retry_class_of(err: &(dyn std::error::Error + 'static)) -> Option<RetryClass> {
+        err.downcast_ref::<Self>().and_then(Self::retry_class)
+    }
 }
 
 impl fmt::Display for StorageError {
@@ -136,6 +213,12 @@ impl fmt::Display for StorageError {
                 f,
                 "invalid scan range: the start key is greater than the end key"
             ),
+            Self::ClusterUnavailable { cause, reason } => {
+                write!(f, "cluster unavailable ({cause}): {reason}")
+            }
+            Self::ClusterWriteOutcomeUnknown { reason } => {
+                write!(f, "cluster write outcome unknown: {reason}")
+            }
             Self::Crypto { reason } => {
                 write!(f, "cryptographic operation failed: {reason}")
             }
@@ -217,6 +300,8 @@ impl std::error::Error for StorageError {
             | Self::CorruptedKeks { .. }
             | Self::AlreadyLocked { .. }
             | Self::InvalidRange
+            | Self::ClusterUnavailable { .. }
+            | Self::ClusterWriteOutcomeUnknown { .. }
             | Self::TornSnapshotRestore { .. }
             | Self::WalMidSegmentCorruption { .. } => None,
         }

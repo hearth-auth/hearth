@@ -347,6 +347,66 @@ pub struct Metrics {
     /// leads cannot commit, and other nodes are enforcing stale controls —
     /// alert on it staying above 0.
     pub control_epoch_bumps_owed: Gauge,
+
+    // ── Cluster write forwarding (H-3) ──────────────────────────────────────
+    /// Writes a follower forwarded to the Raft leader, by outcome.
+    ///
+    /// Labels: `outcome` — a closed set, see [`ForwardedWriteOutcomeLabel`]:
+    /// `committed` (applied here too), `not_applied_locally` (committed, not
+    /// yet applied on this node within the bound), `not_leader` (the peer was
+    /// no longer the leader; retried once), `unreachable` (the leader could
+    /// not be connected to; retried once), `busy` (the leader was at its
+    /// forwarded-write limit), `rejected` (too large, undecodable, or an older
+    /// build), `outcome_unknown` (the answer was lost after the request was
+    /// sent). Every series is present at 0 from the first scrape.
+    pub cluster_forwarded_writes_total: CounterVec,
+}
+
+/// The `outcome` label of `hearth_cluster_forwarded_writes_total`. A closed
+/// set: the label never carries a value derived from a request or a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardedWriteOutcomeLabel {
+    /// Committed by the leader and applied on the forwarding node.
+    Committed,
+    /// Committed, but not applied on the forwarding node within the bound.
+    NotAppliedLocally,
+    /// The peer answered that it is not the leader; nothing was proposed.
+    NotLeader,
+    /// The leader could not be connected to; nothing was sent.
+    Unreachable,
+    /// The leader was at its forwarded-write concurrency limit.
+    Busy,
+    /// Refused for a reason a retry does not cure.
+    Rejected,
+    /// The answer was lost after the request was sent.
+    OutcomeUnknown,
+}
+
+impl ForwardedWriteOutcomeLabel {
+    /// Every label value, for pre-creating the series.
+    pub const ALL: [Self; 7] = [
+        Self::Committed,
+        Self::NotAppliedLocally,
+        Self::NotLeader,
+        Self::Unreachable,
+        Self::Busy,
+        Self::Rejected,
+        Self::OutcomeUnknown,
+    ];
+
+    /// The Prometheus label value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Committed => "committed",
+            Self::NotAppliedLocally => "not_applied_locally",
+            Self::NotLeader => "not_leader",
+            Self::Unreachable => "unreachable",
+            Self::Busy => "busy",
+            Self::Rejected => "rejected",
+            Self::OutcomeUnknown => "outcome_unknown",
+        }
+    }
 }
 
 impl Metrics {
@@ -726,6 +786,21 @@ impl Metrics {
             .register(Box::new(control_epoch_bumps_owed.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let cluster_forwarded_writes_total = CounterVec::new(
+            Opts::new(
+                "hearth_cluster_forwarded_writes_total",
+                "Writes a cluster follower forwarded to the Raft leader, by outcome",
+            ),
+            &["outcome"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(cluster_forwarded_writes_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+        for label in ForwardedWriteOutcomeLabel::ALL {
+            let _ = cluster_forwarded_writes_total.with_label_values(&[label.as_str()]);
+        }
+
         Self {
             registry,
             http_request_duration_seconds,
@@ -763,7 +838,27 @@ impl Metrics {
             kdf_admin_shed_total,
             control_epoch_bump_failures_total,
             control_epoch_bumps_owed,
+            cluster_forwarded_writes_total,
         }
+    }
+
+    /// Counts one forwarded write's outcome
+    /// (`hearth_cluster_forwarded_writes_total{outcome}`).
+    pub fn record_forwarded_write(&self, outcome: ForwardedWriteOutcomeLabel) {
+        self.cluster_forwarded_writes_total
+            .with_label_values(&[outcome.as_str()])
+            .inc();
+    }
+
+    /// The current count for one outcome (tests, diagnostics).
+    #[must_use]
+    pub fn forwarded_writes(&self, outcome: ForwardedWriteOutcomeLabel) -> u64 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let n = self
+            .cluster_forwarded_writes_total
+            .with_label_values(&[outcome.as_str()])
+            .get() as u64;
+        n
     }
 
     /// Records a hot-tier `get` hit — a single lock-free atomic increment.
@@ -846,7 +941,35 @@ pub fn metrics() -> &'static Metrics {
 
 #[cfg(test)]
 mod tests {
-    use super::Metrics;
+    use super::{ForwardedWriteOutcomeLabel, Metrics};
+
+    /// Every forwarded-write outcome is scraped from the start (at 0), and
+    /// recording one moves only its own series.
+    #[test]
+    fn forwarded_write_outcomes_are_a_closed_pre_created_set() {
+        let metrics = Metrics::new();
+        let rendered = metrics.render();
+        for label in ForwardedWriteOutcomeLabel::ALL {
+            let series = format!(
+                "hearth_cluster_forwarded_writes_total{{outcome=\"{}\"}} 0",
+                label.as_str()
+            );
+            assert!(
+                rendered.contains(&series),
+                "missing {series} in:\n{rendered}"
+            );
+        }
+        metrics.record_forwarded_write(ForwardedWriteOutcomeLabel::OutcomeUnknown);
+        metrics.record_forwarded_write(ForwardedWriteOutcomeLabel::OutcomeUnknown);
+        assert_eq!(
+            metrics.forwarded_writes(ForwardedWriteOutcomeLabel::OutcomeUnknown),
+            2
+        );
+        assert_eq!(
+            metrics.forwarded_writes(ForwardedWriteOutcomeLabel::Committed),
+            0
+        );
+    }
 
     /// HEA-1799: the `hearth_rate_limiters_disabled` time series is absent from
     /// a scrape during normal operation and appears (set to `1`) only after the

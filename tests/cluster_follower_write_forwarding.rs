@@ -10,253 +10,33 @@
 //!
 //! Every test here stands up **three real nodes** on loopback (real openraft,
 //! real mTLS gRPC sockets) and sends the writes to a **follower**. The fixture
-//! mirrors `tests/cluster_three_node_control_coherence.rs`, trimmed to what
-//! these tests need; nextest runs this binary in the `three-node-cluster`
+//! lives in `tests/cluster_fixture/`; nextest runs this binary in the `three-node-cluster`
 //! group so it never shares the machine with another cluster.
 
 #![allow(clippy::unwrap_used)]
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+mod cluster_fixture;
+
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use cluster_fixture::{
+    blocking, counter, realm, wait_converged, wait_for_leader, Node, ThreeNodes,
+};
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::cluster::{serve, ClusterEngine, ClusterStorageAdapter, HearthNode, PeerFaults};
-use hearth::config::ClusterConfig;
+use hearth::cluster::ClusterEngine;
 use hearth::core::{Clock, FakeClock, RealmId, Timestamp, UserId};
 use hearth::identity::{
     CleartextPassword, CreateRealmRequest, CreateUserRequest, CredentialConfig,
     EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, RealmConfig, SessionContext,
 };
+use hearth::metrics::ForwardedWriteOutcomeLabel;
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
-use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
-use tempfile::TempDir;
-use uuid::Uuid;
 
-// ── Throwaway mTLS bundle ────────────────────────────────────────────────────
-
-fn generate_cluster_certs(dir: &Path, n_nodes: usize) -> (PathBuf, Vec<(PathBuf, PathBuf)>) {
-    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
-    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    let ca_key = rcgen::KeyPair::generate().unwrap();
-    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-    let ca_path = dir.join("ca.pem");
-    std::fs::write(&ca_path, ca_cert.pem()).unwrap();
-
-    let mut leafs = Vec::with_capacity(n_nodes);
-    for i in 1..=n_nodes {
-        let leaf_params =
-            rcgen::CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
-                .unwrap();
-        let leaf_key = rcgen::KeyPair::generate().unwrap();
-        let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
-        let cert_path = dir.join(format!("node-{i}.crt.pem"));
-        let key_path = dir.join(format!("node-{i}.key.pem"));
-        std::fs::write(&cert_path, leaf_cert.pem()).unwrap();
-        std::fs::write(&key_path, leaf_key.serialize_pem()).unwrap();
-        leafs.push((cert_path, key_path));
-    }
-    (ca_path, leafs)
-}
-
-fn pick_free_loopback_ports(n: usize) -> Vec<u16> {
-    let listeners: Vec<std::net::TcpListener> = (0..n)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
-        .collect();
-    listeners
-        .iter()
-        .map(|l| l.local_addr().unwrap().port())
-        .collect()
-}
-
-// ── The cluster ──────────────────────────────────────────────────────────────
-
-/// One `hearth serve` process: its Raft engine, the storage handle the
-/// application layer uses, the fault injector on its outbound peer RPCs, and
-/// the peer gRPC server task.
-struct Node {
-    id: u64,
-    cluster: Arc<ClusterEngine>,
-    storage: Arc<dyn StorageEngine>,
-    faults: Arc<PeerFaults>,
-    server: tokio::task::JoinHandle<()>,
-}
-
-struct ThreeNodes {
-    nodes: Vec<Node>,
-    leader_id: u64,
-    _tempdir: TempDir,
-}
-
-impl ThreeNodes {
-    async fn start() -> Self {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let tempdir = tempfile::tempdir().unwrap();
-        let (ca_path, leaf_certs) = generate_cluster_certs(tempdir.path(), 3);
-        let ports = pick_free_loopback_ports(3);
-
-        let mut nodes = Vec::with_capacity(3);
-        let mut members = BTreeMap::new();
-        for (i, (cert_path, key_path)) in leaf_certs.into_iter().enumerate() {
-            let id = (i + 1) as u64;
-            let data_dir = tempdir.path().join(format!("node-{id}-data"));
-            std::fs::create_dir_all(&data_dir).unwrap();
-            let storage_cfg = StorageConfig::dev(data_dir);
-            let inner = Arc::new(EmbeddedStorageEngine::open(storage_cfg.clone()).unwrap());
-            let cfg = ClusterConfig {
-                node_id: id,
-                peer_address: format!("127.0.0.1:{}", ports[i]),
-                peers: vec![],
-                tls_cert_path: cert_path,
-                tls_key_path: key_path,
-                tls_ca_cert_path: ca_path.clone(),
-                // Generous: follower reads must not be fenced by the lag
-                // monitor during the brief window between commit and apply.
-                read_lag_threshold_ms: Some(30_000),
-                write_timeout_ms: None,
-            };
-            let faults = PeerFaults::new();
-            let cluster = Arc::new(
-                ClusterEngine::build_clustered_with_peer_faults(
-                    inner,
-                    &cfg,
-                    &storage_cfg,
-                    Arc::clone(&faults),
-                )
-                .await
-                .unwrap(),
-            );
-            let serve_engine = Arc::clone(&cluster);
-            let serve_cfg = cfg.clone();
-            let server = tokio::spawn(async move {
-                let _ = serve(&serve_cfg, serve_engine).await;
-            });
-            members.insert(
-                id,
-                HearthNode {
-                    addr: cfg.peer_address.clone(),
-                },
-            );
-            let storage: Arc<dyn StorageEngine> =
-                Arc::new(ClusterStorageAdapter::new(Arc::clone(&cluster)));
-            nodes.push(Node {
-                id,
-                cluster,
-                storage,
-                faults,
-                server,
-            });
-        }
-
-        // AUDIT: justified-sleep: gRPC listeners need OS scheduling time to bind before the bootstrap RPC attempts connections
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        nodes[0].cluster.initialize_cluster(members).await.unwrap();
-        let engines: Vec<Arc<ClusterEngine>> =
-            nodes.iter().map(|n| Arc::clone(&n.cluster)).collect();
-        let leader_id = wait_for_leader(&engines, &[], Duration::from_secs(20)).await;
-        wait_converged(&engines, Duration::from_secs(20)).await;
-        Self {
-            nodes,
-            leader_id,
-            _tempdir: tempdir,
-        }
-    }
-
-    fn node(&self, id: u64) -> &Node {
-        self.nodes.iter().find(|n| n.id == id).unwrap()
-    }
-
-    fn leader(&self) -> &Node {
-        self.node(self.leader_id)
-    }
-
-    fn followers(&self) -> Vec<&Node> {
-        self.nodes
-            .iter()
-            .filter(|n| n.id != self.leader_id)
-            .collect()
-    }
-
-    fn engines(&self) -> Vec<Arc<ClusterEngine>> {
-        self.nodes.iter().map(|n| Arc::clone(&n.cluster)).collect()
-    }
-
-    async fn converge(&self) {
-        wait_converged(&self.engines(), Duration::from_secs(20)).await;
-    }
-
-    fn shutdown(self) {
-        for n in self.nodes {
-            n.server.abort();
-        }
-    }
-}
-
-/// The node every live node agrees leads, ignoring nodes in `dead`.
-async fn wait_for_leader(engines: &[Arc<ClusterEngine>], dead: &[u64], timeout: Duration) -> u64 {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let live: Vec<_> = engines
-            .iter()
-            .filter_map(|e| e.raft_metrics())
-            .filter(|m| !dead.contains(&m.id))
-            .collect();
-        if let Some(leader) = live[0].current_leader {
-            if !dead.contains(&leader) && live.iter().all(|m| m.current_leader == Some(leader)) {
-                return leader;
-            }
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "no leader elected in {timeout:?}"
-        );
-        // AUDIT: justified-sleep: poll interval inside leader-election loop; openraft exposes no ready-signal channel
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-fn applied(engine: &ClusterEngine) -> u64 {
-    engine
-        .raft_metrics()
-        .and_then(|m| m.last_applied.map(|l| l.index))
-        .unwrap_or(0)
-}
-
-/// Waits until every engine has applied every entry any of them has logged.
-async fn wait_converged(engines: &[Arc<ClusterEngine>], timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let target = engines
-            .iter()
-            .filter_map(|e| e.raft_metrics().and_then(|m| m.last_log_index))
-            .max()
-            .unwrap_or(0);
-        if target > 0 && engines.iter().all(|e| applied(e) >= target) {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "replication did not converge within {timeout:?}"
-        );
-        // AUDIT: justified-sleep: poll interval inside replication-convergence loop; log commit is async with no notification hook
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-fn realm() -> RealmId {
-    RealmId::new(Uuid::new_v4())
-}
-
-fn counter(bytes: Option<Vec<u8>>) -> u64 {
-    let bytes = bytes.expect("the counter row exists");
-    u64::from_le_bytes(bytes.as_slice().try_into().expect("8-byte LE counter"))
-}
-
-/// Runs a synchronous storage call off the async worker (the adapter blocks).
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    tokio::task::spawn_blocking(f).await.unwrap()
+fn forwarded(outcome: ForwardedWriteOutcomeLabel) -> u64 {
+    hearth::metrics::metrics().forwarded_writes(outcome)
 }
 
 // ── Raw storage writes on a follower ─────────────────────────────────────────
@@ -273,6 +53,7 @@ async fn every_write_primitive_sent_to_a_follower_succeeds_and_reads_back_there(
     let followers = cluster.followers();
     let (a, b) = (followers[0], followers[1]);
 
+    let committed_before = forwarded(ForwardedWriteOutcomeLabel::Committed);
     for (n, follower) in [a, b].into_iter().enumerate() {
         let storage = Arc::clone(&follower.storage);
         let r = realm.clone();
@@ -350,8 +131,21 @@ async fn every_write_primitive_sent_to_a_follower_succeeds_and_reads_back_there(
         gone, None,
         "a forwarded delete must be visible on the follower at once"
     );
+    // 2 puts + 2 claims + 2 increments + put_batch + write_batch + delete.
+    assert_eq!(
+        forwarded(ForwardedWriteOutcomeLabel::Committed) - committed_before,
+        9,
+        "hearth_cluster_forwarded_writes_total{{outcome=\"committed\"}} must count each \
+         forwarded write once"
+    );
 
-    // Everything replicated to every node.
+    assert_replicated_everywhere(&cluster, &realm).await;
+
+    cluster.shutdown();
+}
+
+/// Every node holds what the first test wrote through the followers.
+async fn assert_replicated_everywhere(cluster: &ThreeNodes, realm: &RealmId) {
     cluster.converge().await;
     for node in &cluster.nodes {
         let s = Arc::clone(&node.storage);
@@ -372,8 +166,6 @@ async fn every_write_primitive_sent_to_a_follower_succeeds_and_reads_back_there(
         assert_eq!(got.3, Some(b"3".to_vec()), "node {}", node.id);
         assert_eq!(got.4, None, "node {}", node.id);
     }
-
-    cluster.shutdown();
 }
 
 // ── A login and a single-use claim on a follower ─────────────────────────────
@@ -571,6 +363,7 @@ async fn a_forwarded_write_whose_reply_is_lost_is_applied_once_and_never_retried
     let leader_id = cluster.leader_id;
     let follower = cluster.followers()[0];
     follower.faults.lose_forward_replies(leader_id);
+    let unknown_before = forwarded(ForwardedWriteOutcomeLabel::OutcomeUnknown);
 
     let s = Arc::clone(&follower.storage);
     let r = realm.clone();
@@ -582,8 +375,18 @@ async fn a_forwarded_write_whose_reply_is_lost_is_applied_once_and_never_retried
     })
     .await;
     let inc = inc.expect_err("the reply was lost: the increment's outcome is unknown");
+    assert_eq!(
+        forwarded(ForwardedWriteOutcomeLabel::OutcomeUnknown) - unknown_before,
+        2,
+        "both lost replies must be counted as outcome_unknown"
+    );
     let claim = claim.expect_err("the reply was lost: the claim's outcome is unknown");
     for err in [&inc, &claim] {
+        assert_eq!(
+            err.retry_class(),
+            Some(hearth::storage::RetryClass::OutcomeUnknown),
+            "a lost reply must surface as a structured outcome-unknown error: {err}"
+        );
         let msg = err.to_string();
         assert!(
             msg.contains("outcome is unknown") && !hearth::cluster::is_not_leader(err),

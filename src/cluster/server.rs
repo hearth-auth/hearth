@@ -17,6 +17,7 @@ use crate::cluster::rpc::{
     AppendEntriesRequest, AppendEntriesResponse, ForwardWriteRequest, ForwardWriteResponse,
     InstallSnapshotRequest, InstallSnapshotResponse, VoteRequest, VoteResponse,
 };
+use crate::cluster::wire::MAX_PEER_MESSAGE_BYTES;
 use crate::config::ClusterConfig;
 
 // ── IncomingRpcDispatch ───────────────────────────────────────────────────────
@@ -198,7 +199,11 @@ where
 
     Server::builder()
         .tls_config(tls)?
-        .add_service(RaftServiceServer::new(RaftRpcHandler::new(dispatch)))
+        .add_service(
+            RaftServiceServer::new(RaftRpcHandler::new(dispatch))
+                .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES),
+        )
         .serve_with_shutdown(addr, shutdown)
         .await?;
 

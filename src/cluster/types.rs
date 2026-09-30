@@ -27,7 +27,9 @@ pub enum RaftCommand {
         /// Leader wall-clock timestamp (microseconds since UNIX epoch).
         leader_timestamp: i64,
         realm: RealmId,
+        #[serde(with = "crate::cluster::wire::bytes")]
         key: Vec<u8>,
+        #[serde(with = "crate::cluster::wire::bytes")]
         value: Vec<u8>,
     },
     /// Delete a single key.
@@ -35,6 +37,7 @@ pub enum RaftCommand {
         /// Leader wall-clock timestamp (microseconds since UNIX epoch).
         leader_timestamp: i64,
         realm: RealmId,
+        #[serde(with = "crate::cluster::wire::bytes")]
         key: Vec<u8>,
     },
     /// Atomically write multiple key-value pairs for a single realm.
@@ -43,6 +46,7 @@ pub enum RaftCommand {
         leader_timestamp: i64,
         realm: RealmId,
         /// `(key, value)` pairs to write atomically.
+        #[serde(with = "crate::cluster::wire::byte_pairs")]
         entries: Vec<(Vec<u8>, Vec<u8>)>,
     },
     /// Atomically apply a mix of writes and removals for a single realm.
@@ -60,8 +64,10 @@ pub enum RaftCommand {
         leader_timestamp: i64,
         realm: RealmId,
         /// `(key, value)` pairs to write.
+        #[serde(with = "crate::cluster::wire::byte_pairs")]
         puts: Vec<(Vec<u8>, Vec<u8>)>,
         /// Keys to remove.
+        #[serde(with = "crate::cluster::wire::byte_list")]
         deletes: Vec<Vec<u8>>,
     },
     /// Insert a key-value pair only if the key is currently absent.
@@ -74,7 +80,9 @@ pub enum RaftCommand {
         /// Leader wall-clock timestamp (microseconds since UNIX epoch).
         leader_timestamp: i64,
         realm: RealmId,
+        #[serde(with = "crate::cluster::wire::bytes")]
         key: Vec<u8>,
+        #[serde(with = "crate::cluster::wire::bytes")]
         value: Vec<u8>,
     },
     /// Atomically increment the little-endian `u64` counter at `key` (absent
@@ -94,6 +102,7 @@ pub enum RaftCommand {
         /// Leader wall-clock timestamp (microseconds since UNIX epoch).
         leader_timestamp: i64,
         realm: RealmId,
+        #[serde(with = "crate::cluster::wire::bytes")]
         key: Vec<u8>,
     },
 }
@@ -129,6 +138,34 @@ impl RaftCommand {
         }
         self
     }
+
+    /// An upper bound on this command's CBOR size on the peer wire: its byte
+    /// strings plus a generous per-item and fixed envelope. Checked against
+    /// [`MAX_COMMAND_BYTES`](crate::cluster::wire::MAX_COMMAND_BYTES) before
+    /// a command is proposed, without encoding it.
+    #[must_use]
+    pub fn wire_size_estimate(&self) -> usize {
+        const ENVELOPE: usize = 128;
+        const PER_ITEM: usize = 18;
+        let item = |b: &Vec<u8>| b.len() + PER_ITEM;
+        ENVELOPE
+            + match self {
+                Self::Put { key, value, .. } | Self::PutIfAbsent { key, value, .. } => {
+                    item(key) + item(value)
+                }
+                Self::Delete { key, .. } | Self::IncrementU64 { key, .. } => item(key),
+                Self::Batch { entries, .. } => entries
+                    .iter()
+                    .map(|(k, v)| item(k) + item(v) + PER_ITEM)
+                    .sum(),
+                Self::WriteBatch { puts, deletes, .. } => {
+                    puts.iter()
+                        .map(|(k, v)| item(k) + item(v) + PER_ITEM)
+                        .sum::<usize>()
+                        + deletes.iter().map(item).sum::<usize>()
+                }
+            }
+    }
 }
 
 /// The leader's answer to a write a follower forwarded to it (the
@@ -155,9 +192,11 @@ pub enum ForwardedWriteOutcome {
         /// The leader the refusing node knows of, if any.
         leader_id: Option<u64>,
     },
+    /// Refused **without proposing**: the leader is serving its limit of
+    /// concurrent forwarded writes. Nothing was written; retry shortly.
+    Busy,
     /// Refused **without proposing** for a reason a retry does not cure (the
-    /// payload is too large, undecodable, or the leader is at its forwarding
-    /// concurrency limit).
+    /// command is too large or undecodable).
     Rejected {
         /// Operator-facing reason; carries no key or value bytes.
         reason: String,
@@ -180,6 +219,7 @@ pub struct HearthLogResponse {
     /// conditional command (e.g. `PutIfAbsent`) found the key already present.
     pub success: bool,
     /// Optional result bytes returned to the caller.
+    #[serde(with = "crate::cluster::wire::bytes")]
     pub payload: Vec<u8>,
 }
 
