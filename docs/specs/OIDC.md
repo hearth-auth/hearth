@@ -138,7 +138,8 @@ Enforced for every authorization request in the realm:
 1. **PAR required** — authorization requests MUST be submitted via Pushed Authorization Requests
    (RFC 9126). Direct `/authorize` calls without a `request_uri` are rejected with `invalid_request`.
 2. **PKCE S256 required** — `code_challenge` MUST be present; `code_challenge_method` MUST be `S256`.
-3. **`iss` in responses** — all redirect responses include `iss` per RFC 9207.
+3. **`iss` in responses** — all redirect responses, success and error alike, include `iss` per RFC 9207
+   (a JARM response carries it as the JWT's `iss` claim). Hearth sends it in every realm, FAPI or not.
 
 Both profiles also require **sender-constrained tokens**: every token request in the realm — the
 `authorization_code`, `refresh_token`, `client_credentials`, `device_code` and `jwt-bearer`
@@ -946,7 +947,7 @@ and a FAPI 2.0 Advanced realm accepts nothing else from any client (§2.1.2 item
 | `tests/jar.rs` | JAR (RFC 9101) request JWT parsing, signature verification |
 | `tests/private_key_jwt.rs` | `private_key_jwt` client authentication |
 | `tests/fapi_client_auth.rs` | A JWKS-only FAPI 2.0 client authenticates with an ES256/EdDSA assertion from its JWKS and is refused with nothing at `/as/par` and `/token` (`authorization_code`, `refresh_token`, `client_credentials`), on both routes; a FAPI 2.0 Advanced realm refuses `client_secret_*` at `/token`, `/as/par`, `/introspect`, `/revoke` and `none` at `/as/par`, `/token`, `/revoke`, and accepts `private_key_jwt` |
-| `tests/rfc9207_iss.rs` | `iss` in authorization responses per RFC 9207 |
+| `tests/rfc9207_iss.rs` | `iss` in authorization responses per RFC 9207 (error redirects: `tests/oauth_consent.rs`) |
 | `tests/oauth_form_encoding.rs` | Form + JSON content-type acceptance on token/revoke/introspect/PAR/device-authorization and their realm twins (HEA-2077) |
 | `tests/device_grant_client_auth.rs` | Confidential-client authentication on both device-grant endpoints and both realm twins (audit 2026-08-28 §4.19#4, §4.22#6) |
 | `tests/par_client_auth.rs` | RFC 9126 §2 client authentication at `/as/par` and its realm twin: confidential clients refused without or with wrong credentials, `client_secret_basic`/`client_secret_post`/`private_key_jwt` accepted, public client by `client_id` only and refused when presenting a secret, authenticated client bound to the body and request object, FAPI 2.0 client and FAPI realm, KDF-gate shed |
