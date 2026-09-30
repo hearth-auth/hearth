@@ -5,30 +5,53 @@ import { TokenExpiredError, RequiredActionError } from "./errors.js";
 import { VerifiedToken } from "./token.js";
 import type { JWTPayload } from "jose";
 
-const BASE_CONFIG = { issuer_url: "https://auth.example.com", client_id: "app", client_secret: "secret" };
+const BASE_CONFIG = {
+  issuer_url: "https://auth.example.com",
+  client_id: "app",
+  client_secret: "secret",
+};
 
 function makeReqRes(authHeader?: string) {
-  const req = { headers: { authorization: authHeader } as Record<string, string | undefined>, hearthToken: undefined as VerifiedToken | undefined };
+  const req = {
+    headers: { authorization: authHeader } as Record<string, string | undefined>,
+    hearthToken: undefined as VerifiedToken | undefined,
+  };
   const res = {
     statusCode: 200,
     body: undefined as unknown,
     headers: {} as Record<string, string>,
-    status(code: number) { this.statusCode = code; return this; },
-    json(body: unknown) { this.body = body; return this; },
-    setHeader(name: string, value: string) { this.headers[name] = value; return this; },
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body: unknown) {
+      this.body = body;
+      return this;
+    },
+    setHeader(name: string, value: string) {
+      this.headers[name] = value;
+      return this;
+    },
   };
   const next = vi.fn();
   return { req, res, next };
 }
 
-function makeVerifiedToken(payload: Partial<JWTPayload & { scope?: string; scopes?: string[]; roles?: string[]; permissions?: string[] }> = {}): VerifiedToken {
-  return new VerifiedToken({
-    sub: "user1",
-    iss: "https://auth.example.com",
-    exp: 9_999_999_999,
-    iat: 1_700_000_000,
-    ...payload,
-  } as JWTPayload, { alg: "RS256" });
+function makeVerifiedToken(
+  payload: Partial<
+    JWTPayload & { scope?: string; scopes?: string[]; roles?: string[]; permissions?: string[] }
+  > = {},
+): VerifiedToken {
+  return new VerifiedToken(
+    {
+      sub: "user1",
+      iss: "https://auth.example.com",
+      exp: 9_999_999_999,
+      iat: 1_700_000_000,
+      ...payload,
+    } as JWTPayload,
+    { alg: "RS256" },
+  );
 }
 
 describe("hearthMiddleware", () => {
@@ -64,7 +87,9 @@ describe("hearthMiddleware", () => {
   });
 
   it("returns 401 with WWW-Authenticate when verification fails", async () => {
-    vi.spyOn(HearthClient.prototype, "verifyToken").mockRejectedValue(new TokenExpiredError(new Date()));
+    vi.spyOn(HearthClient.prototype, "verifyToken").mockRejectedValue(
+      new TokenExpiredError(new Date()),
+    );
     const mw = hearthMiddleware(BASE_CONFIG);
     const { req, res, next } = makeReqRes("Bearer bad-token");
     await mw(req as never, res as never, next);
@@ -108,7 +133,12 @@ describe("hearthMiddleware", () => {
       permissions: ["delete"],
     } as unknown as JWTPayload);
     vi.spyOn(HearthClient.prototype, "verifyToken").mockResolvedValue(token);
-    const mw = hearthMiddleware({ ...BASE_CONFIG, requiredScope: "admin", requiredRole: "superuser", requiredPermission: "delete" });
+    const mw = hearthMiddleware({
+      ...BASE_CONFIG,
+      requiredScope: "admin",
+      requiredRole: "superuser",
+      requiredPermission: "delete",
+    });
     const { req, res, next } = makeReqRes("Bearer valid-token");
     await mw(req as never, res as never, next);
     expect(res.statusCode).toBe(200);

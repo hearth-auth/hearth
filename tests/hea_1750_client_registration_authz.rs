@@ -177,6 +177,7 @@ fn grpc_register_request(
         access_token_authorization: 0,
         trust_level: None,
         id_token_signed_response_alg: None,
+        token_endpoint_auth_method: None,
     });
     r.metadata_mut().insert(
         "x-realm-id",

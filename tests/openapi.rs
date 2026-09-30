@@ -241,3 +241,29 @@ fn yaml_managed_realm_writes_are_not_documented() {
         "DeleteRealm"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Client registration routes answer 201 Created
+// ---------------------------------------------------------------------------
+
+/// The client-create routes answer `201 Created` (SDK.md requires SDKs to
+/// treat 201 as success); the spec documented `200`, so a generated client
+/// that checks the documented status treated every creation as unexpected.
+/// The secret-regeneration route answers `200` with the client record.
+#[test]
+fn client_create_routes_document_201_and_regeneration_200() {
+    let v = merged();
+    for path in ["/admin/applications", "/clients", "/register"] {
+        let responses = v["paths"][path]["post"]["responses"]
+            .as_object()
+            .unwrap_or_else(|| panic!("POST {path} has responses"));
+        assert!(responses.contains_key("201"), "POST {path}: {responses:?}");
+        assert!(!responses.contains_key("200"), "POST {path}: {responses:?}");
+    }
+    let regen = &v["paths"]["/admin/applications/{clientId}/regenerate-secret"]["post"];
+    assert_eq!(
+        regen["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/v1OAuthClient",
+        "{regen}"
+    );
+}

@@ -44,15 +44,12 @@ describe("TypeScript SDK: JWKS Validation", () => {
     //
     //    The realm's JWKS is keyed by realm *name*, not id, which is why the
     //    name is looked up first.
-    const realmResp = await fetch(
-      `${server.baseUrl}/admin/realms/${bootstrap.realm_id}`,
-      {
-        headers: {
-          Authorization: `Bearer ${bootstrap.access_token}`,
-          "X-Realm-ID": bootstrap.realm_id,
-        },
+    const realmResp = await fetch(`${server.baseUrl}/admin/realms/${bootstrap.realm_id}`, {
+      headers: {
+        Authorization: `Bearer ${bootstrap.access_token}`,
+        "X-Realm-ID": bootstrap.realm_id,
       },
-    );
+    });
     expect(realmResp.ok).toBe(true);
     const realmName = ((await realmResp.json()) as { name: string }).name;
 
@@ -65,10 +62,7 @@ describe("TypeScript SDK: JWKS Validation", () => {
     expect(realmKey).toBeTruthy();
 
     const publicKey = await jose.importJWK(realmKey as jose.JWK, "EdDSA");
-    const { payload: accessPayload } = await jose.jwtVerify(
-      bootstrap.access_token,
-      publicKey,
-    );
+    const { payload: accessPayload } = await jose.jwtVerify(bootstrap.access_token, publicKey);
     expect(accessPayload.sub).toBeTruthy();
     expect(accessPayload.exp).toBeTruthy();
 
@@ -78,8 +72,6 @@ describe("TypeScript SDK: JWKS Validation", () => {
 
     // 6. Verify a tampered token fails verification
     const tampered = bootstrap.access_token.slice(0, -4) + "XXXX";
-    await expect(
-      jose.jwtVerify(tampered, publicKey),
-    ).rejects.toThrow();
+    await expect(jose.jwtVerify(tampered, publicKey)).rejects.toThrow();
   });
 });

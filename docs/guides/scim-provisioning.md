@@ -150,6 +150,8 @@ SCIM provisioning tokens (bearer-token auth) cannot modify or delete admin princ
 
 Requests authenticated with an admin JWT (the fallback path above) are subject to the same privilege ceiling as the REST admin API: the caller may not modify or delete a user who holds an admin permission the caller lacks. `hearth.admin` outranks everyone; a `hearth.users.admin` sub-admin may act only on users whose admin permissions it holds itself.
 
+The same rule covers Groups: `PUT` or `PATCH /scim/v2/Groups/{id}` that removes a member holding an admin permission the caller lacks (organization-scoped admin permissions included), and `DELETE /scim/v2/Groups/{id}` of an organization with such a member, answer `403` before anything is written. The provisioning token holds no admin permission, so it may not remove an admin principal from a group or delete a group that has one as a member.
+
 If you need to deprovision or demote an admin user via SCIM:
 1. Remove the admin role from the user through the Admin API or Admin UI first.
 2. Retry the SCIM operation after the role change has taken effect.
@@ -157,6 +159,8 @@ If you need to deprovision or demote an admin user via SCIM:
 ## Group provisioning
 
 SCIM Groups are Hearth organizations. An organization created through SCIM (`POST /scim/v2/Groups`) carries a durable "provisioned by SCIM" marker; no request field sets or clears it, and backups carry it. The realm's SCIM **bearer token** may read every organization but may replace, patch or delete **only** the ones SCIM created — an organization created through the admin API, the console or `hearth.yaml` answers `403` to the token's `PUT`, `PATCH` and `DELETE`. Admin-token callers on the fallback path keep their rights (they need `hearth.realm.admin`, see above).
+
+A group's `members` is always its full membership: `GET` lists every member, and `PUT` / `PATCH` reconcile against every member, however large the organization. A membership change is checked before anything is written — a member id that is not a user of the realm answers `400 invalidValue`, and removing an out-ranking member answers `403` — and a write that still fails part-way fails the request (`500`, or the underlying error's status) with a `detail` naming the failed step and how many additions and removals were applied; it is never reported as success.
 
 ### Create a group
 

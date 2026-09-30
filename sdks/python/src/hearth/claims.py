@@ -11,7 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 from .errors import (
     TokenExpiredError,
@@ -26,11 +26,11 @@ class Claims:
     Construct via :meth:`decode` or pass a pre-decoded payload dict.
     """
 
-    def __init__(self, payload: Dict[str, Any]) -> None:
+    def __init__(self, payload: dict[str, Any]) -> None:
         self._payload = payload
 
     @classmethod
-    def decode(cls, token: str) -> "Claims":
+    def decode(cls, token: str) -> Claims:
         """Decode a JWT string without verifying its signature.
 
         :raises TokenInvalidError: if the string is not a structurally valid JWT.
@@ -41,7 +41,7 @@ class Claims:
         try:
             padded = parts[1] + "=" * (-len(parts[1]) % 4)
             payload_bytes = base64.urlsafe_b64decode(padded)
-            payload: Dict[str, Any] = json.loads(payload_bytes)
+            payload: dict[str, Any] = json.loads(payload_bytes)
         except Exception as exc:
             raise TokenInvalidError(f"failed to decode JWT payload: {exc}") from exc
         return cls(payload)
@@ -68,7 +68,7 @@ class Claims:
         """Return the ``iss`` (issuer) claim."""
         return str(self._payload.get("iss", ""))
 
-    def audiences(self) -> List[str]:
+    def audiences(self) -> list[str]:
         """Return the ``aud`` (audiences) claim normalised to a list."""
         aud = self._payload.get("aud")
         if aud is None:
@@ -77,22 +77,22 @@ class Claims:
             return [str(a) for a in aud]
         return [str(aud)]
 
-    def expiry(self) -> Optional[int]:
+    def expiry(self) -> int | None:
         """Return the ``exp`` claim as a Unix timestamp, or None if absent."""
         val = self._payload.get("exp")
         return int(val) if val is not None else None
 
-    def issuedAt(self) -> Optional[int]:
+    def issuedAt(self) -> int | None:
         """Return the ``iat`` claim as a Unix timestamp, or None if absent."""
         val = self._payload.get("iat")
         return int(val) if val is not None else None
 
-    def jwtID(self) -> Optional[str]:
+    def jwtID(self) -> str | None:
         """Return the ``jti`` (JWT ID) claim, or None if absent."""
         val = self._payload.get("jti")
         return str(val) if val is not None else None
 
-    def scopes(self) -> List[str]:
+    def scopes(self) -> list[str]:
         """Return the individual scopes from the ``scope`` claim."""
         raw = self._payload.get("scope", "")
         if not raw:
@@ -109,7 +109,7 @@ class Claims:
 
     def in_group(self, group_id: str) -> bool:
         """Return True iff the token's ``groups`` claim contains the given group."""
-        groups: List[str] = self._payload.get("groups", []) or []
+        groups: list[str] = self._payload.get("groups", []) or []
         return group_id in groups
 
     def in_org(self, org_id: str) -> bool:
@@ -121,24 +121,24 @@ class Claims:
         """Return the ``token_type`` claim (``'access'``, ``'refresh'``, or ``'required_action'``)."""
         return str(self._payload.get("token_type", ""))
 
-    def organization_id(self) -> Optional[str]:
+    def organization_id(self) -> str | None:
         """Return the ``oid`` (organization ID) claim, or None if absent."""
         val = self._payload.get("oid")
         return str(val) if val is not None else None
 
-    def org_groups(self) -> List[str]:
+    def org_groups(self) -> list[str]:
         """Return the ``org_groups`` claim (Keycloak-style paths, e.g. ``/org-slug/group``)."""
         val = self._payload.get("org_groups", []) or []
         return [str(g) for g in val]
 
     def hasRole(self, role: str) -> bool:
         """Return True iff the token's ``roles`` claim contains the given role."""
-        roles: List[str] = self._payload.get("roles", [])
+        roles: list[str] = self._payload.get("roles", [])
         return role in roles
 
     def hasPermission(self, permission: str) -> bool:
         """Return True iff the token's ``permissions`` claim contains the given permission."""
-        permissions: List[str] = self._payload.get("permissions", [])
+        permissions: list[str] = self._payload.get("permissions", [])
         return permission in permissions
 
     def get(self, key: str) -> Any:

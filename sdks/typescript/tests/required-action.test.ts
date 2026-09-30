@@ -41,13 +41,10 @@ describe("RequiredActionError", () => {
 
 /** Build a minimal JWT with the given payload. */
 function forgeJwt(payload: Record<string, unknown>): string {
-  const header = Buffer.from(
-    JSON.stringify({ alg: "EdDSA", typ: "JWT" }),
-    "utf8",
-  ).toString("base64url");
-  const body = Buffer.from(JSON.stringify(payload), "utf8").toString(
+  const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" }), "utf8").toString(
     "base64url",
   );
+  const body = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
   const sig = Buffer.from("fake-sig").toString("base64url");
   return `${header}.${body}.${sig}`;
 }
@@ -121,20 +118,18 @@ describe("HearthApiClient.handleCallback()", () => {
 
   it("passes codeVerifier to the token exchange when provided", async () => {
     const accessJwt = forgeJwt({ sub: "user_1", token_type: "access" });
-    const fetchSpy = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            access_token: accessJwt,
-            id_token: "",
-            token_type: "Bearer",
-            expires_in: 3600,
-            refresh_token: "rt",
-          }),
-          { status: 200 },
-        ),
-      );
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          access_token: accessJwt,
+          id_token: "",
+          token_type: "Bearer",
+          expires_in: 3600,
+          refresh_token: "rt",
+        }),
+        { status: 200 },
+      ),
+    );
 
     const client = makeClient();
     await client.handleCallback({

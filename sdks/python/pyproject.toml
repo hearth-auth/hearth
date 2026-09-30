@@ -26,6 +26,9 @@ dev = [
     "pydantic-settings>=2",
     "httpx>=0.27",
     "django>=4.0",
+    # Exact pin: a ruff upgrade changes the rule set and the formatter, so it
+    # is a deliberate edit here, not something a fresh CI install picks up.
+    "ruff==0.16.9",
 ]
 
 [build-system]
@@ -34,3 +37,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hearth"]
+
+# Lint + format: `ruff check .` and `ruff format --check .` (CI: sdk-python job).
+# The rule set is ruff's default for the pinned version above; target-version
+# follows requires-python.
+[tool.ruff]
+# Python sources only: README code samples are prose, not package code.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection markers are meant to be called in defaults.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Security"]

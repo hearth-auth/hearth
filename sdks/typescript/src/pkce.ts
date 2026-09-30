@@ -42,9 +42,7 @@ export interface AuthorizationUrlResult {
 }
 
 /** Build the full authorization redirect URL for an RFC 7636 PKCE flow. */
-export function buildAuthorizationUrl(
-  opts: BuildAuthorizationUrlOptions,
-): AuthorizationUrlResult {
+export function buildAuthorizationUrl(opts: BuildAuthorizationUrlOptions): AuthorizationUrlResult {
   const state = opts.state ?? generateState();
   const params = new URLSearchParams({
     response_type: "code",
@@ -97,9 +95,7 @@ export async function startLogin(
   const doc = await client.discovery();
   const authorizationEndpoint = doc["authorization_endpoint"] as string | undefined;
   if (!authorizationEndpoint) {
-    throw new Error(
-      "startLogin: authorization_endpoint not found in OIDC discovery document",
-    );
+    throw new Error("startLogin: authorization_endpoint not found in OIDC discovery document");
   }
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = await generateCodeChallenge(codeVerifier);

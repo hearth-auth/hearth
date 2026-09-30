@@ -79,6 +79,16 @@ pub const DEVICE_CODE_EXPIRED: &str = "HEARTH_DEVICE_CODE_EXPIRED";
 /// Device authorization was denied by the user.
 pub const DEVICE_CODE_DENIED: &str = "HEARTH_DEVICE_CODE_DENIED";
 
+// ── Cluster availability (503) ────────────────────────────────────────────────
+
+/// Cluster mode: the request was not served and nothing was written (no Raft
+/// leader reachable, the leader busy, or this node's reads fenced by
+/// replication lag). Retry after the `Retry-After` delay.
+pub const CLUSTER_UNAVAILABLE: &str = "HEARTH_CLUSTER_UNAVAILABLE";
+/// Cluster mode: a write whose outcome is unknown — it may or may not have
+/// been applied. Re-read before retrying.
+pub const CLUSTER_WRITE_OUTCOME_UNKNOWN: &str = "HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN";
+
 // ── Rate limiting / account lockout ───────────────────────────────────────────
 
 /// Request rate limit exceeded or account temporarily locked after failed attempts.

@@ -30,6 +30,18 @@ use Throwable;
  */
 final class AdminClient
 {
+    /** `token_endpoint_auth_method`: server-generated secret, sent with HTTP Basic auth. */
+    public const AUTH_CLIENT_SECRET_BASIC = 'client_secret_basic';
+
+    /** `token_endpoint_auth_method`: server-generated secret, sent in the request body. */
+    public const AUTH_CLIENT_SECRET_POST = 'client_secret_post';
+
+    /** `token_endpoint_auth_method`: `private_key_jwt` (requires `jwks`). */
+    public const AUTH_PRIVATE_KEY_JWT = 'private_key_jwt';
+
+    /** `token_endpoint_auth_method`: a public client. */
+    public const AUTH_NONE = 'none';
+
     private readonly ClientInterface $httpClient;
     private readonly RequestFactoryInterface $requestFactory;
     private readonly StreamFactoryInterface $streamFactory;
@@ -160,7 +172,15 @@ final class AdminClient
     // =========================================================================
 
     /**
-     * Creates a new OAuth client registration.
+     * Creates a new OAuth client registration (`POST /admin/applications`).
+     *
+     * `$params` is the proto `RegisterClientRequest` (`client_name`,
+     * `redirect_uris`, …). Set `token_endpoint_auth_method` to
+     * {@see self::AUTH_CLIENT_SECRET_BASIC} or {@see self::AUTH_CLIENT_SECRET_POST}
+     * to create a confidential client: the server generates its secret and
+     * returns it once, as `client_secret` in the returned array — store it on
+     * receipt, no later read returns it. A caller-chosen `client_secret` is
+     * refused (422).
      *
      * @param array<string, mixed> $params
      * @return array<string, mixed>
@@ -189,6 +209,20 @@ final class AdminClient
     public function updateClient(string $id, array $params): array
     {
         return $this->patch("/admin/applications/{$id}", $params);
+    }
+
+    /**
+     * Replaces a confidential client's secret
+     * (`POST /admin/applications/{id}/regenerate-secret`).
+     *
+     * The returned array carries the new `client_secret`, once; the old
+     * secret stops working immediately.
+     *
+     * @return array<string, mixed>
+     */
+    public function regenerateClientSecret(string $id): array
+    {
+        return $this->post("/admin/applications/{$id}/regenerate-secret", []);
     }
 
     /** Deletes an OAuth client by ID. */

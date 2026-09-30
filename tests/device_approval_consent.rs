@@ -211,7 +211,7 @@ impl Rig {
     fn poll(&self, client: &ClientId, device_code: &str) -> Result<(), IdentityError> {
         self.state
             .identity
-            .poll_device_token(&self.realm, device_code, client)
+            .poll_device_token(&self.realm, device_code, client, None)
             .map(|_| ())
     }
 }
@@ -397,7 +397,7 @@ impl Rig {
         let tokens = self
             .state
             .identity
-            .poll_device_token(&self.realm, device_code, client)
+            .poll_device_token(&self.realm, device_code, client, None)
             .expect("the device collects its tokens");
         let claims = self
             .state

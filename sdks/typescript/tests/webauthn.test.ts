@@ -56,9 +56,7 @@ describe("HearthApiClient WebAuthn helpers (C-21)", () => {
     const [url, init] = lastCall();
     expect(url).toBe("https://auth.example.com/webauthn/register/begin");
     expect(init.method).toBe("POST");
-    expect((init.headers as Record<string, string>).Authorization).toBe(
-      "Bearer bearer-token",
-    );
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer bearer-token");
     expect((init.headers as Record<string, string>)["X-Realm-ID"]).toBe("realm_test");
     expect(res.challenge).toBe("chal-1");
     expect(res.rp_id).toBe("auth.example.com");
@@ -78,9 +76,7 @@ describe("HearthApiClient WebAuthn helpers (C-21)", () => {
 
     const [url, init] = lastCall();
     expect(url).toBe("https://auth.example.com/webauthn/register/complete");
-    expect((init.headers as Record<string, string>).Authorization).toBe(
-      "Bearer bearer-token",
-    );
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer bearer-token");
     const body = JSON.parse(init.body as string);
     expect(body.client_data_json).toBe("cdj");
     expect(body.attestation_object).toBe("att");

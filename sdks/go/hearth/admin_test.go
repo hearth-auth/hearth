@@ -188,6 +188,27 @@ func TestAdminDeleteClient(t *testing.T) {
 	}
 }
 
+func TestAdminRegenerateClientSecret(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/admin/applications/cl1/regenerate-secret" || r.Method != "POST" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"client_id":"cl1","client_name":"svc","redirect_uris":[],"grant_types":[],"client_secret":"new-secret"}`))
+	}))
+	defer srv.Close()
+
+	admin := newTestAdminClient(srv)
+	got, err := admin.RegenerateClientSecret(context.Background(), "cl1")
+	if err != nil {
+		t.Fatalf("RegenerateClientSecret: %v", err)
+	}
+	if got.ClientSecret != "new-secret" {
+		t.Fatalf("ClientSecret = %q, want the new secret", got.ClientSecret)
+	}
+}
+
 func TestAdminListClients(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/admin/applications" {

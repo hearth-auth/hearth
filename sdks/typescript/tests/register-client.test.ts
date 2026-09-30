@@ -49,4 +49,39 @@ describe("HearthApiClient.registerClient", () => {
     );
     expect(Object.keys(lastRequestBody())).not.toContain("trust_level");
   });
+
+  it("requests a generated secret and returns it from the create response", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          client_id: "c1",
+          client_name: "svc",
+          redirect_uris: [],
+          grant_types: ["client_credentials"],
+          client_secret: "generated-once",
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const client = new HearthApiClient({ baseUrl: "http://hearth.test", realmId: "r1" });
+    const created = await client.registerClient(
+      {
+        clientName: "svc",
+        redirectUris: ["https://svc.test/cb"],
+        tokenEndpointAuthMethod: "client_secret_basic",
+      },
+      "admin-token",
+    );
+    expect(lastRequestBody().token_endpoint_auth_method).toBe("client_secret_basic");
+    expect(created.client_secret).toBe("generated-once");
+  });
+
+  it("omits token_endpoint_auth_method when none is given", async () => {
+    const client = new HearthApiClient({ baseUrl: "http://hearth.test", realmId: "r1" });
+    await client.registerClient(
+      { clientName: "app", redirectUris: ["http://app.test/cb"] },
+      "admin-token",
+    );
+    expect(Object.keys(lastRequestBody())).not.toContain("token_endpoint_auth_method");
+  });
 });

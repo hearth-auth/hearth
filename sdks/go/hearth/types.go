@@ -136,11 +136,11 @@ type WebAuthnRegistrationCompleteResponse struct {
 
 // WebAuthnAuthenticationBeginResponse holds PublicKeyCredentialRequestOptions from the server.
 type WebAuthnAuthenticationBeginResponse struct {
-	Challenge          string                    `json:"challenge"`
-	RPID               string                    `json:"rp_id"`
-	AllowCredentials   []WebAuthnAllowCredential `json:"allow_credentials"`
-	UserVerification   string                    `json:"user_verification"`
-	Timeout            uint64                    `json:"timeout"`
+	Challenge        string                    `json:"challenge"`
+	RPID             string                    `json:"rp_id"`
+	AllowCredentials []WebAuthnAllowCredential `json:"allow_credentials"`
+	UserVerification string                    `json:"user_verification"`
+	Timeout          uint64                    `json:"timeout"`
 }
 
 // WebAuthnAuthenticationCompleteRequest carries the browser-signed assertion to the server.
@@ -229,7 +229,25 @@ type RegisterClientRequest struct {
 	ClientName   string     `json:"client_name"`
 	RedirectURIs []string   `json:"redirect_uris"`
 	TrustLevel   TrustLevel `json:"trust_level,omitempty"`
+	// TokenEndpointAuthMethod is optional. TokenEndpointAuthClientSecretBasic
+	// or TokenEndpointAuthClientSecretPost creates a confidential client: the
+	// server generates its secret and returns it once, in
+	// OAuthClient.ClientSecret. Empty registers a public client.
+	TokenEndpointAuthMethod TokenEndpointAuthMethod `json:"token_endpoint_auth_method,omitempty"`
 }
+
+// TokenEndpointAuthMethod is how a client authenticates at the token
+// endpoint (RFC 7591 §2).
+type TokenEndpointAuthMethod string
+
+const (
+	// TokenEndpointAuthClientSecretBasic sends the generated secret with HTTP Basic auth.
+	TokenEndpointAuthClientSecretBasic TokenEndpointAuthMethod = "client_secret_basic"
+	// TokenEndpointAuthClientSecretPost sends the generated secret in the request body.
+	TokenEndpointAuthClientSecretPost TokenEndpointAuthMethod = "client_secret_post"
+	// TokenEndpointAuthNone registers a public client.
+	TokenEndpointAuthNone TokenEndpointAuthMethod = "none"
+)
 
 // OAuthClient represents an OAuth client record.
 type OAuthClient struct {
@@ -237,6 +255,9 @@ type OAuthClient struct {
 	ClientName   string   `json:"client_name"`
 	RedirectURIs []string `json:"redirect_uris"`
 	GrantTypes   []string `json:"grant_types"`
+	// ClientSecret is set only on the response that created a confidential
+	// client, and never returned again: store it on receipt.
+	ClientSecret string `json:"client_secret,omitempty"`
 }
 
 // MePermissionsResponse is returned by GET /v1/me/permissions.

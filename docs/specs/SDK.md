@@ -394,7 +394,7 @@ either MUST send the credential that route requires — neither is anonymous by 
 
 | Route | Credential | Success |
 |-------|------------|---------|
-| `POST /clients` (admin) | `Authorization: Bearer <token>` carrying `hearth.clients.admin` (or `hearth.admin`) in the realm, plus `X-Realm-ID` | `201` with the proto `OAuthClient` (`client_id`, `client_name`, …) |
+| `POST /clients` (admin) | `Authorization: Bearer <token>` carrying `hearth.clients.admin` (or `hearth.admin`) in the realm, plus `X-Realm-ID` | `201` with the proto `OAuthClient` (`client_id`, `client_name`, …; plus a generated `client_secret`, once, when `token_endpoint_auth_method` is `client_secret_basic` / `client_secret_post`) |
 | `registration_endpoint` from discovery (RFC 7591, e.g. `/realms/{name}/register`) | Set by the realm's `dcr_policy`: `disabled` (default) → `403`; `open` → none; `authenticated` → an RFC 7591 §3.1 initial access token (a realm token carrying `hearth.clients.admin`) as `Authorization: Bearer` | `201` with `client_id` + generated `client_secret` |
 
 SDK requirements:
@@ -410,6 +410,15 @@ SDK requirements:
   `INTROSPECTION` / `DECISION`. The snake_case spellings (`first_party`, `embedded`) are a `422`.
   `POST /admin/applications` takes the same body (see [OAuth Clients](#oauth-clients-roles-groups)).
 - SDKs MUST treat `201 Created` as success.
+- SDKs SHOULD let the caller pass `token_endpoint_auth_method` (`client_secret_basic`,
+  `client_secret_post`, `private_key_jwt`, `none`) and MUST surface a `client_secret` in the
+  create response: it is the only time the server returns the generated secret. The server
+  refuses a caller-chosen `client_secret` on these routes with `422`. All seven SDKs carry both
+  (PHP and Node through the `createClient` params/record; PHP also has `AdminClient::AUTH_*`).
+- `POST /admin/applications/{id}/regenerate-secret` returns the client record with a new
+  `client_secret`, once; the old secret stops working at once. SDKs MUST offer it on their admin
+  client: `regenerateClientSecret` (TypeScript, Node, PHP, Kotlin), `RegenerateClientSecret`
+  (Go), `regenerate_client_secret` (Python, Rust).
 - An RFC 7591 method MUST accept an optional initial access token and send it as
   `Authorization: Bearer` when it is given.
 

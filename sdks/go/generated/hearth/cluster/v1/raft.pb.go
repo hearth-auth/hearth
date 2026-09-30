@@ -22,7 +22,7 @@ const (
 )
 
 // AppendEntries RPC request.
-// Payload is serde_json-encoded openraft::AppendEntriesRequest<HearthRaftConfig>.
+// Payload is CBOR-encoded openraft::AppendEntriesRequest<HearthRaftConfig>.
 type AppendEntriesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -68,7 +68,7 @@ func (x *AppendEntriesRequest) GetPayload() []byte {
 }
 
 // AppendEntries RPC response.
-// Payload is serde_json-encoded openraft::AppendEntriesResponse<u64>.
+// Payload is CBOR-encoded openraft::AppendEntriesResponse<u64>.
 type AppendEntriesResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -114,7 +114,7 @@ func (x *AppendEntriesResponse) GetPayload() []byte {
 }
 
 // Vote RPC request.
-// Payload is serde_json-encoded openraft::VoteRequest<u64>.
+// Payload is CBOR-encoded openraft::VoteRequest<u64>.
 type VoteRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -160,7 +160,7 @@ func (x *VoteRequest) GetPayload() []byte {
 }
 
 // Vote RPC response.
-// Payload is serde_json-encoded openraft::VoteResponse<u64>.
+// Payload is CBOR-encoded openraft::VoteResponse<u64>.
 type VoteResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -206,7 +206,7 @@ func (x *VoteResponse) GetPayload() []byte {
 }
 
 // InstallSnapshot RPC request (one chunk per call).
-// Payload is serde_json-encoded openraft::InstallSnapshotRequest<HearthRaftConfig>.
+// Payload is CBOR-encoded openraft::InstallSnapshotRequest<HearthRaftConfig>.
 type InstallSnapshotRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -252,7 +252,7 @@ func (x *InstallSnapshotRequest) GetPayload() []byte {
 }
 
 // InstallSnapshot RPC response.
-// Payload is serde_json-encoded openraft::InstallSnapshotResponse<u64>.
+// Payload is CBOR-encoded openraft::InstallSnapshotResponse<u64>.
 type InstallSnapshotResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -297,6 +297,98 @@ func (x *InstallSnapshotResponse) GetPayload() []byte {
 	return nil
 }
 
+// ForwardWrite RPC request.
+// Payload is CBOR-encoded hearth::cluster::RaftCommand.
+type ForwardWriteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ForwardWriteRequest) Reset() {
+	*x = ForwardWriteRequest{}
+	mi := &file_hearth_cluster_v1_raft_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ForwardWriteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ForwardWriteRequest) ProtoMessage() {}
+
+func (x *ForwardWriteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_hearth_cluster_v1_raft_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ForwardWriteRequest.ProtoReflect.Descriptor instead.
+func (*ForwardWriteRequest) Descriptor() ([]byte, []int) {
+	return file_hearth_cluster_v1_raft_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ForwardWriteRequest) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+// ForwardWrite RPC response.
+// Payload is CBOR-encoded hearth::cluster::ForwardedWriteOutcome.
+type ForwardWriteResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ForwardWriteResponse) Reset() {
+	*x = ForwardWriteResponse{}
+	mi := &file_hearth_cluster_v1_raft_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ForwardWriteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ForwardWriteResponse) ProtoMessage() {}
+
+func (x *ForwardWriteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_hearth_cluster_v1_raft_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ForwardWriteResponse.ProtoReflect.Descriptor instead.
+func (*ForwardWriteResponse) Descriptor() ([]byte, []int) {
+	return file_hearth_cluster_v1_raft_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ForwardWriteResponse) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
 var File_hearth_cluster_v1_raft_proto protoreflect.FileDescriptor
 
 const file_hearth_cluster_v1_raft_proto_rawDesc = "" +
@@ -313,11 +405,16 @@ const file_hearth_cluster_v1_raft_proto_rawDesc = "" +
 	"\x16InstallSnapshotRequest\x12\x18\n" +
 	"\apayload\x18\x01 \x01(\fR\apayload\"3\n" +
 	"\x17InstallSnapshotResponse\x12\x18\n" +
-	"\apayload\x18\x01 \x01(\fR\apayload2\xa4\x02\n" +
+	"\apayload\x18\x01 \x01(\fR\apayload\"/\n" +
+	"\x13ForwardWriteRequest\x12\x18\n" +
+	"\apayload\x18\x01 \x01(\fR\apayload\"0\n" +
+	"\x14ForwardWriteResponse\x12\x18\n" +
+	"\apayload\x18\x01 \x01(\fR\apayload2\x85\x03\n" +
 	"\vRaftService\x12b\n" +
 	"\rAppendEntries\x12'.hearth.cluster.v1.AppendEntriesRequest\x1a(.hearth.cluster.v1.AppendEntriesResponse\x12G\n" +
 	"\x04Vote\x12\x1e.hearth.cluster.v1.VoteRequest\x1a\x1f.hearth.cluster.v1.VoteResponse\x12h\n" +
-	"\x0fInstallSnapshot\x12).hearth.cluster.v1.InstallSnapshotRequest\x1a*.hearth.cluster.v1.InstallSnapshotResponseBCZAgithub.com/hearthdb/hearth/sdks/go/generated/cluster/v1;clusterv1b\x06proto3"
+	"\x0fInstallSnapshot\x12).hearth.cluster.v1.InstallSnapshotRequest\x1a*.hearth.cluster.v1.InstallSnapshotResponse\x12_\n" +
+	"\fForwardWrite\x12&.hearth.cluster.v1.ForwardWriteRequest\x1a'.hearth.cluster.v1.ForwardWriteResponseBCZAgithub.com/hearthdb/hearth/sdks/go/generated/cluster/v1;clusterv1b\x06proto3"
 
 var (
 	file_hearth_cluster_v1_raft_proto_rawDescOnce sync.Once
@@ -331,7 +428,7 @@ func file_hearth_cluster_v1_raft_proto_rawDescGZIP() []byte {
 	return file_hearth_cluster_v1_raft_proto_rawDescData
 }
 
-var file_hearth_cluster_v1_raft_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_hearth_cluster_v1_raft_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_hearth_cluster_v1_raft_proto_goTypes = []any{
 	(*AppendEntriesRequest)(nil),    // 0: hearth.cluster.v1.AppendEntriesRequest
 	(*AppendEntriesResponse)(nil),   // 1: hearth.cluster.v1.AppendEntriesResponse
@@ -339,16 +436,20 @@ var file_hearth_cluster_v1_raft_proto_goTypes = []any{
 	(*VoteResponse)(nil),            // 3: hearth.cluster.v1.VoteResponse
 	(*InstallSnapshotRequest)(nil),  // 4: hearth.cluster.v1.InstallSnapshotRequest
 	(*InstallSnapshotResponse)(nil), // 5: hearth.cluster.v1.InstallSnapshotResponse
+	(*ForwardWriteRequest)(nil),     // 6: hearth.cluster.v1.ForwardWriteRequest
+	(*ForwardWriteResponse)(nil),    // 7: hearth.cluster.v1.ForwardWriteResponse
 }
 var file_hearth_cluster_v1_raft_proto_depIdxs = []int32{
 	0, // 0: hearth.cluster.v1.RaftService.AppendEntries:input_type -> hearth.cluster.v1.AppendEntriesRequest
 	2, // 1: hearth.cluster.v1.RaftService.Vote:input_type -> hearth.cluster.v1.VoteRequest
 	4, // 2: hearth.cluster.v1.RaftService.InstallSnapshot:input_type -> hearth.cluster.v1.InstallSnapshotRequest
-	1, // 3: hearth.cluster.v1.RaftService.AppendEntries:output_type -> hearth.cluster.v1.AppendEntriesResponse
-	3, // 4: hearth.cluster.v1.RaftService.Vote:output_type -> hearth.cluster.v1.VoteResponse
-	5, // 5: hearth.cluster.v1.RaftService.InstallSnapshot:output_type -> hearth.cluster.v1.InstallSnapshotResponse
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
+	6, // 3: hearth.cluster.v1.RaftService.ForwardWrite:input_type -> hearth.cluster.v1.ForwardWriteRequest
+	1, // 4: hearth.cluster.v1.RaftService.AppendEntries:output_type -> hearth.cluster.v1.AppendEntriesResponse
+	3, // 5: hearth.cluster.v1.RaftService.Vote:output_type -> hearth.cluster.v1.VoteResponse
+	5, // 6: hearth.cluster.v1.RaftService.InstallSnapshot:output_type -> hearth.cluster.v1.InstallSnapshotResponse
+	7, // 7: hearth.cluster.v1.RaftService.ForwardWrite:output_type -> hearth.cluster.v1.ForwardWriteResponse
+	4, // [4:8] is the sub-list for method output_type
+	0, // [0:4] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -365,7 +466,7 @@ func file_hearth_cluster_v1_raft_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_hearth_cluster_v1_raft_proto_rawDesc), len(file_hearth_cluster_v1_raft_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

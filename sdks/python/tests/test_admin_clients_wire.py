@@ -58,7 +58,9 @@ def test_create_client_sends_trust_level_as_proto_enum_name(respx_mock):
         return_value=httpx.Response(201, json=SERVER_CLIENT)
     )
 
-    _admin().create_client(CreateClientRequest(name="My App", trust_level="first_party"))
+    _admin().create_client(
+        CreateClientRequest(name="My App", trust_level="first_party")
+    )
 
     body = json.loads(route.calls.last.request.content)
     assert body["trust_level"] == "CLIENT_TRUST_LEVEL_FIRST_PARTY"
@@ -66,7 +68,9 @@ def test_create_client_sends_trust_level_as_proto_enum_name(respx_mock):
 
 def test_update_client_sends_client_name_not_name(respx_mock):
     route = respx_mock.patch(f"{BASE}/admin/applications/c-1").mock(
-        return_value=httpx.Response(200, json={**SERVER_CLIENT, "client_name": "Renamed"})
+        return_value=httpx.Response(
+            200, json={**SERVER_CLIENT, "client_name": "Renamed"}
+        )
     )
 
     updated = _admin().update_client("c-1", UpdateClientRequest(name="Renamed"))
@@ -99,3 +103,17 @@ def test_list_clients_parses_server_shape(respx_mock):
 
     assert [c.id for c in page.items] == ["c-1"]
     assert page.items[0].name == "My App"
+
+
+def test_regenerate_client_secret_posts_and_returns_the_new_secret(respx_mock):
+    route = respx_mock.post(f"{BASE}/admin/applications/c-1/regenerate-secret").mock(
+        return_value=httpx.Response(
+            200, json={**SERVER_CLIENT, "client_secret": "new-secret"}
+        )
+    )
+
+    client = _admin().regenerate_client_secret("c-1")
+
+    assert route.called
+    assert client.id == "c-1"
+    assert client.secret == "new-secret"

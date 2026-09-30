@@ -686,6 +686,15 @@ pub(crate) fn identity_error_to_response(
         );
     }
 
+    // A transient cluster failure is a 503 with a fixed message; the router
+    // adds `Retry-After` to every 503 that lacks one.
+    if let IdentityError::Storage(e) = err {
+        if let Some(class) = crate::storage::StorageError::retry_class_of(&**e) {
+            tracing::warn!(error = %e, "request refused: cluster unavailable");
+            return cluster_unavailable_response(class);
+        }
+    }
+
     // A FAPI auth-method refusal says which method is required (RFC 6749 §5.2
     // `error_description`); it names the realm's or client's profile, never
     // whether a presented credential was right.
@@ -1006,8 +1015,44 @@ pub(crate) fn identity_error_to_response(
         Json(serde_json::json!({"error": message, "error_code": error_code})),
     )
 }
+/// The `503` body for a transient cluster failure: a fixed message per
+/// [`RetryClass`](crate::storage::RetryClass) and its stable `error_code`,
+/// never the operator-facing detail behind it.
+pub(crate) fn cluster_unavailable_response(
+    class: crate::storage::RetryClass,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::protocol::error_codes::{CLUSTER_UNAVAILABLE, CLUSTER_WRITE_OUTCOME_UNKNOWN};
+    let (error, description, code) = match class {
+        crate::storage::RetryClass::OutcomeUnknown => (
+            "write_outcome_unknown",
+            "The write may or may not have been applied. Re-read before retrying.",
+            CLUSTER_WRITE_OUTCOME_UNKNOWN,
+        ),
+        _ => (
+            "cluster_unavailable",
+            "The cluster cannot serve this request right now and nothing was written. \
+             Retry shortly.",
+            CLUSTER_UNAVAILABLE,
+        ),
+    };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": error,
+            "error_description": description,
+            "error_code": code,
+        })),
+    )
+}
+
 /// Maps [`RbacError`] values to HTTP responses.
 pub(crate) fn rbac_error_to_response(err: &RbacError) -> (StatusCode, Json<serde_json::Value>) {
+    if let RbacError::Storage(e) = err {
+        if let Some(class) = crate::storage::StorageError::retry_class_of(&**e) {
+            tracing::warn!(error = %e, "request refused: cluster unavailable");
+            return cluster_unavailable_response(class);
+        }
+    }
     let (status, code) = match err {
         RbacError::RoleNotFound | RbacError::GroupNotFound | RbacError::AssignmentNotFound => {
             (StatusCode::NOT_FOUND, "not_found")
@@ -1025,6 +1070,7 @@ pub(crate) fn rbac_error_to_response(err: &RbacError) -> (StatusCode, Json<serde
             (StatusCode::PAYLOAD_TOO_LARGE, "resource_exhausted")
         }
         RbacError::RoleArchived => (StatusCode::CONFLICT, "role_archived"),
+        RbacError::RoleInUse { .. } => (StatusCode::CONFLICT, "role_in_use"),
         RbacError::ReservedNamespace { .. } => (StatusCode::FORBIDDEN, "reserved_namespace"),
         RbacError::InvalidScope { .. } => (StatusCode::BAD_REQUEST, "invalid_scope"),
         RbacError::Storage(_) | RbacError::Serialization { .. } => {
@@ -1472,6 +1518,51 @@ mod rate_limit_attribution_tests {
         let unique: std::collections::BTreeSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "limiter ids must be distinct");
         assert!(ids.iter().all(|id| !id.is_empty()));
+    }
+}
+
+#[cfg(test)]
+mod cluster_unavailable_tests {
+    //! A transient cluster failure behind an RBAC or identity call is a
+    //! `503` with a stable code, not a `500`.
+    use super::{identity_error_to_response, rbac_error_to_response};
+    use crate::identity::IdentityError;
+    use crate::protocol::error_codes::{CLUSTER_UNAVAILABLE, CLUSTER_WRITE_OUTCOME_UNKNOWN};
+    use crate::rbac::RbacError;
+    use crate::storage::{ClusterUnavailableCause, StorageError};
+    use axum::http::StatusCode;
+
+    fn outage(unknown: bool) -> StorageError {
+        if unknown {
+            StorageError::ClusterWriteOutcomeUnknown {
+                reason: "10.1.1.1".to_string(),
+            }
+        } else {
+            StorageError::ClusterUnavailable {
+                cause: ClusterUnavailableCause::LeaderBusy,
+                reason: "10.1.1.1".to_string(),
+            }
+        }
+    }
+
+    #[test]
+    fn rbac_and_identity_cluster_outages_are_503_with_stable_codes() {
+        for (unknown, code) in [
+            (false, CLUSTER_UNAVAILABLE),
+            (true, CLUSTER_WRITE_OUTCOME_UNKNOWN),
+        ] {
+            let (status, body) =
+                rbac_error_to_response(&RbacError::Storage(Box::new(outage(unknown))));
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body.0["error_code"], code, "{}", body.0);
+            assert!(!body.0.to_string().contains("10.1.1.1"), "{}", body.0);
+
+            let (status, body) =
+                identity_error_to_response(&IdentityError::Storage(Box::new(outage(unknown))));
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body.0["error_code"], code, "{}", body.0);
+            assert!(!body.0.to_string().contains("10.1.1.1"), "{}", body.0);
+        }
     }
 }
 

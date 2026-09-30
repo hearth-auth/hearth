@@ -8,7 +8,6 @@ use crate::types::*;
 /// Requires an admin access token obtained via `/admin/bootstrap`.
 pub struct AdminClient {
     base_url: String,
-    realm_id: String,
     http: reqwest::Client,
 }
 
@@ -37,11 +36,7 @@ impl AdminClient {
             })
             .build()
             .expect("reqwest client");
-        Self {
-            base_url,
-            realm_id,
-            http,
-        }
+        Self { base_url, http }
     }
 
     // ------------------------------------------------------------------
@@ -134,7 +129,9 @@ impl AdminClient {
         Self::check(&resp)?;
         let val: serde_json::Value = resp.json().await?;
         if let Some(items) = val.get("items").and_then(|i| i.as_array()) {
-            Ok(serde_json::from_value(serde_json::Value::Array(items.clone()))?)
+            Ok(serde_json::from_value(serde_json::Value::Array(
+                items.clone(),
+            ))?)
         } else {
             Ok(serde_json::from_value(val)?)
         }
@@ -220,6 +217,26 @@ impl AdminClient {
             .http
             .patch(format!("{}/admin/applications/{client_id}", self.base_url))
             .json(req)
+            .send()
+            .await?;
+        Self::check(&resp)?;
+        Ok(resp.json().await?)
+    }
+
+    /// Replace a confidential client's secret
+    /// (`POST /admin/applications/{id}/regenerate-secret`). The returned
+    /// client's [`OAuthClient::secret`] is the new secret, returned once; the
+    /// old secret stops working immediately.
+    pub async fn regenerate_client_secret(
+        &self,
+        client_id: &str,
+    ) -> Result<OAuthClient, HearthError> {
+        let resp = self
+            .http
+            .post(format!(
+                "{}/admin/applications/{client_id}/regenerate-secret",
+                self.base_url
+            ))
             .send()
             .await?;
         Self::check(&resp)?;
@@ -413,6 +430,37 @@ impl AdminClient {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn regenerate_client_secret_posts_and_returns_the_new_secret() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap();
+            let body = r#"{"client_id":"c1","client_name":"svc","client_secret":"new-secret"}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+
+        let admin = AdminClient::new(format!("http://{addr}"), "admin-token", "realm-1");
+        let client = admin
+            .regenerate_client_secret("c1")
+            .await
+            .expect("regenerate_client_secret");
+        assert_eq!(client.secret.as_deref(), Some("new-secret"));
+        let req = server.await.unwrap();
+        assert!(
+            req.starts_with("POST /admin/applications/c1/regenerate-secret "),
+            "{req}"
+        );
+    }
+
     #[test]
     fn admin_client_url_methods_compile() {
         // Verify the method signatures compile and the URL patterns are well-formed.
@@ -493,6 +541,7 @@ mod tests {
             redirect_uris: vec!["https://app.example.com/cb".into()],
             trust_level: Some("first_party".into()),
             access_token_authorization: AccessTokenAuthorization::Introspection,
+            token_endpoint_auth_method: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(
@@ -513,10 +562,43 @@ mod tests {
             redirect_uris: vec![],
             trust_level: Some("third_party".into()),
             access_token_authorization: AccessTokenAuthorization::Embedded,
+            token_endpoint_auth_method: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["access_token_authorization"], "EMBEDDED");
         assert_eq!(json["trust_level"], "CLIENT_TRUST_LEVEL_THIRD_PARTY");
+    }
+
+    #[test]
+    fn client_requests_carry_the_auth_method_and_the_record_its_generated_secret() {
+        let req = CreateClientRequest {
+            name: "svc".into(),
+            redirect_uris: vec![],
+            trust_level: None,
+            access_token_authorization: AccessTokenAuthorization::Embedded,
+            token_endpoint_auth_method: Some("client_secret_basic".into()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["token_endpoint_auth_method"], "client_secret_basic");
+
+        let req = RegisterClientRequest {
+            name: "svc".into(),
+            redirect_uris: vec![],
+            trust_level: None,
+            token_endpoint_auth_method: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("token_endpoint_auth_method").is_none(), "{json}");
+
+        // The create (or regenerate) response carries the generated secret
+        // once, under the wire key `client_secret`.
+        let client: OAuthClient = serde_json::from_value(serde_json::json!({
+            "client_id": "c1",
+            "client_name": "svc",
+            "client_secret": "generated-once",
+        }))
+        .unwrap();
+        assert_eq!(client.secret.as_deref(), Some("generated-once"));
     }
 
     #[test]
@@ -526,6 +608,7 @@ mod tests {
             name: "My App".into(),
             redirect_uris: vec![],
             trust_level: Some("first_party".into()),
+            token_endpoint_auth_method: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["trust_level"], "CLIENT_TRUST_LEVEL_FIRST_PARTY");

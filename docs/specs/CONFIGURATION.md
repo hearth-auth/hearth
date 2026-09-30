@@ -250,7 +250,7 @@ storage:
 
 ### `cluster`
 
-> **⚠ EXPERIMENTAL — Do not use in production.** Multi-node clustering is not production-supported in Hearth 1.x. Known defects: followers do not invalidate RBAC or session caches (C-5); cluster membership is immutable after bootstrap (C-6); writes to followers return HTTP 500 (H-3). The production deployment model is single-node. See the [Clustering guide](../guides/clustering.md).
+> **⚠ EXPERIMENTAL — Do not use in production.** Multi-node clustering is not production-supported in Hearth 1.x. Known defects: followers do not invalidate RBAC or session caches (C-5); cluster membership is immutable after bootstrap (C-6). (Writes to followers are forwarded to the leader — H-3 is fixed.) The production deployment model is single-node. See the [Clustering guide](../guides/clustering.md).
 
 Multi-node Raft consensus configuration. **Omit this section entirely for single-node deployments** — when absent, Hearth runs in single-node mode with no clustering overhead, no extra port, and no Raft log.
 
@@ -285,7 +285,7 @@ cluster:
 
 **Write bound (`write_timeout_ms`):** a leader that loses contact with a quorum immediately after accepting a write would otherwise wait forever — the entry is already in its own log, the quorum acknowledgement can never arrive, and openraft 0.9 neither steps a leader down on a lost quorum nor emits a redirect. The write is therefore bounded; on expiry the caller gets an error saying the outcome is **unknown**, because the timeout does not cancel the proposal and Raft may still commit it. Re-read rather than assuming the write was lost. Raise the value on a cluster whose commits are legitimately slow; lowering it below your normal commit latency turns healthy writes into failures.
 
-**Write routing (H-3):** Writes that arrive on a follower currently return HTTP 500. There is no leader-redirect response. Route all write traffic exclusively to the leader node at the load balancer layer.
+**Write routing (H-3, fixed):** A write that arrives on a follower is forwarded to the leader over the peer mTLS channel and answered once it is committed and applied on that follower, so any node accepts writes and logins. The forwarded call shares the `write_timeout_ms` bound (plus 2 s), and the follower's wait for its own apply is bounded by `write_timeout_ms` again. A forwarded write whose outcome is unknown (the leader died mid-call) fails instead of being retried. A write the cluster cannot serve answers `503` with `Retry-After` and `HEARTH_CLUSTER_UNAVAILABLE` or `HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN`; one replicated write is limited to 4 MiB. See the [Clustering guide](../guides/clustering.md#h-3--writes-to-a-follower-forwarded-to-the-leader-fixed).
 
 **Follower RBAC cache (C-5):** Follower nodes do not invalidate their in-process RBAC or session caches when writes are applied from the Raft log. A permission revoked on the leader will continue to be accepted on followers until those followers restart.
 
@@ -333,6 +333,7 @@ The `/metrics` endpoint returns metrics in Prometheus text exposition format (`t
 | `hearth_kdf_queue_wait_seconds` | histogram | — | Seconds spent waiting for a KDF permit (successful acquisitions only) |
 | `hearth_kdf_compute_seconds` | histogram | — | Wall-clock seconds for one Argon2id operation (excludes queue wait) |
 | `hearth_kdf_shed_total` | counter | — | Argon2id operations shed (`503`/`Retry-After`) due to a full KDF queue (HEA-1887) |
+| `hearth_cluster_forwarded_writes_total` | counter | `outcome` | Cluster mode: writes this node forwarded to the Raft leader, by outcome — a fixed set: `committed`, `not_applied_locally`, `not_leader`, `unreachable`, `busy`, `rejected`, `outcome_unknown` (all present at 0). See the clustering guide (H-3) |
 
 ### `observability`
 
@@ -1320,7 +1321,7 @@ Each realm entry supports:
 | `auth` | object | — | Per-realm auth policy (MFA, password policy, rate limits, token TTLs, self-registration, and DCR). |
 | `applications` | map | — | Declarative OAuth 2.0 client definitions. |
 | `organizations` | map | — | Declarative organization definitions. |
-| `fapi_profile` | string | — | FAPI 2.0 Security Profile for the realm: `"baseline"` or `"advanced"`. When set, all clients in the realm must comply. `"baseline"` requires PAR + PKCE (S256). `"advanced"` adds JAR + JARM. Absent means standard OAuth 2.0 / OIDC rules apply. Can also be set at runtime via `PATCH /admin/realms/{id}/config`. |
+| `fapi_profile` | string | — | FAPI 2.0 Security Profile for the realm: `"baseline"` or `"advanced"`. When set, all clients in the realm must comply. `"baseline"` requires PAR + PKCE (S256). `"advanced"` adds JAR + JARM and accepts `private_key_jwt` client authentication only: an application of an `"advanced"` realm that is `confidential` or carries a `client_secret` fails `hearth config validate`, startup and reload, naming the realm and the application (declare `jwks` instead). Absent means standard OAuth 2.0 / OIDC rules apply. Can also be set at runtime via `PATCH /admin/realms/{id}/config`. |
 | `breach_check` | object | — | HIBP k-anonymity breach check on every password set/change. See below. |
 
 ### `realms.<name>.email`

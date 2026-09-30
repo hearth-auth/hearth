@@ -453,9 +453,11 @@ func (x *OidcTokenResponse) GetRefreshToken() string {
 
 // Request to register a new OAuth 2.0 client.
 type RegisterClientRequest struct {
-	state                    protoimpl.MessageState   `protogen:"open.v1"`
-	ClientName               string                   `protobuf:"bytes,1,opt,name=client_name,json=clientName,proto3" json:"client_name,omitempty"`
-	RedirectUris             []string                 `protobuf:"bytes,2,rep,name=redirect_uris,json=redirectUris,proto3" json:"redirect_uris,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	ClientName   string                 `protobuf:"bytes,1,opt,name=client_name,json=clientName,proto3" json:"client_name,omitempty"`
+	RedirectUris []string               `protobuf:"bytes,2,rep,name=redirect_uris,json=redirectUris,proto3" json:"redirect_uris,omitempty"`
+	// Not accepted on the admin create paths (REST and gRPC refuse it): Hearth
+	// generates client secrets. Request one with token_endpoint_auth_method.
 	ClientSecret             *string                  `protobuf:"bytes,3,opt,name=client_secret,json=clientSecret,proto3,oneof" json:"client_secret,omitempty"`
 	GrantTypes               []string                 `protobuf:"bytes,4,rep,name=grant_types,json=grantTypes,proto3" json:"grant_types,omitempty"`
 	AccessTokenAuthorization AccessTokenAuthorization `protobuf:"varint,5,opt,name=access_token_authorization,json=accessTokenAuthorization,proto3,enum=hearth.identity.v1.AccessTokenAuthorization" json:"access_token_authorization,omitempty"`
@@ -468,8 +470,19 @@ type RegisterClientRequest struct {
 	// and EdDSA on the authenticated admin path. Only ID tokens are affected;
 	// access and refresh tokens are always EdDSA.
 	IdTokenSignedResponseAlg *string `protobuf:"bytes,7,opt,name=id_token_signed_response_alg,proto3,oneof" json:"id_token_signed_response_alg,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// How the client authenticates at the token endpoint (RFC 7591 s2):
+	// "client_secret_basic", "client_secret_post", "private_key_jwt" or "none".
+	// On the authenticated admin create paths (POST /admin/applications,
+	// POST /clients, gRPC CreateApplication and RegisterClient) a
+	// "client_secret_*" value creates a confidential client whose secret Hearth
+	// generates (256 bits from the OS CSPRNG) and returns exactly once, in the
+	// response's client_secret. Only a hash is stored. "private_key_jwt"
+	// requires jwks. Omitted or "none" registers a public client (or a
+	// private_key_jwt client when jwks is given). A client_secret_* method is
+	// refused in a FAPI 2.0 Advanced realm, which accepts private_key_jwt only.
+	TokenEndpointAuthMethod *string `protobuf:"bytes,8,opt,name=token_endpoint_auth_method,proto3,oneof" json:"token_endpoint_auth_method,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *RegisterClientRequest) Reset() {
@@ -547,6 +560,13 @@ func (x *RegisterClientRequest) GetTrustLevel() ClientTrustLevel {
 func (x *RegisterClientRequest) GetIdTokenSignedResponseAlg() string {
 	if x != nil && x.IdTokenSignedResponseAlg != nil {
 		return *x.IdTokenSignedResponseAlg
+	}
+	return ""
+}
+
+func (x *RegisterClientRequest) GetTokenEndpointAuthMethod() string {
+	if x != nil && x.TokenEndpointAuthMethod != nil {
+		return *x.TokenEndpointAuthMethod
 	}
 	return ""
 }
@@ -650,8 +670,14 @@ type OAuthClient struct {
 	AccessTokenAuthorization AccessTokenAuthorization `protobuf:"varint,7,opt,name=access_token_authorization,json=accessTokenAuthorization,proto3,enum=hearth.identity.v1.AccessTokenAuthorization" json:"access_token_authorization,omitempty"`
 	// The algorithm this client's ID tokens are signed with: "RS256" or "EdDSA".
 	IdTokenSignedResponseAlg string `protobuf:"bytes,8,opt,name=id_token_signed_response_alg,proto3" json:"id_token_signed_response_alg,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// The client secret Hearth generated for a confidential client. Present
+	// only in the response that created the client (token_endpoint_auth_method
+	// "client_secret_basic" or "client_secret_post"); never returned again.
+	// Store it on receipt: Hearth keeps only its hash. Also set, once, by
+	// RegenerateApplicationSecret.
+	ClientSecret  *string `protobuf:"bytes,9,opt,name=client_secret,proto3,oneof" json:"client_secret,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OAuthClient) Reset() {
@@ -736,6 +762,13 @@ func (x *OAuthClient) GetAccessTokenAuthorization() AccessTokenAuthorization {
 func (x *OAuthClient) GetIdTokenSignedResponseAlg() string {
 	if x != nil {
 		return x.IdTokenSignedResponseAlg
+	}
+	return ""
+}
+
+func (x *OAuthClient) GetClientSecret() string {
+	if x != nil && x.ClientSecret != nil {
+		return *x.ClientSecret
 	}
 	return ""
 }
@@ -2074,6 +2107,51 @@ func (x *DeleteApplicationRequest) GetClientId() string {
 	return ""
 }
 
+// Request to regenerate a confidential client's secret.
+type RegenerateApplicationSecretRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ClientId      string                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegenerateApplicationSecretRequest) Reset() {
+	*x = RegenerateApplicationSecretRequest{}
+	mi := &file_hearth_identity_v1_oauth_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegenerateApplicationSecretRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegenerateApplicationSecretRequest) ProtoMessage() {}
+
+func (x *RegenerateApplicationSecretRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_hearth_identity_v1_oauth_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegenerateApplicationSecretRequest.ProtoReflect.Descriptor instead.
+func (*RegenerateApplicationSecretRequest) Descriptor() ([]byte, []int) {
+	return file_hearth_identity_v1_oauth_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *RegenerateApplicationSecretRequest) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
 type UpdateApplicationCall struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ClientId      string                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
@@ -2084,7 +2162,7 @@ type UpdateApplicationCall struct {
 
 func (x *UpdateApplicationCall) Reset() {
 	*x = UpdateApplicationCall{}
-	mi := &file_hearth_identity_v1_oauth_proto_msgTypes[25]
+	mi := &file_hearth_identity_v1_oauth_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2096,7 +2174,7 @@ func (x *UpdateApplicationCall) String() string {
 func (*UpdateApplicationCall) ProtoMessage() {}
 
 func (x *UpdateApplicationCall) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_oauth_proto_msgTypes[25]
+	mi := &file_hearth_identity_v1_oauth_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2109,7 +2187,7 @@ func (x *UpdateApplicationCall) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateApplicationCall.ProtoReflect.Descriptor instead.
 func (*UpdateApplicationCall) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_oauth_proto_rawDescGZIP(), []int{25}
+	return file_hearth_identity_v1_oauth_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *UpdateApplicationCall) GetClientId() string {
@@ -2136,7 +2214,7 @@ type OAuthEmpty struct {
 
 func (x *OAuthEmpty) Reset() {
 	*x = OAuthEmpty{}
-	mi := &file_hearth_identity_v1_oauth_proto_msgTypes[26]
+	mi := &file_hearth_identity_v1_oauth_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2148,7 +2226,7 @@ func (x *OAuthEmpty) String() string {
 func (*OAuthEmpty) ProtoMessage() {}
 
 func (x *OAuthEmpty) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_oauth_proto_msgTypes[26]
+	mi := &file_hearth_identity_v1_oauth_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2161,7 +2239,7 @@ func (x *OAuthEmpty) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OAuthEmpty.ProtoReflect.Descriptor instead.
 func (*OAuthEmpty) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_oauth_proto_rawDescGZIP(), []int{26}
+	return file_hearth_identity_v1_oauth_proto_rawDescGZIP(), []int{27}
 }
 
 var File_hearth_identity_v1_oauth_proto protoreflect.FileDescriptor
@@ -2202,7 +2280,7 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"token_type\x18\x03 \x01(\tR\ttokenType\x12\x1d\n" +
 	"\n" +
 	"expires_in\x18\x04 \x01(\x03R\texpiresIn\x12#\n" +
-	"\rrefresh_token\x18\x05 \x01(\tR\frefreshToken\"\xec\x03\n" +
+	"\rrefresh_token\x18\x05 \x01(\tR\frefreshToken\"\xd0\x04\n" +
 	"\x15RegisterClientRequest\x12\x1f\n" +
 	"\vclient_name\x18\x01 \x01(\tR\n" +
 	"clientName\x12#\n" +
@@ -2213,10 +2291,12 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\x1aaccess_token_authorization\x18\x05 \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationR\x18accessTokenAuthorization\x12J\n" +
 	"\vtrust_level\x18\x06 \x01(\x0e2$.hearth.identity.v1.ClientTrustLevelH\x01R\n" +
 	"trustLevel\x88\x01\x01\x12G\n" +
-	"\x1cid_token_signed_response_alg\x18\a \x01(\tH\x02R\x1cid_token_signed_response_alg\x88\x01\x01B\x10\n" +
+	"\x1cid_token_signed_response_alg\x18\a \x01(\tH\x02R\x1cid_token_signed_response_alg\x88\x01\x01\x12C\n" +
+	"\x1atoken_endpoint_auth_method\x18\b \x01(\tH\x03R\x1atoken_endpoint_auth_method\x88\x01\x01B\x10\n" +
 	"\x0e_client_secretB\x0e\n" +
 	"\f_trust_levelB\x1f\n" +
-	"\x1d_id_token_signed_response_alg\"\xe7\x03\n" +
+	"\x1d_id_token_signed_response_algB\x1d\n" +
+	"\x1b_token_endpoint_auth_method\"\xe7\x03\n" +
 	"\x13UpdateClientRequest\x12$\n" +
 	"\vclient_name\x18\x01 \x01(\tH\x00R\n" +
 	"clientName\x88\x01\x01\x12#\n" +
@@ -2230,7 +2310,7 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\f_client_nameB\x1d\n" +
 	"\x1b_access_token_authorizationB\x0e\n" +
 	"\f_trust_levelB\x1f\n" +
-	"\x1d_id_token_signed_response_alg\"\x89\x03\n" +
+	"\x1d_id_token_signed_response_alg\"\xc6\x03\n" +
 	"\vOAuthClient\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x1f\n" +
 	"\vclient_name\x18\x02 \x01(\tR\n" +
@@ -2242,7 +2322,9 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\vgrant_types\x18\x06 \x03(\tR\n" +
 	"grantTypes\x12j\n" +
 	"\x1aaccess_token_authorization\x18\a \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationR\x18accessTokenAuthorization\x12B\n" +
-	"\x1cid_token_signed_response_alg\x18\b \x01(\tR\x1cid_token_signed_response_alg\"~\n" +
+	"\x1cid_token_signed_response_alg\x18\b \x01(\tR\x1cid_token_signed_response_alg\x12)\n" +
+	"\rclient_secret\x18\t \x01(\tH\x00R\rclient_secret\x88\x01\x01B\x10\n" +
+	"\x0e_client_secret\"~\n" +
 	"\x0fOAuthClientPage\x125\n" +
 	"\x05items\x18\x01 \x03(\v2\x1f.hearth.identity.v1.OAuthClientR\x05items\x12$\n" +
 	"\vnext_cursor\x18\x02 \x01(\tH\x00R\n" +
@@ -2384,6 +2466,8 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\x15GetApplicationRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\"7\n" +
 	"\x18DeleteApplicationRequest\x12\x1b\n" +
+	"\tclient_id\x18\x01 \x01(\tR\bclientId\"A\n" +
+	"\"RegenerateApplicationSecretRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\"q\n" +
 	"\x15UpdateApplicationCall\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12;\n" +
@@ -2397,13 +2481,14 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\x10ClientTrustLevel\x12\"\n" +
 	"\x1eCLIENT_TRUST_LEVEL_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eCLIENT_TRUST_LEVEL_THIRD_PARTY\x10\x01\x12\"\n" +
-	"\x1eCLIENT_TRUST_LEVEL_FIRST_PARTY\x10\x022\xc4\x05\n" +
+	"\x1eCLIENT_TRUST_LEVEL_FIRST_PARTY\x10\x022\xf8\x06\n" +
 	"\x17ApplicationAdminService\x12\x81\x01\n" +
 	"\x10ListApplications\x12+.hearth.identity.v1.ListApplicationsRequest\x1a#.hearth.identity.v1.OAuthClientPage\"\x1b\x82\xd3\xe4\x93\x02\x15\x12\x13/admin/applications\x12\x85\x01\n" +
 	"\x0eGetApplication\x12).hearth.identity.v1.GetApplicationRequest\x1a\x1f.hearth.identity.v1.OAuthClient\"'\x82\xd3\xe4\x93\x02!\x12\x1f/admin/applications/{client_id}\x12\x7f\n" +
 	"\x11CreateApplication\x12).hearth.identity.v1.RegisterClientRequest\x1a\x1f.hearth.identity.v1.OAuthClient\"\x1e\x82\xd3\xe4\x93\x02\x18:\x01*\"\x13/admin/applications\x12\x8e\x01\n" +
 	"\x11UpdateApplication\x12).hearth.identity.v1.UpdateApplicationCall\x1a\x1f.hearth.identity.v1.OAuthClient\"-\x82\xd3\xe4\x93\x02':\x04body2\x1f/admin/applications/{client_id}\x12\x8a\x01\n" +
-	"\x11DeleteApplication\x12,.hearth.identity.v1.DeleteApplicationRequest\x1a\x1e.hearth.identity.v1.OAuthEmpty\"'\x82\xd3\xe4\x93\x02!*\x1f/admin/applications/{client_id}2\xef\a\n" +
+	"\x11DeleteApplication\x12,.hearth.identity.v1.DeleteApplicationRequest\x1a\x1e.hearth.identity.v1.OAuthEmpty\"'\x82\xd3\xe4\x93\x02!*\x1f/admin/applications/{client_id}\x12\xb1\x01\n" +
+	"\x1bRegenerateApplicationSecret\x126.hearth.identity.v1.RegenerateApplicationSecretRequest\x1a\x1f.hearth.identity.v1.OAuthClient\"9\x82\xd3\xe4\x93\x023\"1/admin/applications/{client_id}/regenerate-secret2\xef\a\n" +
 	"\fOAuthService\x12w\n" +
 	"\tAuthorize\x12(.hearth.identity.v1.AuthorizationRequest\x1a).hearth.identity.v1.AuthorizationResponse\"\x15\x82\xd3\xe4\x93\x02\x0f:\x01*\"\n" +
 	"/authorize\x12s\n" +
@@ -2429,37 +2514,38 @@ func file_hearth_identity_v1_oauth_proto_rawDescGZIP() []byte {
 }
 
 var file_hearth_identity_v1_oauth_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_hearth_identity_v1_oauth_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_hearth_identity_v1_oauth_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_hearth_identity_v1_oauth_proto_goTypes = []any{
-	(AccessTokenAuthorization)(0),       // 0: hearth.identity.v1.AccessTokenAuthorization
-	(ClientTrustLevel)(0),               // 1: hearth.identity.v1.ClientTrustLevel
-	(*AuthorizationRequest)(nil),        // 2: hearth.identity.v1.AuthorizationRequest
-	(*AuthorizationResponse)(nil),       // 3: hearth.identity.v1.AuthorizationResponse
-	(*TokenExchangeRequest)(nil),        // 4: hearth.identity.v1.TokenExchangeRequest
-	(*OidcTokenResponse)(nil),           // 5: hearth.identity.v1.OidcTokenResponse
-	(*RegisterClientRequest)(nil),       // 6: hearth.identity.v1.RegisterClientRequest
-	(*UpdateClientRequest)(nil),         // 7: hearth.identity.v1.UpdateClientRequest
-	(*OAuthClient)(nil),                 // 8: hearth.identity.v1.OAuthClient
-	(*OAuthClientPage)(nil),             // 9: hearth.identity.v1.OAuthClientPage
-	(*ClientCredentialsRequest)(nil),    // 10: hearth.identity.v1.ClientCredentialsRequest
-	(*ClientCredentialsResponse)(nil),   // 11: hearth.identity.v1.ClientCredentialsResponse
-	(*DeviceAuthorizationRequest)(nil),  // 12: hearth.identity.v1.DeviceAuthorizationRequest
-	(*DeviceAuthorizationResponse)(nil), // 13: hearth.identity.v1.DeviceAuthorizationResponse
-	(*TokenRevocationRequest)(nil),      // 14: hearth.identity.v1.TokenRevocationRequest
-	(*TokenIntrospectionRequest)(nil),   // 15: hearth.identity.v1.TokenIntrospectionRequest
-	(*IntrospectionResponse)(nil),       // 16: hearth.identity.v1.IntrospectionResponse
-	(*TokenDecisionRequest)(nil),        // 17: hearth.identity.v1.TokenDecisionRequest
-	(*TokenDecisionResponse)(nil),       // 18: hearth.identity.v1.TokenDecisionResponse
-	(*UserInfoResponse)(nil),            // 19: hearth.identity.v1.UserInfoResponse
-	(*OidcDiscoveryDocument)(nil),       // 20: hearth.identity.v1.OidcDiscoveryDocument
-	(*JsonWebKey)(nil),                  // 21: hearth.identity.v1.JsonWebKey
-	(*JwksDocument)(nil),                // 22: hearth.identity.v1.JwksDocument
-	(*BootstrapResponse)(nil),           // 23: hearth.identity.v1.BootstrapResponse
-	(*ListApplicationsRequest)(nil),     // 24: hearth.identity.v1.ListApplicationsRequest
-	(*GetApplicationRequest)(nil),       // 25: hearth.identity.v1.GetApplicationRequest
-	(*DeleteApplicationRequest)(nil),    // 26: hearth.identity.v1.DeleteApplicationRequest
-	(*UpdateApplicationCall)(nil),       // 27: hearth.identity.v1.UpdateApplicationCall
-	(*OAuthEmpty)(nil),                  // 28: hearth.identity.v1.OAuthEmpty
+	(AccessTokenAuthorization)(0),              // 0: hearth.identity.v1.AccessTokenAuthorization
+	(ClientTrustLevel)(0),                      // 1: hearth.identity.v1.ClientTrustLevel
+	(*AuthorizationRequest)(nil),               // 2: hearth.identity.v1.AuthorizationRequest
+	(*AuthorizationResponse)(nil),              // 3: hearth.identity.v1.AuthorizationResponse
+	(*TokenExchangeRequest)(nil),               // 4: hearth.identity.v1.TokenExchangeRequest
+	(*OidcTokenResponse)(nil),                  // 5: hearth.identity.v1.OidcTokenResponse
+	(*RegisterClientRequest)(nil),              // 6: hearth.identity.v1.RegisterClientRequest
+	(*UpdateClientRequest)(nil),                // 7: hearth.identity.v1.UpdateClientRequest
+	(*OAuthClient)(nil),                        // 8: hearth.identity.v1.OAuthClient
+	(*OAuthClientPage)(nil),                    // 9: hearth.identity.v1.OAuthClientPage
+	(*ClientCredentialsRequest)(nil),           // 10: hearth.identity.v1.ClientCredentialsRequest
+	(*ClientCredentialsResponse)(nil),          // 11: hearth.identity.v1.ClientCredentialsResponse
+	(*DeviceAuthorizationRequest)(nil),         // 12: hearth.identity.v1.DeviceAuthorizationRequest
+	(*DeviceAuthorizationResponse)(nil),        // 13: hearth.identity.v1.DeviceAuthorizationResponse
+	(*TokenRevocationRequest)(nil),             // 14: hearth.identity.v1.TokenRevocationRequest
+	(*TokenIntrospectionRequest)(nil),          // 15: hearth.identity.v1.TokenIntrospectionRequest
+	(*IntrospectionResponse)(nil),              // 16: hearth.identity.v1.IntrospectionResponse
+	(*TokenDecisionRequest)(nil),               // 17: hearth.identity.v1.TokenDecisionRequest
+	(*TokenDecisionResponse)(nil),              // 18: hearth.identity.v1.TokenDecisionResponse
+	(*UserInfoResponse)(nil),                   // 19: hearth.identity.v1.UserInfoResponse
+	(*OidcDiscoveryDocument)(nil),              // 20: hearth.identity.v1.OidcDiscoveryDocument
+	(*JsonWebKey)(nil),                         // 21: hearth.identity.v1.JsonWebKey
+	(*JwksDocument)(nil),                       // 22: hearth.identity.v1.JwksDocument
+	(*BootstrapResponse)(nil),                  // 23: hearth.identity.v1.BootstrapResponse
+	(*ListApplicationsRequest)(nil),            // 24: hearth.identity.v1.ListApplicationsRequest
+	(*GetApplicationRequest)(nil),              // 25: hearth.identity.v1.GetApplicationRequest
+	(*DeleteApplicationRequest)(nil),           // 26: hearth.identity.v1.DeleteApplicationRequest
+	(*RegenerateApplicationSecretRequest)(nil), // 27: hearth.identity.v1.RegenerateApplicationSecretRequest
+	(*UpdateApplicationCall)(nil),              // 28: hearth.identity.v1.UpdateApplicationCall
+	(*OAuthEmpty)(nil),                         // 29: hearth.identity.v1.OAuthEmpty
 }
 var file_hearth_identity_v1_oauth_proto_depIdxs = []int32{
 	0,  // 0: hearth.identity.v1.RegisterClientRequest.access_token_authorization:type_name -> hearth.identity.v1.AccessTokenAuthorization
@@ -2474,31 +2560,33 @@ var file_hearth_identity_v1_oauth_proto_depIdxs = []int32{
 	24, // 9: hearth.identity.v1.ApplicationAdminService.ListApplications:input_type -> hearth.identity.v1.ListApplicationsRequest
 	25, // 10: hearth.identity.v1.ApplicationAdminService.GetApplication:input_type -> hearth.identity.v1.GetApplicationRequest
 	6,  // 11: hearth.identity.v1.ApplicationAdminService.CreateApplication:input_type -> hearth.identity.v1.RegisterClientRequest
-	27, // 12: hearth.identity.v1.ApplicationAdminService.UpdateApplication:input_type -> hearth.identity.v1.UpdateApplicationCall
+	28, // 12: hearth.identity.v1.ApplicationAdminService.UpdateApplication:input_type -> hearth.identity.v1.UpdateApplicationCall
 	26, // 13: hearth.identity.v1.ApplicationAdminService.DeleteApplication:input_type -> hearth.identity.v1.DeleteApplicationRequest
-	2,  // 14: hearth.identity.v1.OAuthService.Authorize:input_type -> hearth.identity.v1.AuthorizationRequest
-	4,  // 15: hearth.identity.v1.OAuthService.TokenExchange:input_type -> hearth.identity.v1.TokenExchangeRequest
-	14, // 16: hearth.identity.v1.OAuthService.Revoke:input_type -> hearth.identity.v1.TokenRevocationRequest
-	15, // 17: hearth.identity.v1.OAuthService.Introspect:input_type -> hearth.identity.v1.TokenIntrospectionRequest
-	12, // 18: hearth.identity.v1.OAuthService.DeviceAuthorize:input_type -> hearth.identity.v1.DeviceAuthorizationRequest
-	10, // 19: hearth.identity.v1.OAuthService.ClientCredentials:input_type -> hearth.identity.v1.ClientCredentialsRequest
-	6,  // 20: hearth.identity.v1.OAuthService.RegisterClient:input_type -> hearth.identity.v1.RegisterClientRequest
-	17, // 21: hearth.identity.v1.OAuthService.Decide:input_type -> hearth.identity.v1.TokenDecisionRequest
-	9,  // 22: hearth.identity.v1.ApplicationAdminService.ListApplications:output_type -> hearth.identity.v1.OAuthClientPage
-	8,  // 23: hearth.identity.v1.ApplicationAdminService.GetApplication:output_type -> hearth.identity.v1.OAuthClient
-	8,  // 24: hearth.identity.v1.ApplicationAdminService.CreateApplication:output_type -> hearth.identity.v1.OAuthClient
-	8,  // 25: hearth.identity.v1.ApplicationAdminService.UpdateApplication:output_type -> hearth.identity.v1.OAuthClient
-	28, // 26: hearth.identity.v1.ApplicationAdminService.DeleteApplication:output_type -> hearth.identity.v1.OAuthEmpty
-	3,  // 27: hearth.identity.v1.OAuthService.Authorize:output_type -> hearth.identity.v1.AuthorizationResponse
-	5,  // 28: hearth.identity.v1.OAuthService.TokenExchange:output_type -> hearth.identity.v1.OidcTokenResponse
-	28, // 29: hearth.identity.v1.OAuthService.Revoke:output_type -> hearth.identity.v1.OAuthEmpty
-	16, // 30: hearth.identity.v1.OAuthService.Introspect:output_type -> hearth.identity.v1.IntrospectionResponse
-	13, // 31: hearth.identity.v1.OAuthService.DeviceAuthorize:output_type -> hearth.identity.v1.DeviceAuthorizationResponse
-	11, // 32: hearth.identity.v1.OAuthService.ClientCredentials:output_type -> hearth.identity.v1.ClientCredentialsResponse
-	8,  // 33: hearth.identity.v1.OAuthService.RegisterClient:output_type -> hearth.identity.v1.OAuthClient
-	18, // 34: hearth.identity.v1.OAuthService.Decide:output_type -> hearth.identity.v1.TokenDecisionResponse
-	22, // [22:35] is the sub-list for method output_type
-	9,  // [9:22] is the sub-list for method input_type
+	27, // 14: hearth.identity.v1.ApplicationAdminService.RegenerateApplicationSecret:input_type -> hearth.identity.v1.RegenerateApplicationSecretRequest
+	2,  // 15: hearth.identity.v1.OAuthService.Authorize:input_type -> hearth.identity.v1.AuthorizationRequest
+	4,  // 16: hearth.identity.v1.OAuthService.TokenExchange:input_type -> hearth.identity.v1.TokenExchangeRequest
+	14, // 17: hearth.identity.v1.OAuthService.Revoke:input_type -> hearth.identity.v1.TokenRevocationRequest
+	15, // 18: hearth.identity.v1.OAuthService.Introspect:input_type -> hearth.identity.v1.TokenIntrospectionRequest
+	12, // 19: hearth.identity.v1.OAuthService.DeviceAuthorize:input_type -> hearth.identity.v1.DeviceAuthorizationRequest
+	10, // 20: hearth.identity.v1.OAuthService.ClientCredentials:input_type -> hearth.identity.v1.ClientCredentialsRequest
+	6,  // 21: hearth.identity.v1.OAuthService.RegisterClient:input_type -> hearth.identity.v1.RegisterClientRequest
+	17, // 22: hearth.identity.v1.OAuthService.Decide:input_type -> hearth.identity.v1.TokenDecisionRequest
+	9,  // 23: hearth.identity.v1.ApplicationAdminService.ListApplications:output_type -> hearth.identity.v1.OAuthClientPage
+	8,  // 24: hearth.identity.v1.ApplicationAdminService.GetApplication:output_type -> hearth.identity.v1.OAuthClient
+	8,  // 25: hearth.identity.v1.ApplicationAdminService.CreateApplication:output_type -> hearth.identity.v1.OAuthClient
+	8,  // 26: hearth.identity.v1.ApplicationAdminService.UpdateApplication:output_type -> hearth.identity.v1.OAuthClient
+	29, // 27: hearth.identity.v1.ApplicationAdminService.DeleteApplication:output_type -> hearth.identity.v1.OAuthEmpty
+	8,  // 28: hearth.identity.v1.ApplicationAdminService.RegenerateApplicationSecret:output_type -> hearth.identity.v1.OAuthClient
+	3,  // 29: hearth.identity.v1.OAuthService.Authorize:output_type -> hearth.identity.v1.AuthorizationResponse
+	5,  // 30: hearth.identity.v1.OAuthService.TokenExchange:output_type -> hearth.identity.v1.OidcTokenResponse
+	29, // 31: hearth.identity.v1.OAuthService.Revoke:output_type -> hearth.identity.v1.OAuthEmpty
+	16, // 32: hearth.identity.v1.OAuthService.Introspect:output_type -> hearth.identity.v1.IntrospectionResponse
+	13, // 33: hearth.identity.v1.OAuthService.DeviceAuthorize:output_type -> hearth.identity.v1.DeviceAuthorizationResponse
+	11, // 34: hearth.identity.v1.OAuthService.ClientCredentials:output_type -> hearth.identity.v1.ClientCredentialsResponse
+	8,  // 35: hearth.identity.v1.OAuthService.RegisterClient:output_type -> hearth.identity.v1.OAuthClient
+	18, // 36: hearth.identity.v1.OAuthService.Decide:output_type -> hearth.identity.v1.TokenDecisionResponse
+	23, // [23:37] is the sub-list for method output_type
+	9,  // [9:23] is the sub-list for method input_type
 	9,  // [9:9] is the sub-list for extension type_name
 	9,  // [9:9] is the sub-list for extension extendee
 	0,  // [0:9] is the sub-list for field type_name
@@ -2513,6 +2601,7 @@ func file_hearth_identity_v1_oauth_proto_init() {
 	file_hearth_identity_v1_oauth_proto_msgTypes[2].OneofWrappers = []any{}
 	file_hearth_identity_v1_oauth_proto_msgTypes[4].OneofWrappers = []any{}
 	file_hearth_identity_v1_oauth_proto_msgTypes[5].OneofWrappers = []any{}
+	file_hearth_identity_v1_oauth_proto_msgTypes[6].OneofWrappers = []any{}
 	file_hearth_identity_v1_oauth_proto_msgTypes[7].OneofWrappers = []any{}
 	file_hearth_identity_v1_oauth_proto_msgTypes[8].OneofWrappers = []any{}
 	file_hearth_identity_v1_oauth_proto_msgTypes[9].OneofWrappers = []any{}
@@ -2530,7 +2619,7 @@ func file_hearth_identity_v1_oauth_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_hearth_identity_v1_oauth_proto_rawDesc), len(file_hearth_identity_v1_oauth_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   27,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

@@ -127,7 +127,6 @@ impl HearthClientBuilder {
         let jwks_cache = JwksCache::new(http.clone(), self.jwks_ttl);
         HearthClient {
             base_url: self.issuer_url.clone(),
-            realm_id: String::new(),
             http,
             issuer_url: Some(self.issuer_url),
             client_id: self.client_id,
@@ -152,7 +151,6 @@ impl HearthClientBuilder {
 #[derive(Clone)]
 pub struct HearthClient {
     base_url: String,
-    realm_id: String,
     http: reqwest::Client,
     issuer_url: Option<String>,
     client_id: Option<String>,
@@ -183,7 +181,6 @@ impl HearthClient {
         let jwks_cache = JwksCache::new(http.clone(), None);
         Self {
             base_url,
-            realm_id,
             http,
             issuer_url: None,
             client_id: None,
@@ -281,29 +278,35 @@ impl HearthClient {
         self.ensure_jwks_url().await?;
 
         // Parse JWT header to get kid + algorithm.
-        let header = jsonwebtoken::decode_header(token)
-            .map_err(|e| HearthError::TokenInvalidError { reason: e.to_string() })?;
+        let header =
+            jsonwebtoken::decode_header(token).map_err(|e| HearthError::TokenInvalidError {
+                reason: e.to_string(),
+            })?;
 
         let kid = header.kid.ok_or_else(|| HearthError::TokenInvalidError {
             reason: "JWT header is missing 'kid'".into(),
         })?;
 
         // Look up key from JWKS cache (fetches + retries on miss, per spec §2).
-        let jwk =
-            self.jwks_cache.get(&kid).await?.ok_or_else(|| HearthError::JWKSFetchError {
+        let jwk = self
+            .jwks_cache
+            .get(&kid)
+            .await?
+            .ok_or_else(|| HearthError::JWKSFetchError {
                 url: "JWKS".into(),
                 message: format!("kid '{kid}' not found in JWKS"),
             })?;
 
-        let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|e| HearthError::TokenInvalidError {
-            reason: format!("invalid JWK for kid '{kid}': {e}"),
-        })?;
+        let decoding_key =
+            DecodingKey::from_jwk(&jwk).map_err(|e| HearthError::TokenInvalidError {
+                reason: format!("invalid JWK for kid '{kid}': {e}"),
+            })?;
 
         // Steps 2–5: build validation parameters.
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.leeway = 5; // 5 s clock skew
-        // RFC 7519 §4.1.5 — a post-dated token must not be accepted before its
-        // `nbf`. `jsonwebtoken` leaves this off by default.
+                               // RFC 7519 §4.1.5 — a post-dated token must not be accepted before its
+                               // `nbf`. `jsonwebtoken` leaves this off by default.
         validation.validate_nbf = true;
 
         let issuer = self.issuer_url.as_deref().unwrap_or(&self.base_url);
@@ -339,7 +342,11 @@ impl HearthClient {
             let required_actions = claims
                 .get("required_actions")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             return Err(HearthError::RequiredActionError { required_actions });
         }
@@ -463,7 +470,8 @@ impl HearthClient {
                     return Err(HearthError::Api {
                         status: 400,
                         message: err.error,
-                        details: err.error_description
+                        details: err
+                            .error_description
                             .map(|d| serde_json::json!({"description": d})),
                     });
                 }
@@ -570,6 +578,9 @@ impl HearthClient {
     /// Pass `code_challenge` + `code_challenge_method` (typically `"S256"`) to enable
     /// PKCE (RFC 7636).  Use [`crate::pkce::generate_pkce_pair`] to generate the pair,
     /// then pass the verifier to [`HearthClient::exchange_code`].
+    // The positional signature is published 1.x API; collapsing it into a params
+    // struct would be a breaking change for every caller, made only for a lint.
+    #[allow(clippy::too_many_arguments)]
     pub async fn authorize(
         &self,
         client_id: &str,
@@ -592,7 +603,10 @@ impl HearthClient {
         }
         if let Some(cc) = code_challenge {
             params.push(("code_challenge", cc));
-            params.push(("code_challenge_method", code_challenge_method.unwrap_or("S256")));
+            params.push((
+                "code_challenge_method",
+                code_challenge_method.unwrap_or("S256"),
+            ));
         }
         let resp = self
             .http
@@ -619,19 +633,19 @@ impl HearthClient {
         redirect_uri: &str,
         scopes: Option<&str>,
     ) -> Result<LoginBeginResult, HearthError> {
-        let client_id = self.client_id.as_deref().ok_or_else(|| {
-            HearthError::ConfigurationError {
-                message: "client_id is required for begin_login".into(),
-            }
-        })?;
+        let client_id =
+            self.client_id
+                .as_deref()
+                .ok_or_else(|| HearthError::ConfigurationError {
+                    message: "client_id is required for begin_login".into(),
+                })?;
 
         let pkce = crate::pkce::generate_pkce_pair();
         let state = Self::generate_state();
 
         let auth_base = format!("{}/authorize", self.base_url);
-        let mut url = reqwest::Url::parse(&auth_base).map_err(|e| {
-            HearthError::Other(format!("invalid base_url for begin_login: {e}"))
-        })?;
+        let mut url = reqwest::Url::parse(&auth_base)
+            .map_err(|e| HearthError::Other(format!("invalid base_url for begin_login: {e}")))?;
         {
             let mut pairs = url.query_pairs_mut();
             pairs.append_pair("response_type", "code");
@@ -661,8 +675,14 @@ impl HearthClient {
     ) -> Result<TokenResponse, HearthError> {
         let client_id = self.client_id.as_deref().unwrap_or("");
         let client_secret = self.client_secret.as_deref().unwrap_or("");
-        self.exchange_code(code, client_id, client_secret, redirect_uri, Some(code_verifier))
-            .await
+        self.exchange_code(
+            code,
+            client_id,
+            client_secret,
+            redirect_uri,
+            Some(code_verifier),
+        )
+        .await
     }
 
     pub async fn exchange_code(
@@ -826,10 +846,12 @@ impl HearthClient {
         match mode {
             AccessTokenAuthorization::Embedded => self.has_permission(token, permission).await,
             AccessTokenAuthorization::Introspection => {
+                const MISSING_CREDENTIALS: &str =
+                    "Introspection mode requires client_credentials in CheckPermissionOpts";
                 let (cid, csec) =
                     opts.client_credentials
                         .ok_or_else(|| HearthError::ConfigurationError {
-                            message: "Introspection mode requires client_credentials in CheckPermissionOpts".into(),
+                            message: MISSING_CREDENTIALS.into(),
                         })?;
                 let resp = self.introspect(token, &cid, &csec).await?;
                 if !resp.active {
@@ -866,11 +888,12 @@ impl HearthClient {
                         reason: format!("HTTP {}", resp.status()),
                     });
                 }
-                let check: PermissionCheckResponse = resp.json().await.map_err(|e| {
-                    HearthError::AuthorizationFailed {
-                        reason: format!("JSON decode: {e}"),
-                    }
-                })?;
+                let check: PermissionCheckResponse =
+                    resp.json()
+                        .await
+                        .map_err(|e| HearthError::AuthorizationFailed {
+                            reason: format!("JSON decode: {e}"),
+                        })?;
                 Ok(check.allowed)
             }
         }
@@ -889,7 +912,10 @@ impl HearthClient {
     pub async fn discovery(&self) -> Result<Value, HearthError> {
         let resp = self
             .http
-            .get(format!("{}/.well-known/openid-configuration", self.base_url))
+            .get(format!(
+                "{}/.well-known/openid-configuration",
+                self.base_url
+            ))
             .send()
             .await?;
         Self::check(&resp)?;
@@ -916,7 +942,9 @@ impl HearthClient {
     /// or issued by a different issuer.
     pub async fn has_permission(&self, token: &str, permission: &str) -> Result<bool, HearthError> {
         let claims = self.verified_claims(token).await?;
-        Ok(Self::claim_list(&claims, "permissions").iter().any(|p| p == permission))
+        Ok(Self::claim_list(&claims, "permissions")
+            .iter()
+            .any(|p| p == permission))
     }
 
     /// Returns `true` when the token verifies and its `roles` claim contains `role`.
@@ -937,7 +965,9 @@ impl HearthClient {
     /// See [`HearthClient::has_permission`].
     pub async fn in_group(&self, token: &str, group_slug: &str) -> Result<bool, HearthError> {
         let claims = self.verified_claims(token).await?;
-        Ok(Self::claim_list(&claims, "groups").iter().any(|g| g == group_slug))
+        Ok(Self::claim_list(&claims, "groups")
+            .iter()
+            .any(|g| g == group_slug))
     }
 
     /// Returns `true` when the token verifies and its `oid` claim equals `org_id`.
@@ -966,7 +996,11 @@ impl HearthClient {
         claims
             .get(key)
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -1009,6 +1043,8 @@ impl HearthClient {
     /// the password, a current authenticator code, or an assertion from an
     /// enrolled passkey. The server answers `403 step_up_required` without it:
     /// an access token alone is one factor and does not enrol a credential.
+    /// A locked-out account (too many wrong passwords or codes) gets
+    /// `429 too_many_attempts` with `Retry-After` instead.
     ///
     /// # Errors
     ///
@@ -1146,7 +1182,9 @@ fn map_jwt_error(
         ErrorKind::ExpiredSignature => HearthError::TokenExpiredError { expired_at: 0 },
         ErrorKind::ImmatureSignature => HearthError::TokenNotYetValidError { not_before: 0 },
         ErrorKind::InvalidSignature | ErrorKind::InvalidAlgorithm | ErrorKind::InvalidKeyFormat => {
-            HearthError::TokenInvalidError { reason: err.to_string() }
+            HearthError::TokenInvalidError {
+                reason: err.to_string(),
+            }
         }
         ErrorKind::InvalidIssuer => HearthError::TokenIssuerError {
             expected: issuer.to_string(),
@@ -1156,7 +1194,9 @@ fn map_jwt_error(
             expected: audience.unwrap_or("").to_string(),
             actual: vec![],
         },
-        _ => HearthError::TokenInvalidError { reason: err.to_string() },
+        _ => HearthError::TokenInvalidError {
+            reason: err.to_string(),
+        },
     }
 }
 
@@ -1233,12 +1273,13 @@ mod tests {
         let http = reqwest::Client::new();
         let cache = JwksCache::new(http.clone(), None);
         // Set a dummy URL so set_url guard is satisfied (won't be fetched because key is fresh).
-        cache.set_url("https://auth.example.com/.well-known/jwks.json").await;
+        cache
+            .set_url("https://auth.example.com/.well-known/jwks.json")
+            .await;
         cache.inject_for_test(kid, jwk).await;
 
         HearthClient {
             base_url: "https://auth.example.com".to_string(),
-            realm_id: "realm-1".to_string(),
             http,
             issuer_url: None, // No discovery in unit tests
             client_id: client_id.map(str::to_string),
@@ -1297,7 +1338,9 @@ mod tests {
         let jwk = make_jwk(kid, &pub_key);
         let client = client_with_cached_jwk(kid, jwk, None).await;
 
-        let claims = client.verify_token(&token).await
+        let claims = client
+            .verify_token(&token)
+            .await
             .expect("verify_token should succeed for a valid JWT");
         assert_eq!(claims.subject(), "user_abc");
         assert_eq!(claims.issuer(), issuer);
@@ -1373,7 +1416,9 @@ mod tests {
 
         let err = client.verify_token(&token).await.unwrap_err();
         match err {
-            HearthError::RequiredActionError { required_actions, .. } => {
+            HearthError::RequiredActionError {
+                required_actions, ..
+            } => {
                 assert_eq!(required_actions, vec!["VERIFY_EMAIL"]);
             }
             other => panic!("expected RequiredActionError, got {other:?}"),
@@ -1453,7 +1498,10 @@ mod tests {
         });
         let resp: TokenResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.access_token, "eyJ...");
-        assert!(resp.refresh_token.is_none(), "client_credentials response has no refresh_token");
+        assert!(
+            resp.refresh_token.is_none(),
+            "client_credentials response has no refresh_token"
+        );
     }
 
     // ── begin_login / complete_login ──────────────────────────────────────────
@@ -1472,7 +1520,10 @@ mod tests {
 
         let url = reqwest::Url::parse(&result.authorization_url).expect("valid URL");
         let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
-        assert_eq!(params.get("response_type").map(|v| v.as_ref()), Some("code"));
+        assert_eq!(
+            params.get("response_type").map(|v| v.as_ref()),
+            Some("code")
+        );
         assert_eq!(params.get("client_id").map(|v| v.as_ref()), Some("my-app"));
         assert_eq!(
             params.get("redirect_uri").map(|v| v.as_ref()),
@@ -1508,7 +1559,10 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(result.code_verifier.as_bytes());
         let expected = URL_SAFE_NO_PAD.encode(hasher.finalize());
-        assert_eq!(challenge, expected, "code_challenge must be BASE64URL(SHA256(code_verifier))");
+        assert_eq!(
+            challenge, expected,
+            "code_challenge must be BASE64URL(SHA256(code_verifier))"
+        );
     }
 
     #[tokio::test]
@@ -1535,7 +1589,11 @@ mod tests {
     fn generate_state_values_are_unique() {
         let states: std::collections::HashSet<String> =
             (0..10).map(|_| HearthClient::generate_state()).collect();
-        assert_eq!(states.len(), 10, "each generate_state call must produce a distinct value");
+        assert_eq!(
+            states.len(),
+            10,
+            "each generate_state call must produce a distinct value"
+        );
     }
 
     #[test]
@@ -1543,7 +1601,9 @@ mod tests {
         let state = HearthClient::generate_state();
         assert!(!state.is_empty(), "state must not be empty");
         assert!(
-            state.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            state
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "state must be URL-safe base64 (no padding): {state}"
         );
     }
@@ -1587,7 +1647,11 @@ mod tests {
 
         let client = HearthClient::new(base, "realm-1");
         let resp = client
-            .complete_login("auth-code-xyz", "my-verifier-abc", "https://app.example.com/callback")
+            .complete_login(
+                "auth-code-xyz",
+                "my-verifier-abc",
+                "https://app.example.com/callback",
+            )
             .await
             .expect("complete_login");
         assert_eq!(resp.access_token, "at");
@@ -1646,6 +1710,7 @@ mod tests {
                     name: "My App".into(),
                     redirect_uris: vec!["https://app.example.com/cb".into()],
                     trust_level: None,
+                    token_endpoint_auth_method: None,
                 },
                 "admin-token-xyz",
             )
@@ -1718,7 +1783,10 @@ mod tests {
             body.contains("grant_type=urn%3Ahearth%3Agrant-type%3Amagic-link"),
             "missing magic-link grant: {body}"
         );
-        assert!(body.contains("token=magic-token-xyz"), "missing token: {body}");
+        assert!(
+            body.contains("token=magic-token-xyz"),
+            "missing token: {body}"
+        );
         assert!(body.contains("client_id=cid"), "missing client_id: {body}");
     }
 
@@ -1758,11 +1826,17 @@ mod tests {
         let token = unsigned_admin_token();
 
         assert!(
-            !client.has_permission(&token, "admin.write").await.unwrap_or(false),
+            !client
+                .has_permission(&token, "admin.write")
+                .await
+                .unwrap_or(false),
             "has_permission accepted an alg:none forgery claiming admin.write"
         );
         assert!(!client.has_role(&token, "admin").await.unwrap_or(false));
-        assert!(!client.in_group(&token, "engineering").await.unwrap_or(false));
+        assert!(!client
+            .in_group(&token, "engineering")
+            .await
+            .unwrap_or(false));
         assert!(!client.in_org(&token, "org_42").await.unwrap_or(false));
     }
 
@@ -1785,7 +1859,10 @@ mod tests {
         );
 
         assert!(
-            !client.has_permission(&token, "admin.write").await.unwrap_or(false),
+            !client
+                .has_permission(&token, "admin.write")
+                .await
+                .unwrap_or(false),
             "has_permission accepted a token signed by a key outside the JWKS"
         );
     }
@@ -1807,7 +1884,10 @@ mod tests {
         );
 
         assert!(
-            !client.has_permission(&token, "admin.write").await.unwrap_or(false),
+            !client
+                .has_permission(&token, "admin.write")
+                .await
+                .unwrap_or(false),
             "has_permission accepted an expired token"
         );
     }
@@ -1850,7 +1930,10 @@ mod tests {
             )
             .await
             .unwrap_or(false);
-        assert!(!allowed, "embedded check_permission admitted an alg:none forgery");
+        assert!(
+            !allowed,
+            "embedded check_permission admitted an alg:none forgery"
+        );
     }
 
     // ── 25.2 — nbf must be validated ────────────────────────────────────────

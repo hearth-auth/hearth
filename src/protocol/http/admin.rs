@@ -93,6 +93,10 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
                 .patch(admin_update_client)
                 .delete(admin_delete_client),
         )
+        .route(
+            "/applications/{id}/regenerate-secret",
+            post(admin_regenerate_client_secret),
+        )
         .route("/users/{id}/consents", get(admin_list_user_consents))
         .route(
             "/users/{id}/consents/{client_id}",
@@ -2570,11 +2574,50 @@ async fn admin_register_client(
             );
             (
                 StatusCode::CREATED,
-                Json(proto_to_rest_json(&pb::OAuthClient::from(&client))),
+                Json(super::oauth::admin_created_client_json(&client, &request)),
             )
                 .into_response()
         }
-        Err(e) => identity_error_to_response(&e).into_response(),
+        Err(e) => super::oauth::admin_client_error(&e),
+    }
+}
+
+/// Admin: regenerate a confidential client's secret
+/// (`POST /admin/applications/{id}/regenerate-secret`).
+///
+/// Answers `200` with the client record and the new `client_secret`, the
+/// only time it is returned; the old secret stops authenticating at once.
+/// Audited with the acting admin. `400` for a public or FAPI 2.0 client or in
+/// a FAPI 2.0 Advanced realm, `404` for an unknown client.
+async fn admin_regenerate_client_secret(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.clients.admin") {
+        return e.into_response();
+    }
+    let Ok(client_uuid) = id.parse::<uuid::Uuid>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid client ID"})),
+        )
+            .into_response();
+    };
+    match crate::protocol::client_admin::regenerate_client_secret(
+        state.identity.as_ref(),
+        state.audit.as_ref(),
+        &auth.realm_id,
+        &auth.user_id,
+        &ClientId::new(client_uuid),
+        "admin_api",
+    ) {
+        Ok(record) => (StatusCode::OK, Json(proto_to_rest_json(&record))).into_response(),
+        Err(e) => super::oauth::admin_client_error(&e),
     }
 }
 
@@ -4138,28 +4181,47 @@ async fn admin_update_role(
     ) {
         return resp;
     }
-    match state.rbac.update_role(
+    let update = UpdateRoleRequest {
+        name: body.name,
+        description: body.description,
+        permissions,
+        parent_roles,
+        scope_kind: None,
+        status: None,
+        allow_reserved_permissions: false,
+    };
+    // Removing an admin permission from the role demotes its holders
+    // (GA sweep 4).
+    if let Err(e) = crate::protocol::admin_auth::check_role_change_admin_ceiling(
+        state.identity.as_ref(),
+        state.rbac.as_ref(),
         &auth.realm_id,
         &role_id,
-        &UpdateRoleRequest {
-            name: body.name,
-            description: body.description,
-            permissions,
-            parent_roles,
-            scope_kind: None,
-            status: None,
-            allow_reserved_permissions: false,
-        },
+        crate::protocol::admin_auth::RoleChange::Update(&update),
+        &auth.permissions,
     ) {
+        return ceiling_refusal(e).into_response();
+    }
+    match state.rbac.update_role(&auth.realm_id, &role_id, &update) {
         Ok(role) => (StatusCode::OK, Json(role)).into_response(),
         Err(e) => rbac_error_to_response(&e).into_response(),
     }
+}
+
+/// Query of `DELETE /admin/roles/{id}`.
+#[derive(Debug, Default, Deserialize)]
+struct DeleteRoleParams {
+    /// Also remove the role's assignments, parent links and extra org-role
+    /// rows; without it a referenced role answers `409 role_in_use`.
+    #[serde(default)]
+    cascade: bool,
 }
 
 async fn admin_delete_role(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(params): Query<DeleteRoleParams>,
 ) -> axum::response::Response {
     let auth = match extract_admin_auth(&headers, &state) {
         Ok(a) => a,
@@ -4175,7 +4237,20 @@ async fn admin_delete_role(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    match state.rbac.delete_role(&auth.realm_id, &role_id) {
+    if let Err(e) = crate::protocol::admin_auth::check_role_change_admin_ceiling(
+        state.identity.as_ref(),
+        state.rbac.as_ref(),
+        &auth.realm_id,
+        &role_id,
+        crate::protocol::admin_auth::RoleChange::Delete,
+        &auth.permissions,
+    ) {
+        return ceiling_refusal(e).into_response();
+    }
+    match state
+        .rbac
+        .delete_role(&auth.realm_id, &role_id, params.cascade)
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => rbac_error_to_response(&e).into_response(),
     }

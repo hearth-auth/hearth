@@ -26,7 +26,32 @@ include those it holds only through an organization-scoped role or grant. The ru
   `DELETE /admin/groups/{id}`, gRPC `UnassignUserRole`, `UnassignGroupRole`,
   `RevokeUserPermission`, `RemoveAdditionalRole`, `RemoveGroupMember`, `DeleteGroup`;
 - sign-out and consents: `DELETE /admin/sessions/{id}`, `POST /admin/sessions/{id}/sv-bump`,
-  `DELETE /admin/users/{id}/consents/{client_id}`, gRPC `RevokeConsent`.
+  `DELETE /admin/users/{id}/consents/{client_id}`, gRPC `RevokeConsent`;
+- organizations: gRPC `DeleteOrganization` and SCIM `DELETE /scim/v2/Groups/{id}` (every member
+  of the organization), and SCIM `PUT`/`PATCH /scim/v2/Groups/{id}` (every member the change
+  removes). Leaving an organization strips the admin permissions a user holds only in it;
+- role definitions: `PATCH /admin/roles/{id}`, `DELETE /admin/roles/{id}`, gRPC `UpdateRole` /
+  `DeleteRole`, when the change removes an admin permission from the role's effective set — by
+  replacing its permissions or parents, by deleting it, or by renaming it (an extra organization
+  role is stored by name). Every holder is checked: users assigned the role or a role that
+  inherits from it, members of groups assigned one, and users holding one as an extra
+  organization role. An edit that removes no admin permission is not checked.
+
+`DELETE /admin/roles/{id}` answers `409 role_in_use` while the role is referenced (assignments,
+child roles, extra organization roles); `?cascade=true` removes those references atomically with
+the role. A user's organization-scoped admin permissions include those granted in an organization
+it is not a member of, since permission resolution honours them.
+
+A check that affects many users resolves only the users who can out-rank anyone: it enumerates
+once the realm's admin holders (holders of any role granting an admin permission — directly,
+through a group or an inherited role, or as an extra organization role — and direct grantees of
+one), and every other affected user passes at the cost of a set lookup, so deleting a
+5 000-member organization takes about a second. The bounds fail closed with `503` rather than
+half-check: 100 000 affected users, 10 000 admin holders in the realm, and 50 000 permission
+resolutions (one per admin holder plus one per organization it belongs to). `hearth.admin` skips
+the walk. The web
+console admits only `hearth.admin`, so the rule holds there by construction. `hearth.yaml`
+reconciliation (`roles:`) is operator-authoritative and is not subject to it.
 
 ### List users
 
@@ -584,8 +609,8 @@ sessions page, `/ui/account/sessions`, or with `DELETE /admin/sessions/{id}` and
 `X-Realm-ID`) to end the token early. The result page names the session. The issuance is recorded in the system
 realm's audit trail (`token_issued`, actor = the operator, `issued_via: "admin console"`, the
 lifetime and the token's `jti` — never the token). The session and the audit record are written
-through the normal write path, so in cluster mode they replicate: mint on the **leader** (a
-follower cannot accept the write) and the token then works against every node.
+through the normal write path, so in cluster mode they replicate: mint on any node (a follower
+forwards the writes to the leader) and the token then works against every node.
 
 For a **stopped** store — the server is down, or the data directory is being rebuilt — mint one on
 the host with `hearth admin token` instead. The command opens the data directory itself, so it

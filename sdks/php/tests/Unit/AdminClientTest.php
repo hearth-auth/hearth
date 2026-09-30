@@ -19,11 +19,15 @@ final class RecordingHttpClient implements ClientInterface
 {
     public ?RequestInterface $lastRequest = null;
 
+    public int $status = 200;
+
+    public string $body = '{}';
+
     public function sendRequest(RequestInterface $request): ResponseInterface
     {
         $this->lastRequest = $request;
 
-        return new Response(200, ['Content-Type' => 'application/json'], '{}');
+        return new Response($this->status, ['Content-Type' => 'application/json'], $this->body);
     }
 }
 
@@ -69,6 +73,36 @@ final class AdminClientTest extends TestCase
     {
         $this->client->updateUser('u1', ['display_name' => 'New']);
         $this->assertSent('PATCH', '/admin/users/u1');
+    }
+
+    public function testCreateClientRequestsAndReturnsAGeneratedSecret(): void
+    {
+        // `token_endpoint_auth_method` asks the server to generate the secret;
+        // the 201 create response carries it once, as `client_secret`.
+        $this->http->status = 201;
+        $this->http->body   = '{"client_id":"c1","client_name":"svc","is_confidential":true,'
+            . '"client_secret":"generated-once"}';
+
+        $created = $this->client->createClient([
+            'client_name'                => 'svc',
+            'redirect_uris'              => ['https://svc.example.com/cb'],
+            'token_endpoint_auth_method' => AdminClient::AUTH_CLIENT_SECRET_BASIC,
+        ]);
+
+        $this->assertSent('POST', '/admin/applications');
+        $sent = json_decode((string) $this->http->lastRequest?->getBody(), true);
+        self::assertSame('client_secret_basic', $sent['token_endpoint_auth_method']);
+        self::assertSame('generated-once', $created['client_secret']);
+    }
+
+    public function testRegenerateClientSecretPostsAndReturnsTheNewSecret(): void
+    {
+        $this->http->body = '{"client_id":"c1","client_secret":"new-secret"}';
+
+        $result = $this->client->regenerateClientSecret('c1');
+
+        $this->assertSent('POST', '/admin/applications/c1/regenerate-secret');
+        self::assertSame('new-secret', $result['client_secret']);
     }
 
     public function testUpdateClientSendsPatchToApplications(): void

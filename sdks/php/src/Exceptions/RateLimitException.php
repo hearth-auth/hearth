@@ -18,7 +18,7 @@ final class RateLimitException extends HearthException
         public readonly int $retryAfter,
         public readonly string $endpoint,
         string $message = '',
-        \Throwable $previous = null,
+        ?\Throwable $previous = null,
     ) {
         parent::__construct(
             $message !== '' ? $message : "Rate limit exceeded for {$endpoint}" . ($retryAfter > 0 ? "; retry after {$retryAfter}s" : ''),

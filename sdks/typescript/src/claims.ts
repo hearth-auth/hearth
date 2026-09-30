@@ -8,11 +8,7 @@
  */
 
 import { decodeJwt } from "jose";
-import {
-  TokenExpiredError,
-  TokenInvalidError,
-  TokenNotYetValidError,
-} from "./errors.js";
+import { TokenExpiredError, TokenInvalidError, TokenNotYetValidError } from "./errors.js";
 
 /** Raw JWT payload shape used internally. */
 interface RawPayload {
@@ -101,16 +97,12 @@ export class Claims {
 
   /** The `exp` (expiry) claim as a Date, or null if absent. */
   expiry(): Date | null {
-    return this.payload.exp !== undefined
-      ? new Date(this.payload.exp * 1000)
-      : null;
+    return this.payload.exp !== undefined ? new Date(this.payload.exp * 1000) : null;
   }
 
   /** The `iat` (issuedAt) claim as a Date, or null if absent. */
   issuedAt(): Date | null {
-    return this.payload.iat !== undefined
-      ? new Date(this.payload.iat * 1000)
-      : null;
+    return this.payload.iat !== undefined ? new Date(this.payload.iat * 1000) : null;
   }
 
   /** The `jti` (JWT ID) claim, or null if absent. */

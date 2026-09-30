@@ -269,6 +269,13 @@ pub(crate) fn encode_user_permission_by_perm(
     .into_bytes()
 }
 
+/// Scan prefix for every extra-permission primary row in a realm, across
+/// all users. It cannot match a `by_perm` index key: those continue with
+/// `by_perm:`, never a realm UUID.
+pub(crate) fn user_permission_realm_scan_prefix(realm_id: &RealmId) -> Vec<u8> {
+    format!("{USER_PERM_PREFIX}{}:", realm_id.as_uuid()).into_bytes()
+}
+
 /// Scan prefix for all extra permissions granted to a user in a realm.
 pub(crate) fn user_permission_scan_prefix(realm_id: &RealmId, user_id: &UserId) -> Vec<u8> {
     format!(

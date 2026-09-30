@@ -878,7 +878,11 @@ impl SigningKey {
             scope: request.scope.clone(),
             nonce: None,
             azp: None,
-            cnf: None, // DPoP binding is on access tokens only
+            // RFC 9449 §5: a pair minted against a DPoP proof binds the
+            // refresh token too, as the code grant and rotation do.
+            cnf: request.dpop_jkt.as_deref().map(|jkt| CnfClaim {
+                jkt: jkt.to_string(),
+            }),
             roles: Vec::new(),
             groups: Vec::new(),
             org_groups: Vec::new(),
@@ -937,7 +941,7 @@ pub struct IssueTokenRequest<'a> {
     /// is appended to the `aud` claim as a second entry.
     pub resource: Option<&'a Uri>,
     /// JWK thumbprint for DPoP binding (RFC 9449). When set, the issued
-    /// access token will carry a `cnf.jkt` claim.
+    /// access and refresh tokens carry a `cnf.jkt` claim.
     pub dpop_jkt: Option<String>,
     /// Current session version for the `sv` claim (HEA-930).
     ///

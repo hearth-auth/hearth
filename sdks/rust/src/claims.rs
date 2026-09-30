@@ -41,11 +41,12 @@ impl Claims {
                 reason: "expected three dot-separated segments".into(),
             });
         }
-        let payload_bytes = URL_SAFE_NO_PAD
-            .decode(parts[1])
-            .map_err(|e| HearthError::TokenInvalidError {
-                reason: format!("base64 decode: {e}"),
-            })?;
+        let payload_bytes =
+            URL_SAFE_NO_PAD
+                .decode(parts[1])
+                .map_err(|e| HearthError::TokenInvalidError {
+                    reason: format!("base64 decode: {e}"),
+                })?;
         let payload: Value =
             serde_json::from_slice(&payload_bytes).map_err(|e| HearthError::TokenInvalidError {
                 reason: format!("JSON parse: {e}"),
@@ -86,7 +87,6 @@ impl Claims {
     // ── Spec §4 accessor methods ─────────────────────────────────────────
     // Method names follow the spec identifiers exactly; allow non_snake_case
     // for camelCase names required by the spec surface.
-    #[allow(non_snake_case)]
 
     /// Return the `sub` (subject) claim.
     pub fn subject(&self) -> &str {

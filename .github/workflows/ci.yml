@@ -168,6 +168,9 @@ jobs:
             sdks-rust:
               - 'sdks/rust/**'
               - 'proto/**'
+              # sdks/rust has no rustfmt.toml of its own; `cargo fmt` in the
+              # sdk-rust job reads the repository's.
+              - 'rustfmt.toml'
               - '.github/workflows/ci.yml'
             sdks-php:
               - 'sdks/php/**'
@@ -182,6 +185,11 @@ jobs:
               - 'scripts/check-sdk-conformance.sh'
               - 'docs/specs/SDK.md'
               - '.github/workflows/ci.yml'
+              # sdk-smoke gates on this filter: its own workflow file and the
+              # two quickstart examples it runs must re-run it when edited.
+              - '.github/workflows/sdk-smoke.yml'
+              - 'examples/typescript-nextjs/**'
+              - 'examples/go-gin/**'
             # Gates the proto-freshness job. Audit §4.8#8: generated SDK types
             # could drift from proto/ past the PR gate, because the only
             # freshness check lived in `quality` — gated on the `rust` filter,
@@ -935,6 +943,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Tool versions come from package-lock.json (prettier is pinned exact).
+      - name: Lint (eslint)
+        run: npm run lint
+
+      - name: Format check (prettier)
+        run: npm run format:check
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -974,14 +989,23 @@ jobs:
   # method the server 405s shipped in all seven SDKs and two integration suites
   # sat red at HEAD unnoticed. Every SDK now runs its own suite here.
   #
-  # Gating: sdk-rust, sdk-python, and sdk-php are green and wired into the
-  # required-summary gate. sdk-go and sdk-typescript run but are NOT gated yet —
-  # their auth-code/refresh/jwks integration tests are red at HEAD for an
-  # unrelated reason (registerClient returns 401 "missing authorization header").
-  # sdk-kotlin runs but is not gated pending a first green CI run. Promotion of
-  # these three into the required gate is tracked as a follow-up (see the issue).
+  # Gating: every sdk-* job is in required-summary's `needs:` and results loop
+  # (audit §4.12#12; scripts/check-required-summary-coverage.sh fails CI if one
+  # drops out), so a red SDK suite blocks the merge. That includes sdk-go,
+  # sdk-typescript and sdk-kotlin, which HEA-2171 first added as run-only.
+  # The PHP integration suite needs a live server and runs in sdk-smoke.yml.
+  #
+  # Lint (GA sweep 4): every SDK job also runs its language's linter and
+  # formatter check, with the tool version pinned in the SDK's own manifest:
+  # rust rustfmt + clippy -D warnings, python ruff check + ruff format
+  # (pyproject dev extra), php phpstan (composer.lock), go golangci-lint
+  # (version below; config sdks/go/.golangci.yml), typescript/node eslint +
+  # prettier (package-lock.json). Lint steps run before the tests so a style
+  # failure is reported without waiting for a server build. Kotlin declares
+  # no linter (no ktlint/detekt in its Gradle build), so sdk-kotlin has none.
 
-  # Rust SDK — unit suite (client logic, no server). Gated.
+  # Rust SDK — unit suite (client logic, no server). Gated. All features, so
+  # the tower/actix middleware modules and their tests are compiled and run.
   sdk-rust:
     name: sdk-rust
     needs: filter
@@ -995,9 +1019,19 @@ jobs:
           persist-credentials: false
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: cargo test
+        with:
+          components: clippy, rustfmt
+      # sdks/rust is its own workspace, so the root fmt/clippy gates never
+      # reach it. rustfmt picks up the repository's rustfmt.toml.
+      - name: cargo fmt --check
         working-directory: sdks/rust
-        run: cargo test
+        run: cargo fmt --check
+      - name: cargo clippy (all targets, all features)
+        working-directory: sdks/rust
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: cargo test (all features)
+        working-directory: sdks/rust
+        run: cargo test --all-features
 
   # Python SDK — unit suite (respx-mocked). Gated.
   sdk-python:
@@ -1018,6 +1052,13 @@ jobs:
       - name: Install with dev extras
         working-directory: sdks/python
         run: pip install -e '.[dev]'
+      # ruff is pinned in the dev extra (pyproject.toml).
+      - name: ruff check
+        working-directory: sdks/python
+        run: ruff check .
+      - name: ruff format --check
+        working-directory: sdks/python
+        run: ruff format --check .
       - name: pytest
         working-directory: sdks/python
         run: python -m pytest -q
@@ -1042,12 +1083,14 @@ jobs:
       - name: composer install
         working-directory: sdks/php
         run: composer install --prefer-dist --no-interaction
+      - name: phpstan (composer analyse)
+        working-directory: sdks/php
+        run: composer analyse
       - name: composer test (unit)
         working-directory: sdks/php
         run: composer test
 
-  # Kotlin SDK — unit suite (MockWebServer). Runs; promotion to the gate tracked
-  # as a follow-up (no local JVM to confirm the first green run).
+  # Kotlin SDK — unit suite (MockWebServer). Gated.
   sdk-kotlin:
     name: sdk-kotlin
     needs: filter
@@ -1073,9 +1116,7 @@ jobs:
         run: gradle test
 
   # Go SDK — integration suite; the tests build and boot the hearth server, so
-  # Rust + protoc are provisioned. Runs but NOT gated: the auth-code/refresh/
-  # verify-token tests are red at HEAD (registerClient 401), unrelated to the
-  # createRealm removal. Promotion to the gate is tracked as a follow-up.
+  # Rust + protoc are provisioned. Gated.
   sdk-go:
     name: sdk-go
     needs: filter
@@ -1087,25 +1128,30 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: sdks/go/go.mod
+          cache-dependency-path: sdks/go/go.sum
+      # golangci-lint's `standard` set (errcheck, govet, ineffassign,
+      # staticcheck, unused) plus the gofmt formatter; sdks/go/.golangci.yml.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.12.2
+          working-directory: sdks/go
       - name: Free disk space (hearth debug build needs headroom)
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
       - name: Setup Rust toolchain + protoc (builds the hearth test server)
         uses: ./.github/actions/setup-rust
         with:
           toolchain: stable
-      - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: sdks/go/go.mod
-          cache-dependency-path: sdks/go/go.sum
       - name: go test
         working-directory: sdks/go
         run: go test ./...
 
   # TypeScript SDK — integration suite; the tests build and boot the hearth
-  # server, so Rust + protoc + Node are provisioned. Runs but NOT gated: the
-  # auth-flow and jwks integration tests are red at HEAD (registerClient 401),
-  # unrelated to the createRealm removal. Promotion tracked as a follow-up.
+  # server, so Rust + protoc + Node are provisioned. Gated.
   sdk-typescript:
     name: sdk-typescript
     needs: filter
@@ -1117,6 +1163,22 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - name: Install dependencies
+        working-directory: sdks/typescript
+        run: npm ci
+      # Tool versions come from package-lock.json (prettier is pinned exact).
+      - name: Lint (eslint)
+        working-directory: sdks/typescript
+        run: npm run lint
+      - name: Format check (prettier)
+        working-directory: sdks/typescript
+        run: npm run format:check
       - name: Free disk space (hearth debug build needs headroom)
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
       - name: Setup Rust toolchain + protoc
@@ -1136,15 +1198,6 @@ jobs:
       # default (featureless) build does not contain.
       - name: Build the hearth test server
         run: cargo build --features dev-endpoints
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: sdks/typescript/package-lock.json
-      - name: Install dependencies
-        working-directory: sdks/typescript
-        run: npm ci
       - name: Typecheck (tsc)
         working-directory: sdks/typescript
         run: npm run build
@@ -1627,7 +1680,7 @@ jobs:
     name: sdk-smoke
     needs: [filter]
     # Old trigger: sdks/**, examples/{typescript-nextjs,go-gin}/**, src/**.
-    # `sdks-any` covers the first, `rust` covers src/**.
+    # `sdks-any` covers the first two (and sdk-smoke.yml), `rust` covers src/**.
     if: (needs.filter.result == 'success' && (needs.filter.outputs.sdks-any == 'true' || needs.filter.outputs.rust == 'true')) || github.ref == 'refs/heads/main'
     uses: ./.github/workflows/sdk-smoke.yml
     permissions:

@@ -30,16 +30,16 @@ Usage (views.py)::
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import wraps
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 try:
     from django.conf import settings as django_settings
     from django.http import HttpRequest, HttpResponse
 except ImportError as _exc:  # pragma: no cover
     raise ImportError(
-        "hearth.django requires Django. "
-        "Install it with: pip install django"
+        "hearth.django requires Django. Install it with: pip install django"
     ) from _exc
 
 from .middleware import (
@@ -57,6 +57,7 @@ if TYPE_CHECKING:
 # Django-specific HTTP response helpers
 # ---------------------------------------------------------------------------
 
+
 def _django_403() -> HttpResponse:
     """Return a minimal 403 Forbidden Django response."""
     return HttpResponse("Forbidden", status=403, content_type="text/plain")
@@ -64,7 +65,9 @@ def _django_403() -> HttpResponse:
 
 def _django_401_required_action() -> HttpResponse:
     """Return a 401 Unauthorized Django response for required-action tokens (spec §6 rule 6)."""
-    resp = HttpResponse("Required actions pending", status=401, content_type="text/plain")
+    resp = HttpResponse(
+        "Required actions pending", status=401, content_type="text/plain"
+    )
     resp["WWW-Authenticate"] = 'Bearer realm="hearth", error="required_action"'
     return resp
 
@@ -73,15 +76,16 @@ def _django_401_required_action() -> HttpResponse:
 # Shared sync permission check
 # ---------------------------------------------------------------------------
 
+
 def _sync_check(
-    client: Optional["HearthClient"],
+    client: HearthClient | None,
     token: str,
     permission: str,
     mode: str,
     client_id: str = "",
     client_secret: str = "",
-    organization_id: Optional[str] = None,
-    resource: Optional[str] = None,
+    organization_id: str | None = None,
+    resource: str | None = None,
 ) -> bool:
     """Check a permission synchronously, dispatching on *mode*.
 
@@ -122,6 +126,7 @@ def _sync_check(
 # HearthDjangoMiddleware
 # ---------------------------------------------------------------------------
 
+
 class HearthDjangoMiddleware:
     """Django new-style class middleware for Hearth token extraction.
 
@@ -153,19 +158,26 @@ class HearthDjangoMiddleware:
 
     def __init__(self, get_response: Callable) -> None:
         self.get_response = get_response
-        self._client: Optional["HearthClient"] = getattr(django_settings, "HEARTH_CLIENT", None)
+        self._client: HearthClient | None = getattr(
+            django_settings, "HEARTH_CLIENT", None
+        )
         if self._client is None:
             base_url = getattr(django_settings, "HEARTH_BASE_URL", None)
             realm_id = getattr(django_settings, "HEARTH_REALM_ID", None)
             if base_url and realm_id:
                 from .client import HearthClient as _HearthClient
+
                 self._client = _HearthClient(base_url, realm_id=realm_id)
         self._mode: str = getattr(django_settings, "HEARTH_MODE", "embedded")
-        self._permission: Optional[str] = getattr(django_settings, "HEARTH_PERMISSION", None)
+        self._permission: str | None = getattr(
+            django_settings, "HEARTH_PERMISSION", None
+        )
         self._client_id: str = getattr(django_settings, "HEARTH_CLIENT_ID", "")
         self._client_secret: str = getattr(django_settings, "HEARTH_CLIENT_SECRET", "")
-        self._organization_id: Optional[str] = getattr(django_settings, "HEARTH_ORGANIZATION_ID", None)
-        self._resource: Optional[str] = getattr(django_settings, "HEARTH_RESOURCE", None)
+        self._organization_id: str | None = getattr(
+            django_settings, "HEARTH_ORGANIZATION_ID", None
+        )
+        self._resource: str | None = getattr(django_settings, "HEARTH_RESOURCE", None)
 
     def __call__(self, request: HttpRequest) -> HttpResponse:
         token = _extract_bearer_environ(request.META)
@@ -189,7 +201,7 @@ class HearthDjangoMiddleware:
                     organization_id=self._organization_id,
                     resource=self._resource,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 -- fail closed on any error
                 # Fail-closed on any error (mode mismatch, network, etc.)
                 allowed = False
             if not allowed:
@@ -202,15 +214,16 @@ class HearthDjangoMiddleware:
 # @require_permission view decorator
 # ---------------------------------------------------------------------------
 
+
 def require_permission(
     permission: str,
     *,
-    client: Optional["HearthClient"] = None,
+    client: HearthClient | None = None,
     mode: str = "embedded",
     client_id: str = "",
     client_secret: str = "",
-    organization_id: Optional[str] = None,
-    resource: Optional[str] = None,
+    organization_id: str | None = None,
+    resource: str | None = None,
 ) -> Callable:
     """View decorator that enforces a Hearth permission check on a specific view.
 
@@ -242,11 +255,14 @@ def require_permission(
         def my_view(request):
             ...
     """
+
     def decorator(view_func: Callable) -> Callable:
         @wraps(view_func)
         def wrapper(request: HttpRequest, *args, **kwargs):
             # Prefer token already extracted by HearthDjangoMiddleware.
-            token = getattr(request, "hearth_token", None) or _extract_bearer_environ(request.META)
+            token = getattr(request, "hearth_token", None) or _extract_bearer_environ(
+                request.META
+            )
             if not token:
                 return _django_403()
 
@@ -271,7 +287,7 @@ def require_permission(
                     organization_id=organization_id,
                     resource=resource,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 -- fail closed on any error
                 # Fail-closed on any error.
                 allowed = False
 
@@ -279,5 +295,7 @@ def require_permission(
                 return _django_403()
 
             return view_func(request, *args, **kwargs)
+
         return wrapper
+
     return decorator

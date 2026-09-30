@@ -6,6 +6,202 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+<!-- GA audit round 3 follow-ups, 2026-09-30 (branch feature/ga-sweep-4-2026-09-29). -->
+
+### Security
+- **Admin privilege ceiling now covers organization and role changes.** A sub-admin may no
+  longer demote a user who holds an admin permission it lacks (organization-scoped admin
+  permissions included) by removing them from an organization or deleting it — gRPC
+  `DeleteOrganization`, SCIM `DELETE /scim/v2/Groups/{id}`, and SCIM `PUT`/`PATCH
+  /scim/v2/Groups/{id}` member changes — or by editing a role definition: `PATCH` /
+  `DELETE /admin/roles/{id}` and gRPC `UpdateRole` / `DeleteRole` are refused when the change
+  removes an admin permission from the role (directly, through its parent roles, by deleting it,
+  or by renaming it away from members who hold it as an extra organization role) and any holder
+  of the role, or of a role inheriting from it, out-ranks the caller. Refusals answer `403` /
+  `PERMISSION_DENIED` before anything is written. The SCIM provisioning token, which holds no
+  admin permission, can no longer remove an admin principal from a group or delete a group that
+  has one as a member. `hearth.admin` callers, the web console (which admits only `hearth.admin`)
+  and `hearth.yaml` role reconciliation are unaffected.
+- The admin privilege ceiling also counts org-scoped admin permissions a user holds in an
+  organization it is **not** a member of (an org-scoped assignment, directly or through a group,
+  or an org-scoped grant), since permission resolution honours those (`GET
+  /v1/me/permissions?org_id=`). gRPC `AddAdditionalRole` now requires the user to be a member of
+  the organization (`FAILED_PRECONDITION` otherwise). **Breaking** for callers that added extra
+  roles to non-members.
+- Backups now also carry the single-use markers of required-action flows (and forced password
+  updates) that had already ended. Before, a restored node let such a flow complete a second
+  time while its link was still valid.
+- A required-action flow that starts from a magic link no longer counts an email-OTP enrolment
+  as a second factor. Both prove the same inbox, which is the rule a magic-link login already
+  applies to an email-OTP second factor. Such a flow now ends without a session, as a
+  magic-link login does for a user who already holds email OTP.
+- **Device-grant tokens are DPoP-bound, and FAPI realms require it** — a DPoP proof sent with the
+  device-code token request (RFC 8628 + RFC 9449) now binds the access token (`cnf.jkt`), the
+  refresh token and the grant family to the proof key, and the response says
+  `token_type: DPoP`; the refresh token then rotates only with a proof by the same key. Before,
+  the proof was validated and ignored and the tokens were plain Bearer. In a realm with a
+  `fapi_profile`, or for a FAPI 2.0 client, the device grant now refuses a request without a
+  proof (`400 invalid_request`), as the code, refresh and `client_credentials` grants already
+  did; the approved device code stays redeemable, so the device can retry with a proof.
+  **Breaking** for device clients of FAPI realms that polled without DPoP (GA audit 3 B-6).
+- **FAPI realms require DPoP on the `jwt-bearer` grant** — a FAPI 2.0 client, or any client of a
+  realm with a `fapi_profile`, now gets `400 invalid_request` from
+  `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer` without a DPoP proof; the assertion's
+  `jti` is not spent, so the same assertion succeeds with one. **Breaking** for such clients
+  that sent no proof (GA audit 3 B-6).
+- **The step-up-MFA grant is sender-constrained like every other grant** —
+  `grant_type=urn:hearth:params:grant-type:step-up-mfa` now accepts a DPoP proof and binds the
+  access token, refresh token and grant family to it (`token_type: DPoP`). In a realm with a
+  `fapi_profile` it refuses a request without a proof (`400 invalid_request`), and the refresh of
+  any clientless grant family (step-up, first-party) without a proof is refused there too; before,
+  both minted and rotated plain Bearer tokens. **Breaking** for step-up callers in FAPI realms that
+  sent no proof.
+- **No secret-based clients in a FAPI 2.0 Advanced realm** — creating a `client_secret_*` client
+  there (admin REST, gRPC, console) or regenerating a secret is refused with a clear error naming
+  `private_key_jwt`, instead of creating a client the token endpoint can never authenticate.
+  **Breaking.**
+
+### Added
+- **Confidential clients from the admin API** — `POST /admin/applications`, `POST /clients` and
+  gRPC `CreateApplication` / `RegisterClient` accept `token_endpoint_auth_method`
+  (`client_secret_basic`, `client_secret_post`, `private_key_jwt`, `none`). A `client_secret_*`
+  method creates a confidential client: Hearth generates the secret, stores only its hash and
+  returns it once, as `client_secret` in the create response; it is never returned again.
+  `private_key_jwt` requires `jwks`. The TypeScript and Go SDKs expose the field
+  (`tokenEndpointAuthMethod` / `TokenEndpointAuthMethod`) and the returned `client_secret`.
+- **Client-secret regeneration over the API** — `POST /admin/applications/{id}/regenerate-secret`
+  and gRPC `ApplicationAdminService.RegenerateApplicationSecret` replace a confidential client's
+  secret with a new generated one, returned once in the response; the old secret stops working
+  immediately. Audited (`client_updated`, `change: client_secret_regenerated`, acting admin).
+- **SDKs** — the Python, Rust, PHP and Kotlin SDKs expose `token_endpoint_auth_method` on client
+  creation and the returned one-time `client_secret`, like TypeScript and Go.
+- **SDKs: regenerate a client secret** — every SDK's admin client can call
+  `POST /admin/applications/{id}/regenerate-secret`: `regenerateClientSecret` (TypeScript, Node,
+  PHP, Kotlin), `RegenerateClientSecret` (Go), `regenerate_client_secret` (Python, Rust). The
+  returned record carries the new secret once.
+- `hearth_cluster_forwarded_writes_total{outcome}` counter: writes a follower forwarded to the
+  leader, by a fixed set of outcomes (`committed`, `not_applied_locally`, `not_leader`,
+  `unreachable`, `busy`, `rejected`, `outcome_unknown`), all present at 0 from the first scrape.
+
+### Changed
+- **Breaking:** a multi-user ceiling check (group, organization or role holders) visits at most
+  10 000 users and 50 000 permission resolutions; past that bound a sub-admin's call is refused
+  with `503` / `UNAVAILABLE` rather than half-checked (the group bound was already 10 000 members).
+  A `hearth.admin` caller is not bounded.
+- **The admin privilege ceiling no longer scales with plain members.** Checks that affect many
+  users (organization deletion, group or role changes, SCIM membership replacement) now resolve
+  only the realm's admin holders; other users pass without a permission lookup. A sub-admin
+  deleting a 5,000-member organization took minutes and now takes about a second. The bounds are
+  now 100 000 affected users, 10 000 admin holders per realm and 50 000 permission resolutions;
+  past any of them the call is refused with `503` / `UNAVAILABLE`, as before.
+- **Breaking:** every step-up check answers a locked-out account with `429 Too Many Requests`
+  and a `Retry-After` header (seconds until the lockout ends). A lockout follows too many
+  wrong passwords or TOTP codes. On the JSON routes the body is
+  `{"error": "too_many_attempts", "error_code": "HEARTH_RATE_LIMITED"}`. These routes used
+  to answer `403 step_up_required`, which told the client its proof was wrong:
+  `POST /webauthn/register/begin`, `DELETE /webauthn/credentials/{credential_id}`,
+  `POST /ui/account/passkeys/register-begin` and `POST /ui/account/passkeys/{id}/delete`.
+  In the console, the API-token mint now sends `Retry-After` with its 429. TOTP
+  activation, TOTP disable, recovery-code regeneration and password change answer 429 with
+  a lockout message; they used to say the code or password was wrong.
+- **The REST admin client-create routes refuse a caller-chosen `client_secret`** with `422`
+  (`POST /admin/applications`, `POST /clients`). They used to drop it silently and register a
+  **public** client; request a generated secret with `token_endpoint_auth_method` instead.
+  **Breaking.**
+- **gRPC client creation refuses a caller-chosen `client_secret`** — `CreateApplication` and
+  `RegisterClient` answer `INVALID_ARGUMENT`, as REST answers `422`; request a generated secret
+  with `token_endpoint_auth_method`. **Breaking.**
+- **`hearth.yaml`: no secret-based applications in a FAPI 2.0 Advanced realm** — an application
+  that is `confidential: true` or carries a `client_secret` in a realm with
+  `fapi_profile: advanced` now fails `hearth config validate`, startup and reload with an error on
+  `realms.<realm>.applications.<app>.client_secret` naming the realm, the application and
+  `private_key_jwt`. It used to be accepted and reconciled into a client the token endpoint could
+  never authenticate. **Breaking** for such configs: declare `jwks` instead.
+- **Cluster mode (experimental): writes and logins on a follower now succeed.** A follower forwards
+  each write to the Raft leader over the existing peer mTLS channel (new `ForwardWrite` RPC on
+  `cluster.peer_address`) and answers only once the write is committed and applied on the follower
+  itself, so a client reads its own write on the node it wrote to. Previously every write that
+  reached a follower — including every login, which writes a session — failed with HTTP 500
+  (`raft: not the leader`; clustering guide H-3). Load balancers no longer need to route writes to
+  the leader. Forwarded writes are never retried once they may have reached a leader: if the
+  leader dies mid-call the write fails with "its outcome is unknown" (re-read before retrying), so
+  single-use claims and counters stay exactly-once. Bounds: finding a leader plus the forwarded
+  call share `cluster.write_timeout_ms` + 2 s, the follower's local apply wait is bounded by
+  `cluster.write_timeout_ms`, a leader serves at most 256 forwarded writes at once, and a forwarded
+  command is limited to 3 MiB serialized. `raft: not the leader` now means no leader could be
+  reached at all. Cluster mode remains experimental. Mixed-version clusters remain unsupported (a
+  leader without the RPC refuses forwarded writes with a clear error).
+- **Cluster mode (experimental): cluster unavailability is `503`, not `500`.** A request the
+  cluster cannot serve right now answers `503 Service Unavailable` with `Retry-After` and a stable
+  `error_code`: `HEARTH_CLUSTER_UNAVAILABLE` (no leader reachable, the leader at its forwarding
+  limit, or this node's reads fenced by replication lag — nothing was written, retry) or
+  `HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN` (the write may have been applied — re-read before
+  retrying). gRPC answers `UNAVAILABLE`. Neither carries internal detail. Every `503` from the
+  REST router now carries `Retry-After` (2 s unless the handler sets its own).
+
+### Fixed
+- **PHP SDK** — `TokenVerifier::verify()` now rejects a JWT whose signature is not 64 bytes, or a
+  JWKS key that is not 32 bytes, with `TokenInvalidException`. It used to let libsodium's
+  `SodiumException` escape, which `HearthMiddleware` does not catch, so such a request failed
+  with an uncaught exception instead of a `401`.
+- **SCIM Groups handle the whole membership.** `GET /scim/v2/Groups/{id}` lists every member
+  (it stopped at 1,000), and `PUT` / `PATCH` reconcile against the full membership, so members
+  beyond the first 1,000 are removed when a request drops them. A membership change naming a
+  user who does not exist answers `400 invalidValue` before anything is written, and a
+  membership write that fails part-way now fails the request with a `detail` naming the failed
+  step and how many additions and removals were applied (it used to be swallowed and reported as
+  success). List responses read members only for the groups on the returned page.
+- **Role deletion never leaves dangling references.** `DELETE /admin/roles/{id}` and gRPC
+  `DeleteRole` now honour `cascade`: a role that still has assignments, child roles or extra
+  organization-role holders is refused with `409 role_in_use` / `FAILED_PRECONDITION` unless
+  `?cascade=true` (gRPC `cascade: true`), which removes those references atomically with the role.
+  The web console always cascades. **Breaking:** a plain `DELETE` of an assigned role used to
+  answer `204`.
+- `POST /scim/v2/Groups` checks every member before creating the organization: an unknown member
+  answers `400 invalidValue` and creates nothing (it used to leave a half-created group). A member
+  `value` that is not a user id is refused with `400 invalidValue` on `POST`, `PUT` and `PATCH`
+  instead of being silently ignored. **Breaking** for clients that relied on it being ignored.
+- An authorization code or device approval issued after the SMS second-factor challenge now
+  records the proved factor, the same way the other second-factor challenges do. Before,
+  the code carried only the browser session's own proof. If that session proved nothing at
+  sign-in, its token session proved nothing too, and clients or roles that require MFA
+  refused it. A passkey session with user verification keeps its stronger proof.
+- Backups now carry each user's required-action generation. It is restored without ever
+  lowering the counter on the target node. Before, a restore reset the counter, so
+  required-action links that a session revocation had ended before the backup worked
+  again.
+- Retrying a user deletion now removes the user's required-action generation record.
+- Revoking the sessions of a deleted or unknown user no longer leaves a required-action record
+  naming that user.
+- For operators (system realm), the account page's TOTP activation and password change now
+  check the password on the admin KDF pool. A tenant login flood can no longer shed them
+  with 503.
+- The federation confirm-link page reports a locked account as locked, with `429 Too Many
+  Requests`, `Retry-After` and a lockout message. It used to send the user back to sign-in
+  as if the password were wrong.
+- **RFC 9207 `iss` on authorization error redirects** — `error=access_denied`,
+  `consent_required`, `login_required` and the other authorization errors of the browser
+  `/ui/oauth/authorize` flow now carry the realm issuer as `iss` (query or fragment, wherever the
+  error is delivered), as successful responses and the realm discovery document
+  (`authorization_response_iss_parameter_supported: true`) already promised. JARM error
+  responses carry it as the JWT's `iss` claim.
+- OpenAPI: `POST /admin/applications`, `POST /clients` and `POST /register` document `201 Created`
+  (they never answered `200`); the regeneration route is documented.
+- `make sdk-smoke-local` builds the TypeScript SDK itself, so it passes from a clean checkout.
+- **Cluster mode (experimental): replication no longer stalls on large messages.** Peer RPCs were
+  JSON (a byte string cost ~3.6 bytes per byte) under gRPC's default 4 MiB limit, so a follower
+  more than ~1 MiB behind, any single write over ~1 MiB, or any snapshot over ~1 MiB produced a
+  message the peer refused on every retry — replication to that node stopped silently for good.
+  Peer RPCs are now CBOR with byte strings, peers accept messages up to 16 MiB in both directions,
+  `AppendEntries` batches are cut to 2 MiB, snapshots travel in 4 MiB chunks, and one replicated
+  write is limited to 4 MiB (refused up front, on the leader or a follower, instead of stalling
+  replication). **Breaking** for mixed-version clusters: all nodes must run the same build (a
+  full-cluster restart, already required by this release).
+- **Cluster mode (experimental): a leader crashed the first time a follower needed a snapshot.**
+  A node served lagging followers only a snapshot it had *installed*, never one it had *built*,
+  so a leader that had purged its log (as it does after every snapshot) failed with "snapshot not
+  found" and its Raft core stopped.
+
 <!-- GA audit round 3, 2026-09-29 (branch feature/ga-sweep-3-2026-09-28). -->
 
 ### Security

@@ -21,7 +21,10 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "dependencies": {
     "jose": "^5.0.0"
@@ -35,13 +38,17 @@
     }
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@testing-library/react": "^16.0.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
+    "eslint": "^10.11.0",
     "jsdom": "^25.0.0",
+    "prettier": "3.9.9",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "typescript": "^5.0.0",
+    "typescript-eslint": "^8.71.0",
     "vitest": "^4.1.6"
   },
   "overrides": {

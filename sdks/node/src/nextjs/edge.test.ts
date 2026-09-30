@@ -23,7 +23,9 @@ const BASE_OPTIONS = {
   jwksUri: "https://auth.example.com/.well-known/jwks.json",
 };
 
-function makeRequest(authHeader?: string): { headers: { get(n: string): string | null; entries(): IterableIterator<[string, string]> } } {
+function makeRequest(authHeader?: string): {
+  headers: { get(n: string): string | null; entries(): IterableIterator<[string, string]> };
+} {
   const map: Record<string, string> = {};
   if (authHeader) map["authorization"] = authHeader;
   return {
@@ -34,12 +36,16 @@ function makeRequest(authHeader?: string): { headers: { get(n: string): string |
   };
 }
 
-function makePayload(extra: Partial<JWTPayload & {
-  scope?: string;
-  roles?: string[];
-  permissions?: string[];
-  token_type?: string;
-}> = {}): JWTPayload {
+function makePayload(
+  extra: Partial<
+    JWTPayload & {
+      scope?: string;
+      roles?: string[];
+      permissions?: string[];
+      token_type?: string;
+    }
+  > = {},
+): JWTPayload {
   return {
     sub: "user1",
     iss: "https://auth.example.com",
@@ -61,7 +67,10 @@ function rejectJwtVerify(err: Error = new Error("invalid token")): void {
 
 describe("EdgeToken", () => {
   it("returns subject, issuer, jwtID", () => {
-    const t = new EdgeToken({ sub: "u1", iss: "https://auth.example.com", jti: "abc" }, { alg: "EdDSA" });
+    const t = new EdgeToken(
+      { sub: "u1", iss: "https://auth.example.com", jti: "abc" },
+      { alg: "EdDSA" },
+    );
     expect(t.subject()).toBe("u1");
     expect(t.issuer()).toBe("https://auth.example.com");
     expect(t.jwtID()).toBe("abc");
@@ -110,7 +119,9 @@ describe("EdgeToken", () => {
   });
 
   it("returns token_type", () => {
-    expect(new EdgeToken({ token_type: "required_action" } as JWTPayload, {}).tokenType()).toBe("required_action");
+    expect(new EdgeToken({ token_type: "required_action" } as JWTPayload, {}).tokenType()).toBe(
+      "required_action",
+    );
     expect(new EdgeToken({} as JWTPayload, {}).tokenType()).toBe("");
   });
 
@@ -166,7 +177,7 @@ describe("hearthEdgeMiddleware", () => {
       expect(res).toBeInstanceOf(Response);
       expect(res!.status).toBe(401);
       expect(res!.headers.get("WWW-Authenticate")).toBe('Bearer realm="hearth"');
-      const body = await res!.json() as Record<string, string>;
+      const body = (await res!.json()) as Record<string, string>;
       expect(body.error).toBe("unauthorized");
     });
 
@@ -205,7 +216,7 @@ describe("hearthEdgeMiddleware", () => {
       const guard = hearthEdgeMiddleware({ ...BASE_OPTIONS, required: false });
       const res = await guard(makeRequest("Bearer action-token"));
       expect(res!.status).toBe(401);
-      const body = await res!.json() as Record<string, string>;
+      const body = (await res!.json()) as Record<string, string>;
       expect(body.error_description).toContain("required actions");
     });
   });
@@ -225,7 +236,7 @@ describe("hearthEdgeMiddleware", () => {
       const guard = hearthEdgeMiddleware({ ...BASE_OPTIONS, requiredScope: "admin" });
       const res = await guard(makeRequest("Bearer token"));
       expect(res!.status).toBe(403);
-      const body = await res!.json() as Record<string, string>;
+      const body = (await res!.json()) as Record<string, string>;
       expect(body.error).toBe("forbidden");
     });
 

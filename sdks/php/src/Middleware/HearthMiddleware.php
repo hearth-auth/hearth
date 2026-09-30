@@ -36,7 +36,7 @@ final class HearthMiddleware implements MiddlewareInterface
 
     /**
      * @param TokenVerifierInterface  $tokenVerifier   Configured verifier (JWKS + claim checks)
-     * @param ResponseFactoryInterface $responseFactory PSR-17 factory for creating 401/403 responses
+     * @param ResponseFactoryInterface $responseFactory PSR-17 factory for creating 401 responses
      * @param bool                     $requireAuth     When false, missing tokens are forwarded to the handler
      *                                                  (useful for optional-auth routes)
      */
@@ -47,7 +47,7 @@ final class HearthMiddleware implements MiddlewareInterface
     ) {}
 
     /**
-     * Authenticates the request or short-circuits with 401 / 403.
+     * Authenticates the request or short-circuits with 401.
      */
     public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
     {
@@ -99,14 +99,6 @@ final class HearthMiddleware implements MiddlewareInterface
         return $this->responseFactory
             ->createResponse(401)
             ->withHeader('WWW-Authenticate', 'Bearer realm="hearth"')
-            ->withHeader('Content-Type', 'application/json');
-    }
-
-    /** Builds a 403 response. */
-    private function forbidden(string $detail): ResponseInterface
-    {
-        return $this->responseFactory
-            ->createResponse(403)
             ->withHeader('Content-Type', 'application/json');
     }
 }

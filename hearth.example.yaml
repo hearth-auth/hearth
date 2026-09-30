@@ -945,8 +945,8 @@ onboarding:
 # │  • C-6: Cluster membership is IMMUTABLE after bootstrap. Nodes cannot  │
 # │    be added or removed from a running cluster. Replacing a failed node  │
 # │    requires a full-cluster restart with updated YAML.                   │
-# │  • H-3: Writes to a follower return HTTP 500 (no redirect to leader).  │
-# │    All write traffic must be routed exclusively to the leader node.     │
+# │  • H-3 (fixed): writes to a follower are forwarded to the leader, so   │
+# │    any node accepts writes and logins.                                  │
 # │                                                                         │
 # │  The supported deployment model for Hearth 1.x is single-node.         │
 # │  Omit the cluster: section entirely for production deployments.         │

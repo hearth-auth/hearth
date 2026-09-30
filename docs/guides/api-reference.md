@@ -252,6 +252,53 @@ curl -s -X POST http://127.0.0.1:8420/clients \
 
 A token without `hearth.clients.admin` receives `403 Forbidden`.
 
+#### Confidential clients: a generated secret, returned once
+
+To create a client that authenticates with a secret, set `token_endpoint_auth_method` to
+`client_secret_basic` or `client_secret_post` on `POST /admin/applications` or `POST /clients`
+(gRPC `CreateApplication` / `RegisterClient` take the same field). Hearth generates the secret —
+256 bits from the operating system's CSPRNG — stores only a hash of it, and returns it **once**,
+as `client_secret` in the `201` response:
+
+```bash
+curl -s -X POST http://127.0.0.1:8420/admin/applications \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "X-Realm-ID: $REALM_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "Billing backend",
+    "redirect_uris": ["https://billing.example.com/cb"],
+    "grant_types": ["client_credentials"],
+    "trust_level": "CLIENT_TRUST_LEVEL_FIRST_PARTY",
+    "token_endpoint_auth_method": "client_secret_basic"
+  }'
+# → 201 {"client_id":"…","is_confidential":true,"client_secret":"<43 characters>", …}
+```
+
+Store the secret when you receive it: no later read (`GET /admin/applications/{id}`, the list, the
+console) returns it. To replace a lost or leaked secret, regenerate it:
+
+```bash
+curl -s -X POST "http://127.0.0.1:8420/admin/applications/$CLIENT_ID/regenerate-secret" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "X-Realm-ID: $REALM_ID"
+# → 200 {"client_id":"…","client_secret":"<new, 43 characters>", …}
+```
+
+The new secret is returned once and the old one stops authenticating at once. The change is
+audited (`client_updated`, metadata `change: client_secret_regenerated`, with the acting admin).
+gRPC: `ApplicationAdminService.RegenerateApplicationSecret`; console: **Applications → the client →
+Regenerate secret**. A public client answers `400`, an unknown one `404`.
+
+- `private_key_jwt` requires the client's public keys in `jwks`; `none` (or omitting the field)
+  registers a public client, or a `private_key_jwt` client when `jwks` is given.
+- A caller-chosen `client_secret` is refused: `422` on REST, `INVALID_ARGUMENT` on gRPC. The REST
+  routes used to drop it silently and register a **public** client; gRPC used to store it.
+- Any other `token_endpoint_auth_method` value is a `422` (gRPC: `INVALID_ARGUMENT`).
+- A realm with `fapi_profile: advanced` accepts `private_key_jwt` only, so creating a
+  `client_secret_*` client there — or regenerating a secret — is refused with `400
+  invalid_request` naming `private_key_jwt` (gRPC: `INVALID_ARGUMENT`), rather than creating a
+  client the token endpoint would never authenticate.
+
 ### gRPC (`OAuthService.register_client`)
 
 The gRPC RPC applies the same gate. Pass the admin token as `Authorization: Bearer
@@ -478,6 +525,14 @@ padding:
 
 **Response `403 Forbidden`:** `{"error": "step_up_required"}` — no proof was
 supplied, or the proof did not verify.
+
+**Response `429 Too Many Requests`:**
+`{"error": "too_many_attempts", "error_code": "HEARTH_RATE_LIMITED"}` with a
+`Retry-After` header (seconds) — the account is locked out: too many wrong
+passwords (the login lockout) or TOTP codes (the TOTP guess budget). No proof
+is checked until the lockout ends. Every step-up surface answers a locked
+account this way: passkey enrolment and removal here and on the account page,
+and the console's step-up forms.
 
 **Response `503 Service Unavailable`:** `{"error": "temporarily_unavailable"}`
 with a `Retry-After` header — the KDF admission gate shed the password

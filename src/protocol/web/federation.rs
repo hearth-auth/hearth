@@ -730,6 +730,61 @@ pub async fn confirm_link_submit(
     confirm_link_submit_impl(state, None, headers, peer_addr, form).await
 }
 
+/// Checks the local account's password before a confirm-link; `Err` is the
+/// answer to send instead of linking.
+///
+/// This is an Argon2id op, so it runs on the shared KDF admission gate —
+/// every pre-auth hash MUST join the one permit pool that bounds total
+/// hashing work and sheds 503 on overload (audit 2026-08-28 §4.17#2 class;
+/// HEA-1891/F3). A wrong password redirects to the login page rather than
+/// back to the confirm-link page, which would reveal that the ticket was
+/// valid (enumeration resistance); the ticket is already consumed, so the
+/// user restarts the federation flow. A locked account is told it is locked
+/// (GA sweep 4 round 2).
+async fn verify_link_password(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    realm_id: &RealmId,
+    user_id: &UserId,
+    password: &FormSecret,
+) -> Result<(), Response> {
+    let cleartext = crate::identity::CleartextPassword::new(password.as_bytes().to_vec());
+    let (identity, realm, user) = (state.identity.clone(), realm_id.clone(), user_id.clone());
+    match crate::identity::gate()
+        .run(move || identity.verify_password(&realm, &user, &cleartext))
+        .await
+    {
+        Ok(Ok(true)) => Ok(()),
+        Ok(Err(crate::identity::IdentityError::RateLimited)) => {
+            Err(locked_account_response(state, realm_id, user_id))
+        }
+        Err(crate::identity::KdfGateError::Overloaded { retry_after }) => Err(
+            super::handlers::kdf_shed_html_response(state, headers, retry_after, None, None, None),
+        ),
+        other => {
+            if let Err(crate::identity::KdfGateError::Join(e)) = other {
+                tracing::warn!(error = %e, "confirm-link verify_password KDF task panicked");
+            }
+            Err(Redirect::to("/ui/login?error=fed_link_failed").into_response())
+        }
+    }
+}
+
+/// The confirm-link answer for an account whose login lockout refused the
+/// password: `429` with `Retry-After` and a lockout message (GA sweep 4
+/// round 2). It used to read as a wrong password.
+fn locked_account_response(state: &WebState, realm_id: &RealmId, user_id: &UserId) -> Response {
+    let retry_after =
+        crate::identity::password_retry_after(state.identity.as_ref(), realm_id, user_id);
+    let mut resp = handlers_common::too_many_requests(
+        state,
+        "Too many failed sign-in attempts for this account. Wait a few minutes, then sign in \
+         with your identity provider again.",
+    );
+    crate::protocol::step_up::set_retry_after(&mut resp, retry_after);
+    resp
+}
+
 async fn confirm_link_submit_impl(
     state: Arc<WebState>,
     realm_name: Option<String>,
@@ -784,43 +839,16 @@ async fn confirm_link_submit_impl(
     {
         return Redirect::to("/ui/login?error=fed_link_failed").into_response();
     }
-    // Verify local password. This is an Argon2id op, so route it through the
-    // shared KDF admission gate — every pre-auth hash MUST join the one permit
-    // pool that bounds total hashing work and sheds 503 on overload
-    // (audit 2026-08-28 §4.17#2 class; HEA-1891/F3). This callsite was the last
-    // ungated `verify_password`.
-    let cleartext = crate::identity::CleartextPassword::new(form.password.as_bytes().to_vec());
-    let realm_for_verify = realm_id.clone();
-    let user_for_verify = ticket_rec.user_id.clone();
-    let identity = state.identity.clone();
-    let ok = match crate::identity::gate()
-        .run(move || identity.verify_password(&realm_for_verify, &user_for_verify, &cleartext))
-        .await
+    if let Err(refusal) = verify_link_password(
+        &state,
+        &headers,
+        &realm_id,
+        &ticket_rec.user_id,
+        &form.password,
+    )
+    .await
     {
-        Ok(Ok(true)) => true,
-        Ok(Ok(false) | Err(_)) => false,
-        Err(crate::identity::KdfGateError::Overloaded { retry_after }) => {
-            return super::handlers::kdf_shed_html_response(
-                &state,
-                &headers,
-                retry_after,
-                None,
-                None,
-                None,
-            );
-        }
-        Err(crate::identity::KdfGateError::Join(e)) => {
-            tracing::warn!(error = %e, "confirm-link verify_password KDF task panicked");
-            false
-        }
-    };
-    if !ok {
-        // Redirect to login rather than back to the confirm-link page.
-        // Returning to confirm-link with the ticket reveals that the ticket
-        // was valid (enumeration resistance). The ticket was consumed by
-        // take_confirm_link_ticket above, so the user must restart the
-        // federation flow to try again.
-        return Redirect::to("/ui/login?error=fed_link_failed").into_response();
+        return refusal;
     }
     // Link and complete.
     if let Err(e) = state.identity.link_external_identity(
@@ -952,6 +980,7 @@ fn complete_login(
         Some(return_to),
         // The upstream login is one factor; nothing was owed above.
         &build_session_context(headers, peer_addr, &state.trusted_proxies),
+        auth::FirstFactor::Credential,
         headers,
         now,
     ) {

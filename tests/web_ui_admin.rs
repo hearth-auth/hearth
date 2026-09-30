@@ -353,21 +353,15 @@ async fn system_realm_user_without_admin_permission_gets_403() {
     );
 }
 
-/// The console's user administration is exempt from the per-surface
-/// privilege-ceiling calls (`admin_auth::check_user_admin_ceiling`) only
-/// because it admits nobody but `hearth.admin`, who clears the ceiling by
-/// construction (GA audit round 3). A system-realm *sub*-admin
-/// (`hearth.users.admin`) must therefore be refused before any user mutation;
-/// if this gate ever widens to sub-admins, the console must call the ceiling.
-#[tokio::test]
-async fn system_realm_sub_admin_cannot_use_console_user_admin() {
-    let rig = build_rig();
+/// A console session cookie for a fresh system-realm user holding only the
+/// seeded `role` (a sub-admin), with CSRF token `csrf`.
+fn system_sub_admin_cookie(rig: &TestRig, role: &str, csrf: &str) -> String {
     let system_realm = hearth::core::RealmId::new(uuid::Uuid::nil());
     let sub_admin = rig
         .identity
         .create_admin_user(&CreateUserRequest {
-            email: "users-admin@hearth.test".to_string(),
-            display_name: "Users Admin".to_string(),
+            email: format!("{}@hearth.test", role.replace('.', "-")),
+            display_name: role.to_string(),
             first_name: String::new(),
             last_name: String::new(),
             attributes: Default::default(),
@@ -383,22 +377,22 @@ async fn system_realm_sub_admin_cannot_use_console_user_admin() {
             },
         )
         .expect("activate system-realm user");
-    let role = rig
+    let seeded = rig
         .authz
-        .get_role_by_name(&system_realm, "hearth.users.admin")
+        .get_role_by_name(&system_realm, role)
         .expect("role lookup")
-        .expect("hearth.users.admin seeded in the system realm");
+        .unwrap_or_else(|| panic!("{role} seeded in the system realm"));
     rig.authz
         .assign_role(
             &system_realm,
             &hearth::rbac::AssignRoleRequest {
                 subject: hearth::rbac::Subject::User(sub_admin.id().clone()),
-                role_id: role.id,
+                role_id: seeded.id,
                 scope: hearth::rbac::Scope::Realm,
                 assigned_by: None,
             },
         )
-        .expect("assign hearth.users.admin");
+        .expect("assign the sub-admin role");
     let session = rig
         .identity
         .create_session(
@@ -407,8 +401,20 @@ async fn system_realm_sub_admin_cannot_use_console_user_admin() {
             &hearth::identity::SessionContext::default(),
         )
         .expect("create session");
+    auth_cookie(session.id(), &system_realm, csrf)
+}
+
+/// The console's user administration is exempt from the per-surface
+/// privilege-ceiling calls (`admin_auth::check_user_admin_ceiling`) only
+/// because it admits nobody but `hearth.admin`, who clears the ceiling by
+/// construction (GA audit round 3). A system-realm *sub*-admin
+/// (`hearth.users.admin`) must therefore be refused before any user mutation;
+/// if this gate ever widens to sub-admins, the console must call the ceiling.
+#[tokio::test]
+async fn system_realm_sub_admin_cannot_use_console_user_admin() {
+    let rig = build_rig();
     let csrf = "csrf-sub-admin";
-    let cookie = auth_cookie(session.id(), &system_realm, csrf);
+    let cookie = system_sub_admin_cookie(&rig, "hearth.users.admin", csrf);
 
     let uid = rig.non_admin_user_id.as_uuid();
     let response = rig
@@ -434,6 +440,90 @@ async fn system_realm_sub_admin_cannot_use_console_user_admin() {
             .is_some(),
         "a refused sub-admin must not delete the user"
     );
+}
+
+/// Deleting an organization, removing a member, and deleting a role demote
+/// the users affected, so REST, gRPC and SCIM run the admin privilege ceiling
+/// on them (GA sweep 4). The console does not, because it admits nobody but
+/// `hearth.admin`: a system-realm `hearth.realm.admin` sub-admin must be
+/// refused before any of these mutations.
+#[tokio::test]
+async fn system_realm_sub_admin_cannot_use_console_org_or_role_admin() {
+    let rig = build_rig();
+    let csrf = "csrf-realm-sub-admin";
+    let cookie = system_sub_admin_cookie(&rig, "hearth.realm.admin", csrf);
+    let org = rig
+        .identity
+        .create_organization(
+            &rig.realm_id,
+            &hearth::identity::CreateOrganizationRequest {
+                name: "Acme Ops".into(),
+                slug: "acme-ops".into(),
+                description: None,
+                config: None,
+                attributes: Default::default(),
+            },
+        )
+        .expect("create org");
+    rig.identity
+        .add_member(
+            &rig.realm_id,
+            org.id(),
+            &rig.non_admin_user_id,
+            hearth::identity::OrganizationRole::Member,
+        )
+        .expect("add member");
+    let role = rig
+        .authz
+        .create_role(
+            &rig.realm_id,
+            &hearth::rbac::CreateRoleRequest {
+                name: "ops".into(),
+                description: None,
+                permissions: vec![],
+                parent_roles: vec![],
+                scope_kind: Default::default(),
+                allow_reserved_permissions: false,
+            },
+        )
+        .expect("create role");
+    let org_uri = format!("/ui/admin/realms/acme/organizations/{}", org.id().as_uuid());
+    let uid = rig.non_admin_user_id.as_uuid();
+
+    for uri in [
+        format!("{org_uri}/delete"),
+        format!("{org_uri}/members/{uid}/remove"),
+        format!(
+            "/ui/admin/realms/acme/rbac/roles/{}/delete",
+            role.id.as_uuid()
+        ),
+    ] {
+        let response = rig
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&uri)
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("_csrf={csrf}")))
+                    .expect("build request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+    }
+    assert!(rig
+        .identity
+        .get_membership(&rig.realm_id, org.id(), &rig.non_admin_user_id)
+        .expect("lookup")
+        .is_some());
+    assert!(rig
+        .authz
+        .get_role(&rig.realm_id, &role.id)
+        .expect("lookup")
+        .is_some());
 }
 
 #[tokio::test]

@@ -75,9 +75,7 @@ export function requirePermission(
         }
 
         if (!result.active) return false;
-        return (
-          Array.isArray(result.permissions) && result.permissions.includes(permission)
-        );
+        return Array.isArray(result.permissions) && result.permissions.includes(permission);
       };
   }
 }

@@ -51,7 +51,7 @@ use crate::identity::ra_token::{self, OidcParams};
 use crate::identity::RequiredAction;
 use crate::identity::{CleartextPassword, MfaProof, SessionContext, UpdateUserRequest};
 use crate::protocol::client_info::PeerAddr;
-use crate::protocol::web::auth::{issue_auth_cookies, IssuedCookies};
+use crate::protocol::web::auth::{issue_auth_cookies, FirstFactor, IssuedCookies};
 
 use super::authorize_gate::{refuse_if_silent, run_authorize_gates, AuthorizeParams, Gate};
 use super::handlers::append_cookie;
@@ -286,15 +286,23 @@ fn pending_required_actions(
 /// Unlike the OIDC intercept, this generates an RA token without
 /// OIDC params; flow resumption creates a session cookie and redirects to
 /// `return_to` once all actions are complete.
+///
+/// `first_factor` is what proved the login's first factor. After a magic
+/// link ([`FirstFactor::Inbox`]) an email OTP enrolled in the flow proves
+/// the same inbox and does not raise the proof
+/// ([`ra_token::RaClaims::inbox_first_factor`], GA sweep 4 round 2).
+#[allow(clippy::too_many_arguments)]
 pub fn required_action_check_browser(
     state: &Arc<WebState>,
     realm: &RealmId,
     user_id: &UserId,
     return_to: Option<&str>,
     ctx: &SessionContext,
+    first_factor: FirstFactor,
     headers: &HeaderMap,
     now: Timestamp,
 ) -> Option<Response> {
+    let inbox_first_factor = !first_factor.allows_email_otp();
     // No client on the direct browser login path; client-level MFA
     // enforcement is OIDC-only. A lookup error refuses (see
     // `pending_required_actions`).
@@ -329,7 +337,7 @@ pub fn required_action_check_browser(
         }
     };
     if let Some(config) = realm_config.as_ref() {
-        let reachable = best_reachable_proof(mfa_proof, &actions, config);
+        let reachable = best_reachable_proof(mfa_proof, &actions, config, inbox_first_factor);
         if !realm_policy_admits(config, reachable) {
             tracing::info!(
                 realm_id = %realm.as_uuid(),
@@ -351,6 +359,7 @@ pub fn required_action_check_browser(
         actions,
         return_to.map(str::to_string),
         mfa_proof,
+        inbox_first_factor,
         None,
         now,
     ) {
@@ -372,13 +381,16 @@ pub fn required_action_check_browser(
 /// `proof` with `actions` pending can end with: a passkey registration (the
 /// `ENROLL_MFA` page registers one in a realm that offers passkeys) records
 /// [`MfaProof::ProvedWebAuthn`]; any enrolment raises a login that proved
-/// nothing to [`MfaProof::Proved`] (see [`ra_token::RaClaims`]). An upper
-/// bound — an action can be skipped as already satisfied — so the session
-/// the flow ends in is still checked by the engine.
+/// nothing to [`MfaProof::Proved`] (see [`ra_token::RaClaims`]) — except an
+/// email-OTP enrolment after a magic link (`inbox_first_factor`), which proves
+/// the inbox the login already proved. An upper bound — an action can be
+/// skipped as already satisfied — so the session the flow ends in is still
+/// checked by the engine.
 fn best_reachable_proof(
     proof: MfaProof,
     actions: &[RequiredAction],
     config: &crate::identity::RealmConfig,
+    inbox_first_factor: bool,
 ) -> MfaProof {
     let offers_passkeys = config
         .mfa_methods
@@ -387,13 +399,10 @@ fn best_reachable_proof(
     if offers_passkeys && actions.contains(&RequiredAction::EnrollMfa) {
         return MfaProof::ProvedWebAuthn;
     }
-    let enrols_a_factor = actions.iter().any(|a| {
-        matches!(
-            a,
-            RequiredAction::EnrollMfa
-                | RequiredAction::EnrollPhoneOtp
-                | RequiredAction::EnrollEmailOtp
-        )
+    let enrols_a_factor = actions.iter().any(|a| match a {
+        RequiredAction::EnrollMfa | RequiredAction::EnrollPhoneOtp => true,
+        RequiredAction::EnrollEmailOtp => !inbox_first_factor,
+        _ => false,
     });
     if enrols_a_factor && proof == MfaProof::None {
         return MfaProof::Proved;
@@ -604,6 +613,7 @@ pub fn next_required_action(
     oidc_params: Option<OidcParams>,
     browser_return_to: Option<String>,
     mfa_proof: MfaProof,
+    inbox_first_factor: bool,
     flow: &str,
     secure: bool,
     now: Timestamp,
@@ -634,6 +644,7 @@ pub fn next_required_action(
             remaining,
             browser_return_to,
             mfa_proof,
+            inbox_first_factor,
             Some(flow),
             now,
         ) {
@@ -1266,6 +1277,7 @@ fn advance_flow(
             claims.oidc_params,
             claims.browser_return_to,
             claims.mfa_proof,
+            claims.inbox_first_factor,
             &claims.flow,
             secure,
             now,
@@ -2508,9 +2520,10 @@ pub async fn enroll_email_otp_verify_submit(
         tracing::warn!(error = %e, "enroll_email_otp_verify_submit: audit append failed");
     }
 
-    // The user proved the inbox just enrolled; see `record_enrolled_factor`.
+    // The user proved the inbox just enrolled; after a magic link that is
+    // the inbox the login already proved (see `record_enrolled_email_otp`).
     let mut claims = claims;
-    claims.record_enrolled_factor();
+    claims.record_enrolled_email_otp();
     advance_flow(
         &state,
         &realm,

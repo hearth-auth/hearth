@@ -29,18 +29,18 @@ Usage::
 
 from __future__ import annotations
 
-from typing import Annotated, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel
 
 from .claims import Claims
 from .errors import (
+    HearthSdkError,
+    TokenAudienceError,
     TokenExpiredError,
     TokenInvalidError,
-    TokenNotYetValidError,
     TokenIssuerError,
-    TokenAudienceError,
-    HearthSdkError,
+    TokenNotYetValidError,
 )
 
 try:
@@ -59,6 +59,7 @@ if TYPE_CHECKING:
 # VerifiedClaims — typed return value for route handlers
 # ---------------------------------------------------------------------------
 
+
 class VerifiedClaims(BaseModel):
     """A verified JWT's claims, ready to inject into FastAPI route handlers.
 
@@ -70,23 +71,23 @@ class VerifiedClaims(BaseModel):
     """Subject (user ID)."""
     iss: str
     """Issuer URL."""
-    exp: Optional[int] = None
+    exp: int | None = None
     """Expiry timestamp (Unix seconds)."""
-    aud: Optional[List[str]] = None
+    aud: list[str] | None = None
     """Audiences."""
-    permissions: List[str] = []
+    permissions: list[str] = []
     """Embedded permission set (``permissions`` claim)."""
-    roles: List[str] = []
+    roles: list[str] = []
     """Assigned roles (``roles`` claim)."""
-    groups: List[str] = []
+    groups: list[str] = []
     """Group memberships (``groups`` claim)."""
-    organization_id: Optional[str] = None
+    organization_id: str | None = None
     """Organization ID (``oid`` claim)."""
-    jti: Optional[str] = None
+    jti: str | None = None
     """JWT ID (``jti`` claim)."""
 
     @classmethod
-    def from_claims(cls, claims: Claims) -> "VerifiedClaims":
+    def from_claims(cls, claims: Claims) -> VerifiedClaims:
         """Build a :class:`VerifiedClaims` from a :class:`~hearth.claims.Claims` object."""
         return cls(
             sub=claims.subject(),
@@ -117,6 +118,7 @@ class VerifiedClaims(BaseModel):
 # HearthFastAPIDep — Depends()-compatible callable
 # ---------------------------------------------------------------------------
 
+
 class HearthFastAPIDep:
     """A ``Depends()``-compatible callable that verifies Hearth Bearer JWTs.
 
@@ -138,10 +140,10 @@ class HearthFastAPIDep:
     def __init__(
         self,
         *,
-        client: "HearthClient",
+        client: HearthClient,
         mode: str,
-        permission: Optional[str] = None,
-        audience: Optional[str] = None,
+        permission: str | None = None,
+        audience: str | None = None,
     ) -> None:
         self._client = client
         self._mode = mode
@@ -154,7 +156,9 @@ class HearthFastAPIDep:
 
         # FastAPI injects the real Request; tests pass a mock with .headers dict.
         headers: dict = getattr(request, "headers", {})
-        auth_header: str = headers.get("authorization", "") or headers.get("Authorization", "")
+        auth_header: str = headers.get("authorization", "") or headers.get(
+            "Authorization", ""
+        )
 
         if not auth_header.startswith("Bearer "):
             raise HTTPException(
@@ -172,27 +176,39 @@ class HearthFastAPIDep:
                 raise HTTPException(
                     status_code=401,
                     detail="Required actions pending — complete required actions first",
-                    headers={"WWW-Authenticate": 'Bearer realm="hearth", error="required_action"'},
+                    headers={
+                        "WWW-Authenticate": 'Bearer realm="hearth", error="required_action"'
+                    },
                 )
         except HTTPException:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 -- verify_token below reports the failure
             # decode failure handled below via verify_token
             pass
 
         try:
             claims = self._client.verify_token(token, audience=self._audience)
-        except (TokenExpiredError, TokenInvalidError, TokenNotYetValidError,
-                TokenIssuerError, TokenAudienceError, HearthSdkError) as exc:
+        except (
+            TokenExpiredError,
+            TokenInvalidError,
+            TokenNotYetValidError,
+            TokenIssuerError,
+            TokenAudienceError,
+            HearthSdkError,
+        ) as exc:
             raise HTTPException(
                 status_code=401,
                 detail=str(exc),
-                headers={"WWW-Authenticate": 'Bearer realm="hearth", error="invalid_token"'},
+                headers={
+                    "WWW-Authenticate": 'Bearer realm="hearth", error="invalid_token"'
+                },
             ) from exc
 
         verified = VerifiedClaims.from_claims(claims)
 
-        if self._permission is not None and not verified.has_permission(self._permission):
+        if self._permission is not None and not verified.has_permission(
+            self._permission
+        ):
             raise HTTPException(
                 status_code=403,
                 detail=f"Permission required: {self._permission}",
@@ -204,6 +220,7 @@ class HearthFastAPIDep:
 # ---------------------------------------------------------------------------
 # require_permission() — Annotated shorthand
 # ---------------------------------------------------------------------------
+
 
 def require_permission(
     permission: str,
@@ -263,14 +280,15 @@ try:
 
         base_url: str = ""
         realm_id: str = ""
-        client_id: Optional[str] = None
-        client_secret: Optional[str] = None
+        client_id: str | None = None
+        client_secret: str | None = None
 
         model_config = {"env_prefix": "HEARTH_"}
 
-        def to_client(self) -> "HearthClient":
+        def to_client(self) -> HearthClient:
             """Construct a :class:`~hearth.client.HearthClient` from these settings."""
             from .client import HearthClient
+
             return HearthClient(
                 base_url=self.base_url,
                 realm_id=self.realm_id,

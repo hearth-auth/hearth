@@ -90,8 +90,8 @@ pub use engine::{
 };
 pub use error::IdentityError;
 pub use kdf_gate::{
-    admin_gate, gate, init_admin_gate, init_gate, KdfGate, KdfGateConfig, KdfGateError,
-    DEFAULT_ADMIN_MAX_IN_FLIGHT, DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS,
+    admin_gate, gate, gate_for_realm, init_admin_gate, init_gate, KdfGate, KdfGateConfig,
+    KdfGateError, DEFAULT_ADMIN_MAX_IN_FLIGHT, DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS,
 };
 pub use magic_link::MagicLinkResponse;
 pub use oidc::{
@@ -116,8 +116,8 @@ pub use sms::{
     StubSmsHttpTransport, TwilioSmsSender,
 };
 pub use step_up::{
-    has_step_up_credential, verify_operator_step_up, verify_step_up, SecondFactorProof,
-    StepUpAssertion, StepUpError, StepUpProof,
+    has_step_up_credential, password_retry_after, totp_retry_after, verify_operator_step_up,
+    verify_step_up, SecondFactorProof, StepUpAssertion, StepUpError, StepUpProof,
 };
 pub use tokens::{
     decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
@@ -298,6 +298,7 @@ pub trait IdentityEngine: Send + Sync {
     /// when the flow ends records it (see [`ra_token::RaClaims::mfa_proof`]).
     /// `flow` as for [`Self::generate_ra_token`].
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn generate_browser_ra_token(
         &self,
         realm_id: &RealmId,
@@ -305,6 +306,7 @@ pub trait IdentityEngine: Send + Sync {
         pending_actions: Vec<RequiredAction>,
         return_to: Option<String>,
         mfa_proof: MfaProof,
+        inbox_first_factor: bool,
         flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
@@ -530,6 +532,23 @@ pub trait IdentityEngine: Send + Sync {
     /// dummy answered measurably faster for an address with no account
     /// (GA audit L14).
     fn dummy_verify_password_for_realm(&self, realm_id: &RealmId, password: &CleartextPassword);
+
+    /// How long the account's login lockout still runs — the lockout
+    /// [`Self::verify_password`] answers with [`IdentityError::RateLimited`]
+    /// — or `None` when it is not engaged. Feeds the `Retry-After` of a
+    /// locked step-up (GA sweep 4).
+    fn login_lockout_remaining(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Option<std::time::Duration>;
+
+    /// How long until [`Self::verify_totp`] checks a code for this account
+    /// again after answering [`IdentityError::RateLimited`]: the node-local
+    /// TOTP lockout's remaining time, or the end of the cluster-wide guess
+    /// window, whichever is later. An upper bound, at most the 5-minute TOTP
+    /// window. Feeds the `Retry-After` of a locked step-up (GA sweep 4).
+    fn mfa_lockout_remaining(&self, realm_id: &RealmId, user_id: &UserId) -> std::time::Duration;
 
     /// Checks whether the given IP has exceeded the per-IP login rate limit
     /// for a realm. Returns `Err(RateLimited)` when blocked.
@@ -1052,11 +1071,21 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Returns tokens if the user has approved, or an appropriate error
     /// (`AuthorizationPending`, `SlowDown`, `DeviceCodeExpired`, `DeviceCodeDenied`).
+    ///
+    /// `dpop_jkt` is the thumbprint of a DPoP proof (RFC 9449) the caller has
+    /// already validated on the token request. When present, the access and
+    /// refresh tokens carry `cnf.jkt`, the grant family is bound to that key
+    /// and the response's `token_type` is `DPoP` — as for the
+    /// authorization-code grant. In a realm with a `fapi_profile`, or for a
+    /// FAPI 2.0 client, `None` is refused with
+    /// [`IdentityError::FapiViolation`] and the approved code stays
+    /// redeemable.
     fn poll_device_token(
         &self,
         realm_id: &RealmId,
         device_code: &str,
         client_id: &crate::core::ClientId,
+        dpop_jkt: Option<&str>,
     ) -> Result<OidcTokenResponse, IdentityError>;
 
     /// Revokes a token (RFC 7009).
@@ -3051,8 +3080,11 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Returns the realm's live token revocations — revoked access-token
     /// JTIs, blocked DPoP key thumbprints and revoked AAT JTIs — for backup
-    /// export (audit GA 2026-09-28 M3). JTIs already past their `exp` are
-    /// omitted: the token they name can no longer validate anywhere.
+    /// export (audit GA 2026-09-28 M3) — and every non-zero user
+    /// required-action generation and every live spent required-action
+    /// marker (GA sweep 4). JTIs already past their
+    /// `exp` are omitted: the token they name can no longer validate
+    /// anywhere.
     ///
     /// Read-only: the exporter calls it while holding the backup barrier.
     fn export_revocations(
@@ -3063,6 +3095,10 @@ pub trait IdentityEngine: Send + Sync {
     /// Restores one revocation and applies it to this node's in-memory
     /// blocklists, so a token revoked before the backup stays dead after the
     /// restore. A JTI whose `exp` has passed is [`ImportOutcome::Skipped`].
+    /// A required-action generation only ever raises the node's counter; one
+    /// at or below it is [`ImportOutcome::Skipped`] in either restore mode. A
+    /// spent required-action marker is written if absent; an expired or
+    /// present one is [`ImportOutcome::Skipped`].
     fn import_revocation(
         &self,
         realm_id: &RealmId,

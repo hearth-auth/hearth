@@ -51,7 +51,7 @@ func mixedJWKSClient(t *testing.T, rsaPub *rsa.PublicKey, x, edKid, issuer strin
 	})
 	jwksSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(jwks)
+		writeBody(t, w, jwks)
 	}))
 	discJSON, _ := json.Marshal(map[string]any{
 		"issuer":   issuer,
@@ -60,7 +60,7 @@ func mixedJWKSClient(t *testing.T, rsaPub *rsa.PublicKey, x, edKid, issuer strin
 	mainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.well-known/openid-configuration" {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(discJSON)
+			writeBody(t, w, discJSON)
 			return
 		}
 		http.NotFound(w, r)

@@ -55,8 +55,12 @@ function mockResponse(body: unknown, status = 200): Response {
 // ── exchangeCode ─────────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.exchangeCode", () => {
-  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it("POSTs to discovered token_endpoint with authorization_code grant", async () => {
     const { client } = makeClient();
@@ -82,7 +86,9 @@ describe("OAuthFlowsClient.exchangeCode", () => {
 
     await client.exchangeCode("code", "https://app.example.com/cb", { codeVerifier: "v3rif1er" });
 
-    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
+    const body = new URLSearchParams(
+      (vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string,
+    );
     expect(body.get("code_verifier")).toBe("v3rif1er");
   });
 
@@ -100,16 +106,21 @@ describe("OAuthFlowsClient.exchangeCode", () => {
     const { client } = makeClient();
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({ error: "invalid_grant" }, 400));
 
-    await expect(client.exchangeCode("bad-code", "https://app.example.com/cb"))
-      .rejects.toBeInstanceOf(OAuthFlowError);
+    await expect(
+      client.exchangeCode("bad-code", "https://app.example.com/cb"),
+    ).rejects.toBeInstanceOf(OAuthFlowError);
   });
 });
 
 // ── refreshTokens ──────────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.refreshTokens", () => {
-  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it("POSTs refresh_token grant to discovered token_endpoint with credentials in body", async () => {
     const { client } = makeClient();
@@ -136,7 +147,9 @@ describe("OAuthFlowsClient.refreshTokens", () => {
 
     await client.refreshTokens("rt", "openid profile");
 
-    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
+    const body = new URLSearchParams(
+      (vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string,
+    );
     expect(body.get("scope")).toBe("openid profile");
   });
 
@@ -146,7 +159,9 @@ describe("OAuthFlowsClient.refreshTokens", () => {
 
     await client.refreshTokens("rt");
 
-    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
+    const body = new URLSearchParams(
+      (vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string,
+    );
     expect(body.get("scope")).toBeNull();
   });
 
@@ -172,8 +187,12 @@ describe("OAuthFlowsClient.refreshTokens", () => {
 // ── clientCredentials ─────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.clientCredentials", () => {
-  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it("POSTs client_credentials grant with client_id and client_secret in body", async () => {
     const { client } = makeClient();
@@ -181,7 +200,9 @@ describe("OAuthFlowsClient.clientCredentials", () => {
 
     await client.clientCredentials();
 
-    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
+    const body = new URLSearchParams(
+      (vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string,
+    );
     expect(body.get("grant_type")).toBe("client_credentials");
     expect(body.get("client_id")).toBe("client1");
     expect(body.get("client_secret")).toBe("secret1");
@@ -196,7 +217,9 @@ describe("OAuthFlowsClient.clientCredentials", () => {
 
     await client.clientCredentials("read:users");
 
-    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
+    const body = new URLSearchParams(
+      (vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string,
+    );
     expect(body.get("scope")).toBe("read:users");
   });
 
@@ -206,7 +229,9 @@ describe("OAuthFlowsClient.clientCredentials", () => {
 
     await client.clientCredentials();
 
-    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
+    const body = new URLSearchParams(
+      (vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string,
+    );
     expect(body.get("scope")).toBeNull();
   });
 
@@ -229,8 +254,12 @@ describe("OAuthFlowsClient.clientCredentials", () => {
 // ── startDeviceFlow ───────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.startDeviceFlow", () => {
-  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   const DEVICE_RESPONSE = {
     device_code: "dev-code-abc",
@@ -257,7 +286,9 @@ describe("OAuthFlowsClient.startDeviceFlow", () => {
 
     await client.startDeviceFlow("openid profile");
 
-    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
+    const body = new URLSearchParams(
+      (vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string,
+    );
     expect(body.get("client_id")).toBe("client1");
     expect(body.get("scope")).toBe("openid profile");
   });
@@ -273,7 +304,9 @@ describe("OAuthFlowsClient.startDeviceFlow", () => {
   });
 
   it("throws when device_authorization_endpoint not in discovery", async () => {
-    const getDiscovery = vi.fn().mockResolvedValue({ ...DISCOVERY, device_authorization_endpoint: undefined });
+    const getDiscovery = vi
+      .fn()
+      .mockResolvedValue({ ...DISCOVERY, device_authorization_endpoint: undefined });
     const client = new OAuthFlowsClient(BASE_CONFIG, getDiscovery);
 
     await expect(client.startDeviceFlow()).rejects.toBeInstanceOf(ConfigurationError);
@@ -283,8 +316,14 @@ describe("OAuthFlowsClient.startDeviceFlow", () => {
 // ── pollDeviceToken ───────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.pollDeviceToken", () => {
-  beforeEach(() => { vi.useFakeTimers(); vi.stubGlobal("fetch", vi.fn()); });
-  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
   it("resolves with TokenResponse when user approves immediately", async () => {
     const { client } = makeClient();
@@ -341,7 +380,9 @@ describe("OAuthFlowsClient.pollDeviceToken", () => {
     await vi.runAllTimersAsync();
     await p;
 
-    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
+    const body = new URLSearchParams(
+      (vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string,
+    );
     expect(body.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:device_code");
     expect(body.get("device_code")).toBe("dev-code-abc");
     expect(body.get("client_id")).toBe("client1");
@@ -351,8 +392,12 @@ describe("OAuthFlowsClient.pollDeviceToken", () => {
 // ── requestMagicLink ──────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.requestMagicLink", () => {
-  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it("POSTs to /v1/{realm_id}/auth/magic-link with JSON body", async () => {
     const { client } = makeClient();
@@ -385,16 +430,21 @@ describe("OAuthFlowsClient.requestMagicLink", () => {
   it("throws ConfigurationError when realm_id is not set", async () => {
     const { client } = makeClient({ realm_id: null });
 
-    await expect(client.requestMagicLink("user@example.com"))
-      .rejects.toBeInstanceOf(ConfigurationError);
+    await expect(client.requestMagicLink("user@example.com")).rejects.toBeInstanceOf(
+      ConfigurationError,
+    );
   });
 });
 
 // ── exchangeMagicLink ───────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.exchangeMagicLink", () => {
-  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it("POSTs the magic-link grant to the discovered token_endpoint with token in body", async () => {
     const { client } = makeClient();
@@ -431,8 +481,12 @@ describe("OAuthFlowsClient.exchangeMagicLink", () => {
 // ── userinfo ──────────────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.userinfo", () => {
-  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it("GETs the discovered userinfo_endpoint with Bearer token", async () => {
     const { client } = makeClient();
@@ -443,7 +497,9 @@ describe("OAuthFlowsClient.userinfo", () => {
 
     const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
     expect(url).toBe(DISCOVERY.userinfo_endpoint);
-    expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer access-token-xyz");
+    expect((init.headers as Record<string, string>)["Authorization"]).toBe(
+      "Bearer access-token-xyz",
+    );
     expect(result.sub).toBe("user123");
   });
 
@@ -458,19 +514,30 @@ describe("OAuthFlowsClient.userinfo", () => {
 // ── mePermissions ─────────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.mePermissions", () => {
-  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it("GETs /v1/me/permissions with Bearer token", async () => {
     const { client } = makeClient();
-    const permResponse = { roles: ["admin"], groups: ["eng"], permissions: ["docs.write"], scope: "openid" };
+    const permResponse = {
+      roles: ["admin"],
+      groups: ["eng"],
+      permissions: ["docs.write"],
+      scope: "openid",
+    };
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse(permResponse));
 
     const result = await client.mePermissions("access-token-xyz");
 
     const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
     expect(url).toContain("/v1/me/permissions");
-    expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer access-token-xyz");
+    expect((init.headers as Record<string, string>)["Authorization"]).toBe(
+      "Bearer access-token-xyz",
+    );
     expect(result.roles).toEqual(["admin"]);
     expect(result.permissions).toEqual(["docs.write"]);
   });
@@ -479,8 +546,12 @@ describe("OAuthFlowsClient.mePermissions", () => {
 // ── svSnapshot ────────────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.svSnapshot", () => {
-  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it("GETs /oauth/session-versions/snapshot with Bearer token", async () => {
     const { client } = makeClient();
@@ -499,8 +570,12 @@ describe("OAuthFlowsClient.svSnapshot", () => {
 // ── svDelta ───────────────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.svDelta", () => {
-  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it("GETs /oauth/session-versions with since param", async () => {
     const { client } = makeClient();
@@ -525,7 +600,11 @@ describe("OAuthFlowsClient.svDelta", () => {
 
   it("returns null on 204 No Content", async () => {
     const { client } = makeClient();
-    vi.mocked(fetch).mockResolvedValueOnce({ ok: true, status: 204, json: () => Promise.resolve(null) } as unknown as Response);
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 204,
+      json: () => Promise.resolve(null),
+    } as unknown as Response);
 
     const result = await client.svDelta("tok", 5);
     expect(result).toBeNull();
@@ -543,9 +622,7 @@ describe("OAuthFlowsClient.beginLogin", () => {
     expect(challenge).toBeTruthy();
     // SHA-256(verifier) base64url should equal the challenge
     const { createHash } = await import("node:crypto");
-    const expectedChallenge = createHash("sha256")
-      .update(result.codeVerifier)
-      .digest("base64url");
+    const expectedChallenge = createHash("sha256").update(result.codeVerifier).digest("base64url");
     expect(challenge).toBe(expectedChallenge);
   });
 
@@ -576,26 +653,39 @@ describe("OAuthFlowsClient.beginLogin", () => {
   });
 
   it("throws ConfigurationError when authorization_endpoint is absent from discovery", async () => {
-    const getDiscovery = vi.fn().mockResolvedValue({ ...DISCOVERY, authorization_endpoint: undefined });
+    const getDiscovery = vi
+      .fn()
+      .mockResolvedValue({ ...DISCOVERY, authorization_endpoint: undefined });
     const client = new OAuthFlowsClient(BASE_CONFIG, getDiscovery);
-    await expect(client.beginLogin("https://app.example.com/callback"))
-      .rejects.toBeInstanceOf(ConfigurationError);
+    await expect(client.beginLogin("https://app.example.com/callback")).rejects.toBeInstanceOf(
+      ConfigurationError,
+    );
   });
 });
 
 // ── completeLogin ─────────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.completeLogin", () => {
-  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
-  afterEach(() => { vi.unstubAllGlobals(); });
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it("calls exchangeCode with the supplied codeVerifier", async () => {
     const { client } = makeClient();
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse(TOKEN_RESPONSE));
 
-    await client.completeLogin("auth-code-xyz", "my-verifier-abc", "https://app.example.com/callback");
+    await client.completeLogin(
+      "auth-code-xyz",
+      "my-verifier-abc",
+      "https://app.example.com/callback",
+    );
 
-    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
+    const body = new URLSearchParams(
+      (vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string,
+    );
     expect(body.get("code_verifier")).toBe("my-verifier-abc");
     expect(body.get("code")).toBe("auth-code-xyz");
     expect(body.get("redirect_uri")).toBe("https://app.example.com/callback");

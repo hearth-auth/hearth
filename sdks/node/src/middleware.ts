@@ -96,7 +96,8 @@ type AuthDecision = "allow" | "deny_forbidden" | "deny_unauthorized";
 /** Embedded: all checks from JWT claims — no network calls. */
 function checkEmbedded(token: VerifiedToken, opts: MiddlewareOptions): AuthDecision {
   if (!checkScopeAndRole(token, opts)) return "deny_forbidden";
-  if (opts.requiredPermission && !token.hasPermission(opts.requiredPermission)) return "deny_forbidden";
+  if (opts.requiredPermission && !token.hasPermission(opts.requiredPermission))
+    return "deny_forbidden";
   return "allow";
 }
 
@@ -157,7 +158,9 @@ export function hearthMiddleware(options: MiddlewareOptions) {
   const resolved = resolveConfig(options);
   const client = new HearthClient(options);
   const introspectionClient = new IntrospectionClient(resolved, async () => {
-    throw new Error("Discovery not available in middleware context; configure introspection_endpoint explicitly");
+    throw new Error(
+      "Discovery not available in middleware context; configure introspection_endpoint explicitly",
+    );
   });
   const authorizeClient = new AuthorizeClient(resolved);
   const required = options.required !== false;
@@ -179,7 +182,8 @@ export function hearthMiddleware(options: MiddlewareOptions) {
       verified = await client.verifyToken(rawToken);
     } catch (err) {
       if (required) {
-        const desc = err instanceof TokenVerificationError ? err.message : "Token verification failed";
+        const desc =
+          err instanceof TokenVerificationError ? err.message : "Token verification failed";
         sendUnauthorized(res, desc);
         return;
       }
@@ -235,7 +239,9 @@ export function hearthFastifyHook(options: MiddlewareOptions) {
   const resolved = resolveConfig(options);
   const client = new HearthClient(options);
   const introspectionClient = new IntrospectionClient(resolved, async () => {
-    throw new Error("Discovery not available in middleware context; configure introspection_endpoint explicitly");
+    throw new Error(
+      "Discovery not available in middleware context; configure introspection_endpoint explicitly",
+    );
   });
   const authorizeClient = new AuthorizeClient(resolved);
   const required = options.required !== false;
@@ -260,7 +266,8 @@ export function hearthFastifyHook(options: MiddlewareOptions) {
       verified = await client.verifyToken(rawToken);
     } catch (err) {
       if (required) {
-        const desc = err instanceof TokenVerificationError ? err.message : "Token verification failed";
+        const desc =
+          err instanceof TokenVerificationError ? err.message : "Token verification failed";
         reply.header("WWW-Authenticate", WWW_AUTHENTICATE).code(401).send({
           error: "unauthorized",
           error_description: desc,
@@ -281,7 +288,9 @@ export function hearthFastifyHook(options: MiddlewareOptions) {
     }
 
     // Reuse Express-side request wrapper for auth-options check
-    const minimalReq = { headers: request.headers as Record<string, string | string[] | undefined> };
+    const minimalReq = {
+      headers: request.headers as Record<string, string | string[] | undefined>,
+    };
     let decision: AuthDecision;
     if (mode === "introspection") {
       decision = await checkIntrospection(rawToken, introspectionClient, options, verified);

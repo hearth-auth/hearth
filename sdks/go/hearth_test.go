@@ -107,7 +107,7 @@ func startServer(t *testing.T) *testServer {
 	defer cancel()
 	for {
 		if ctx.Err() != nil {
-			cmd.Process.Kill()
+			_ = cmd.Process.Kill() // best effort; the test is failing anyway
 			t.Fatal("hearth did not start in time")
 		}
 		resp, err := http.Get(baseURL + "/health")
@@ -121,15 +121,17 @@ func startServer(t *testing.T) *testServer {
 	// Bootstrap
 	bootstrap, err := hearth.Bootstrap(context.Background(), baseURL)
 	if err != nil {
-		cmd.Process.Kill()
+		_ = cmd.Process.Kill() // best effort; the test is failing anyway
 		t.Fatalf("bootstrap: %v", err)
 	}
 
 	client := hearth.NewClient(baseURL, bootstrap.RealmID)
 
 	t.Cleanup(func() {
-		cmd.Process.Kill()
-		cmd.Wait()
+		// Best-effort teardown: Kill fails if the server already exited, and
+		// Wait then reports the kill signal. Neither is a test failure.
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 	})
 
 	return &testServer{

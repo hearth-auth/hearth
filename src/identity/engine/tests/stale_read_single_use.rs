@@ -887,7 +887,7 @@ fn a_device_approval_is_not_overwritten_by_a_stale_deny() {
     );
     f.storage.disarm();
     f.engine
-        .poll_device_token(&f.realm, &device_code, &client)
+        .poll_device_token(&f.realm, &device_code, &client, None)
         .expect("the approved device is served its tokens");
 }
 
@@ -910,7 +910,8 @@ fn a_device_denial_is_not_overwritten_by_a_stale_approve() {
     f.storage.disarm();
     assert!(
         matches!(
-            f.engine.poll_device_token(&f.realm, &device_code, &client),
+            f.engine
+                .poll_device_token(&f.realm, &device_code, &client, None),
             Err(IdentityError::DeviceCodeDenied)
         ),
         "the denied device was not told access_denied"

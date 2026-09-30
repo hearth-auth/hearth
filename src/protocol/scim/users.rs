@@ -13,10 +13,10 @@ use crate::abuse::{MAX_SCIM_OPERATIONS, SCIM_MAX_SCAN_LIMIT};
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{RealmId, UserId};
 use crate::identity::{CreateUserRequest, UpdateUserRequest, User, UserStatus};
-use crate::protocol::admin_auth::{check_user_admin_ceiling, UserCeilingError};
+use crate::protocol::admin_auth::check_user_admin_ceiling;
 use crate::protocol::http::AppState;
 use crate::protocol::scim::auth::{authenticate, ScimAuth, ScimResource};
-use crate::protocol::scim::error::{from_identity_error, ScimError};
+use crate::protocol::scim::error::{from_ceiling_error, from_identity_error, ScimError};
 use crate::protocol::scim::etag::{check_if_match, resource_response};
 use crate::protocol::scim::filter::{self, FilterExpr};
 use crate::protocol::scim::patch_apply::apply_user_patch;
@@ -180,14 +180,7 @@ fn admin_principal_guard(
         user_id,
         &auth.actor_permissions,
     )
-    .map_err(|e| match e {
-        UserCeilingError::Exceeded => ScimError::forbidden(refusal.to_string()).into_response(),
-        UserCeilingError::Unresolved => ScimError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "could not determine whether the target is an admin principal; retry later",
-        )
-        .into_response(),
-    })
+    .map_err(|e| from_ceiling_error(e, refusal).into_response())
 }
 
 // ================== Handlers ==================

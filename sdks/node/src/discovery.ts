@@ -26,14 +26,16 @@ export class DiscoveryClient {
     if (this.cache) return this.cache;
     // Deduplicate concurrent calls
     if (!this.fetchPromise) {
-      this.fetchPromise = this.fetchDiscovery().then((doc) => {
-        this.cache = doc;
-        this.fetchPromise = null;
-        return doc;
-      }).catch((err) => {
-        this.fetchPromise = null;
-        throw err;
-      });
+      this.fetchPromise = this.fetchDiscovery()
+        .then((doc) => {
+          this.cache = doc;
+          this.fetchPromise = null;
+          return doc;
+        })
+        .catch((err) => {
+          this.fetchPromise = null;
+          throw err;
+        });
     }
     return this.fetchPromise;
   }
@@ -54,7 +56,7 @@ export class DiscoveryClient {
     }
     let doc: OidcDiscovery;
     try {
-      doc = await res.json() as OidcDiscovery;
+      doc = (await res.json()) as OidcDiscovery;
     } catch (err) {
       throw new DiscoveryError("OIDC discovery response is not valid JSON", { cause: err });
     }

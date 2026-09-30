@@ -81,10 +81,9 @@ async function signWith(
 
 /** An `alg: none` forgery claiming admin.write. Costs the attacker nothing. */
 function unsignedAdminToken(): string {
-  const header = Buffer.from(
-    JSON.stringify({ alg: "none", typ: "JWT" }),
-    "utf8",
-  ).toString("base64url");
+  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" }), "utf8").toString(
+    "base64url",
+  );
   const body = Buffer.from(
     JSON.stringify({
       sub: "attacker",

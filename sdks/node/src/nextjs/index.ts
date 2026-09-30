@@ -93,14 +93,10 @@ export function withHearthAuth(handler: ApiHandler, options: MiddlewareOptions):
     let middlewareError: unknown = undefined;
     let middlewareCalled = false;
 
-    await mw(
-      req as Parameters<typeof mw>[0],
-      res as Parameters<typeof mw>[1],
-      (err?: unknown) => {
-        middlewareCalled = true;
-        middlewareError = err;
-      },
-    );
+    await mw(req as Parameters<typeof mw>[0], res as Parameters<typeof mw>[1], (err?: unknown) => {
+      middlewareCalled = true;
+      middlewareError = err;
+    });
 
     if (middlewareError) {
       throw middlewareError;

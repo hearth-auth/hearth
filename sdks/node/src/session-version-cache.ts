@@ -10,10 +10,7 @@
  * middleware — so the managed facade belongs here.
  */
 
-import {
-  SessionVersionCacheStaleError,
-  SessionVersionRevokedError,
-} from "./errors.js";
+import { SessionVersionCacheStaleError, SessionVersionRevokedError } from "./errors.js";
 
 /** Configuration for the managed {@link SessionVersionCache}. */
 export interface SessionVersionConfig {

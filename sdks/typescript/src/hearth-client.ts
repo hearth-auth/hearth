@@ -6,10 +6,7 @@ import {
   TokenExpiredError,
 } from "./errors.js";
 import { JwksClient } from "./jwks-client.js";
-import {
-  IntrospectionClient,
-  type IntrospectionResult,
-} from "./introspection-client.js";
+import { IntrospectionClient, type IntrospectionResult } from "./introspection-client.js";
 import type {
   AccessTokenAuthorizationMode,
   AuthorizePermissionOptions,
@@ -110,9 +107,7 @@ export class HearthClient {
     try {
       new URL(config.issuerUrl);
     } catch {
-      throw new ConfigurationError(
-        `issuerUrl "${config.issuerUrl}" is not a valid URL`,
-      );
+      throw new ConfigurationError(`issuerUrl "${config.issuerUrl}" is not a valid URL`);
     }
 
     this.issuerUrl = config.issuerUrl.replace(/\/$/, "");
@@ -142,16 +137,11 @@ export class HearthClient {
         signal: AbortSignal.timeout(this.httpTimeout),
       });
     } catch (err) {
-      throw new DiscoveryError(
-        `OIDC discovery endpoint unreachable: ${url}`,
-        { cause: err },
-      );
+      throw new DiscoveryError(`OIDC discovery endpoint unreachable: ${url}`, { cause: err });
     }
 
     if (!resp.ok) {
-      throw new DiscoveryError(
-        `OIDC discovery returned HTTP ${resp.status}`,
-      );
+      throw new DiscoveryError(`OIDC discovery returned HTTP ${resp.status}`);
     }
 
     let doc: OidcConfiguration;
@@ -164,9 +154,7 @@ export class HearthClient {
     }
 
     if (!doc.jwks_uri) {
-      throw new DiscoveryError(
-        "OIDC discovery document is missing required field: jwks_uri",
-      );
+      throw new DiscoveryError("OIDC discovery document is missing required field: jwks_uri");
     }
 
     this._discovery = doc;
@@ -211,8 +199,7 @@ export class HearthClient {
     }
 
     const endpoint =
-      this.introspectionEndpointOverride ??
-      (await this.discover()).introspection_endpoint;
+      this.introspectionEndpointOverride ?? (await this.discover()).introspection_endpoint;
 
     if (!endpoint) {
       throw new ConfigurationError(
@@ -290,10 +277,7 @@ export class HearthClient {
       result.mode !== undefined &&
       result.mode !== this.expectedMode
     ) {
-      throw new AuthorizationModeMismatchError(
-        this.expectedMode,
-        String(result.mode),
-      );
+      throw new AuthorizationModeMismatchError(this.expectedMode, String(result.mode));
     }
     return result;
   }
@@ -366,7 +350,8 @@ export class HearthClient {
    */
   async startDeviceFlow(scope?: string): Promise<DeviceAuthorizationResponse> {
     const doc = await this.discover();
-    const deviceEndpoint = (doc as Record<string, unknown>)["device_authorization_endpoint"] as string | undefined;
+    const deviceEndpoint = (doc as Record<string, unknown>)["device_authorization_endpoint"] as
+      string | undefined;
     if (!deviceEndpoint) {
       throw new ConfigurationError(
         "device_authorization_endpoint not found in OIDC discovery document",
@@ -398,7 +383,6 @@ export class HearthClient {
     let currentIntervalMs = intervalSeconds * 1000;
 
     // Use while(true) + await-setTimeout so Vitest fake timers can control polling in tests.
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       await new Promise<void>((res) => setTimeout(res, currentIntervalMs));
 
@@ -422,7 +406,9 @@ export class HearthClient {
       try {
         const parsed = (await resp.json()) as Record<string, unknown>;
         errorCode = typeof parsed["error"] === "string" ? parsed["error"] : "unknown";
-      } catch { /* ignore parse failures */ }
+      } catch {
+        /* ignore parse failures */
+      }
 
       if (errorCode === "authorization_pending") {
         continue;
@@ -505,7 +491,9 @@ export class HearthClient {
       try {
         const parsed = (await resp.json()) as Record<string, unknown>;
         if (typeof parsed["error"] === "string") errorCode = parsed["error"];
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
       throw new OAuthFlowError(resp.status, errorCode);
     }
     return resp.json() as Promise<T>;

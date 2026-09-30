@@ -63,6 +63,17 @@ For server-side (5xx) errors, `error_code` is `null` — internal detail is neve
 | `HEARTH_DEVICE_CODE_EXPIRED` | Device authorization code has expired. Restart the flow. |
 | `HEARTH_DEVICE_CODE_DENIED` | Device authorization was denied by the user. |
 
+### Cluster Availability
+
+Cluster mode only (experimental). Both answer `503 Service Unavailable` with a `Retry-After`
+header; gRPC answers `UNAVAILABLE`. See the
+[clustering guide](./clustering.md#h-3--writes-to-a-follower-forwarded-to-the-leader-fixed).
+
+| Code | Meaning |
+|------|---------|
+| `HEARTH_CLUSTER_UNAVAILABLE` | The cluster could not serve the request right now (no Raft leader reachable, the leader at its forwarding limit, or this node's reads fenced by replication lag). Nothing was written — retry after `Retry-After`. |
+| `HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN` | A write may or may not have been applied (the connection to the leader was lost mid-call, or it committed but this node has not applied it yet). Re-read before retrying. |
+
 ### Rate Limiting / Account Lockout
 
 | Code | Meaning |

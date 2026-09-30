@@ -186,7 +186,9 @@ export class OAuthFlowsClient {
             message += `: ${json.error_description}`;
           }
         }
-      } catch { /* ignore parse failure */ }
+      } catch {
+        /* ignore parse failure */
+      }
       throw new OAuthFlowError(res.status, message);
     }
 
@@ -339,7 +341,6 @@ export class OAuthFlowsClient {
     const endpoint = await this.getTokenEndpoint();
     let intervalMs = intervalSeconds * 1000;
 
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
 
@@ -377,7 +378,9 @@ export class OAuthFlowsClient {
       try {
         const json = (await res.json()) as Record<string, unknown>;
         errorCode = typeof json.error === "string" ? json.error : "";
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
 
       if (errorCode === "authorization_pending") {
         continue;
@@ -538,7 +541,11 @@ export class OAuthFlowsClient {
    * @param codeVerifier - PKCE verifier returned by {@link beginLogin}.
    * @param redirectUri - Same `redirectUri` used in {@link beginLogin}.
    */
-  async completeLogin(code: string, codeVerifier: string, redirectUri: string): Promise<TokenResponse> {
+  async completeLogin(
+    code: string,
+    codeVerifier: string,
+    redirectUri: string,
+  ): Promise<TokenResponse> {
     return this.exchangeCode(code, redirectUri, { codeVerifier });
   }
 
@@ -552,11 +559,7 @@ export class OAuthFlowsClient {
    * @param since - Return only events with `seq > since`.
    * @param limit - Maximum number of deltas to return (server default applies when omitted).
    */
-  async svDelta(
-    token: string,
-    since: number,
-    limit?: number,
-  ): Promise<SvDeltaResponse | null> {
+  async svDelta(token: string, since: number, limit?: number): Promise<SvDeltaResponse | null> {
     const url = `${this.config.issuer_url}/oauth/session-versions`;
     const params: Record<string, string> = { since: String(since) };
     if (limit !== undefined) params.limit = String(limit);

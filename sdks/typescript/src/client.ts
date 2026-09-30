@@ -79,10 +79,7 @@ export class HearthApiClient {
    * operation and answers `401 missing authorization header` without one. It is
    * optional here only so that adding it does not break existing callers.
    */
-  async registerClient(
-    params: RegisterClientParams,
-    accessToken?: string,
-  ): Promise<OAuthClient> {
+  async registerClient(params: RegisterClientParams, accessToken?: string): Promise<OAuthClient> {
     return this.post(
       "/clients",
       {
@@ -94,6 +91,9 @@ export class HearthApiClient {
             params.trustLevel === "first_party"
               ? "CLIENT_TRUST_LEVEL_FIRST_PARTY"
               : "CLIENT_TRUST_LEVEL_THIRD_PARTY",
+        }),
+        ...(params.tokenEndpointAuthMethod && {
+          token_endpoint_auth_method: params.tokenEndpointAuthMethod,
         }),
       },
       accessToken,
@@ -108,10 +108,7 @@ export class HearthApiClient {
    * the server answers `401 invalid_token` without one. Optional here so that
    * adding it does not break existing callers.
    */
-  async authorize(
-    params: AuthorizeParams,
-    accessToken?: string,
-  ): Promise<AuthorizeResponse> {
+  async authorize(params: AuthorizeParams, accessToken?: string): Promise<AuthorizeResponse> {
     return this.post(
       "/authorize",
       {
@@ -164,10 +161,7 @@ export class HearthApiClient {
   }
 
   /** POST /token — refresh tokens using a refresh token. */
-  async refreshTokens(
-    clientId: string,
-    refreshToken: string,
-  ): Promise<TokenResponse> {
+  async refreshTokens(clientId: string, refreshToken: string): Promise<TokenResponse> {
     return this.post("/token", {
       client_id: clientId,
       grant_type: "refresh_token",
@@ -221,9 +215,7 @@ export class HearthApiClient {
 
   /** GET /.well-known/openid-configuration — OIDC discovery document. */
   async discovery(): Promise<Record<string, unknown>> {
-    const resp = await fetch(
-      `${this.baseUrl}/.well-known/openid-configuration`,
-    );
+    const resp = await fetch(`${this.baseUrl}/.well-known/openid-configuration`);
     if (!resp.ok) {
       throw new HearthError(resp.status, await resp.json());
     }
@@ -275,9 +267,7 @@ export class HearthApiClient {
    * Omit `userId` for a discoverable-credential (resident-key) flow; when
    * provided, the server constrains `allow_credentials` to that user's passkeys.
    */
-  async startWebAuthnAuthentication(
-    userId?: string,
-  ): Promise<WebAuthnAuthenticationBeginResponse> {
+  async startWebAuthnAuthentication(userId?: string): Promise<WebAuthnAuthenticationBeginResponse> {
     const body = userId ? { user_id: userId } : {};
     return this.post("/webauthn/auth/begin", body);
   }
@@ -293,11 +283,7 @@ export class HearthApiClient {
     return this.post("/webauthn/auth/complete", request);
   }
 
-  private async post<T>(
-    path: string,
-    body: unknown,
-    accessToken?: string,
-  ): Promise<T> {
+  private async post<T>(path: string, body: unknown, accessToken?: string): Promise<T> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-Realm-ID": this.realmId,

@@ -34,21 +34,21 @@ type Claims struct {
 
 // rawClaims is the internal JSON shape of a Hearth JWT payload.
 type rawClaims struct {
-	Sub             string          `json:"sub"`
-	Iss             string          `json:"iss"`
-	Aud             audClaim        `json:"aud"`
-	Exp             int64           `json:"exp"`
-	Nbf             int64           `json:"nbf"`
-	Iat             int64           `json:"iat"`
-	Jti             string          `json:"jti"`
-	Scope           string          `json:"scope"`
-	Roles           []string        `json:"roles"`
-	Permissions     []string        `json:"permissions"`
-	Groups          []string        `json:"groups"`
-	OID             string          `json:"oid"`
-	OrgGroups       []string        `json:"org_groups"`
-	TokenType       string          `json:"token_type"`
-	Extra           json.RawMessage `json:"-"`
+	Sub         string          `json:"sub"`
+	Iss         string          `json:"iss"`
+	Aud         audClaim        `json:"aud"`
+	Exp         int64           `json:"exp"`
+	Nbf         int64           `json:"nbf"`
+	Iat         int64           `json:"iat"`
+	Jti         string          `json:"jti"`
+	Scope       string          `json:"scope"`
+	Roles       []string        `json:"roles"`
+	Permissions []string        `json:"permissions"`
+	Groups      []string        `json:"groups"`
+	OID         string          `json:"oid"`
+	OrgGroups   []string        `json:"org_groups"`
+	TokenType   string          `json:"token_type"`
+	Extra       json.RawMessage `json:"-"`
 }
 
 // audClaim handles both single-string and array-of-string aud values.

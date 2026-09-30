@@ -37,7 +37,6 @@ type Client struct {
 
 	discMu  sync.Mutex
 	discDoc *oidcDiscovery
-	discErr error
 }
 
 // oidcDiscovery holds the fields we need from the OIDC discovery document.
@@ -212,10 +211,10 @@ func (c *Client) RefreshTokens(ctx context.Context, clientID, refreshToken strin
 // session-version check, and the required-action guard are decoded;
 // everything else is ignored.
 type rbacClaims struct {
-	Permissions     []string `json:"permissions"`
-	Roles           []string `json:"roles"`
-	Groups          []string `json:"groups"`
-	OID             string   `json:"oid"`
+	Permissions []string `json:"permissions"`
+	Roles       []string `json:"roles"`
+	Groups      []string `json:"groups"`
+	OID         string   `json:"oid"`
 	// SV is the session version claim (u64). Pointer so absence is detectable.
 	SV              *uint64  `json:"sv"`
 	Sid             string   `json:"sid"`

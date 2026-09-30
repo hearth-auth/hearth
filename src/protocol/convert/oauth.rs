@@ -25,6 +25,9 @@ impl From<&domain::OAuthClient> for pb::OAuthClient {
             grant_types: c.grant_types().to_vec(),
             access_token_authorization: mode,
             id_token_signed_response_alg: c.id_token_signed_response_alg().as_str().to_string(),
+            // The domain record holds only the secret's hash. The create
+            // paths set the generated plaintext on their response, once.
+            client_secret: None,
         }
     }
 }
@@ -457,6 +460,7 @@ mod tests {
             access_token_authorization: 0, // Embedded
             trust_level: None,
             id_token_signed_response_alg: Some("RS256".to_string()),
+            token_endpoint_auth_method: None,
         };
         let domain = domain::RegisterClientRequest::from(proto);
         assert_eq!(domain.client_name, "My App");
@@ -499,6 +503,7 @@ mod tests {
             access_token_authorization: 0,
             trust_level: None,
             id_token_signed_response_alg: None,
+            token_endpoint_auth_method: None,
         };
         let domain = domain::RegisterClientRequest::from(proto);
         assert_eq!(

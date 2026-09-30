@@ -11,18 +11,22 @@
 //!  │  ClusterEngine (public-facing wrapper)               │
 //!  │    • single-node bypass (zero Raft overhead)         │
 //!  │    • leader write routing via client_write           │
+//!  │    • follower writes forwarded to the leader, then   │
+//!  │      awaited locally (read-your-writes)              │
 //!  │    • follower read staleness via reads_allowed flag  │
 //!  └──────────────────────────────────────────────────────┘
 //!  ┌──────────────────────────────────────────────────────┐
 //!  │  HearthNetworkFactory (outgoing RPCs)                │
 //!  │    └─ HearthPeerNetwork per peer                     │
 //!  │         • lazy mTLS gRPC channel                     │
-//!  │         • serde_json encode/decode openraft payloads │
+//!  │         • CBOR encode/decode openraft payloads       │
+//!  │           (size limits: see `wire`)                  │
 //!  └──────────────────────────────────────────────────────┘
 //!  ┌──────────────────────────────────────────────────────┐
 //!  │  RaftRpcHandler / serve() (incoming RPCs)            │
 //!  │    • tonic Server with ServerTlsConfig (mTLS)        │
 //!  │    • delegates to IncomingRpcDispatch                │
+//!  │      (Raft RPCs + ForwardWrite from followers)       │
 //!  └──────────────────────────────────────────────────────┘
 //! ```
 
@@ -34,6 +38,7 @@ pub(crate) mod rpc;
 pub mod server;
 pub mod state_machine;
 pub mod types;
+pub mod wire;
 
 /// Observes storage writes applied outside the node's own API surface —
 /// today, Raft state-machine applies on a follower.
@@ -73,4 +78,10 @@ pub use log_store::{HearthLogReader, HearthLogStore};
 pub use network::{HearthNetworkFactory, PeerFaults};
 pub use server::{serve, serve_with_shutdown, IncomingRpcDispatch, NoopDispatch, RaftRpcHandler};
 pub use state_machine::HearthStateMachine;
-pub use types::{HearthLogData, HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand};
+pub use types::{
+    ForwardedWriteOutcome, HearthLogData, HearthLogResponse, HearthNode, HearthRaftConfig,
+    RaftCommand,
+};
+pub use wire::{
+    APPEND_BATCH_BYTES, MAX_COMMAND_BYTES, MAX_PEER_MESSAGE_BYTES, SNAPSHOT_CHUNK_BYTES,
+};

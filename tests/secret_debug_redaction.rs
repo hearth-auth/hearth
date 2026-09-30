@@ -105,6 +105,7 @@ fn grant_requests_do_not_print_credentials() {
                 scope: None,
                 client_ip: None,
                 user_agent: None,
+                dpop_jkt: None,
             }
         ),
     );

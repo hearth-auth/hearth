@@ -37,7 +37,7 @@ export class AdminClient {
 
   private get authHeaders(): Record<string, string> {
     return {
-      "Authorization": `Bearer ${this.accessToken}`,
+      Authorization: `Bearer ${this.accessToken}`,
       "X-Realm-ID": this.realmId,
       "Content-Type": "application/json",
     };
@@ -138,8 +138,20 @@ export class AdminClient {
   }
 
   /** Update an OAuth client by ID. */
-  async updateClient(id: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async updateClient(
+    id: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
     return this.request("PATCH", this.buildUrl(`/admin/applications/${id}`), params);
+  }
+
+  /**
+   * Replace a confidential client's secret
+   * (`POST /admin/applications/{id}/regenerate-secret`). The response carries
+   * the new `client_secret` once; the old secret stops working immediately.
+   */
+  async regenerateClientSecret(id: string): Promise<Record<string, unknown>> {
+    return this.request("POST", this.buildUrl(`/admin/applications/${id}/regenerate-secret`), {});
   }
 
   /** Delete an OAuth client by ID. */
@@ -149,7 +161,9 @@ export class AdminClient {
 
   /** List OAuth clients with optional pagination. */
   async listClients(options?: PageOptions): Promise<PageResponse<Record<string, unknown>>> {
-    const url = options ? this.buildUrl("/admin/applications", options) : `${this.baseUrl}/admin/applications`;
+    const url = options
+      ? this.buildUrl("/admin/applications", options)
+      : `${this.baseUrl}/admin/applications`;
     return this.request("GET", url);
   }
 

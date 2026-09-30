@@ -87,8 +87,14 @@ mod tests {
     fn pkce_pairs_are_unique() {
         let p1 = generate_pkce_pair();
         let p2 = generate_pkce_pair();
-        assert_ne!(p1.verifier, p2.verifier, "each call should produce unique verifier");
-        assert_ne!(p1.challenge, p2.challenge, "each call should produce unique challenge");
+        assert_ne!(
+            p1.verifier, p2.verifier,
+            "each call should produce unique verifier"
+        );
+        assert_ne!(
+            p1.challenge, p2.challenge,
+            "each call should produce unique challenge"
+        );
     }
 
     #[test]

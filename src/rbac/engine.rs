@@ -102,6 +102,19 @@ impl EmbeddedRbacEngine {
         Ok(())
     }
 
+    /// [`StorageEngine::write_batch`] (atomic puts + deletes) followed by
+    /// cache invalidation for the realm.
+    fn write_batch(
+        &self,
+        realm_id: &RealmId,
+        puts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> Result<(), StorageError> {
+        self.storage.write_batch(realm_id, puts, deletes)?; // rbac-storage-write-ok
+        self.invalidate_realm(realm_id);
+        Ok(())
+    }
+
     /// [`StorageEngine::delete`] followed by cache invalidation for the realm.
     fn write_delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
         self.storage.delete(realm_id, key)?; // rbac-storage-write-ok
@@ -154,6 +167,61 @@ impl EmbeddedRbacEngine {
         let mut parts = rest.splitn(4, ':');
         let (_realm, _org, user) = (parts.next(), parts.next(), parts.next());
         user.is_some_and(|u| u == user_id.as_uuid().to_string())
+    }
+
+    /// Every reference to `role`: its assignments (by-role index key, the
+    /// assignment if it still loads, and its id), the roles naming it as a
+    /// parent, and the extra org-role row keys naming it (stored by name).
+    fn role_references(
+        &self,
+        realm_id: &RealmId,
+        role: &Role,
+    ) -> Result<RoleReferences, RbacError> {
+        let asgn_prefix = keys::assign_role_scan_prefix(&role.id);
+        let asgn_end = keys::prefix_end(&asgn_prefix);
+        let mut assignments = Vec::new();
+        for e in self.storage.scan(realm_id, &asgn_prefix, &asgn_end)? {
+            let aid: AssignmentId = Self::de(&e.value)?;
+            assignments.push((e.key, self.load_assignment(realm_id, &aid)?, aid));
+        }
+        let name_prefix = keys::role_name_scan_prefix(realm_id);
+        let name_end = keys::prefix_end(&name_prefix);
+        let mut children = Vec::new();
+        for e in self.storage.scan(realm_id, &name_prefix, &name_end)? {
+            let id: RoleId = Self::de(&e.value)?;
+            if let Some(r) = self.load_role(realm_id, &id)? {
+                if r.parent_roles.contains(&role.id) {
+                    children.push(r);
+                }
+            }
+        }
+        let org_prefix = keys::org_extra_role_realm_scan_prefix(realm_id);
+        let org_end = keys::prefix_end(&org_prefix);
+        let org_rows = self
+            .storage
+            .scan_keys(realm_id, &org_prefix, &org_end)?
+            .into_iter()
+            .filter(|k| Self::org_role_key_holder(k, &role.name).is_some())
+            .collect();
+        Ok(RoleReferences {
+            assignments,
+            children,
+            org_rows,
+        })
+    }
+
+    /// The `{user}` of an `rba:org_role:{realm}:{org}:{user}:{role}` row when
+    /// its `{role}` is `role_name`; `None` for another role or a row that
+    /// does not parse.
+    fn org_role_key_holder(key: &[u8], role_name: &str) -> Option<UserId> {
+        let text = std::str::from_utf8(key).ok()?;
+        let rest = text.strip_prefix(keys::ORG_ROLE_PREFIX)?;
+        let mut parts = rest.splitn(4, ':');
+        let (_realm, _org, user, role) = (parts.next(), parts.next(), parts.next()?, parts.next()?);
+        if role != role_name {
+            return None;
+        }
+        uuid::Uuid::parse_str(user).ok().map(UserId::new)
     }
 
     /// Injects the [`SvBumper`] implementation. Called once at startup after
@@ -672,6 +740,16 @@ impl Resolver for EmbeddedRbacEngine {
 // RbacEngine trait impl
 // ---------------------------------------------------------------------------
 
+/// What refers to a role, as found by `EmbeddedRbacEngine::role_references`.
+struct RoleReferences {
+    /// `(by-role index key, assignment if it loads, assignment id)`.
+    assignments: Vec<(Vec<u8>, Option<RoleAssignment>, AssignmentId)>,
+    /// Roles that list the role as a parent.
+    children: Vec<Role>,
+    /// Extra org-role row keys naming the role.
+    org_rows: Vec<Vec<u8>>,
+}
+
 impl RbacEngine for EmbeddedRbacEngine {
     fn on_replicated_row(&self, realm_id: &RealmId, key: &[u8]) {
         // One prefix compare on the apply path; every non-RBAC row costs
@@ -858,6 +936,75 @@ impl RbacEngine for EmbeddedRbacEngine {
         Ok(out)
     }
 
+    fn list_additional_role_holders(
+        &self,
+        realm_id: &RealmId,
+        role_names: &[&str],
+        limit: usize,
+    ) -> Result<Vec<UserId>, RbacError> {
+        // The key layout is org-major, so a role cannot be a prefix: scan the
+        // realm's extra-role keys (no values) and filter on the last segment.
+        let prefix = keys::org_extra_role_realm_scan_prefix(realm_id);
+        let end = keys::prefix_end(&prefix);
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for key in self.storage.scan_keys(realm_id, &prefix, &end)? {
+            if out.len() >= limit {
+                break;
+            }
+            let holder = role_names
+                .iter()
+                .find_map(|name| Self::org_role_key_holder(&key, name));
+            if let Some(user) = holder {
+                if seen.insert(user.clone()) {
+                    out.push(user);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn list_permission_grantees(
+        &self,
+        realm_id: &RealmId,
+        permissions: &[&str],
+        limit: usize,
+    ) -> Result<Vec<UserId>, RbacError> {
+        // The primary rows (`rba:user_perm:{realm}:{user}:{scope}:{perm}`),
+        // not the by-permission index: the primary row is what resolution
+        // reads, so it is the authority on who holds a grant.
+        let prefix = keys::user_permission_realm_scan_prefix(realm_id);
+        let end = keys::prefix_end(&prefix);
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for key in self.storage.scan_keys(realm_id, &prefix, &end)? {
+            if out.len() >= limit {
+                break;
+            }
+            let Some(rest) = key
+                .strip_prefix(prefix.as_slice())
+                .and_then(|r| std::str::from_utf8(r).ok())
+            else {
+                continue;
+            };
+            let mut parts = rest.splitn(3, ':');
+            let (Some(user), Some(_scope), Some(perm)) = (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if !permissions.contains(&perm) {
+                continue;
+            }
+            if let Ok(uuid) = uuid::Uuid::parse_str(user) {
+                let user = UserId::new(uuid);
+                if seen.insert(user.clone()) {
+                    out.push(user);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn purge_org_roles_for_user(
         &self,
         realm_id: &RealmId,
@@ -1010,13 +1157,60 @@ impl RbacEngine for EmbeddedRbacEngine {
         Ok(role)
     }
 
-    fn delete_role(&self, realm_id: &RealmId, role_id: &RoleId) -> Result<(), RbacError> {
+    fn delete_role(
+        &self,
+        realm_id: &RealmId,
+        role_id: &RoleId,
+        cascade: bool,
+    ) -> Result<(), RbacError> {
         let Some(role) = self.load_role(realm_id, role_id)? else {
             return Err(RbacError::RoleNotFound);
         };
-        self.write_delete(realm_id, &keys::encode_role(role_id))?;
-        self.storage
-            .delete(realm_id, &keys::encode_role_name(realm_id, &role.name))?;
+
+        let RoleReferences {
+            assignments,
+            children,
+            org_rows,
+        } = self.role_references(realm_id, &role)?;
+        if !cascade && (!assignments.is_empty() || !children.is_empty() || !org_rows.is_empty()) {
+            return Err(RbacError::RoleInUse {
+                assignments: assignments.len(),
+                child_roles: children.len(),
+                org_roles: org_rows.len(),
+            });
+        }
+
+        let now = self.clock.now();
+        let mut puts = Vec::with_capacity(children.len());
+        for mut child in children {
+            child.parent_roles.retain(|p| p != role_id);
+            child.updated_at = now;
+            puts.push((keys::encode_role(&child.id), Self::ser(&child)?));
+        }
+        let mut deletes = org_rows;
+        let mut subjects = Vec::new();
+        for (role_idx, assignment, aid) in assignments {
+            deletes.push(role_idx);
+            deletes.push(keys::encode_assignment(&aid));
+            if let Some(a) = assignment {
+                deletes.push(match &a.subject {
+                    Subject::User(u) => keys::encode_assign_user(u, &aid),
+                    Subject::Group(g) => keys::encode_assign_group(g, &aid),
+                });
+                subjects.push(a.subject);
+            }
+        }
+        deletes.push(keys::encode_role(role_id));
+        deletes.push(keys::encode_role_name(realm_id, &role.name));
+        self.write_batch(realm_id, &puts, &deletes)?;
+
+        // As `unassign_role`: the subjects' live sessions re-read authority.
+        for subject in &subjects {
+            match subject {
+                Subject::User(uid) => self.bump_sv_for_user(realm_id, uid),
+                Subject::Group(gid) => self.bump_sv_for_group_members(realm_id, gid),
+            }
+        }
         Ok(())
     }
 
@@ -1454,6 +1648,16 @@ impl RbacEngine for EmbeddedRbacEngine {
         assignment_id: &AssignmentId,
     ) -> Result<Option<RoleAssignment>, RbacError> {
         self.load_assignment(realm_id, assignment_id)
+    }
+
+    fn list_user_org_contexts(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<Vec<OrganizationId>, RbacError> {
+        Ok(resolve::org_contexts(self, realm_id, user_id)?
+            .into_iter()
+            .collect())
     }
 
     fn list_user_assignments(
@@ -2923,7 +3127,7 @@ mod tests {
                 },
             )
             .expect("r");
-        RbacEngine::delete_role(&engine, &realm, &r.id).expect("delete");
+        RbacEngine::delete_role(&engine, &realm, &r.id, false).expect("delete");
         assert!(RbacEngine::get_role(&engine, &realm, &r.id)
             .expect("get")
             .is_none());
@@ -2983,6 +3187,105 @@ mod tests {
         assert!(engine
             .list_group_assignments(&realm, &g.id)
             .expect("list asgn")
+            .is_empty());
+    }
+
+    /// `list_additional_role_holders` finds a role's extra-role holders in
+    /// every organization, once each, matches the role name exactly, and
+    /// honours its limit (GA sweep 4: the role-change ceiling reads it).
+    #[test]
+    fn list_additional_role_holders_spans_orgs_and_dedups() {
+        let (e, realm) = mk_engine();
+        e.seed_realm(&realm).expect("seed");
+        let (org1, org2) = (
+            OrganizationId::new(uuid::Uuid::new_v4()),
+            OrganizationId::new(uuid::Uuid::new_v4()),
+        );
+        let (a, b, c) = (UserId::generate(), UserId::generate(), UserId::generate());
+        for (org, user, role) in [
+            (&org1, &a, "realm.admin"),
+            (&org2, &a, "realm.admin"),
+            (&org2, &b, "realm.admin"),
+            (&org1, &c, "realm.member"),
+        ] {
+            e.add_additional_role(&realm, org, user, role, None)
+                .expect("extra role");
+        }
+
+        let mut admins = e
+            .list_additional_role_holders(&realm, &["realm.admin"], 10)
+            .expect("list");
+        admins.sort_by_key(|u| *u.as_uuid());
+        let mut expected = vec![a.clone(), b.clone()];
+        expected.sort_by_key(|u| *u.as_uuid());
+        assert_eq!(admins, expected, "each holder once, across orgs");
+        assert_eq!(
+            e.list_additional_role_holders(&realm, &["realm.member"], 10)
+                .expect("list"),
+            vec![c],
+        );
+        assert!(e
+            .list_additional_role_holders(&realm, &["realm"], 10)
+            .expect("list")
+            .is_empty());
+        assert_eq!(
+            e.list_additional_role_holders(&realm, &["realm.admin"], 1)
+                .expect("list")
+                .len(),
+            1,
+            "the limit caps the result"
+        );
+    }
+
+    /// `list_permission_grantees` finds direct grants of the named
+    /// permissions at every scope, once per user, and nothing else.
+    #[test]
+    fn list_permission_grantees_spans_scopes_and_filters_permissions() {
+        let (e, realm) = mk_engine();
+        let org = OrganizationId::new(uuid::Uuid::new_v4());
+        let (a, b, c) = (UserId::generate(), UserId::generate(), UserId::generate());
+        for (user, permission, scope) in [
+            (&a, "hearth.admin", Scope::Realm),
+            (
+                &a,
+                "hearth.admin",
+                Scope::Org {
+                    org_id: org.clone(),
+                },
+            ),
+            (
+                &b,
+                "hearth.users.admin",
+                Scope::Org {
+                    org_id: org.clone(),
+                },
+            ),
+            (&c, "docs.read", Scope::Realm),
+        ] {
+            e.grant_user_permission(
+                &realm,
+                &UserPermissionGrant {
+                    realm_id: realm.clone(),
+                    user_id: user.clone(),
+                    permission: perm(permission),
+                    scope,
+                    granted_at: Timestamp::from_micros(1),
+                    granted_by: None,
+                },
+            )
+            .expect("grant");
+        }
+
+        let mut found = e
+            .list_permission_grantees(&realm, &["hearth.admin", "hearth.users.admin"], 10)
+            .expect("list");
+        found.sort_by_key(|u| *u.as_uuid());
+        let mut expected = vec![a, b];
+        expected.sort_by_key(|u| *u.as_uuid());
+        assert_eq!(found, expected);
+        assert!(e
+            .list_permission_grantees(&realm, &["hearth.clients.admin"], 10)
+            .expect("list")
             .is_empty());
     }
 }

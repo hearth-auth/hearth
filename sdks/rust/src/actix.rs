@@ -354,14 +354,20 @@ mod tests {
     #[test]
     fn valid_bearer_is_extracted() {
         let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer tok.en.here"));
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer tok.en.here"),
+        );
         assert_eq!(extract_bearer(&headers).as_deref(), Some("tok.en.here"));
     }
 
     #[test]
     fn basic_scheme_returns_none() {
         let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_static("Basic dXNlcjpwYXNz"));
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Basic dXNlcjpwYXNz"),
+        );
         assert!(extract_bearer(&headers).is_none());
     }
 

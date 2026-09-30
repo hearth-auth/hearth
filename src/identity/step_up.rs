@@ -86,8 +86,13 @@ pub enum StepUpError {
     SecondFactorNotEnrolled,
     /// The account's login lockout, or its TOTP guess budget, is spent: too
     /// many wrong passwords or codes. No proof is checked until the window
-    /// passes, however correct. The caller SHOULD answer `429`.
-    Locked,
+    /// passes, however correct. Every caller answers `429 Too Many Requests`
+    /// with the carried `Retry-After` hint (GA sweep 4).
+    Locked {
+        /// How long until the lockout that refused the proof ends (at least
+        /// one second).
+        retry_after: std::time::Duration,
+    },
 }
 
 impl std::fmt::Display for StepUpError {
@@ -98,12 +103,40 @@ impl std::fmt::Display for StepUpError {
             Self::SecondFactorNotEnrolled => {
                 f.write_str("step-up needs a second factor and the account holds none")
             }
-            Self::Locked => f.write_str("step-up refused — too many failed attempts"),
+            Self::Locked { .. } => f.write_str("step-up refused — too many failed attempts"),
         }
     }
 }
 
 impl std::error::Error for StepUpError {}
+
+/// The smallest `Retry-After` a locked step-up answers with.
+const MIN_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The `Retry-After` for a password refused by the account's login lockout:
+/// the lockout's remaining time, at least one second (the lockout may have
+/// ended between the refusal and this read).
+pub fn password_retry_after(
+    identity: &dyn IdentityEngine,
+    realm_id: &RealmId,
+    user_id: &UserId,
+) -> std::time::Duration {
+    identity
+        .login_lockout_remaining(realm_id, user_id)
+        .map_or(MIN_RETRY_AFTER, |d| d.max(MIN_RETRY_AFTER))
+}
+
+/// The `Retry-After` for a TOTP code refused because the account's TOTP
+/// guess budget is spent, at least one second.
+pub fn totp_retry_after(
+    identity: &dyn IdentityEngine,
+    realm_id: &RealmId,
+    user_id: &UserId,
+) -> std::time::Duration {
+    identity
+        .mfa_lockout_remaining(realm_id, user_id)
+        .max(MIN_RETRY_AFTER)
+}
 
 /// Verifies a step-up proof before a credential enrolment.
 ///
@@ -136,11 +169,7 @@ pub async fn verify_step_up(
             // `verify_password` applies the account's login lockout itself:
             // a wrong password here counts as a failed login, and a locked
             // account is refused before its credential is checked.
-            let kdf_gate = if realm_id.as_uuid().is_nil() {
-                crate::identity::admin_gate()
-            } else {
-                crate::identity::gate()
-            };
+            let kdf_gate = crate::identity::gate_for_realm(realm_id);
             let engine = Arc::clone(identity);
             let realm = realm_id.clone();
             let user = user_id.clone();
@@ -149,7 +178,9 @@ pub async fn verify_step_up(
                 .await
             {
                 Ok(Ok(true)) => Ok(()),
-                Ok(Err(IdentityError::RateLimited)) => Err(StepUpError::Locked),
+                Ok(Err(IdentityError::RateLimited)) => Err(StepUpError::Locked {
+                    retry_after: password_retry_after(identity.as_ref(), realm_id, user_id),
+                }),
                 Ok(Ok(false) | Err(_)) => Err(StepUpError::Required),
                 Err(KdfGateError::Overloaded { retry_after }) => {
                     Err(StepUpError::Overloaded { retry_after })
@@ -164,7 +195,9 @@ pub async fn verify_step_up(
         // login's second factor draws from — and refuses once it is spent.
         StepUpProof::TotpCode(code) => match identity.verify_totp(realm_id, user_id, &code) {
             Ok(()) => Ok(()),
-            Err(IdentityError::RateLimited) => Err(StepUpError::Locked),
+            Err(IdentityError::RateLimited) => Err(StepUpError::Locked {
+                retry_after: totp_retry_after(identity.as_ref(), realm_id, user_id),
+            }),
             Err(_) => Err(StepUpError::Required),
         },
         StepUpProof::WebAuthnAssertion(assertion) => {

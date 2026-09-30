@@ -6,21 +6,11 @@
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from "vitest";
-import {
-  generateKeyPair,
-  exportJWK,
-  SignJWT,
-  importJWK,
-  exportSPKI,
-} from "jose";
+import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import type { KeyLike } from "jose";
 import { HearthClient } from "../src/hearth-client.js";
 import { Claims } from "../src/claims.js";
-import {
-  TokenExpiredError,
-  TokenInvalidError,
-  TokenIssuerError,
-} from "../src/errors.js";
+import { TokenExpiredError, TokenInvalidError, TokenIssuerError } from "../src/errors.js";
 
 const ISSUER = "https://auth.example.com";
 const KID = "key-1";
@@ -111,22 +101,19 @@ describe("HearthClient.verifyToken() — EdDSA / Ed25519", () => {
   });
 
   it("throws TokenExpiredError for a token with exp in the past", async () => {
-    const token = await signToken(privateKey, {}, "1s");
     // Set exp to 1970 by overriding iat/exp manually
     const expiredToken = await new SignJWT({ sub: "user123" })
       .setProtectedHeader({ alg: "EdDSA", kid: KID })
       .setIssuedAt(0)
       .setIssuer(ISSUER)
-      .setExpirationTime(1)  // 1 second after epoch
+      .setExpirationTime(1) // 1 second after epoch
       .sign(privateKey);
 
     const jwksDoc = await makeJwksDoc(publicKey);
     mockFetch([{ body: DISCOVERY }, { body: jwksDoc }]);
 
     const client = new HearthClient({ issuerUrl: ISSUER });
-    await expect(client.verifyToken(expiredToken)).rejects.toBeInstanceOf(
-      TokenExpiredError,
-    );
+    await expect(client.verifyToken(expiredToken)).rejects.toBeInstanceOf(TokenExpiredError);
   });
 
   it("throws TokenInvalidError for a tampered / bad signature", async () => {
@@ -140,9 +127,7 @@ describe("HearthClient.verifyToken() — EdDSA / Ed25519", () => {
     mockFetch([{ body: DISCOVERY }, { body: jwksDoc }]);
 
     const client = new HearthClient({ issuerUrl: ISSUER });
-    await expect(client.verifyToken(badToken)).rejects.toBeInstanceOf(
-      TokenInvalidError,
-    );
+    await expect(client.verifyToken(badToken)).rejects.toBeInstanceOf(TokenInvalidError);
   });
 
   it("throws TokenIssuerError when issuer does not match", async () => {
@@ -157,9 +142,7 @@ describe("HearthClient.verifyToken() — EdDSA / Ed25519", () => {
     mockFetch([{ body: DISCOVERY }, { body: jwksDoc }]);
 
     const client = new HearthClient({ issuerUrl: ISSUER });
-    await expect(client.verifyToken(wrongIssuerToken)).rejects.toBeInstanceOf(
-      TokenIssuerError,
-    );
+    await expect(client.verifyToken(wrongIssuerToken)).rejects.toBeInstanceOf(TokenIssuerError);
   });
 
   it("reuses the cached JWKS key set on successive verifyToken calls", async () => {

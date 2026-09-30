@@ -11,7 +11,7 @@ import (
 // AdminClient provides access to the Hearth admin API.
 type AdminClient struct {
 	baseURL     string
-	realmID    string
+	realmID     string
 	accessToken string
 	http        *http.Client
 }
@@ -111,6 +111,18 @@ func (a *AdminClient) GetClient(ctx context.Context, clientID string) (*OAuthCli
 func (a *AdminClient) UpdateClient(ctx context.Context, clientID string, req UpdateClientRequest) (*OAuthClient, error) {
 	var result OAuthClient
 	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/applications/%s", clientID), req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// RegenerateClientSecret replaces a confidential client's secret
+// (POST /admin/applications/{id}/regenerate-secret). The returned client
+// carries the new secret in ClientSecret, once; the old secret stops working
+// immediately.
+func (a *AdminClient) RegenerateClientSecret(ctx context.Context, clientID string) (*OAuthClient, error) {
+	var result OAuthClient
+	if err := a.post(ctx, fmt.Sprintf("/admin/applications/%s/regenerate-secret", clientID), nil, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil

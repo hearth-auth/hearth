@@ -1,25 +1,23 @@
 """AdminClient: user and realm CRUD operations (requires admin token)."""
 
-from typing import Optional, List
-
 import httpx
 
 from .errors import HearthError
 from .types import (
-    User,
-    CreateUserRequest,
-    UpdateUserRequest,
-    Realm,
-    PageResponse,
-    OAuthClient,
     CreateClientRequest,
-    UpdateClientRequest,
-    Role,
-    CreateRoleRequest,
-    UpdateRoleRequest,
-    Group,
     CreateGroupRequest,
+    CreateRoleRequest,
+    CreateUserRequest,
+    Group,
+    OAuthClient,
+    PageResponse,
+    Realm,
+    Role,
+    UpdateClientRequest,
     UpdateGroupRequest,
+    UpdateRoleRequest,
+    UpdateUserRequest,
+    User,
 )
 
 
@@ -35,7 +33,9 @@ class AdminClient:
         realm_id: The realm to operate on.
     """
 
-    def __init__(self, base_url: str, admin_token: str, realm_id: str, timeout: float = 30.0):
+    def __init__(
+        self, base_url: str, admin_token: str, realm_id: str, timeout: float = 30.0
+    ):
         self._base = base_url.rstrip("/")
         self._token = admin_token
         self._realm = realm_id
@@ -61,7 +61,7 @@ class AdminClient:
         return User(**resp.json())
 
     def list_users(
-        self, cursor: Optional[str] = None, limit: int = 50
+        self, cursor: str | None = None, limit: int = 50
     ) -> PageResponse[User]:
         """List users with cursor-based pagination."""
         params = {"limit": str(limit)}
@@ -106,7 +106,7 @@ class AdminClient:
     # PATCH /admin/realms/{id} (HEA-2171, audit 2026-08-28 §25.4). Only read
     # paths and deletion are exposed.
 
-    def list_realms(self) -> List[Realm]:
+    def list_realms(self) -> list[Realm]:
         """List all realms."""
         resp = self._http.get(f"{self._base}/admin/realms")
         if resp.status_code != 200:
@@ -143,7 +143,7 @@ class AdminClient:
         return OAuthClient(**resp.json())
 
     def list_clients(
-        self, cursor: Optional[str] = None, limit: int = 50
+        self, cursor: str | None = None, limit: int = 50
     ) -> PageResponse[OAuthClient]:
         """List OAuth clients with cursor-based pagination."""
         params = {"limit": str(limit)}
@@ -173,6 +173,20 @@ class AdminClient:
             raise HearthError(resp.status_code, resp.text)
         return OAuthClient(**resp.json())
 
+    def regenerate_client_secret(self, client_id: str) -> OAuthClient:
+        """Replace a confidential client's secret.
+
+        ``POST /admin/applications/{id}/regenerate-secret``. The returned
+        client's ``secret`` is the new secret, returned once; the old secret
+        stops working immediately.
+        """
+        resp = self._http.post(
+            f"{self._base}/admin/applications/{client_id}/regenerate-secret"
+        )
+        if resp.status_code != 200:
+            raise HearthError(resp.status_code, resp.text)
+        return OAuthClient.model_validate(resp.json())
+
     def delete_client(self, client_id: str) -> None:
         """Delete an OAuth client."""
         resp = self._http.delete(f"{self._base}/admin/applications/{client_id}")
@@ -193,7 +207,7 @@ class AdminClient:
         return Role(**resp.json())
 
     def list_roles(
-        self, cursor: Optional[str] = None, limit: int = 50
+        self, cursor: str | None = None, limit: int = 50
     ) -> PageResponse[Role]:
         """List realm-level roles with cursor-based pagination."""
         params = {"limit": str(limit)}
@@ -242,7 +256,7 @@ class AdminClient:
         return Group(**resp.json())
 
     def list_groups(
-        self, cursor: Optional[str] = None, limit: int = 50
+        self, cursor: str | None = None, limit: int = 50
     ) -> PageResponse[Group]:
         """List realm-level groups with cursor-based pagination."""
         params = {"limit": str(limit)}

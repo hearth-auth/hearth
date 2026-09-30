@@ -7,7 +7,6 @@ use crate::types::AccessTokenAuthorization;
 #[derive(Debug, thiserror::Error)]
 pub enum HearthError {
     // ── HTTP / network layer ─────────────────────────────────────────────
-
     #[error("HTTP {status}: {message}")]
     Api {
         status: u16,
@@ -25,7 +24,6 @@ pub enum HearthError {
     Other(String),
 
     // ── Spec §5 error types ──────────────────────────────────────────────
-
     /// The client is misconfigured (e.g. missing base URL or realm ID).
     #[error("configuration error: {message}")]
     ConfigurationError { message: String },

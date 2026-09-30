@@ -304,6 +304,7 @@ struct Page {
     status: StatusCode,
     cache_control: Option<String>,
     location: Option<String>,
+    retry_after: Option<String>,
     body: String,
 }
 
@@ -318,6 +319,7 @@ async fn send_web(rig: &Rig, req: Request<Body>) -> Page {
     };
     let cache_control = header_value(header::CACHE_CONTROL);
     let location = header_value(header::LOCATION);
+    let retry_after = header_value(header::RETRY_AFTER);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("body");
@@ -325,6 +327,7 @@ async fn send_web(rig: &Rig, req: Request<Body>) -> Page {
         status,
         cache_control,
         location,
+        retry_after,
         body: String::from_utf8_lossy(&bytes).into_owned(),
     }
 }
@@ -843,6 +846,12 @@ async fn wrong_step_up_passwords_lock_the_account_until_the_window_passes() {
         "the page says why: {}",
         page.body
     );
+    // The clock stands still: the whole lockout window is still to run.
+    assert_eq!(
+        page.retry_after.as_deref(),
+        Some((LOCKOUT_MICROS / 1_000_000).to_string().as_str()),
+        "the 429 says how long the lockout still runs"
+    );
     assert!(!carries_a_jwt(&page.body));
     assert!(issued_events(&rig).is_empty());
 
@@ -864,7 +873,7 @@ async fn wrong_step_up_passwords_lock_the_account_until_the_window_passes() {
             StepUpProof::Password(CleartextPassword::from_string(PASSWORD.to_string())),
         )
         .await,
-        Err(StepUpError::Locked)
+        Err(StepUpError::Locked { .. })
     ));
 
     rig.clock.advance(LOCKOUT_MICROS + 1_000_000);
@@ -905,6 +914,16 @@ async fn wrong_step_up_totp_codes_spend_the_totp_guess_budget() {
         StatusCode::TOO_MANY_REQUESTS,
         "a spent TOTP budget refuses the right code: {}",
         page.body
+    );
+    let retry_after: i64 = page
+        .retry_after
+        .as_deref()
+        .expect("the 429 carries Retry-After")
+        .parse()
+        .expect("delta-seconds");
+    assert!(
+        (1..=LOCKOUT_MICROS / 1_000_000).contains(&retry_after),
+        "Retry-After {retry_after}s falls inside the TOTP lockout window"
     );
     assert!(!carries_a_jwt(&page.body));
     assert!(matches!(
@@ -957,5 +976,120 @@ async fn an_operator_step_up_runs_on_the_admin_kdf_gate() {
         page.body
     );
     assert!(shown_token(&page).is_some());
+    holder.await.expect("holder");
+}
+
+/// Posts `fields` to `path` under `cookie`.
+async fn post_form_to(rig: &Rig, cookie: String, path: &str, fields: &[(&str, &str)]) -> Page {
+    let body = serde_urlencoded::to_string(fields).expect("encode form");
+    send_web(
+        rig,
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, cookie)
+            .body(Body::from(body))
+            .expect("request"),
+    )
+    .await
+}
+
+/// Installs a one-permit shared KDF gate and holds its only permit until
+/// the returned handle finishes: a tenant-login flood that fills the gate.
+async fn hold_the_shared_kdf_gate() -> tokio::task::JoinHandle<()> {
+    let installed = hearth::identity::init_gate(KdfGateConfig {
+        max_in_flight: 1,
+        max_queue_wait: std::time::Duration::from_millis(40),
+        retry_after: std::time::Duration::from_secs(2),
+    });
+    assert!(installed, "no earlier gate() call in this process");
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let holder = tokio::spawn(async move {
+        let _ = hearth::identity::gate()
+            .run(move || {
+                let _ = tx.send(());
+                std::thread::sleep(std::time::Duration::from_millis(1500)); // AUDIT: justified-sleep: holds the shared gate's only KDF permit while the operator's request runs
+            })
+            .await;
+    });
+    rx.await.expect("holder acquired the only permit");
+    holder
+}
+
+/// GA sweep 4 round 2: an operator's password change on the account page
+/// verifies (and hashes) on the admin-reserved KDF gate, like the console
+/// login and the token mint's step-up; a full shared gate must not shed it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_operators_password_change_runs_on_the_admin_kdf_gate() {
+    let holder = hold_the_shared_kdf_gate().await;
+    let rig = build_rig();
+    let op = totp_operator(&rig, "ops@hearth.example");
+    let fresh = "a-fresh-0perator-passphrase!";
+
+    let page = post_form_to(
+        &rig,
+        op.cookie(),
+        "/ui/account/password",
+        &[
+            ("_csrf", CSRF),
+            ("current_password", PASSWORD),
+            ("new_password", fresh),
+            ("confirm_password", fresh),
+        ],
+    )
+    .await;
+    assert_ne!(
+        page.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the operator's password change must not queue behind tenant logins: {}",
+        page.body
+    );
+    assert!(
+        matches!(
+            rig.identity.verify_password(
+                &system_realm(),
+                &op.id,
+                &CleartextPassword::from_string(fresh.to_string())
+            ),
+            Ok(true)
+        ),
+        "the password was changed"
+    );
+    holder.await.expect("holder");
+}
+
+/// The same for the password step-up that activates a TOTP factor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_operators_totp_activation_runs_on_the_admin_kdf_gate() {
+    let holder = hold_the_shared_kdf_gate().await;
+    let rig = build_rig();
+    let id = create_system_user(&rig, "totp-ops@hearth.example", true);
+    let session = console_session(&rig, &id);
+    let enrollment = rig
+        .identity
+        .enroll_totp(&system_realm(), &id)
+        .expect("pending enrolment");
+    let code = totp_code(&enrollment.secret_base32, rig.now_secs());
+
+    let page = post_form_to(
+        &rig,
+        cookie(&system_realm(), &session),
+        "/ui/account/totp/activate",
+        &[("_csrf", CSRF), ("password", PASSWORD), ("code", &code)],
+    )
+    .await;
+    assert_ne!(
+        page.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the operator's TOTP activation must not queue behind tenant logins: {}",
+        page.body
+    );
+    assert!(
+        rig.identity
+            .mfa_enabled(&system_realm(), &id)
+            .expect("mfa state"),
+        "the factor was activated"
+    );
     holder.await.expect("holder");
 }

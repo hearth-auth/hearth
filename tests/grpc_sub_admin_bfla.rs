@@ -750,6 +750,16 @@ async fn full_admin_can_add_any_role() {
             },
         )
         .expect("create target user");
+    // An additional role belongs to a membership (GA sweep 4).
+    svc.h
+        .identity()
+        .add_member(
+            &svc.realm,
+            org.id(),
+            target.id(),
+            hearth::identity::OrganizationRole::Member,
+        )
+        .expect("add member");
 
     svc.rbac_svc
         .add_additional_role(with_token(

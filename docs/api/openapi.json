@@ -94,8 +94,8 @@
           }
         },
         "responses": {
-          "200": {
-            "description": "A successful response.",
+          "201": {
+            "description": "Created. For a client_secret_basic or client_secret_post client the body carries the generated client_secret, the only time it is returned.",
             "content": {
               "application/json": {
                 "schema": {
@@ -216,6 +216,45 @@
         "responses": {
           "200": {
             "description": "A successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1OAuthClient"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/rpcStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/applications/{clientId}/regenerate-secret": {
+      "post": {
+        "operationId": "ApplicationAdminService_RegenerateApplicationSecret",
+        "summary": "Replaces a confidential client's secret with a new Hearth-generated one (256 bits from the OS CSPRNG, stored only as a hash). The new secret is returned once, in the response's client_secret; the old one stops authenticating at once. Refused for a public client, a FAPI 2.0 client and in a FAPI 2.0 Advanced realm (private_key_jwt only). Audited.",
+        "tags": [
+          "ApplicationAdminService"
+        ],
+        "parameters": [
+          {
+            "name": "clientId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The client record with the new client_secret.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2532,8 +2571,8 @@
           }
         },
         "responses": {
-          "200": {
-            "description": "A successful response.",
+          "201": {
+            "description": "Created. For a client_secret_basic or client_secret_post client the body carries the generated client_secret, the only time it is returned.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2942,8 +2981,8 @@
           }
         },
         "responses": {
-          "200": {
-            "description": "A successful response.",
+          "201": {
+            "description": "Created. For a client_secret_basic or client_secret_post client the body carries the generated client_secret, the only time it is returned.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3556,6 +3595,20 @@
           },
           "403": {
             "description": "Missing or wrong step-up proof (step_up_required), or a third-party client's token"
+          },
+          "429": {
+            "description": "`too_many_attempts` (`error_code` `HEARTH_RATE_LIMITED`) \u2014 the account is locked out: too many wrong passwords (the login lockout) or TOTP codes (the TOTP guess budget). No proof is checked until the lockout ends; retry after the `Retry-After` hint (seconds).\n",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the lockout ends.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily_unavailable` \u2014 the KDF admission gate shed the password verification. Retry after the `Retry-After` hint.\n"
           }
         }
       }
@@ -3633,6 +3686,17 @@
           },
           "403": {
             "description": "`forbidden` \u2014 the token was issued to a third-party client; or `step_up_required` \u2014 no step-up proof was supplied, or it did not verify.\n"
+          },
+          "429": {
+            "description": "`too_many_attempts` (`error_code` `HEARTH_RATE_LIMITED`) \u2014 the account is locked out: too many wrong passwords (the login lockout) or TOTP codes (the TOTP guess budget). No proof is checked until the lockout ends; retry after the `Retry-After` hint (seconds).\n",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the lockout ends.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           },
           "503": {
             "description": "`temporarily_unavailable` \u2014 the KDF admission gate shed the password verification. Retry after the `Retry-After` hint.\n"
@@ -4316,6 +4380,10 @@
           },
           "accessTokenAuthorization": {
             "$ref": "#/components/schemas/v1AccessTokenAuthorization"
+          },
+          "client_secret": {
+            "type": "string",
+            "description": "The generated client secret. Present only in the response that created a client_secret_basic or client_secret_post client, or that regenerated its secret, and never returned again: store it on receipt. Hearth keeps only its hash."
           }
         },
         "description": "A registered OAuth 2.0 client."
@@ -4456,7 +4524,8 @@
             }
           },
           "clientSecret": {
-            "type": "string"
+            "type": "string",
+            "description": "Refused (422 on REST, INVALID_ARGUMENT on gRPC): Hearth generates client secrets. Request one with token_endpoint_auth_method."
           },
           "grantTypes": {
             "type": "array",
@@ -4466,6 +4535,16 @@
           },
           "accessTokenAuthorization": {
             "$ref": "#/components/schemas/v1AccessTokenAuthorization"
+          },
+          "token_endpoint_auth_method": {
+            "type": "string",
+            "enum": [
+              "client_secret_basic",
+              "client_secret_post",
+              "private_key_jwt",
+              "none"
+            ],
+            "description": "How the client authenticates at the token endpoint (RFC 7591 \u00a72). client_secret_basic or client_secret_post creates a confidential client: Hearth generates its secret (256 bits from the OS CSPRNG), stores only a hash, and returns the secret exactly once, as client_secret in this create response. private_key_jwt requires jwks. Omitted or none registers a public client (a private_key_jwt client when jwks is given). A client_secret_* method is refused in a FAPI 2.0 Advanced realm, which accepts private_key_jwt only."
           }
         },
         "description": "Request to register a new OAuth 2.0 client."

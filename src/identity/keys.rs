@@ -2528,6 +2528,28 @@ pub(crate) fn encode_ra_generation(user_id: &UserId) -> Vec<u8> {
     format!("ra:gen:{}", user_id.as_uuid()).into_bytes()
 }
 
+/// The marker kinds a required-action flow spends (`consumed:{kind}:{hash}`),
+/// carried by a backup (GA sweep 4 round 2).
+pub(crate) const RA_CONSUMED_KINDS: [&str; 2] = ["ra-flow", "ra-password"];
+
+/// Scan prefix for one required-action marker `kind` (see
+/// [`RA_CONSUMED_KINDS`]); the builder for its keys is [`encode_consumed_ra`].
+pub(crate) fn consumed_ra_scan_prefix(kind: &str) -> Vec<u8> {
+    format!("{CONSUMED_PREFIX}{kind}:").into_bytes()
+}
+
+/// A required-action marker of `kind` for `hash` — the key
+/// [`encode_consumed_ra_flow`] or [`encode_consumed_ra_password`] builds.
+pub(crate) fn encode_consumed_ra(kind: &str, hash: &str) -> Vec<u8> {
+    encode_consumed(kind, hash)
+}
+
+/// Scan prefix for every user's required-action generation in a realm
+/// (backup export, GA sweep 4). See [`encode_ra_generation`].
+pub(crate) fn ra_generation_scan_prefix() -> Vec<u8> {
+    b"ra:gen:".to_vec()
+}
+
 /// Scan prefix for every single-use redemption marker in a realm.
 pub(crate) fn consumed_marker_scan_prefix() -> Vec<u8> {
     CONSUMED_PREFIX.as_bytes().to_vec()

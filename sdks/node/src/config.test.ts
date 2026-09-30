@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { resolveConfig, JWKS_TTL_MAX_MS, JWKS_TTL_DEFAULT_MS, CLOCK_SKEW_DEFAULT_S, HTTP_TIMEOUT_DEFAULT_MS } from "./config.js";
+import {
+  resolveConfig,
+  JWKS_TTL_MAX_MS,
+  JWKS_TTL_DEFAULT_MS,
+  CLOCK_SKEW_DEFAULT_S,
+  HTTP_TIMEOUT_DEFAULT_MS,
+} from "./config.js";
 import { ConfigurationError } from "./errors.js";
 
 describe("resolveConfig", () => {

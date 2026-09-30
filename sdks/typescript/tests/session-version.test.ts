@@ -1,10 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createHearth } from "../src/hearth.js";
 import { SessionVersionCache } from "../src/session-version-cache.js";
-import {
-  SessionVersionCacheStaleError,
-  SessionVersionRevokedError,
-} from "../src/errors.js";
+import { SessionVersionCacheStaleError, SessionVersionRevokedError } from "../src/errors.js";
 import type { SessionVersionConfig } from "../src/types.js";
 
 // ---------------------------------------------------------------------------
@@ -28,10 +25,9 @@ async function flushAsync(): Promise<void> {
 }
 
 function forgeJwt(claims: Record<string, unknown>): string {
-  const header = Buffer.from(
-    JSON.stringify({ alg: "EdDSA", typ: "JWT" }),
-    "utf8",
-  ).toString("base64url");
+  const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" }), "utf8").toString(
+    "base64url",
+  );
   const body = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
   return `${header}.${body}.fakesig`;
 }
@@ -141,9 +137,9 @@ describe("SessionVersionCache", () => {
   });
 
   it("re-fetches snapshot when poll returns HTTP 400 (sequence too old)", async () => {
-    mockFetch(snapshotResponse({ sess_A: 2 }));      // initial snapshot
-    mockFetch(null, 400);                             // poll says seq too old
-    mockFetch(snapshotResponse({ sess_A: 5 }));      // re-snapshot after 400
+    mockFetch(snapshotResponse({ sess_A: 2 })); // initial snapshot
+    mockFetch(null, 400); // poll says seq too old
+    mockFetch(snapshotResponse({ sess_A: 5 })); // re-snapshot after 400
 
     const cache = new SessionVersionCache("https://hearth.example.com", "r1", BASE_SV_CONFIG);
     cache.start();
@@ -191,8 +187,11 @@ describe("SessionVersionCache", () => {
     vi.advanceTimersByTime(BASE_SV_CONFIG.staleThresholdMs + 1_000);
 
     const err = (() => {
-      try { cache.validateSv(1n, "sess_S"); }
-      catch (e) { return e; }
+      try {
+        cache.validateSv(1n, "sess_S");
+      } catch (e) {
+        return e;
+      }
     })();
     expect(err).toBeInstanceOf(SessionVersionCacheStaleError);
     expect((err as SessionVersionCacheStaleError).onStale).toBe("reject");
@@ -219,7 +218,7 @@ describe("SessionVersionCache", () => {
     const badCfg: SessionVersionConfig = {
       ...BASE_SV_CONFIG,
       pollIntervalMs: 10_000,
-      staleThresholdMs: 5_000,  // less than poll — should warn
+      staleThresholdMs: 5_000, // less than poll — should warn
     };
     const cache = new SessionVersionCache("https://hearth.example.com", "r1", badCfg);
     cache.start();
@@ -273,7 +272,7 @@ describe("createHearth() with sessionVersions", () => {
   it("hasPermission passes when sv is valid", async () => {
     mockFetch(snapshotResponse({ sess_01: 1 }));
 
-    let token = forgeJwt({ permissions: ["docs.read"], sv: 1, sid: "sess_01" });
+    const token = forgeJwt({ permissions: ["docs.read"], sv: 1, sid: "sess_01" });
     const hearth = createHearth({
       baseUrl: "https://hearth.example.com",
       realmId: "r1",

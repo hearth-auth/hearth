@@ -46,7 +46,11 @@ export class AuthorizeClient {
    * Fail-closed: returns `{ allowed: false }` on any network or server error.
    * Throws `AuthorizeError` only when the endpoint is not configured.
    */
-  async decide(token: string, permission: string, opts?: AuthorizeOptions): Promise<AuthorizeResult> {
+  async decide(
+    token: string,
+    permission: string,
+    opts?: AuthorizeOptions,
+  ): Promise<AuthorizeResult> {
     if (!this.endpoint) {
       throw new AuthorizeError(
         "authorize_endpoint is not configured and issuer_url is unavailable",
@@ -55,7 +59,7 @@ export class AuthorizeClient {
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${token}`,
+      Authorization: `Bearer ${token}`,
     };
     if (this.realmId) headers["X-Realm-ID"] = this.realmId;
 
@@ -76,7 +80,7 @@ export class AuthorizeClient {
 
       if (!res.ok) return { allowed: false };
 
-      const json = await res.json() as Record<string, unknown>;
+      const json = (await res.json()) as Record<string, unknown>;
       return { allowed: json["allowed"] === true };
     } catch {
       // Fail-closed: any network error → deny

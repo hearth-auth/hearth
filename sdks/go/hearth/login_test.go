@@ -144,7 +144,7 @@ func TestCompleteLogin_CallsTokenEndpointWithVerifier(t *testing.T) {
 			t.Errorf("token request body was not valid JSON (form-encoded regression?): %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		writeJSON(t, w, map[string]interface{}{
 			"access_token": "eyJ...",
 			"token_type":   "Bearer",
 			"expires_in":   3600,

@@ -7,8 +7,18 @@
 //! ## Write path (cluster mode)
 //! Every mutation creates a [`RaftCommand`] carrying a `leader_timestamp`
 //! stamped at proposal time, proposes it via `Raft::client_write`, and blocks
-//! until quorum commit. If this node is not the leader the caller receives
-//! [`ClusterError::NotLeader`] with the leader's address for redirect.
+//! until quorum commit.
+//!
+//! On a follower the proposal is refused without entering the log, and the
+//! command is **forwarded** to the leader over the peer mTLS channel (the
+//! `ForwardWrite` RPC) — standard Raft client-request forwarding, as in
+//! etcd and Consul. The leader restamps and proposes it and answers with the
+//! committed log index and the state-machine response; the follower then
+//! waits until its own state machine has applied that index, so the caller
+//! reads its own write on the node it wrote to. See
+//! [`ClusterEngine::propose_with_response`] for the retry rules that keep
+//! conditional commands exactly-once. [`ClusterError::NotLeader`] now means
+//! no leader could be reached at all.
 //!
 //! ## Read path (cluster mode)
 //! A background task updates [`ClusterEngine::reads_allowed`] every 50 ms by
@@ -21,19 +31,25 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use openraft::error::{ClientWriteError, RaftError};
+use openraft::metrics::WaitError;
+use openraft::raft::ClientWriteResponse;
 use openraft::raft::{AppendEntriesRequest, InstallSnapshotRequest, VoteRequest};
 use openraft::{Config as RaftConfig, EntryPayload, RaftMetrics, ServerState};
 use tokio::task::spawn_blocking;
 use tracing::{info, warn};
 
 use crate::cluster::log_store::HearthLogStore;
-use crate::cluster::network::{HearthNetworkFactory, PeerFaults};
+use crate::cluster::network::{ForwardFailure, HearthNetworkFactory, LeaderForwarder, PeerFaults};
 use crate::cluster::server::IncomingRpcDispatch;
 use crate::cluster::state_machine::HearthStateMachine;
-use crate::cluster::types::{HearthNode, HearthRaftConfig, RaftCommand};
+use crate::cluster::types::{
+    ForwardedWriteOutcome, HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand,
+};
+use crate::cluster::wire::{self, MAX_COMMAND_BYTES, SNAPSHOT_CHUNK_BYTES};
 use crate::cluster::ReplicatedWriteObserver;
 use crate::config::ClusterConfig;
 use crate::core::RealmId;
+use crate::metrics::ForwardedWriteOutcomeLabel;
 use crate::storage::{EmbeddedStorageEngine, ScanEntry, StorageConfig, StorageEngine};
 
 // ── Error types ───────────────────────────────────────────────────────────────
@@ -70,10 +86,106 @@ pub enum ClusterError {
         leader_addr: String,
     },
 
+    /// A write forwarded to the leader may or may not have been applied:
+    /// the connection to the leader was lost after the request was sent, or
+    /// the leader could not tell whether its proposal committed.
+    ///
+    /// Never retried — a conditional command (`PutIfAbsent`, `IncrementU64`)
+    /// applied twice is a different result. The caller must re-read.
+    #[error(
+        "the write was forwarded to the leader at {leader_addr} and its outcome is unknown \
+         ({reason}); it may or may not have been applied — re-read before retrying"
+    )]
+    ForwardOutcomeUnknown { leader_addr: String, reason: String },
+
+    /// The leader refused a forwarded write without proposing it because it
+    /// is serving its limit of forwarded writes. Nothing was written; retry.
+    #[error("the leader at {leader_addr} is at its forwarded-write limit; retry shortly")]
+    LeaderBusy { leader_addr: String },
+
+    /// The leader refused a forwarded write without proposing it, for a reason
+    /// a retry does not cure (undecodable, too large, older build).
+    #[error("the leader at {leader_addr} refused the forwarded write: {reason}")]
+    ForwardRejected { leader_addr: String, reason: String },
+
+    /// A forwarded write committed, but this node had not applied it within
+    /// its bound, so answering success would break read-your-writes on this
+    /// node. The write is durable and becomes visible here once this node's
+    /// state machine catches up.
+    #[error(
+        "the write committed at log index {log_index} but this node did not apply it within \
+         {timeout_ms} ms; it becomes visible here once replication catches up"
+    )]
+    NotAppliedLocally { log_index: u64, timeout_ms: u64 },
+
+    /// A write too large to replicate: its Raft entry would not fit a peer
+    /// message. Refused before it is proposed, so nothing was written.
+    #[error(
+        "the write is about {size} bytes as a Raft entry, above the {limit}-byte limit for one \
+         replicated write; split it"
+    )]
+    CommandTooLarge { size: usize, limit: usize },
+
     /// Raft or runtime error.
     #[error("raft: {0}")]
     Raft(String),
 }
+
+/// Refuses a command whose Raft entry could not fit a peer message.
+fn check_command_size(cmd: &RaftCommand) -> Result<(), ClusterError> {
+    let size = cmd.wire_size_estimate();
+    if size > MAX_COMMAND_BYTES {
+        return Err(ClusterError::CommandTooLarge {
+            size,
+            limit: MAX_COMMAND_BYTES,
+        });
+    }
+    Ok(())
+}
+
+/// Why this node's own `client_write` did not produce a committed entry.
+enum LocalProposal {
+    /// Refused **without** entering the log: this node is not the leader.
+    /// Carries the leader it knows of, if any.
+    NotLeader(Option<u64>),
+    /// Any other failure, including a timeout whose outcome is unknown.
+    Failed(ClusterError),
+}
+
+/// What one forwarded attempt produced.
+enum ForwardAttempt {
+    /// Committed and applied on the leader at `log_index`.
+    Committed {
+        log_index: u64,
+        response: HearthLogResponse,
+    },
+    /// Not proposed anywhere; may be sent to another leader. Carries the
+    /// leader the refusing node named, if any.
+    Retryable(Option<u64>),
+    /// A final answer: rejected, or an unknown outcome.
+    Failed(ClusterError),
+}
+
+/// Follower-to-leader write forwarding state. Absent in single-node mode.
+struct Forwarding {
+    client: LeaderForwarder,
+    /// Bounds the forwarded writes this node serves at once as a leader.
+    permits: tokio::sync::Semaphore,
+}
+
+/// Forwarded writes a leader serves concurrently. One more is refused at
+/// once (not queued), so a burst cannot pin unbounded memory on the leader.
+pub const MAX_CONCURRENT_FORWARDED_WRITES: usize = 256;
+
+/// Extra time a follower gives a forwarded write beyond
+/// `cluster.write_timeout_ms`, so the leader's own commit-timeout answer
+/// arrives in-band instead of racing the follower's deadline.
+const FORWARD_GRACE: Duration = Duration::from_secs(2);
+
+/// How many times one write may be routed (proposed locally or forwarded)
+/// before it gives up. At most two of those are forwards: the first, and one
+/// retry on a new leader when the first provably did not propose it.
+const MAX_ROUTING_ROUNDS: usize = 4;
 
 /// Error produced when building a [`ClusterEngine`].
 #[non_exhaustive]
@@ -113,6 +225,9 @@ pub struct ClusterEngine {
     /// 2026-08-28 §4.16#5). `None` in single-node mode — there is no state
     /// machine, and the node's own API handlers keep projections coherent.
     observer_slot: Option<Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>>>,
+    /// Follower write forwarding (client and leader-side limit). `None` in
+    /// single-node mode, which never forwards anything.
+    forwarding: Option<Forwarding>,
 }
 
 impl ClusterEngine {
@@ -139,6 +254,7 @@ impl ClusterEngine {
             self_node_id: None,
             initial_members: None,
             observer_slot: None,
+            forwarding: None,
         }
     }
 
@@ -237,12 +353,19 @@ impl ClusterEngine {
             Some(f) => network_factory.with_peer_faults(f),
             None => network_factory,
         };
+        let forwarding = Forwarding {
+            client: network_factory.leader_forwarder(),
+            permits: tokio::sync::Semaphore::new(MAX_CONCURRENT_FORWARDED_WRITES),
+        };
 
         let raft_config = Arc::new(
             RaftConfig {
                 heartbeat_interval: 500,
                 election_timeout_min: 1500,
                 election_timeout_max: 3000,
+                // Chunks well under the peer message limit (see
+                // `cluster::wire`); openraft's default is 3 MiB.
+                snapshot_max_chunk_size: SNAPSHOT_CHUNK_BYTES,
                 ..RaftConfig::default()
             }
             .validate()
@@ -310,6 +433,7 @@ impl ClusterEngine {
             self_node_id: Some(config.node_id),
             initial_members: Some(initial_members),
             observer_slot: Some(observer_slot),
+            forwarding: Some(forwarding),
         })
     }
 
@@ -437,12 +561,14 @@ impl ClusterEngine {
         self.self_node_id
     }
 
-    /// Whether a replicated write proposed on this node right now would be
-    /// accepted.
+    /// Whether this node would propose a replicated write itself right now,
+    /// i.e. whether it is the Raft leader.
     ///
-    /// Always `true` in single-node mode. In cluster mode only the current
-    /// Raft leader accepts one — every other node, and every node before an
-    /// election has completed, answers [`ClusterError::NotLeader`]. Advisory
+    /// Always `true` in single-node mode. In cluster mode a follower's writes
+    /// are forwarded to the leader and succeed there, so this is no longer
+    /// "would a write succeed": it answers "does this node lead". Start-up
+    /// uses it to run the cold-data-directory write set on exactly one node
+    /// (see `EmbeddedIdentityEngine::await_cold_start_window`). Advisory
     /// only: leadership can move between this call and the write.
     pub fn accepts_writes(&self) -> bool {
         let Some(raft) = self.raft.as_ref() else {
@@ -574,6 +700,53 @@ impl ClusterEngine {
         })
     }
 
+    /// Builds a snapshot of everything this node has applied, then purges
+    /// its Raft log up to that snapshot, and returns the snapshot's last log
+    /// index.
+    ///
+    /// openraft does both on its own schedule (a snapshot every 5,000 applied
+    /// entries, then a purge that keeps 1,000); this runs them now. A follower
+    /// whose next entry was purged catches up by snapshot. Each wait is
+    /// bounded by `cluster.write_timeout_ms`; openraft may delay a purge while
+    /// a replication task still reads the logs, so the purge wait can expire
+    /// (reported as an error) while the purge still happens later.
+    ///
+    /// # Errors
+    ///
+    /// Single-node mode, a stopped Raft core, or a bound expiring.
+    pub async fn compact_log(&self) -> Result<u64, ClusterError> {
+        let raft = self.raft.as_ref().ok_or_else(|| {
+            ClusterError::Raft("compact_log called on a single-node engine".to_string())
+        })?;
+        let applied = raft.metrics().borrow().last_applied.map_or(0, |l| l.index);
+        raft.trigger()
+            .snapshot()
+            .await
+            .map_err(|e| ClusterError::Raft(e.to_string()))?;
+        let upto = raft
+            .wait(Some(self.write_timeout))
+            .metrics(
+                |m| m.snapshot.is_some_and(|s| s.index >= applied),
+                "a snapshot of every applied entry",
+            )
+            .await
+            .map_err(|e| ClusterError::Raft(e.to_string()))?
+            .snapshot
+            .map_or(applied, |s| s.index);
+        raft.trigger()
+            .purge_log(upto)
+            .await
+            .map_err(|e| ClusterError::Raft(e.to_string()))?;
+        raft.wait(Some(self.write_timeout))
+            .metrics(
+                |m| m.purged.is_some_and(|p| p.index >= upto),
+                "the log purged up to the snapshot",
+            )
+            .await
+            .map_err(|e| ClusterError::Raft(e.to_string()))?;
+        Ok(upto)
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     fn current_leader_addr(&self) -> String {
@@ -641,36 +814,115 @@ impl ClusterEngine {
     /// Used by conditional commands (e.g. `PutIfAbsent`) that need to inspect
     /// the `success` flag of the applied response.
     ///
+    /// ## Routing
+    ///
+    /// The command is first offered to this node's own Raft. On the leader
+    /// that is the whole story. On a follower openraft refuses it **before**
+    /// it enters the log (`ForwardToLeader`), and the command is forwarded to
+    /// the leader instead (the `ForwardWrite` peer RPC). A committed answer is
+    /// only returned once this node's own state machine has applied the
+    /// entry, so a caller that reads on this node right after a write sees it.
+    ///
+    /// ## Exactly once
+    ///
+    /// A forwarded command is retried — once, on a new leader — only when it
+    /// provably never entered any log: the connection to the leader could not
+    /// be opened, or the leader refused it as not-the-leader without
+    /// proposing. Once the request may have reached a leader that proposed it
+    /// (a lost connection, the leader's commit wait timing out, Raft stopping
+    /// under it) the outcome is unknown and is reported as
+    /// [`ClusterError::ForwardOutcomeUnknown`], never retried: a
+    /// `PutIfAbsent` retried after it committed answers `false` for the
+    /// caller's own write, and an `IncrementU64` counts twice.
+    ///
     /// ## Why this is bounded (task 26.58)
     ///
     /// `Raft::client_write` resolves when the entry commits, when the node
-    /// learns it is no longer the leader, or **never**. The third case is
-    /// real, not theoretical: it was observed on a three-node cluster whose
-    /// leader lost contact with both followers immediately after accepting a
-    /// write. The entry is appended to the leader's own log and it waits for a
-    /// quorum acknowledgement that cannot arrive, while the leader — which
-    /// still believes it leads, because openraft 0.9 does not step down on a
-    /// lost quorum — never produces a `ForwardToLeader` either. An
-    /// unbounded await on a distributed write is a liveness bug: every caller
-    /// above this is an HTTP handler holding a connection and, on the login
-    /// path, an advisory lock.
-    ///
-    /// The bound is `cluster.write_timeout_ms` (default 10 s) rather than a
-    /// constant so that a cluster which legitimately commits slowly can raise
-    /// it. A fixed bound would trade this liveness bug for an availability
-    /// bug on any deployment slower than the number chosen here.
-    ///
-    /// The timeout does **not** cancel the proposal — openraft may still
-    /// commit it afterwards — so the error says the outcome is unknown rather
-    /// than claiming the write failed.
+    /// learns it is no longer the leader, or **never** — a leader that lost
+    /// its quorum (openraft 0.9 does not step down on a lost quorum) waits
+    /// for acknowledgements that cannot arrive. Every caller above this is an
+    /// HTTP handler holding a connection and, on the login path, an advisory
+    /// lock, so every wait here is bounded: the local proposal by
+    /// `cluster.write_timeout_ms` (default 10 s), finding a leader and the
+    /// forwarded call together by that plus a 2 s grace, and the local apply
+    /// wait by `cluster.write_timeout_ms` again. A timeout does **not** cancel
+    /// a proposal — openraft may still commit it afterwards — so it is
+    /// reported as an unknown outcome, not a failure.
     async fn propose_with_response(
         &self,
         cmd: RaftCommand,
-    ) -> Result<crate::cluster::types::HearthLogResponse, ClusterError> {
+    ) -> Result<HearthLogResponse, ClusterError> {
         let raft = self.raft.as_ref().ok_or_else(|| {
             ClusterError::Raft("propose called on single-node engine".to_string())
         })?;
+        check_command_size(&cmd)?;
+        let deadline = tokio::time::Instant::now() + self.write_timeout + FORWARD_GRACE;
+        let mut forwards = 0_u8;
+        // The leader that last refused the command without proposing it, and
+        // the leader it named in its place.
+        let mut refused_by: Option<u64> = None;
+        let mut named: Option<u64> = None;
 
+        for _ in 0..MAX_ROUTING_ROUNDS {
+            let hint = match self.propose_local(raft, cmd.clone()).await {
+                Ok(resp) => return Ok(resp.data),
+                Err(LocalProposal::NotLeader(hint)) => hint,
+                Err(LocalProposal::Failed(e)) => return Err(e),
+            };
+            let Some(forwarding) = self.forwarding.as_ref() else {
+                return Err(ClusterError::NotLeader {
+                    leader_addr: self.current_leader_addr(),
+                });
+            };
+            let leader = match named.take().or(hint).filter(|l| Some(*l) != refused_by) {
+                Some(leader) => leader,
+                None => self.await_leader(raft, refused_by, deadline).await?,
+            };
+            if Some(leader) == self.self_node_id {
+                // This node has just been elected: propose it here.
+                continue;
+            }
+            let leader_addr = self.node_addr(leader);
+            forwards += 1;
+            match self
+                .forward_once(forwarding, leader, &leader_addr, &cmd, deadline)
+                .await
+            {
+                ForwardAttempt::Committed {
+                    log_index,
+                    response,
+                } => {
+                    let applied = self.await_applied(raft, log_index).await;
+                    crate::metrics::metrics().record_forwarded_write(if applied.is_ok() {
+                        ForwardedWriteOutcomeLabel::Committed
+                    } else {
+                        ForwardedWriteOutcomeLabel::NotAppliedLocally
+                    });
+                    applied?;
+                    return Ok(response);
+                }
+                ForwardAttempt::Retryable(next) if forwards < 2 => {
+                    refused_by = Some(leader);
+                    named = next;
+                }
+                ForwardAttempt::Retryable(_) => {
+                    return Err(ClusterError::NotLeader { leader_addr });
+                }
+                ForwardAttempt::Failed(e) => return Err(e),
+            }
+        }
+        Err(ClusterError::NotLeader {
+            leader_addr: self.current_leader_addr(),
+        })
+    }
+
+    /// Offers `cmd` to this node's own Raft, bounded by
+    /// `cluster.write_timeout_ms`.
+    async fn propose_local(
+        &self,
+        raft: &openraft::Raft<HearthRaftConfig>,
+        cmd: RaftCommand,
+    ) -> Result<ClientWriteResponse<HearthRaftConfig>, LocalProposal> {
         let Ok(outcome) = tokio::time::timeout(self.write_timeout, raft.client_write(cmd)).await
         else {
             let timeout_ms = u64::try_from(self.write_timeout.as_millis()).unwrap_or(u64::MAX);
@@ -680,22 +932,242 @@ impl ClusterEngine {
                 leader_addr = %leader_addr,
                 "replicated write did not reach quorum commit within the configured bound"
             );
-            return Err(ClusterError::WriteTimeout {
+            return Err(LocalProposal::Failed(ClusterError::WriteTimeout {
                 timeout_ms,
                 leader_addr,
-            });
+            }));
         };
-
-        outcome.map(|resp| resp.data).map_err(|e| match e {
+        outcome.map_err(|e| match e {
             RaftError::APIError(ClientWriteError::ForwardToLeader(fwd)) => {
-                let addr = fwd
-                    .leader_node
-                    .map(|n| n.addr)
-                    .unwrap_or_else(|| "unknown".to_string());
-                ClusterError::NotLeader { leader_addr: addr }
+                LocalProposal::NotLeader(fwd.leader_id)
             }
-            other => ClusterError::Raft(other.to_string()),
+            other => LocalProposal::Failed(ClusterError::Raft(other.to_string())),
         })
+    }
+
+    /// Waits (until `deadline`) for this node to learn of a leader other than
+    /// `exclude`, and returns it — possibly this node itself.
+    async fn await_leader(
+        &self,
+        raft: &openraft::Raft<HearthRaftConfig>,
+        exclude: Option<u64>,
+        deadline: tokio::time::Instant,
+    ) -> Result<u64, ClusterError> {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let found = raft
+            .wait(Some(remaining))
+            .metrics(
+                |m| m.current_leader.is_some_and(|l| Some(l) != exclude),
+                "a leader to forward a write to",
+            )
+            .await;
+        match found.ok().and_then(|m| m.current_leader) {
+            Some(leader) => Ok(leader),
+            None => Err(ClusterError::NotLeader {
+                leader_addr: self.current_leader_addr(),
+            }),
+        }
+    }
+
+    /// The peer address of `node` in the current membership.
+    fn node_addr(&self, node: u64) -> String {
+        let Some(raft) = &self.raft else {
+            return "unknown".to_string();
+        };
+        let metrics = raft.metrics().borrow().clone();
+        let addr = metrics
+            .membership_config
+            .nodes()
+            .find(|(id, _)| **id == node)
+            .map_or_else(|| "unknown".to_string(), |(_, n)| n.addr.clone());
+        addr
+    }
+
+    /// Sends `cmd` to `leader` once, classifies the answer, and counts every
+    /// outcome but a commit (counted once its local apply is known) in
+    /// `hearth_cluster_forwarded_writes_total`.
+    async fn forward_once(
+        &self,
+        forwarding: &Forwarding,
+        leader: u64,
+        leader_addr: &str,
+        cmd: &RaftCommand,
+        deadline: tokio::time::Instant,
+    ) -> ForwardAttempt {
+        let (attempt, label) = self
+            .forward_once_unrecorded(forwarding, leader, leader_addr, cmd, deadline)
+            .await;
+        if let Some(label) = label {
+            crate::metrics::metrics().record_forwarded_write(label);
+        }
+        attempt
+    }
+
+    async fn forward_once_unrecorded(
+        &self,
+        forwarding: &Forwarding,
+        leader: u64,
+        leader_addr: &str,
+        cmd: &RaftCommand,
+        deadline: tokio::time::Instant,
+    ) -> (ForwardAttempt, Option<ForwardedWriteOutcomeLabel>) {
+        use ForwardedWriteOutcomeLabel as L;
+        let payload = match wire::encode(cmd) {
+            Ok(p) => p,
+            Err(e) => {
+                return (
+                    ForwardAttempt::Failed(ClusterError::Raft(format!(
+                        "could not encode a write to forward: {e}"
+                    ))),
+                    Some(L::Rejected),
+                )
+            }
+        };
+        let timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let unknown = |reason: String| {
+            ForwardAttempt::Failed(ClusterError::ForwardOutcomeUnknown {
+                leader_addr: leader_addr.to_string(),
+                reason,
+            })
+        };
+        let answer = match forwarding
+            .client
+            .forward(leader, leader_addr, payload, timeout)
+            .await
+        {
+            Ok(answer) => answer,
+            Err(ForwardFailure::NotSent(e)) => {
+                warn!(leader, leader_addr, error = %e, "could not reach the leader to forward a write");
+                return (ForwardAttempt::Retryable(None), Some(L::Unreachable));
+            }
+            Err(ForwardFailure::Unsupported(e)) => {
+                return (
+                    ForwardAttempt::Failed(ClusterError::ForwardRejected {
+                        leader_addr: leader_addr.to_string(),
+                        reason: format!(
+                            "the leader runs a Hearth build without follower write forwarding \
+                             ({e}); mixed-version clusters are not supported"
+                        ),
+                    }),
+                    Some(L::Rejected),
+                );
+            }
+            Err(ForwardFailure::Unknown(e)) => {
+                warn!(
+                    leader,
+                    leader_addr,
+                    error = %e,
+                    "lost the leader's answer to a forwarded write; its outcome is unknown"
+                );
+                return (unknown(e.to_string()), Some(L::OutcomeUnknown));
+            }
+        };
+        match wire::decode::<ForwardedWriteOutcome>(&answer) {
+            // Counted by the caller once the local apply is known.
+            Ok(ForwardedWriteOutcome::Committed {
+                log_index,
+                response,
+            }) => (
+                ForwardAttempt::Committed {
+                    log_index,
+                    response,
+                },
+                None,
+            ),
+            Ok(ForwardedWriteOutcome::NotLeader { leader_id }) => {
+                (ForwardAttempt::Retryable(leader_id), Some(L::NotLeader))
+            }
+            Ok(ForwardedWriteOutcome::Busy) => (
+                ForwardAttempt::Failed(ClusterError::LeaderBusy {
+                    leader_addr: leader_addr.to_string(),
+                }),
+                Some(L::Busy),
+            ),
+            Ok(ForwardedWriteOutcome::Rejected { reason }) => (
+                ForwardAttempt::Failed(ClusterError::ForwardRejected {
+                    leader_addr: leader_addr.to_string(),
+                    reason,
+                }),
+                Some(L::Rejected),
+            ),
+            Ok(ForwardedWriteOutcome::Unknown { reason }) => {
+                (unknown(reason), Some(L::OutcomeUnknown))
+            }
+            Err(_) => (
+                unknown("the leader's answer could not be decoded".to_string()),
+                Some(L::OutcomeUnknown),
+            ),
+        }
+    }
+
+    /// Blocks until this node's state machine has applied `log_index`,
+    /// bounded by `cluster.write_timeout_ms`.
+    async fn await_applied(
+        &self,
+        raft: &openraft::Raft<HearthRaftConfig>,
+        log_index: u64,
+    ) -> Result<(), ClusterError> {
+        match raft
+            .wait(Some(self.write_timeout))
+            .applied_index_at_least(Some(log_index), "a forwarded write to apply locally")
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(WaitError::Timeout(..)) => Err(ClusterError::NotAppliedLocally {
+                log_index,
+                timeout_ms: u64::try_from(self.write_timeout.as_millis()).unwrap_or(u64::MAX),
+            }),
+            Err(WaitError::ShuttingDown) => Err(ClusterError::Raft(
+                "this node's Raft core stopped while a forwarded write was being applied"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// Serves a write a follower forwarded to this node: proposes it if this
+    /// node leads and says, in every other case, whether it can have entered
+    /// the log. Never forwards onward — a node that is not the leader answers
+    /// [`ForwardedWriteOutcome::NotLeader`], so a forward cannot loop.
+    async fn serve_forwarded_write(&self, payload: &[u8]) -> ForwardedWriteOutcome {
+        let (Some(raft), Some(forwarding)) = (self.raft.as_ref(), self.forwarding.as_ref()) else {
+            return ForwardedWriteOutcome::Rejected {
+                reason: "this node does not run in cluster mode".to_string(),
+            };
+        };
+        let Ok(_permit) = forwarding.permits.try_acquire() else {
+            return ForwardedWriteOutcome::Busy;
+        };
+        // The decode error is not echoed: serde quotes input fragments.
+        let Ok(cmd) = wire::decode::<RaftCommand>(payload) else {
+            return ForwardedWriteOutcome::Rejected {
+                reason: "the forwarded command could not be decoded (are all nodes on the same \
+                         Hearth build?)"
+                    .to_string(),
+            };
+        };
+        if let Err(e) = check_command_size(&cmd) {
+            return ForwardedWriteOutcome::Rejected {
+                reason: e.to_string(),
+            };
+        }
+        // A stopped Raft core cannot have proposed anything: refuse it as
+        // not-the-leader so the follower may try the next leader.
+        if raft.metrics().borrow().running_state.is_err() {
+            return ForwardedWriteOutcome::NotLeader { leader_id: None };
+        }
+        let cmd = cmd.restamped(Self::leader_timestamp_now());
+        match self.propose_local(raft, cmd).await {
+            Ok(resp) => ForwardedWriteOutcome::Committed {
+                log_index: resp.log_id.index,
+                response: resp.data,
+            },
+            Err(LocalProposal::NotLeader(leader_id)) => ForwardedWriteOutcome::NotLeader {
+                leader_id: leader_id.filter(|l| Some(*l) != self.self_node_id),
+            },
+            Err(LocalProposal::Failed(e)) => ForwardedWriteOutcome::Unknown {
+                reason: e.to_string(),
+            },
+        }
     }
 
     // ── Async storage API ─────────────────────────────────────────────────────
@@ -973,29 +1445,33 @@ impl ClusterEngine {
 impl IncomingRpcDispatch for ClusterEngine {
     async fn append_entries(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
         let raft = self.raft.as_ref().ok_or("Raft not initialised")?;
-        check_clock_skew(payload);
-        let req: AppendEntriesRequest<HearthRaftConfig> =
-            serde_json::from_slice(payload).map_err(|e| e.to_string())?;
+        let req: AppendEntriesRequest<HearthRaftConfig> = wire::decode(payload)?;
+        clock_skew_of(&req);
         let resp = raft.append_entries(req).await.map_err(|e| e.to_string())?;
-        serde_json::to_vec(&resp).map_err(|e| e.to_string())
+        wire::encode(&resp)
     }
 
     async fn vote(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
         let raft = self.raft.as_ref().ok_or("Raft not initialised")?;
-        let req: VoteRequest<u64> = serde_json::from_slice(payload).map_err(|e| e.to_string())?;
+        let req: VoteRequest<u64> = wire::decode(payload)?;
         let resp = raft.vote(req).await.map_err(|e| e.to_string())?;
-        serde_json::to_vec(&resp).map_err(|e| e.to_string())
+        wire::encode(&resp)
     }
 
     async fn install_snapshot(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
         let raft = self.raft.as_ref().ok_or("Raft not initialised")?;
         let req: InstallSnapshotRequest<HearthRaftConfig> =
-            serde_json::from_slice(payload).map_err(|e| e.to_string())?;
+            wire::decode::<wire::WireInstallSnapshot>(payload)?.into();
         let resp = raft
             .install_snapshot(req)
             .await
             .map_err(|e| e.to_string())?;
-        serde_json::to_vec(&resp).map_err(|e| e.to_string())
+        wire::encode(&resp)
+    }
+
+    async fn forward_write(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
+        let outcome = self.serve_forwarded_write(payload).await;
+        wire::encode(&outcome)
     }
 }
 
@@ -1085,17 +1561,24 @@ fn clock_skew_ms(leader_ts_micros: i64, now_micros: i64) -> u64 {
     (now_micros - leader_ts_micros).unsigned_abs() / 1_000
 }
 
-/// Inspect an `AppendEntries` payload for embedded leader timestamps and warn
+/// Decodes an `AppendEntries` payload and runs [`clock_skew_of`] on it;
+/// `None` when the payload does not decode.
+#[cfg(test)]
+fn check_clock_skew(payload: &[u8]) -> Option<u64> {
+    let req = wire::decode::<AppendEntriesRequest<HearthRaftConfig>>(payload).ok()?;
+    clock_skew_of(&req)
+}
+
+/// Inspect an `AppendEntries` request for embedded leader timestamps and warn
 /// if the clock skew between this node and the leader exceeds 1 second.
 ///
 /// Returns `Some(skew_ms)` for the first timestamped entry inspected, or `None`
-/// when the payload is unparseable or carries no usable leader timestamp — the
-/// return value exists so robustness tests can assert on the outcome rather than
-/// merely on the absence of a panic.
+/// when it carries no usable leader timestamp — the return value exists so
+/// robustness tests can assert on the outcome rather than merely on the
+/// absence of a panic.
 ///
 /// NTP synchronisation is a deployment prerequisite for cluster mode.
-fn check_clock_skew(payload: &[u8]) -> Option<u64> {
-    let req = serde_json::from_slice::<AppendEntriesRequest<HearthRaftConfig>>(payload).ok()?;
+fn clock_skew_of(req: &AppendEntriesRequest<HearthRaftConfig>) -> Option<u64> {
     for entry in &req.entries {
         let leader_ts = match &entry.payload {
             EntryPayload::Normal(cmd) => match cmd {
@@ -1164,11 +1647,9 @@ fn check_clock_skew(payload: &[u8]) -> Option<u64> {
 /// bypass replication, and would expose the split-commit barrier deadlock
 /// (GA audit 3 F-1) in `serve`.
 ///
-/// [`ClusterError::NotLeader`] and [`ClusterError::ReplicationLagExceeded`]
-/// are surfaced as [`StorageError::Io`] with a descriptive message so
-/// callers can detect redirect-eligible errors by inspecting the message.
-/// A future revision may add a dedicated `StorageError::ClusterRedirect`
-/// variant to enable structured HTTP 307 responses.
+/// Every [`ClusterError`] is surfaced as [`StorageError::Io`] with a
+/// descriptive message (see [`cluster_to_storage_err`]); [`is_not_leader`]
+/// recognises the one that means no leader could be reached.
 pub struct ClusterStorageAdapter {
     engine: Arc<ClusterEngine>,
 }
@@ -1204,10 +1685,10 @@ impl ClusterStorageAdapter {
 /// once per term it leads, however quickly the metrics change around it.
 ///
 /// A control's durable row and its control-epoch bump are two Raft proposals.
-/// When leadership moves between them the bump is lost, and cluster storage
-/// has no follower-to-leader forwarding, so the old leader can never make it
-/// up; the observer bumps the epoch on the new leader instead (see the
-/// identity engine's control plane). Exits when the Raft instance shuts down.
+/// When leadership moves between them the bump can be lost — including while
+/// no leader is elected, when there is nowhere to forward it — so the
+/// observer bumps the epoch on the new leader too (see the identity engine's
+/// control plane). Exits when the Raft instance shuts down.
 async fn watch_leadership(
     raft: openraft::Raft<HearthRaftConfig>,
     observer: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>>,
@@ -1234,42 +1715,51 @@ async fn watch_leadership(
     }
 }
 
-/// How a [`ClusterError::NotLeader`] reads once carried as a
-/// [`crate::storage::StorageError::Io`] (see [`cluster_to_storage_err`]).
-const NOT_LEADER_PREFIX: &str = "raft: not the leader";
-
-/// Whether a storage error is cluster storage refusing a write because this
-/// node is not the Raft leader.
+/// Whether a storage error is cluster storage refusing a write because no
+/// Raft leader could be reached.
 ///
-/// Cluster storage does not forward a follower's write to the leader, so such
-/// a write can never succeed on this node until it leads again — a caller
+/// A follower forwards its writes to the leader, so this is returned only
+/// when there was none to forward to within the write bound (no leader
+/// elected, or the known one unreachable and no other elected) — a caller
 /// retrying one is waiting on an election, not on a transient fault.
 pub fn is_not_leader(err: &crate::storage::StorageError) -> bool {
-    matches!(err, crate::storage::StorageError::Io(e) if e.to_string().starts_with(NOT_LEADER_PREFIX))
+    matches!(
+        err,
+        crate::storage::StorageError::ClusterUnavailable {
+            cause: crate::storage::ClusterUnavailableCause::NoLeader,
+            ..
+        }
+    )
 }
 
 /// Maps a [`ClusterError`] onto the [`crate::storage::StorageError`] the
 /// [`StorageEngine`] facade returns.
+///
+/// The transient ones keep their meaning in structured variants the protocol
+/// layer answers as `503` / `UNAVAILABLE`:
+/// [`StorageError::ClusterUnavailable`](crate::storage::StorageError::ClusterUnavailable)
+/// when nothing was written, and
+/// [`StorageError::ClusterWriteOutcomeUnknown`](crate::storage::StorageError::ClusterWriteOutcomeUnknown)
+/// when the write may have been applied.
 pub(crate) fn cluster_to_storage_err(e: ClusterError) -> crate::storage::StorageError {
-    use crate::storage::StorageError;
+    use crate::storage::{ClusterUnavailableCause as Cause, StorageError};
+    let unavailable = |cause, e: &ClusterError| StorageError::ClusterUnavailable {
+        cause,
+        reason: format!("raft: {e}"),
+    };
     match e {
         ClusterError::Storage(se) => se,
-        ClusterError::NotLeader { leader_addr } => StorageError::Io(std::io::Error::other(
-            format!("{NOT_LEADER_PREFIX}; redirect to {leader_addr}"),
-        )),
-        ClusterError::ReplicationLagExceeded { leader_addr } => {
-            StorageError::Io(std::io::Error::other(format!(
-                "raft: replication lag exceeded; redirect to {leader_addr}"
-            )))
+        ClusterError::NotLeader { .. } => unavailable(Cause::NoLeader, &e),
+        ClusterError::LeaderBusy { .. } => unavailable(Cause::LeaderBusy, &e),
+        ClusterError::ReplicationLagExceeded { .. } => unavailable(Cause::ReplicationLag, &e),
+        ClusterError::WriteTimeout { .. }
+        | ClusterError::ForwardOutcomeUnknown { .. }
+        | ClusterError::NotAppliedLocally { .. } => StorageError::ClusterWriteOutcomeUnknown {
+            reason: format!("raft: {e}"),
+        },
+        e @ (ClusterError::CommandTooLarge { .. } | ClusterError::ForwardRejected { .. }) => {
+            StorageError::Io(std::io::Error::other(format!("raft: {e}")))
         }
-        ClusterError::WriteTimeout {
-            timeout_ms,
-            leader_addr,
-        } => StorageError::Io(std::io::Error::other(format!(
-            "raft: replicated write did not reach quorum commit within {timeout_ms} ms and its \
-             outcome is unknown; leadership or quorum was most likely lost mid-write (last known \
-             leader: {leader_addr})"
-        ))),
         ClusterError::Raft(msg) => StorageError::Io(std::io::Error::other(format!("raft: {msg}"))),
     }
 }
@@ -1860,7 +2350,7 @@ mod tests {
     fn check_clock_skew_returns_none_on_unparseable_payload() {
         // Malformed / empty payloads must be rejected by the parser and yield
         // None (no entry inspected) rather than panicking or reporting a skew.
-        assert_eq!(check_clock_skew(b"not json"), None);
+        assert_eq!(check_clock_skew(b"not cbor"), None);
         assert_eq!(check_clock_skew(b"{}"), None);
         assert_eq!(check_clock_skew(b""), None);
     }

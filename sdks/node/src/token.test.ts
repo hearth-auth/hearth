@@ -2,7 +2,21 @@ import { describe, it, expect } from "vitest";
 import { VerifiedToken } from "./token.js";
 import type { JWTPayload } from "jose";
 
-function makeToken(overrides: Partial<JWTPayload & { scope?: string; scopes?: string[]; roles?: string[]; permissions?: string[]; groups?: string[]; oid?: string; org_groups?: string[]; token_type?: string; jti?: string }> = {}): VerifiedToken {
+function makeToken(
+  overrides: Partial<
+    JWTPayload & {
+      scope?: string;
+      scopes?: string[];
+      roles?: string[];
+      permissions?: string[];
+      groups?: string[];
+      oid?: string;
+      org_groups?: string[];
+      token_type?: string;
+      jti?: string;
+    }
+  > = {},
+): VerifiedToken {
   const payload: JWTPayload = {
     sub: "user123",
     iss: "https://auth.example.com",
@@ -18,12 +32,18 @@ function makeToken(overrides: Partial<JWTPayload & { scope?: string; scopes?: st
 describe("VerifiedToken claims accessors", () => {
   it("subject() returns sub", () => expect(makeToken().subject()).toBe("user123"));
   it("issuer() returns iss", () => expect(makeToken().issuer()).toBe("https://auth.example.com"));
-  it("audiences() returns normalized array", () => expect(makeToken().audiences()).toEqual(["api.example.com", "admin.example.com"]));
-  it("audiences() returns [] when absent", () => expect(makeToken({ aud: undefined }).audiences()).toEqual([]));
-  it("audiences() wraps single string in array", () => expect(makeToken({ aud: "only.one" }).audiences()).toEqual(["only.one"]));
-  it("issuedAt() returns Date", () => expect(makeToken().issuedAt()).toEqual(new Date(1_700_000_000_000)));
-  it("expiry() returns Date", () => expect(makeToken().expiry()).toEqual(new Date(1_700_003_600_000)));
-  it("notBefore() returns Date", () => expect(makeToken().notBefore()).toEqual(new Date(1_700_000_000_000)));
+  it("audiences() returns normalized array", () =>
+    expect(makeToken().audiences()).toEqual(["api.example.com", "admin.example.com"]));
+  it("audiences() returns [] when absent", () =>
+    expect(makeToken({ aud: undefined }).audiences()).toEqual([]));
+  it("audiences() wraps single string in array", () =>
+    expect(makeToken({ aud: "only.one" }).audiences()).toEqual(["only.one"]));
+  it("issuedAt() returns Date", () =>
+    expect(makeToken().issuedAt()).toEqual(new Date(1_700_000_000_000)));
+  it("expiry() returns Date", () =>
+    expect(makeToken().expiry()).toEqual(new Date(1_700_003_600_000)));
+  it("notBefore() returns Date", () =>
+    expect(makeToken().notBefore()).toEqual(new Date(1_700_000_000_000)));
   it("issuedAt/expiry/notBefore return null when absent", () => {
     const t = makeToken({ iat: undefined, exp: undefined, nbf: undefined });
     expect(t.issuedAt()).toBeNull();
@@ -140,7 +160,9 @@ describe("VerifiedToken Hearth custom claims", () => {
   });
 
   it("orgGroups() returns org_groups claim array", () => {
-    const t = makeToken({ org_groups: ["/acme/engineers", "/acme/admins"] } as unknown as JWTPayload);
+    const t = makeToken({
+      org_groups: ["/acme/engineers", "/acme/admins"],
+    } as unknown as JWTPayload);
     expect(t.orgGroups()).toEqual(["/acme/engineers", "/acme/admins"]);
   });
   it("orgGroups() returns empty array when absent", () => {
