@@ -360,12 +360,9 @@ impl OAuthService for OAuthSvc {
             .identity
             .register_client(&auth.realm_id, &body)
             .map_err(identity_to_status)?;
-        let mut record = pb::OAuthClient::from(&client);
-        record.client_secret = body
-            .generated_client_secret
-            .as_ref()
-            .map(|g| g.expose().to_string());
-        Ok(Response::new(record))
+        Ok(Response::new(
+            crate::protocol::client_admin::created_client_record(&client, &body),
+        ))
     }
 
     async fn decide(

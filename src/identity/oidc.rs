@@ -291,11 +291,13 @@ impl RegisterClientRequest {
     /// in its create response. `private_key_jwt` requires [`Self::jwks`].
     /// `none` registers a public client. `None` leaves the request as it is.
     ///
+    /// A caller-chosen [`Self::client_secret`] is refused whatever the method:
+    /// the administrative create paths (REST and gRPC) never accept one.
+    ///
     /// # Errors
     /// [`crate::identity::IdentityError::InvalidInput`] for an unknown method,
-    /// a caller-chosen [`Self::client_secret`] next to any method (Hearth
-    /// generates secrets; `none` and `private_key_jwt` carry none), or
-    /// `private_key_jwt` without `jwks`.
+    /// a caller-chosen [`Self::client_secret`], or `private_key_jwt` without
+    /// `jwks`.
     pub fn apply_token_endpoint_auth_method(
         &mut self,
         method: Option<&str>,
@@ -305,6 +307,12 @@ impl RegisterClientRequest {
                 reason: reason.to_string(),
             })
         };
+        if self.client_secret.is_some() {
+            return refuse(
+                "client_secret must not be supplied: Hearth generates the secret of a \
+                 client_secret_basic or client_secret_post client and returns it once",
+            );
+        }
         let Some(method) = method else {
             return Ok(());
         };
@@ -315,12 +323,6 @@ impl RegisterClientRequest {
             return refuse(
                 "token_endpoint_auth_method must be client_secret_basic, client_secret_post, \
                  private_key_jwt or none",
-            );
-        }
-        if self.client_secret.is_some() {
-            return refuse(
-                "client_secret must not be supplied: Hearth generates the secret of a \
-                 client_secret_basic or client_secret_post client and returns it once",
             );
         }
         match method {

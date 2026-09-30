@@ -335,3 +335,205 @@ async fn grpc_admin_create_returns_a_generated_secret_once() {
         .expect_err("unknown method");
     assert_eq!(err.code(), Code::InvalidArgument);
 }
+
+// ── Round 2: caller-chosen secrets on gRPC, regeneration, FAPI Advanced ─────
+
+/// gRPC refuses a caller-chosen secret exactly as REST does (it used to
+/// store it), with or without a method.
+#[tokio::test]
+async fn grpc_admin_create_refuses_a_caller_chosen_secret() {
+    let fx = fixture().await;
+    let oauth = OAuthSvc::new(fx.grpc());
+    let apps = AppAdminSvc::new(fx.grpc());
+    let with_secret = |method: Option<&str>| {
+        let mut r = grpc_request(&fx.realm, &fx.token, "none");
+        r.get_mut().token_endpoint_auth_method = method.map(str::to_string);
+        r.get_mut().client_secret = Some("operator-chosen-secret-123!".to_string());
+        r
+    };
+    for method in [None, Some("client_secret_basic"), Some("none")] {
+        let err = oauth
+            .register_client(with_secret(method))
+            .await
+            .expect_err("RegisterClient with a caller-chosen secret");
+        assert_eq!(err.code(), Code::InvalidArgument, "{method:?}: {err:?}");
+        let err = apps
+            .create_application(with_secret(method))
+            .await
+            .expect_err("CreateApplication with a caller-chosen secret");
+        assert_eq!(err.code(), Code::InvalidArgument, "{method:?}: {err:?}");
+    }
+}
+
+impl Fx {
+    async fn regenerate(&self, id: &str) -> (StatusCode, serde_json::Value) {
+        self.send(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/admin/applications/{id}/regenerate-secret"))
+                .header("X-Realm-ID", self.realm.as_uuid().to_string())
+                .header("Authorization", format!("Bearer {}", self.token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    fn regeneration_events(&self, id: &str) -> usize {
+        let mut q = hearth::audit::AuditQuery::for_realm(self.realm.clone());
+        q.action = Some(hearth::audit::AuditAction::ClientUpdated);
+        self.h
+            .audit()
+            .query(&q)
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                e.resource_id == id
+                    && e.metadata.as_ref().and_then(|m| m.get("change"))
+                        == Some(&serde_json::json!("client_secret_regenerated"))
+                    && !e.actor.is_empty()
+            })
+            .count()
+    }
+}
+
+/// `POST /admin/applications/{id}/regenerate-secret` returns a new secret
+/// once; the old one stops working at once; the change is audited with the
+/// acting admin.
+#[tokio::test]
+async fn rest_regenerate_secret_replaces_it_at_once() {
+    let fx = fixture().await;
+    let (_, created) = fx
+        .create(
+            "/admin/applications",
+            confidential_body("client_secret_basic"),
+        )
+        .await;
+    let id = created["client_id"].as_str().unwrap().to_string();
+    let old = created["client_secret"].as_str().unwrap().to_string();
+
+    let (status, body) = fx.regenerate(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let new = body["client_secret"]
+        .as_str()
+        .expect("new secret")
+        .to_string();
+    assert_eq!(new.len(), 43);
+    assert_ne!(new, old);
+    assert_eq!(body["client_id"], id.as_str());
+
+    assert_eq!(
+        fx.client_credentials(&id, &old, true).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(fx.client_credentials(&id, &new, true).await, StatusCode::OK);
+    assert_eq!(fx.regeneration_events(&id), 1, "one audited regeneration");
+
+    // A public client has no secret to regenerate; an unknown one is 404.
+    let mut public = confidential_body("none");
+    public["grant_types"] = serde_json::json!(["authorization_code"]);
+    let (_, public) = fx.create("/admin/applications", public).await;
+    let (status, body) = fx.regenerate(public["client_id"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.get("client_secret").is_none());
+    let (status, _) = fx.regenerate(&uuid::Uuid::new_v4().to_string()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// gRPC `RegenerateApplicationSecret` does the same.
+#[tokio::test]
+async fn grpc_regenerate_secret_replaces_it_at_once() {
+    let fx = fixture().await;
+    let apps = AppAdminSvc::new(fx.grpc());
+    let created = apps
+        .create_application(grpc_request(&fx.realm, &fx.token, "client_secret_basic"))
+        .await
+        .unwrap()
+        .into_inner();
+    let old = created.client_secret.unwrap();
+
+    let mut req = TonicRequest::new(id_pb::RegenerateApplicationSecretRequest {
+        client_id: created.client_id.clone(),
+    });
+    req.metadata_mut().insert(
+        "x-realm-id",
+        fx.realm.as_uuid().to_string().parse().unwrap(),
+    );
+    req.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", fx.token).parse().unwrap(),
+    );
+    let new = apps
+        .regenerate_application_secret(req)
+        .await
+        .expect("RegenerateApplicationSecret")
+        .into_inner()
+        .client_secret
+        .expect("new secret");
+    assert_ne!(new, old);
+    assert_eq!(
+        fx.client_credentials(&created.client_id, &old, true).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        fx.client_credentials(&created.client_id, &new, true).await,
+        StatusCode::OK
+    );
+    assert_eq!(fx.regeneration_events(&created.client_id), 1);
+}
+
+/// A FAPI 2.0 Advanced realm accepts `private_key_jwt` only, so creating a
+/// secret-based client there is refused up front, on REST and gRPC, as is
+/// regenerating the secret of a client that predates the profile.
+#[tokio::test]
+async fn fapi_advanced_realm_refuses_secret_clients_at_creation() {
+    let fx = fixture().await;
+    // A secret client created before the realm turns Advanced.
+    let (_, before) = fx
+        .create(
+            "/admin/applications",
+            confidential_body("client_secret_basic"),
+        )
+        .await;
+    let before_id = before["client_id"].as_str().unwrap().to_string();
+
+    let mut config =
+        fx.h.identity()
+            .get_realm(&fx.realm)
+            .unwrap()
+            .unwrap()
+            .config()
+            .clone();
+    config.fapi_profile = Some(hearth::identity::FapiProfile::Advanced);
+    fx.h.identity()
+        .update_realm(
+            &fx.realm,
+            &hearth::identity::UpdateRealmRequest {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    for route in ROUTES {
+        for method in ["client_secret_basic", "client_secret_post"] {
+            let (status, body) = fx.create(route, confidential_body(method)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{route} {method}: {body}");
+            assert!(
+                body.to_string().contains("private_key_jwt"),
+                "{route} {method}: the error names the required method: {body}"
+            );
+            assert!(body.get("client_id").is_none(), "{route} {method}: {body}");
+        }
+    }
+    let err = AppAdminSvc::new(fx.grpc())
+        .create_application(grpc_request(&fx.realm, &fx.token, "client_secret_basic"))
+        .await
+        .expect_err("gRPC secret client in an Advanced realm");
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("private_key_jwt"), "{err:?}");
+
+    let (status, body) = fx.regenerate(&before_id).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.get("client_secret").is_none(), "{body}");
+}

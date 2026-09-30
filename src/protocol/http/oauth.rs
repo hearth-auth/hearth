@@ -1687,19 +1687,33 @@ pub(super) fn admin_registration_request(
     Ok(request)
 }
 
-/// The admin create response for `client`: the client record, plus — for a
-/// confidential client whose secret Hearth generated from `request` — that
-/// secret, the one time it is ever returned. Only its hash is stored.
+/// The admin create response for `client` as REST JSON
+/// ([`crate::protocol::client_admin::created_client_record`]).
 pub(super) fn admin_created_client_json(
     client: &crate::identity::OAuthClient,
     request: &crate::identity::RegisterClientRequest,
 ) -> serde_json::Value {
-    let mut record = pb::OAuthClient::from(client);
-    record.client_secret = request
-        .generated_client_secret
-        .as_ref()
-        .map(|g| g.expose().to_string());
-    proto_to_rest_json(&record)
+    proto_to_rest_json(&crate::protocol::client_admin::created_client_record(
+        client, request,
+    ))
+}
+
+/// The response for an identity error on an admin client route. A FAPI
+/// refusal names the rule (e.g. that an Advanced realm takes
+/// `private_key_jwt` only) in `error_description`; the rest map as usual.
+pub(super) fn admin_client_error(err: &crate::identity::IdentityError) -> Response {
+    match err {
+        crate::identity::IdentityError::FapiViolation { reason } => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_request",
+                "error_description": reason,
+                "error_code": crate::protocol::error_codes::for_identity_error(err),
+            })),
+        )
+            .into_response(),
+        e => identity_error_to_response(e).into_response(),
+    }
 }
 
 /// How a dynamically registered client authenticates at the token endpoint
@@ -1844,7 +1858,7 @@ async fn register_client(
             )
                 .into_response()
         }
-        Err(e) => identity_error_to_response(&e).into_response(),
+        Err(e) => admin_client_error(&e),
     }
 }
 

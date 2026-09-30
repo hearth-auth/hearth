@@ -186,6 +186,12 @@ impl EmbeddedIdentityEngine {
             }
             validation::validate_redirect_uri(uri)?;
         }
+        // A FAPI 2.0 Advanced realm accepts private_key_jwt only, and the
+        // token endpoint refuses every secret there: a secret-based client
+        // could never authenticate. Refused before the secret is hashed.
+        if request.client_secret.is_some() || request.generated_client_secret.is_some() {
+            self.refuse_secret_client_in_fapi_advanced_realm(realm_id)?;
+        }
 
         let client_id = ClientId::generate();
         let now = self.clock.now();
@@ -4026,6 +4032,30 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
+    /// Refuses to create a secret-based client — or to mint a new secret for
+    /// one — in a FAPI 2.0 Advanced realm, where the token endpoint accepts
+    /// `private_key_jwt` only ([`Self::refuse_secrets_in_fapi_advanced_realm`]).
+    ///
+    /// # Errors
+    /// [`IdentityError::FapiViolation`] naming the required method.
+    fn refuse_secret_client_in_fapi_advanced_realm(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<(), IdentityError> {
+        if self
+            .refuse_secrets_in_fapi_advanced_realm(realm_id)
+            .is_err()
+        {
+            return Err(IdentityError::FapiViolation {
+                reason: "this realm uses the FAPI 2.0 Advanced profile: clients authenticate \
+                         with private_key_jwt only, so a client secret could never \
+                         authenticate; register the client's public keys in jwks instead"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Refuses a FAPI 2.0 client that authenticated with a secret (it may hold
     /// none — registration refuses one — but a secret set by any other route
     /// must not authenticate it). Called only AFTER the secret verified, so
@@ -4747,6 +4777,7 @@ impl EmbeddedIdentityEngine {
                 reason: "cannot regenerate secret for a public client".to_string(),
             });
         }
+        self.refuse_secret_client_in_fapi_advanced_realm(realm_id)?;
 
         // A fresh 256-bit CSPRNG secret, stored in the fast format — rotation
         // is also how a client with a legacy Argon2id hash moves onto it.

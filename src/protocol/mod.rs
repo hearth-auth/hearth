@@ -5,6 +5,7 @@
 
 pub mod admin_auth;
 pub(crate) mod audit_log;
+pub(crate) mod client_admin;
 pub(crate) mod client_info;
 pub(crate) mod cluster_admin;
 pub mod convert;

@@ -93,6 +93,10 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
                 .patch(admin_update_client)
                 .delete(admin_delete_client),
         )
+        .route(
+            "/applications/{id}/regenerate-secret",
+            post(admin_regenerate_client_secret),
+        )
         .route("/users/{id}/consents", get(admin_list_user_consents))
         .route(
             "/users/{id}/consents/{client_id}",
@@ -2574,7 +2578,46 @@ async fn admin_register_client(
             )
                 .into_response()
         }
-        Err(e) => identity_error_to_response(&e).into_response(),
+        Err(e) => super::oauth::admin_client_error(&e),
+    }
+}
+
+/// Admin: regenerate a confidential client's secret
+/// (`POST /admin/applications/{id}/regenerate-secret`).
+///
+/// Answers `200` with the client record and the new `client_secret`, the
+/// only time it is returned; the old secret stops authenticating at once.
+/// Audited with the acting admin. `400` for a public or FAPI 2.0 client or in
+/// a FAPI 2.0 Advanced realm, `404` for an unknown client.
+async fn admin_regenerate_client_secret(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.clients.admin") {
+        return e.into_response();
+    }
+    let Ok(client_uuid) = id.parse::<uuid::Uuid>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid client ID"})),
+        )
+            .into_response();
+    };
+    match crate::protocol::client_admin::regenerate_client_secret(
+        state.identity.as_ref(),
+        state.audit.as_ref(),
+        &auth.realm_id,
+        &auth.user_id,
+        &ClientId::new(client_uuid),
+        "admin_api",
+    ) {
+        Ok(record) => (StatusCode::OK, Json(proto_to_rest_json(&record))).into_response(),
+        Err(e) => super::oauth::admin_client_error(&e),
     }
 }
 

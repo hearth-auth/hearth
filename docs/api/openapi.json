@@ -94,8 +94,8 @@
           }
         },
         "responses": {
-          "200": {
-            "description": "A successful response.",
+          "201": {
+            "description": "Created. For a client_secret_basic or client_secret_post client the body carries the generated client_secret, the only time it is returned.",
             "content": {
               "application/json": {
                 "schema": {
@@ -216,6 +216,45 @@
         "responses": {
           "200": {
             "description": "A successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1OAuthClient"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/rpcStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/applications/{clientId}/regenerate-secret": {
+      "post": {
+        "operationId": "ApplicationAdminService_RegenerateApplicationSecret",
+        "summary": "Replaces a confidential client's secret with a new Hearth-generated one (256 bits from the OS CSPRNG, stored only as a hash). The new secret is returned once, in the response's client_secret; the old one stops authenticating at once. Refused for a public client, a FAPI 2.0 client and in a FAPI 2.0 Advanced realm (private_key_jwt only). Audited.",
+        "tags": [
+          "ApplicationAdminService"
+        ],
+        "parameters": [
+          {
+            "name": "clientId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The client record with the new client_secret.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2532,8 +2571,8 @@
           }
         },
         "responses": {
-          "200": {
-            "description": "A successful response.",
+          "201": {
+            "description": "Created. For a client_secret_basic or client_secret_post client the body carries the generated client_secret, the only time it is returned.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2942,8 +2981,8 @@
           }
         },
         "responses": {
-          "200": {
-            "description": "A successful response.",
+          "201": {
+            "description": "Created. For a client_secret_basic or client_secret_post client the body carries the generated client_secret, the only time it is returned.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4344,7 +4383,7 @@
           },
           "client_secret": {
             "type": "string",
-            "description": "The generated client secret. Present only in the response that created a client_secret_basic or client_secret_post client, and never returned again: store it on receipt. Hearth keeps only its hash; rotate it from the admin console."
+            "description": "The generated client secret. Present only in the response that created a client_secret_basic or client_secret_post client, or that regenerated its secret, and never returned again: store it on receipt. Hearth keeps only its hash."
           }
         },
         "description": "A registered OAuth 2.0 client."
@@ -4486,7 +4525,7 @@
           },
           "clientSecret": {
             "type": "string",
-            "description": "gRPC only: a caller-chosen secret, stored as an Argon2id hash. The REST admin paths (POST /admin/applications, POST /clients) refuse it with 422: request a generated secret with token_endpoint_auth_method instead."
+            "description": "Refused (422 on REST, INVALID_ARGUMENT on gRPC): Hearth generates client secrets. Request one with token_endpoint_auth_method."
           },
           "grantTypes": {
             "type": "array",
@@ -4505,7 +4544,7 @@
               "private_key_jwt",
               "none"
             ],
-            "description": "How the client authenticates at the token endpoint (RFC 7591 \u00a72). client_secret_basic or client_secret_post creates a confidential client: Hearth generates its secret (256 bits from the OS CSPRNG), stores only a hash, and returns the secret exactly once, as client_secret in this create response. private_key_jwt requires jwks. Omitted or none registers a public client (a private_key_jwt client when jwks is given)."
+            "description": "How the client authenticates at the token endpoint (RFC 7591 \u00a72). client_secret_basic or client_secret_post creates a confidential client: Hearth generates its secret (256 bits from the OS CSPRNG), stores only a hash, and returns the secret exactly once, as client_secret in this create response. private_key_jwt requires jwks. Omitted or none registers a public client (a private_key_jwt client when jwks is given). A client_secret_* method is refused in a FAPI 2.0 Advanced realm, which accepts private_key_jwt only."
           }
         },
         "description": "Request to register a new OAuth 2.0 client."
