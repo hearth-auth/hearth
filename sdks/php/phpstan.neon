@@ -3,5 +3,4 @@ parameters:
     paths:
         - src
     phpVersion: 80100
-    checkMissingIterableValueType: false
     treatPhpDocTypesAsCertain: false

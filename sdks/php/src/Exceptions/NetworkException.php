@@ -14,7 +14,7 @@ use Throwable;
  */
 class NetworkException extends HearthException
 {
-    /** @param non-empty-string $url The URL that could not be reached */
+    /** @param string $url The URL that could not be reached */
     public function __construct(
         private readonly string $url,
         string $message = '',

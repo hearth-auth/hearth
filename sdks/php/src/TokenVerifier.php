@@ -178,6 +178,16 @@ final class TokenVerifier implements TokenVerifierInterface
             throw new TokenInvalidException('Malformed JWT: could not base64url-decode signature');
         }
 
+        // libsodium throws SodiumException (not a HearthException) on a wrong
+        // length, which HearthMiddleware would not catch: reject it here.
+        if (strlen($signature) !== SODIUM_CRYPTO_SIGN_BYTES) {
+            throw new TokenInvalidException('Malformed JWT: Ed25519 signature must be 64 bytes');
+        }
+
+        if (strlen($publicKeyBytes) !== SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES) {
+            throw new TokenInvalidException('Signing key is not a 32-byte Ed25519 public key');
+        }
+
         if (!sodium_crypto_sign_verify_detached($signature, $message, $publicKeyBytes)) {
             throw new TokenInvalidException('JWT signature verification failed');
         }
