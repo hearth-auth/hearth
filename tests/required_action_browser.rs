@@ -1322,3 +1322,132 @@ async fn a_passkey_realm_that_does_not_offer_passkeys_says_so() {
     );
     assert!(auto_cleared_events(&rig).is_empty());
 }
+
+// ── ENROLL_EMAIL_OTP after a magic link (GA sweep 4 round 2) ────────────────
+
+/// The `mfa_proof` of the browser session the jar now holds.
+fn jar_session_proof(rig: &Rig, browser: &Browser) -> hearth::identity::MfaProof {
+    let cookie = browser
+        .cookie("hearth_ui_session")
+        .expect("a session cookie");
+    let session_id = cookie.split('.').next().expect("session id");
+    rig.identity
+        .get_session(
+            &rig.realm_id,
+            &hearth::core::SessionId::new(session_id.parse().expect("uuid")),
+        )
+        .expect("lookup")
+        .expect("session")
+        .mfa_proof()
+}
+
+/// An active user with `actions` pending and no session.
+fn user_with_actions(rig: &Rig, email: &str, actions: Vec<RequiredAction>) {
+    let (_unused_browser, user) =
+        signed_in_browser_with(rig, email, actions, hearth::identity::MfaProof::None);
+    rig.identity
+        .revoke_all_user_sessions(&rig.realm_id, &user, None)
+        .expect("sign the setup session out");
+}
+
+/// Completes the pending `ENROLL_EMAIL_OTP` page the browser was sent to.
+async fn enrol_email_otp(rig: &Rig, browser: &mut Browser, page: &str) -> axum::response::Response {
+    assert_eq!(page, "/required-action/ENROLL_EMAIL_OTP");
+    let html = open(browser, page).await;
+    let resp = submit(
+        browser,
+        &html,
+        "/required-action/ENROLL_EMAIL_OTP/send",
+        &[],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "the send step");
+    let html = body_text(resp).await;
+    let code = six_digit_code(&rig.outbox.last_mail());
+    submit(
+        browser,
+        &html,
+        "/required-action/ENROLL_EMAIL_OTP/verify",
+        &[("code", &code)],
+    )
+    .await
+}
+
+/// A magic link proves the inbox. Enrolling email OTP in the required-action
+/// detour that follows proves the same inbox again: one factor, not two —
+/// the rule a magic-link login already applies to an email-OTP second factor
+/// (D-4). The enrolment used to raise the session to `Proved`.
+///
+/// Once enrolled, email OTP is a factor the account holds and a magic-link
+/// login cannot prove it — exactly where a magic-link login of a user who
+/// already holds email OTP stands — so the flow ends without a session.
+#[tokio::test]
+async fn an_email_otp_enrolled_after_a_magic_link_is_not_a_second_factor() {
+    let rig = build_rig(&["email_otp"]);
+    let email = "jar-magic-emailotp@example.com";
+    user_with_actions(&rig, email, vec![RequiredAction::EnrollEmailOtp]);
+    let minted = rig
+        .identity
+        .request_magic_link(&rig.realm_id, email)
+        .expect("mint magic link");
+
+    let mut browser = Browser::new(rig.app.clone());
+    let redeem = format!("/ui/realms/{}/magic-link", rig.realm_name);
+    browser.accept_set_cookie(
+        &format!("hearth_link_token={}; Path=/ui", minted.token()),
+        &redeem,
+    );
+    let binding =
+        web::link_token::link_binding(&CookieSecret::from_bytes(COOKIE_SECRET), minted.token());
+    browser.accept_set_cookie("hearth_ui_csrf=magic-csrf; Path=/ui", &redeem);
+    let resp = browser
+        .post_form(
+            &redeem,
+            &[
+                ("link_binding".to_string(), binding),
+                ("_csrf".to_string(), "magic-csrf".to_string()),
+            ],
+        )
+        .await;
+    let page = location(&resp).expect("the link redirects");
+    let resp = enrol_email_otp(&rig, &mut browser, &page).await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a magic link plus an email OTP from the same inbox is one factor: no session"
+    );
+    assert!(
+        !browser.has_cookie("hearth_ui_session"),
+        "no session was opened on the strength of the same inbox twice"
+    );
+}
+
+/// The control: after a password login the same enrolment is a second
+/// factor, as it always was.
+#[tokio::test]
+async fn an_email_otp_enrolled_after_a_password_login_is_a_second_factor() {
+    let rig = build_rig(&["email_otp"]);
+    let email = "jar-password-emailotp@example.com";
+    user_with_actions(&rig, email, vec![RequiredAction::EnrollEmailOtp]);
+
+    let mut browser = Browser::new(rig.app.clone());
+    let login = format!("/ui/realms/{}/login", rig.realm_name);
+    let html = open(&mut browser, &login).await;
+    let mut fields = hidden_fields(&html, &login);
+    fields.push(("email".to_string(), email.to_string()));
+    fields.push(("password".to_string(), PASSWORD.to_string()));
+    let resp = browser.post_form(&login, &fields).await;
+    let page = location(&resp).expect("the login redirects");
+    let resp = enrol_email_otp(&rig, &mut browser, &page).await;
+    assert_eq!(
+        location(&resp).as_deref(),
+        Some("/ui"),
+        "the flow ends in a session"
+    );
+
+    assert_eq!(
+        jar_session_proof(&rig, &browser),
+        hearth::identity::MfaProof::Proved
+    );
+}

@@ -127,6 +127,14 @@ pub struct RaClaims {
     /// and carries its proof in [`OidcParams::mfa_proof`].
     #[serde(default)]
     pub mfa_proof: MfaProof,
+    /// The authentication that started this flow was a magic link: it proved
+    /// the user's inbox. Enrolling email OTP in the flow proves the same inbox
+    /// again — one factor, not two — so it does not raise
+    /// [`RaClaims::mfa_proof`] (GA sweep 4 round 2; the rule a magic-link
+    /// login applies to an email-OTP second factor, GA audit round 3 D-4).
+    /// `false` for a token minted before this field existed.
+    #[serde(default)]
+    pub inbox_first_factor: bool,
     /// Identifier of the required-action flow this token belongs to, kept by
     /// every token the flow re-mints. The flow's end claims it once, so the
     /// flow ends — in a session or an authorization code — at most once
@@ -206,6 +214,7 @@ pub fn generate(
         oidc_params: Some(oidc_params),
         browser_return_to: None,
         mfa_proof: MfaProof::None,
+        inbox_first_factor: false,
         flow,
         generation,
         iat,
@@ -221,7 +230,8 @@ pub fn generate(
 /// session cookie and redirecting to `return_to` (or `/ui` when `None`).
 /// `mfa_proof` is what the authentication that started the flow proved; the
 /// session created at the end records it (see [`RaClaims::mfa_proof`]).
-/// `flow` and `generation` are [`RaClaims::flow`] and
+/// `inbox_first_factor`, `flow` and `generation` are
+/// [`RaClaims::inbox_first_factor`], [`RaClaims::flow`] and
 /// [`RaClaims::generation`].
 #[allow(clippy::too_many_arguments)]
 pub fn generate_browser(
@@ -230,6 +240,7 @@ pub fn generate_browser(
     pending_actions: Vec<RequiredAction>,
     return_to: Option<String>,
     mfa_proof: MfaProof,
+    inbox_first_factor: bool,
     flow: String,
     generation: u64,
     signing_key: &SigningKey,
@@ -245,6 +256,7 @@ pub fn generate_browser(
         oidc_params: None,
         browser_return_to: return_to,
         mfa_proof,
+        inbox_first_factor,
         flow,
         generation,
         iat,
@@ -275,6 +287,16 @@ impl RaClaims {
     pub fn record_enrolled_factor(&mut self) {
         if self.mfa_proof == MfaProof::None {
             self.mfa_proof = MfaProof::Proved;
+        }
+    }
+
+    /// Records that this flow enrolled email OTP and the user proved it by
+    /// typing back a code sent to the inbox: [`Self::record_enrolled_factor`],
+    /// except after a magic link ([`RaClaims::inbox_first_factor`]), which
+    /// proved the same inbox — one factor, not two (GA sweep 4 round 2).
+    pub fn record_enrolled_email_otp(&mut self) {
+        if !self.inbox_first_factor {
+            self.record_enrolled_factor();
         }
     }
 }
@@ -595,6 +617,7 @@ mod tests {
             vec![RequiredAction::UpdatePassword],
             None,
             proof,
+            false,
             "flow-1".to_string(),
             0,
             &key,
@@ -635,5 +658,23 @@ mod tests {
         let mut claims = browser_claims(MfaProof::Proved);
         claims.record_verified_passkey();
         assert_eq!(claims.mfa_proof, MfaProof::ProvedWebAuthn);
+    }
+
+    #[test]
+    fn an_email_otp_enrolled_after_a_magic_link_does_not_raise_the_proof() {
+        let mut after_link = browser_claims(MfaProof::None);
+        after_link.inbox_first_factor = true;
+        after_link.record_enrolled_email_otp();
+        assert_eq!(after_link.mfa_proof, MfaProof::None, "the same inbox twice");
+
+        let mut after_password = browser_claims(MfaProof::None);
+        after_password.record_enrolled_email_otp();
+        assert_eq!(after_password.mfa_proof, MfaProof::Proved);
+
+        // TOTP or SMS enrolled after a magic link is a different factor.
+        let mut totp_after_link = browser_claims(MfaProof::None);
+        totp_after_link.inbox_first_factor = true;
+        totp_after_link.record_enrolled_factor();
+        assert_eq!(totp_after_link.mfa_proof, MfaProof::Proved);
     }
 }

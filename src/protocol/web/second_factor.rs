@@ -511,6 +511,7 @@ pub async fn mfa_passkey_challenge_complete(
         user.id(),
         pending.return_to.as_deref(),
         &session_ctx,
+        pending.first_factor,
         &headers,
         now,
     ) {
