@@ -1648,6 +1648,7 @@ mod tests {
                     name: "My App".into(),
                     redirect_uris: vec!["https://app.example.com/cb".into()],
                     trust_level: None,
+                    token_endpoint_auth_method: None,
                 },
                 "admin-token-xyz",
             )

@@ -466,6 +466,7 @@ async fn step_up_grant_enforces_pending_required_actions() {
                 scope: None,
                 client_ip: None,
                 user_agent: None,
+                dpop_jkt: None,
             },
         )
         .expect_err("pending actions must block the grant");

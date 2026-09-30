@@ -562,7 +562,9 @@ impl BackupExporter {
         // a token revoked before the backup validates again after a restore
         // (audit GA 2026-09-28 M3). Expired JTIs are omitted. Each user's
         // required-action generation travels here too: a restore that reset it
-        // to 0 revived RA tokens a revocation had ended (GA sweep 4).
+        // to 0 revived RA tokens a revocation had ended (GA sweep 4) — and so
+        // do the spent markers of flows that already ended, which could
+        // otherwise end again (GA sweep 4 round 2).
         let revocations = self
             .identity
             .export_revocations(realm_id)

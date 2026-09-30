@@ -276,15 +276,28 @@ curl -s -X POST http://127.0.0.1:8420/admin/applications \
 ```
 
 Store the secret when you receive it: no later read (`GET /admin/applications/{id}`, the list, the
-console) returns it. To replace a lost or leaked secret, regenerate it from the admin console
-(**Applications → the client → Regenerate secret**); the old one stops working at once.
+console) returns it. To replace a lost or leaked secret, regenerate it:
+
+```bash
+curl -s -X POST "http://127.0.0.1:8420/admin/applications/$CLIENT_ID/regenerate-secret" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "X-Realm-ID: $REALM_ID"
+# → 200 {"client_id":"…","client_secret":"<new, 43 characters>", …}
+```
+
+The new secret is returned once and the old one stops authenticating at once. The change is
+audited (`client_updated`, metadata `change: client_secret_regenerated`, with the acting admin).
+gRPC: `ApplicationAdminService.RegenerateApplicationSecret`; console: **Applications → the client →
+Regenerate secret**. A public client answers `400`, an unknown one `404`.
 
 - `private_key_jwt` requires the client's public keys in `jwks`; `none` (or omitting the field)
   registers a public client, or a `private_key_jwt` client when `jwks` is given.
-- The REST routes refuse a caller-chosen `client_secret` with `422` — they used to drop it
-  silently and register a **public** client. gRPC still accepts a caller-chosen `client_secret`
-  (stored as an Argon2id hash) when `token_endpoint_auth_method` is omitted.
+- A caller-chosen `client_secret` is refused: `422` on REST, `INVALID_ARGUMENT` on gRPC. The REST
+  routes used to drop it silently and register a **public** client; gRPC used to store it.
 - Any other `token_endpoint_auth_method` value is a `422` (gRPC: `INVALID_ARGUMENT`).
+- A realm with `fapi_profile: advanced` accepts `private_key_jwt` only, so creating a
+  `client_secret_*` client there — or regenerating a secret — is refused with `400
+  invalid_request` naming `private_key_jwt` (gRPC: `INVALID_ARGUMENT`), rather than creating a
+  client the token endpoint would never authenticate.
 
 ### gRPC (`OAuthService.register_client`)
 
