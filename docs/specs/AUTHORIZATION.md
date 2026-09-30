@@ -758,7 +758,7 @@ The reverse direction is covered too: a sub-admin MUST NOT demote, modify or sig
 - organization member removal (SCIM `PUT`/`PATCH /Groups`) and organization deletion (gRPC `DeleteOrganization`, SCIM `DELETE /Groups`) — every affected member;
 - role update or deletion (`PATCH`/`DELETE /admin/roles/{id}`, gRPC `UpdateRole`/`DeleteRole`) that removes an admin permission from the role's transitive set, including a rename (extra org roles are stored by name) — every holder of the role or of a role inheriting from it, directly, through a group, or as an extra org role.
 
-A multi-user check visits at most 10 000 users and 50 000 permission resolutions and fails closed (`503` / `UNAVAILABLE`) past that. `hearth.admin` bypasses it. The console admits only `hearth.admin`; `hearth.yaml` reconciliation is operator-authoritative and exempt.
+A multi-user check resolves only the affected users who are among the realm's admin holders (every user reachable from a role whose transitive permissions include an admin-grade one — by direct or group assignment at any scope, or as an extra org role — plus every direct grantee of one); other users hold no admin permission and pass without resolution. It fails closed (`503` / `UNAVAILABLE`) past 100 000 affected users, 10 000 admin holders or 50 000 permission resolutions. `hearth.admin` bypasses it. The console admits only `hearth.admin`; `hearth.yaml` reconciliation is operator-authoritative and exempt.
 
 ### 8.3 Error envelope
 

@@ -178,12 +178,50 @@ fn audit(
     );
 }
 
-/// The user ids `desired` names (entries that are not UUIDs are ignored).
-fn desired_member_ids(desired: &[ScimMember]) -> std::collections::HashSet<UserId> {
+/// The user ids `desired` names. A value that is not a user id is refused
+/// (`400 invalidValue`) rather than ignored: ignoring it would turn a
+/// malformed member into a removal.
+fn desired_member_ids(
+    desired: &[ScimMember],
+) -> Result<std::collections::HashSet<UserId>, ScimError> {
     desired
         .iter()
-        .filter_map(|m| uuid::Uuid::parse_str(&m.value).ok().map(UserId::new))
+        .map(|m| {
+            uuid::Uuid::parse_str(&m.value)
+                .map(UserId::new)
+                .map_err(|_| {
+                    ScimError::bad_request(
+                        "invalidValue",
+                        "a member value is not a user id; nothing was changed",
+                    )
+                })
+        })
         .collect()
+}
+
+/// Refuses (`400 invalidValue`) a member that is not a user of the realm, so
+/// a membership change can be refused before anything is written.
+fn check_members_exist<'u>(
+    state: &AppState,
+    realm_id: &RealmId,
+    ids: impl IntoIterator<Item = &'u UserId>,
+) -> Result<(), ScimError> {
+    for id in ids {
+        match state.identity.get_user(realm_id, id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(ScimError::bad_request(
+                    "invalidValue",
+                    format!(
+                        "member {} is not a user of this realm; nothing was changed",
+                        id.as_uuid()
+                    ),
+                ))
+            }
+            Err(e) => return Err(from_identity_error(&e)),
+        }
+    }
+    Ok(())
 }
 
 /// The current members a reconciliation to `desired` removes. Owners and
@@ -219,22 +257,12 @@ fn check_member_change(
         .iter()
         .map(crate::identity::OrganizationMembership::user_id)
         .collect();
-    let desired_ids = desired_member_ids(desired);
-    for id in desired_ids.iter().filter(|id| !current_ids.contains(id)) {
-        match state.identity.get_user(&auth.realm_id, id) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                return Err(ScimError::bad_request(
-                    "invalidValue",
-                    format!(
-                        "member {} is not a user of this realm; nothing was changed",
-                        id.as_uuid()
-                    ),
-                ))
-            }
-            Err(e) => return Err(from_identity_error(&e)),
-        }
-    }
+    let desired_ids = desired_member_ids(desired)?;
+    check_members_exist(
+        state,
+        &auth.realm_id,
+        desired_ids.iter().filter(|id| !current_ids.contains(id)),
+    )?;
     let removed = stale_members(&current, &desired_ids);
     check_users_admin_ceiling(
         state.identity.as_ref(),
@@ -264,7 +292,7 @@ fn reconcile_members(
     let current = all_members(state, &auth.realm_id, org_id)?;
     let current_ids: std::collections::HashSet<UserId> =
         current.iter().map(|m| m.user_id().clone()).collect();
-    let desired_ids = desired_member_ids(desired);
+    let desired_ids = desired_member_ids(desired)?;
     let to_add: Vec<UserId> = desired_ids.difference(&current_ids).cloned().collect();
     let to_remove = stale_members(&current, &desired_ids);
     apply_membership_diff(
@@ -384,6 +412,14 @@ pub async fn create_group(
         {
             return ScimError::uniqueness("externalId already provisioned").into_response();
         }
+    }
+
+    // Every member is checked before the organization is created, so an
+    // unknown or malformed member leaves nothing half-created.
+    let validated = desired_member_ids(&body.members)
+        .and_then(|ids| check_members_exist(&state, &auth.realm_id, &ids));
+    if let Err(e) = validated {
+        return e.into_response();
     }
 
     let mut slug = slugify(&body.display_name);
