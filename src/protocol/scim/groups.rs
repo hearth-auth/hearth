@@ -22,7 +22,7 @@ use crate::identity::{
     CreateOrganizationRequest, Organization, OrganizationRole, UpdateOrganizationRequest,
 };
 use crate::protocol::http::AppState;
-use crate::protocol::scim::auth::{authenticate, ScimAuth};
+use crate::protocol::scim::auth::{authenticate, ScimAuth, ScimResource};
 use crate::protocol::scim::error::{from_identity_error, ScimError};
 use crate::protocol::scim::etag::{check_if_match, resource_response};
 use crate::protocol::scim::filter::{self, FilterExpr};
@@ -35,6 +35,22 @@ use crate::protocol::scim::types::{
 /// micros, matching the `meta.version` emitted in the resource body.
 fn group_version(org: &Organization) -> String {
     format!("W/\"{}\"", org.updated_at().as_micros())
+}
+
+/// Refuses (`403`) a provisioning-token write to an organization SCIM did not
+/// create. The realm's SCIM token may replace, patch or delete only the
+/// organizations it provisioned ([`Organization::scim_provisioned`]);
+/// organizations an operator created through the admin API, the console or
+/// `hearth.yaml` are read-only to it. Admin-token callers are unaffected
+/// (GA audit round 3).
+fn provisioning_token_may_write(auth: &ScimAuth, org: &Organization) -> Result<(), Response> {
+    if auth.provisioning_token && !org.scim_provisioned() {
+        return Err(ScimError::forbidden(
+            "the SCIM provisioning token may modify only organizations SCIM created",
+        )
+        .into_response());
+    }
+    Ok(())
 }
 
 fn iso8601(micros: i64) -> String {
@@ -194,7 +210,7 @@ pub async fn create_group(
     headers: HeaderMap,
     Json(body): Json<ScimGroup>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -230,7 +246,12 @@ pub async fn create_group(
         config: None,
         attributes: std::collections::BTreeMap::new(),
     };
-    let org = match state.identity.create_organization(&auth.realm_id, &req) {
+    // SCIM-created organizations carry the durable "provisioned by SCIM"
+    // marker: the only ones a provisioning token may later modify or delete.
+    let org = match state
+        .identity
+        .create_scim_organization(&auth.realm_id, &req)
+    {
         Ok(o) => o,
         Err(e) => return from_identity_error(&e).into_response(),
     };
@@ -283,7 +304,7 @@ pub async fn get_group(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -324,7 +345,7 @@ pub async fn list_groups(
     headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -390,7 +411,7 @@ pub async fn replace_group(
     Path(id): Path<String>,
     Json(body): Json<ScimGroup>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -409,6 +430,9 @@ pub async fn replace_group(
     // (HEA-2172).
     if let Err(e) = check_if_match(&headers, &group_version(&existing)) {
         return e.into_response();
+    }
+    if let Err(resp) = provisioning_token_may_write(&auth, &existing) {
+        return resp;
     }
 
     let req = UpdateOrganizationRequest {
@@ -478,7 +502,7 @@ pub async fn patch_group(
     Path(id): Path<String>,
     Json(body): Json<PatchRequest>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -505,6 +529,9 @@ pub async fn patch_group(
     // (HEA-2172).
     if let Err(e) = check_if_match(&headers, &group_version(&existing)) {
         return e.into_response();
+    }
+    if let Err(resp) = provisioning_token_may_write(&auth, &existing) {
+        return resp;
     }
 
     let current_ext = state
@@ -592,7 +619,7 @@ pub async fn delete_group(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -601,14 +628,18 @@ pub async fn delete_group(
     };
     let org_id = OrganizationId::new(uuid);
 
-    // Optimistic concurrency: when the caller supplies `If-Match`, reject a
-    // stale validator before deleting (HEA-2172). Only pay the extra read
-    // when the header is present.
-    if headers.contains_key(axum::http::header::IF_MATCH) {
+    // The provisioning token needs the organization's SCIM marker, and a
+    // caller's `If-Match` needs its version: read it when either applies.
+    if auth.provisioning_token || headers.contains_key(axum::http::header::IF_MATCH) {
         match state.identity.get_organization(&auth.realm_id, &org_id) {
             Ok(Some(org)) => {
+                // Optimistic concurrency: reject a stale validator before
+                // deleting (HEA-2172).
                 if let Err(e) = check_if_match(&headers, &group_version(&org)) {
                     return e.into_response();
+                }
+                if let Err(resp) = provisioning_token_may_write(&auth, &org) {
+                    return resp;
                 }
             }
             Ok(None) => return ScimError::not_found("group not found").into_response(),

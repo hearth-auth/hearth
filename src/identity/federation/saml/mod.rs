@@ -66,7 +66,9 @@ pub use response::{
     BearerConfirmation, ResponseBuilder, SamlResponse,
 };
 pub use signature::{
-    sign_element, validate_signing_cert_pem, verify_signed_element, SignedElement,
+    sign_element, split_pem_certificates, validate_idp_certificate_bundle,
+    validate_signing_cert_pem, verify_signed_element, verify_signed_element_with_any,
+    SignedElement,
 };
 pub use sp::{SamlSpOutcome, SamlSpService};
 pub use types::{

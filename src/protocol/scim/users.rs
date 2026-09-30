@@ -13,8 +13,9 @@ use crate::abuse::{MAX_SCIM_OPERATIONS, SCIM_MAX_SCAN_LIMIT};
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{RealmId, UserId};
 use crate::identity::{CreateUserRequest, UpdateUserRequest, User, UserStatus};
+use crate::protocol::admin_auth::{check_user_admin_ceiling, UserCeilingError};
 use crate::protocol::http::AppState;
-use crate::protocol::scim::auth::authenticate;
+use crate::protocol::scim::auth::{authenticate, ScimAuth, ScimResource};
 use crate::protocol::scim::error::{from_identity_error, ScimError};
 use crate::protocol::scim::etag::{check_if_match, resource_response};
 use crate::protocol::scim::filter::{self, FilterExpr};
@@ -22,7 +23,6 @@ use crate::protocol::scim::patch_apply::apply_user_patch;
 use crate::protocol::scim::types::{
     ListResponse, Meta, PatchRequest, ScimEmail, ScimName, ScimUser, USER_SCHEMA,
 };
-use crate::rbac::Permission;
 
 /// Converts a stored `User` to a SCIM wire resource. `base_path` is the
 /// absolute request path prefix up to `/scim/v2/Users`.
@@ -146,52 +146,48 @@ fn audit(
     );
 }
 
-/// Refuses (`403`, with `refusal` as the detail) when the target user holds
-/// admin-level permissions (`hearth.admin` or `hearth.users.admin`).
+/// The privilege ceiling on user administration, applied to SCIM: refuses
+/// (`403`, with `refusal` as the detail) when the target user holds an admin
+/// permission the caller lacks
+/// ([`crate::protocol::admin_auth::check_user_admin_ceiling`], the rule REST
+/// `/admin/users*` and gRPC `UpdateUser` / `DeleteUser` call too).
 ///
-/// SCIM provisioning tokens are narrowed-scope service accounts and must not
-/// be able to modify or delete principals that hold admin authority, as that
-/// would enable realm takeover via a compromised integration token.
+/// Runs on both credential paths:
+///
+/// - The provisioning token acts with no permissions, so it may not modify or
+///   delete any principal holding an admin permission — a compromised
+///   integration token must not reach realm takeover. (This guard used to
+///   carry its own two-entry list, which left realm, clients and agents
+///   sub-admins exposed: GA audit round 3, G-6.)
+/// - The admin-JWT fallback acts with its token's permissions, so a
+///   `hearth.users.admin` sub-admin may not rewrite a superuser's email and
+///   reset the password.
 ///
 /// Fails CLOSED on an RBAC read error (GA audit L13): the error is a `503`
-/// the caller returns instead of mutating. It used to answer "not an admin",
-/// which let a provisioning token delete or modify an admin principal
-/// whenever the RBAC read failed. A user with no assignments (or an unseeded
-/// realm) resolves to an empty set, not an error, so provisioning of ordinary
-/// users is unaffected.
+/// the caller returns instead of mutating. A user with no assignments (or an
+/// unseeded realm) resolves to an empty set, not an error, so provisioning of
+/// ordinary users is unaffected.
 fn admin_principal_guard(
     state: &AppState,
-    realm_id: &RealmId,
+    auth: &ScimAuth,
     user_id: &UserId,
     refusal: &str,
 ) -> Result<(), Response> {
-    const PROTECTED: &[&str] = &["hearth.admin", "hearth.users.admin"];
-    match state
-        .rbac
-        .resolve_permissions(user_id, realm_id, None, None)
-    {
-        Ok(resolved)
-            if resolved
-                .permissions
-                .iter()
-                .any(|p: &Permission| PROTECTED.contains(&p.as_str())) =>
-        {
-            Err(ScimError::forbidden(refusal.to_string()).into_response())
-        }
-        Ok(_) => Ok(()),
-        Err(e) => {
-            tracing::warn!(
-                realm_id = %realm_id,
-                error = %e,
-                "SCIM admin-principal check could not resolve permissions; refusing"
-            );
-            Err(ScimError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "could not determine whether the target is an admin principal; retry later",
-            )
-            .into_response())
-        }
-    }
+    check_user_admin_ceiling(
+        state.identity.as_ref(),
+        state.rbac.as_ref(),
+        &auth.realm_id,
+        user_id,
+        &auth.actor_permissions,
+    )
+    .map_err(|e| match e {
+        UserCeilingError::Exceeded => ScimError::forbidden(refusal.to_string()).into_response(),
+        UserCeilingError::Unresolved => ScimError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "could not determine whether the target is an admin principal; retry later",
+        )
+        .into_response(),
+    })
 }
 
 // ================== Handlers ==================
@@ -202,7 +198,7 @@ pub async fn create_user(
     headers: HeaderMap,
     Json(body): Json<ScimUser>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -312,7 +308,7 @@ pub async fn get_user(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -359,7 +355,7 @@ pub async fn list_users(
     headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -430,7 +426,7 @@ pub async fn replace_user(
     Path(id): Path<String>,
     Json(body): Json<ScimUser>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -454,16 +450,15 @@ pub async fn replace_user(
         return e.into_response();
     }
 
-    // SCIM provisioning tokens may not replace admin principals (HEA-2032).
-    if auth.is_scim_token {
-        if let Err(resp) = admin_principal_guard(
-            &state,
-            &auth.realm_id,
-            &user_id,
-            "SCIM provisioning token may not replace an admin principal",
-        ) {
-            return resp;
-        }
+    // Privilege ceiling: neither a provisioning token nor a sub-admin may
+    // replace a principal that outranks it (HEA-2032, GA audit round 3).
+    if let Err(resp) = admin_principal_guard(
+        &state,
+        &auth,
+        &user_id,
+        "the caller may not replace a principal holding admin permissions it lacks",
+    ) {
+        return resp;
     }
 
     let (first_name, last_name) = match require_name(&body) {
@@ -544,7 +539,7 @@ pub async fn patch_user(
     Path(id): Path<String>,
     Json(body): Json<PatchRequest>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -573,16 +568,15 @@ pub async fn patch_user(
         return e.into_response();
     }
 
-    // SCIM provisioning tokens may not patch admin principals (HEA-2032).
-    if auth.is_scim_token {
-        if let Err(resp) = admin_principal_guard(
-            &state,
-            &auth.realm_id,
-            &user_id,
-            "SCIM provisioning token may not patch an admin principal",
-        ) {
-            return resp;
-        }
+    // Privilege ceiling: neither a provisioning token nor a sub-admin may
+    // patch a principal that outranks it (HEA-2032, GA audit round 3).
+    if let Err(resp) = admin_principal_guard(
+        &state,
+        &auth,
+        &user_id,
+        "the caller may not patch a principal holding admin permissions it lacks",
+    ) {
+        return resp;
     }
 
     let current_ext = state
@@ -702,7 +696,7 @@ pub async fn delete_user(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let auth = match authenticate(&headers, &state) {
+    let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -726,16 +720,15 @@ pub async fn delete_user(
         }
     }
 
-    // SCIM provisioning tokens may not delete admin principals (HEA-2032).
-    if auth.is_scim_token {
-        if let Err(resp) = admin_principal_guard(
-            &state,
-            &auth.realm_id,
-            &user_id,
-            "SCIM provisioning token may not delete an admin principal",
-        ) {
-            return resp;
-        }
+    // Privilege ceiling: neither a provisioning token nor a sub-admin may
+    // delete a principal that outranks it (HEA-2032, GA audit round 3).
+    if let Err(resp) = admin_principal_guard(
+        &state,
+        &auth,
+        &user_id,
+        "the caller may not delete a principal holding admin permissions it lacks",
+    ) {
+        return resp;
     }
 
     match state.identity.delete_user(&auth.realm_id, &user_id) {

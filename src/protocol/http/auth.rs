@@ -102,19 +102,13 @@ pub(crate) fn extract_admin_auth(
 
     // Check admin role via the token's `permissions` claim (§ 5.2).
     // Accepts hearth.admin (full superuser) or any granular sub-permission
-    // (hearth.users.admin, hearth.clients.admin, hearth.realm.admin). Sub-admins
-    // pass this outer gate but are still checked per-handler via
-    // require_admin_permission(). hearth.admin bypasses all per-handler checks.
-    let is_admin = claims.permissions.iter().any(|p| {
-        matches!(
-            p.as_str(),
-            "hearth.admin"
-                | "hearth.users.admin"
-                | "hearth.clients.admin"
-                | "hearth.realm.admin"
-                | "hearth.agents.admin"
-        )
-    });
+    // (`ADMIN_PERMISSIONS`). Sub-admins pass this outer gate but are still
+    // checked per-handler via require_admin_permission(). hearth.admin
+    // bypasses all per-handler checks.
+    let is_admin = claims
+        .permissions
+        .iter()
+        .any(|p| crate::protocol::admin_auth::is_admin_permission(p));
     // A token held by a third-party client never administers the realm, even
     // when a claim profile releases admin permissions to it (GA audit B1).
     if !is_admin
@@ -400,11 +394,7 @@ pub(crate) fn require_admin_permission(
     auth: &AdminAuth,
     required: &str,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let permitted = auth
-        .permissions
-        .iter()
-        .any(|p| p == "hearth.admin" || p == required);
-    if !permitted {
+    if !crate::protocol::admin_auth::grants_admin_permission(&auth.permissions, required) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
@@ -414,6 +404,56 @@ pub(crate) fn require_admin_permission(
         ));
     }
     Ok(())
+}
+
+/// REST face of the privilege ceiling on user administration
+/// ([`crate::protocol::admin_auth::check_user_admin_ceiling`]): the caller may
+/// not modify, re-email, reset, disable, delete, demote or sign out a user of
+/// `realm_id` who holds an admin permission the caller lacks. Call it after
+/// [`require_admin_permission`] and before the mutation, on every
+/// user-targeting admin write.
+///
+/// Returns `403 Forbidden` when the target outranks the caller and
+/// `503 Service Unavailable` when the target's permissions cannot be resolved.
+pub(crate) fn require_user_admin_ceiling(
+    state: &AppState,
+    auth: &AdminAuth,
+    realm_id: &RealmId,
+    target: &UserId,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    crate::protocol::admin_auth::check_user_admin_ceiling(
+        state.identity.as_ref(),
+        state.rbac.as_ref(),
+        realm_id,
+        target,
+        &auth.permissions,
+    )
+    .map_err(ceiling_refusal)
+}
+
+/// Maps a privilege-ceiling refusal onto the REST error response: `403` when
+/// the target outranks the caller, `503` when it could not be resolved.
+pub(crate) fn ceiling_refusal(
+    e: crate::protocol::admin_auth::UserCeilingError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::protocol::admin_auth::UserCeilingError;
+    match e {
+        UserCeilingError::Exceeded => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "error_description": "the target user holds admin permissions the caller lacks"
+            })),
+        ),
+        UserCeilingError::Unresolved => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "service_unavailable",
+                "error_description":
+                    "could not resolve the target user's permissions; retry later"
+            })),
+        ),
+    }
 }
 
 /// Checks that the caller holds `hearth.admin` or **any one** of the listed
@@ -669,6 +709,11 @@ pub(crate) fn identity_error_to_response(
             StatusCode::CONFLICT,
             "only archived realms can be permanently deleted",
         ),
+        IdentityError::RealmArchived => (
+            StatusCode::CONFLICT,
+            "the realm is archived or being deleted; only an active or suspended realm can \
+             be suspended or reinstated",
+        ),
         IdentityError::YamlManagedResource { .. } => (
             StatusCode::CONFLICT,
             "this resource is managed by hearth.yaml: it cannot be deleted, and its \
@@ -761,6 +806,7 @@ pub(crate) fn identity_error_to_response(
             (StatusCode::FORBIDDEN, "invitation required")
         }
         IdentityError::ConsentRequired => (StatusCode::FORBIDDEN, "consent required"),
+        IdentityError::ClientMismatch => (StatusCode::FORBIDDEN, "client mismatch"),
         IdentityError::ConsentTicketNotFound | IdentityError::ConsentTicketExpired => {
             (StatusCode::BAD_REQUEST, "consent ticket invalid")
         }
@@ -1029,8 +1075,9 @@ fn coerce_string_ints(v: serde_json::Value) -> serde_json::Value {
     }
 }
 /// Enforces DPoP proof validation for `cnf`-bound tokens at resource endpoints
-/// (RFC 9449 §7.2). Called from [`extract_user_auth`] when the validated token
-/// carries a `cnf.jkt` claim.
+/// (RFC 9449 §7.2). Called from the user-token extractors
+/// ([`extract_user_auth_claims`] and its first-party / session variants) when
+/// the validated token carries a `cnf.jkt` claim.
 fn enforce_dpop_binding(
     headers: &HeaderMap,
     state: &AppState,
@@ -1090,39 +1137,85 @@ fn enforce_dpop_binding(
 }
 
 /// Extracts and validates user authentication, enforcing DPoP binding for
-/// `cnf`-bound tokens (RFC 9449 §7.2).
+/// `cnf`-bound tokens (RFC 9449 §7.2), and returns the user with the bearer
+/// token's validated claims — for a handler that judges the client the token
+/// was issued to. Any client's token passes; a surface that acts with the
+/// user's full authority uses [`extract_first_party_user_auth`] instead.
 ///
 /// `htm` is the HTTP method (e.g. `"GET"`). `htu` is the full request URI
 /// including scheme and authority (e.g. `"https://auth.example.com/oauth/consents"`).
-pub(crate) fn extract_user_auth(
+pub(crate) fn extract_user_auth_claims(
+    headers: &HeaderMap,
+    state: &AppState,
+    realm_id: &RealmId,
+    htm: &str,
+    htu: &str,
+) -> Result<
+    (UserId, std::sync::Arc<crate::identity::TokenClaims>),
+    (StatusCode, Json<serde_json::Value>),
+> {
+    user_auth_claims(headers, state, realm_id, htm, htu)
+}
+
+/// [`extract_user_auth_claims`] for account self-service surfaces that act with the
+/// user's full authority over their own account — consents, passkeys (GA
+/// audit 3 B-5). The token must be a first-party session token or one issued
+/// to a first-party client
+/// ([`crate::protocol::admin_auth::token_client_may_administer`], the gate the
+/// admin API applies); a third-party client's token is refused
+/// `403 forbidden`, whatever the claim profile released to it.
+pub(crate) fn extract_first_party_user_auth(
     headers: &HeaderMap,
     state: &AppState,
     realm_id: &RealmId,
     htm: &str,
     htu: &str,
 ) -> Result<UserId, (StatusCode, Json<serde_json::Value>)> {
-    user_auth_claims(headers, state, realm_id, htm, htu).map(|(user_id, _)| user_id)
+    let (user_id, claims) = user_auth_claims(headers, state, realm_id, htm, htu)?;
+    if !crate::protocol::admin_auth::token_client_may_administer(
+        state.identity.as_ref(),
+        realm_id,
+        &claims,
+    ) {
+        return Err(third_party_token_forbidden());
+    }
+    Ok(user_id)
 }
 
-/// [`extract_user_auth`] that also returns the session behind the bearer
-/// token, for a surface that must judge what that session proved (the
-/// non-interactive `/authorize`, GA audit B2/B5). A token whose `sid` names
-/// no session (a sessionless token) is refused.
+/// The refusal of a third-party client's token on a first-party-only surface.
+pub(crate) fn third_party_token_forbidden() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "forbidden",
+            "error_description": "a token issued to a third-party client cannot use this endpoint"
+        })),
+    )
+}
+
+/// [`extract_user_auth_claims`] for a surface the engine must judge by the
+/// token itself: the
+/// non-interactive `/authorize` checks the client the token was issued to
+/// (GA audit 3 B-1) and the factor its session proved (GA audit B2/B5). A
+/// token whose `sid` names no session (a sessionless token) is refused.
 pub(crate) fn extract_user_session_auth(
     headers: &HeaderMap,
     state: &AppState,
     realm_id: &RealmId,
     htm: &str,
     htu: &str,
-) -> Result<(UserId, crate::core::SessionId), (StatusCode, Json<serde_json::Value>)> {
+) -> Result<
+    (UserId, std::sync::Arc<crate::identity::TokenClaims>),
+    (StatusCode, Json<serde_json::Value>),
+> {
     let (user_id, claims) = user_auth_claims(headers, state, realm_id, htm, htu)?;
-    let session_id = claims.sid.parse::<crate::core::SessionId>().map_err(|_| {
-        (
+    if claims.sid.parse::<crate::core::SessionId>().is_err() {
+        return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid_token"})),
-        )
-    })?;
-    Ok((user_id, session_id))
+        ));
+    }
+    Ok((user_id, claims))
 }
 
 /// Validates the bearer token (with its DPoP binding) and parses its user.
@@ -1167,9 +1260,10 @@ fn user_auth_claims(
 /// returning the decoded claims on success.
 ///
 /// Resource endpoints that consume the raw access token directly — rather than
-/// through [`extract_user_auth`] — MUST route through this guard so a stolen
-/// DPoP-bound token cannot be replayed as a plain `Bearer` (HEA-2031). Callers
-/// that only need the [`UserId`] should prefer [`extract_user_auth`]; this
+/// through [`extract_user_auth_claims`] — MUST route through this guard so a
+/// stolen DPoP-bound token cannot be replayed as a plain `Bearer` (HEA-2031).
+/// Callers that only need the [`UserId`] should prefer
+/// [`extract_first_party_user_auth`]; this
 /// helper exists for handlers that must hand the raw token to the identity
 /// layer (e.g. `/userinfo`, `/v1/me/permissions`).
 ///

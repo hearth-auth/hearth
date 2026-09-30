@@ -1020,44 +1020,6 @@
             }
           }
         }
-      },
-      "post": {
-        "operationId": "IdentityAdminService_CreateRealm",
-        "tags": [
-          "IdentityAdminService"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/v1CreateRealmRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "A successful response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/v1Realm"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "An unexpected error response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/rpcStatus"
-                }
-              }
-            }
-          }
-        }
       }
     },
     "/admin/realms/{id}": {
@@ -1117,52 +1079,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/v1Empty"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "An unexpected error response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/rpcStatus"
-                }
-              }
-            }
-          }
-        }
-      },
-      "put": {
-        "operationId": "IdentityAdminService_UpdateRealm",
-        "tags": [
-          "IdentityAdminService"
-        ],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "type": "string"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/v1UpdateRealmRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "A successful response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/v1Realm"
                 }
               }
             }
@@ -1398,6 +1314,88 @@
           },
           "400": {
             "description": "grace_period_secs was not a non-negative integer"
+          }
+        }
+      }
+    },
+    "/admin/realms/{id}/suspend": {
+      "post": {
+        "summary": "Suspend a realm (incident-response freeze)",
+        "description": "Every token of the realm stops validating, its sessions are revoked and no new session starts until the realm is reinstated. Caller must be a system-realm admin (`hearth.realm.admin` or `hearth.admin`, with `X-Realm-ID` set to the system realm); the target realm's cross-realm trust policy applies. The system realm cannot be suspended. Audited in the target realm with the actor and old/new status. YAML reconciliation never clears a suspension. gRPC twin: `IdentityAdminService/SuspendRealm`.",
+        "operationId": "IdentityAdminService_SuspendRealm",
+        "tags": [
+          "IdentityAdminService"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The realm, now suspended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1Realm"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a system-realm hearth.realm.admin, the target is the system realm, or the target's trust policy refuses the crossing"
+          },
+          "404": {
+            "description": "Realm not found"
+          },
+          "409": {
+            "description": "The realm is archived or being deleted (HEARTH_REALM_ARCHIVED)"
+          }
+        }
+      }
+    },
+    "/admin/realms/{id}/unsuspend": {
+      "post": {
+        "summary": "Reinstate a suspended realm",
+        "description": "Restores a suspended realm to active. Same gate as suspend. An archived realm is not revived (409): only reappearing in hearth.yaml does that. gRPC twin: `IdentityAdminService/UnsuspendRealm`.",
+        "operationId": "IdentityAdminService_UnsuspendRealm",
+        "tags": [
+          "IdentityAdminService"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The realm, now active",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1Realm"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a system-realm hearth.realm.admin, or the target's trust policy refuses the crossing"
+          },
+          "404": {
+            "description": "Realm not found"
+          },
+          "409": {
+            "description": "The realm is archived or being deleted (HEARTH_REALM_ARCHIVED)"
           }
         }
       }
@@ -2792,6 +2790,7 @@
     "/oauth/consents": {
       "get": {
         "summary": "List the authenticated user's active consents",
+        "description": "First-party tokens only: a token issued to a third-party client is refused with 403.",
         "operationId": "selfListConsents",
         "tags": [
           "OAuth"
@@ -2811,6 +2810,7 @@
     "/oauth/consents/{client_id}": {
       "delete": {
         "summary": "Revoke a single consent",
+        "description": "A third-party client's token may revoke only the consent granted to that client itself; any other client_id is refused with 403.",
         "operationId": "selfRevokeConsent",
         "tags": [
           "OAuth"
@@ -3469,6 +3469,7 @@
     "/webauthn/credentials": {
       "get": {
         "summary": "List the authenticated user's WebAuthn credentials",
+        "description": "First-party tokens only: a token issued to a third-party client is refused with 403.",
         "operationId": "webauthnListCredentials",
         "tags": [
           "Auth"
@@ -3481,6 +3482,9 @@
         "responses": {
           "200": {
             "description": "List of registered credentials"
+          },
+          "403": {
+            "description": "The token was issued to a third-party client"
           }
         }
       }
@@ -3488,6 +3492,7 @@
     "/webauthn/credentials/{credential_id}": {
       "delete": {
         "summary": "Delete a WebAuthn credential",
+        "description": "First-party tokens only. The body MUST carry a step-up proof \u2014 the account password, a current TOTP code, or an assertion from an enrolled passkey \u2014 as enrolment does; without one the answer is 403 step_up_required.",
         "operationId": "webauthnDeleteCredential",
         "tags": [
           "Auth"
@@ -3507,9 +3512,50 @@
             }
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string"
+                  },
+                  "totp_code": {
+                    "type": "string"
+                  },
+                  "assertion": {
+                    "type": "object",
+                    "properties": {
+                      "credential_id": {
+                        "type": "string"
+                      },
+                      "client_data_json": {
+                        "type": "string"
+                      },
+                      "authenticator_data": {
+                        "type": "string"
+                      },
+                      "signature": {
+                        "type": "string"
+                      },
+                      "user_handle": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "204": {
             "description": "Credential deleted"
+          },
+          "403": {
+            "description": "Missing or wrong step-up proof (step_up_required), or a third-party client's token"
           }
         }
       }
@@ -3517,7 +3563,7 @@
     "/webauthn/register/begin": {
       "post": {
         "summary": "Begin WebAuthn credential registration",
-        "description": "Requires a step-up proof. An access token alone is one factor, so enrolling with it would turn a stolen token into a permanent credential. Supply exactly one of `password`, `totp_code`, or `assertion`. An account that holds none of those credentials needs no proof.\n",
+        "description": "First-party tokens only: a token issued to a third-party client is refused with 403 `forbidden`. Requires a step-up proof. An access token alone is one factor, so enrolling with it would turn a stolen token into a permanent credential. Supply exactly one of `password`, `totp_code`, or `assertion`. An account that holds none of those credentials needs no proof.\n",
         "operationId": "webauthnRegisterBegin",
         "tags": [
           "Auth"
@@ -3586,7 +3632,7 @@
             "description": "PublicKeyCredentialCreationOptions JSON"
           },
           "403": {
-            "description": "`step_up_required` \u2014 no step-up proof was supplied, or it did not verify.\n"
+            "description": "`forbidden` \u2014 the token was issued to a third-party client; or `step_up_required` \u2014 no step-up proof was supplied, or it did not verify.\n"
           },
           "503": {
             "description": "`temporarily_unavailable` \u2014 the KDF admission gate shed the password verification. Retry after the `Retry-After` hint.\n"
@@ -3597,6 +3643,7 @@
     "/webauthn/register/complete": {
       "post": {
         "summary": "Complete WebAuthn credential registration",
+        "description": "First-party tokens only: a token issued to a third-party client is refused with 403.",
         "operationId": "webauthnRegisterComplete",
         "tags": [
           "Auth"
@@ -3619,6 +3666,9 @@
         "responses": {
           "200": {
             "description": "Credential stored"
+          },
+          "403": {
+            "description": "The token was issued to a third-party client"
           }
         }
       }

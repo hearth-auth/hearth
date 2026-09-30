@@ -91,6 +91,7 @@ For server-side (5xx) errors, `error_code` is `null` — internal detail is neve
 | Code | Meaning |
 |------|---------|
 | `HEARTH_REALM_SUSPENDED` | Realm is suspended; all operations are denied. |
+| `HEARTH_REALM_ARCHIVED` | Suspend or unsuspend was requested for a realm that is archived or being deleted; those realms follow `hearth.yaml` only. Returned as `409` over REST and `FAILED_PRECONDITION` over gRPC. |
 | `HEARTH_REALM_NOT_ARCHIVED` | Permanent deletion was requested for a realm that is not archived. Remove it from `hearth.yaml` and restart to archive it first. Returned as `409` over REST and `FAILED_PRECONDITION` over gRPC. |
 
 ### Input Validation
@@ -150,6 +151,7 @@ For server-side (5xx) errors, `error_code` is `null` — internal detail is neve
 | `HEARTH_CONSENT_TICKET_INVALID` | Consent ticket is invalid or expired. |
 | `HEARTH_CONSENT_SCOPE_NOT_REQUESTED` | Approved scope was not in the original authorization request. |
 | `HEARTH_CONSENT_NOT_FOUND` | No consent record exists for this client. |
+| `HEARTH_CLIENT_MISMATCH` | `POST /authorize` (or gRPC `Authorize`) named a client the bearer token was not issued to. A token may authorize only the client it was issued to; a first-party session token only a first-party client. |
 
 ### Federation
 

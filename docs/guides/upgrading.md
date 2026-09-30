@@ -609,9 +609,14 @@ cluster must share one value anyway: run the restore and the new cluster with th
 1. **Before stopping anything**, stop client writes (a maintenance window) and take a backup from
    the leader over HTTP, with a **system-realm** token (only the system realm may export every
    realm — a realm-scoped admin token exports its own realm only) and the system realm's nil UUID
-   as `X-Realm-ID`:
+   as `X-Realm-ID`. Mint the token in the **leader's admin console**: sign in at
+   `/ui/admin/login`, open **API Tokens** (`/ui/admin/api-tokens`), pick a lifetime that covers
+   the export (up to 60 minutes) and confirm with your password and second factor
+   ([System-realm tokens](./clustering.md#system-realm-tokens)). The cluster keeps running, so
+   this step is still reversible:
 
    ```bash
+   read -rs SYSTEM_TOKEN   # paste the token from the console page
    curl -fsS -X POST -H "Authorization: Bearer $SYSTEM_TOKEN" \
      -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000" \
      "https://10.0.0.1:8420/admin/backup?include_audit=true" -o pre-upgrade.hearth-backup
@@ -622,6 +627,14 @@ cluster must share one value anyway: run the restore and the new cluster with th
    The token needs the `hearth.admin` and `hearth.export` capabilities. Check the archive lists
    every tenant realm (`hearth backup inspect --input pre-upgrade.hearth-backup`); see the
    [Backup guide](./backup.md) for signing (the restore refuses an unsigned archive).
+
+   **The console has no API Tokens page before this release.** A cluster still running v1.6.11
+   has no production way to mint a system-realm token online, and `hearth admin token` needs the
+   node stopped and refuses a cluster node's store — and stopping is one-way here. On v1.6.11,
+   or whenever you have no token, skip this export and take the offline one instead: in step 3,
+   export **every** realm (drop `--realm …`, add `--include-audit` and write
+   `--output pre-upgrade.hearth-backup`). That one archive then carries the system realm too, so
+   step 4 runs only the first restore.
 2. **Stop every node** — one-way, see above — and **move each node's data directory aside** (keep
    it, for investigation and for step 3; do not delete it):
 
@@ -678,6 +691,22 @@ cluster must share one value anyway: run the restore and the new cluster with th
    here. `hearth backup restore`
    writes only the store, never a Raft log, so a directory it restored into while empty holds no
    `raft.db`. Do **not** start `hearth serve` on it yet.
+
+   To check the new cluster with `/admin/cluster/status` in step 6, mint a system-realm token in
+   the **leader's** admin console once the cluster is up (`/ui/admin/api-tokens`, password and
+   second factor): its session and audit record go through Raft, so the token validates on every
+   node. If you would rather hold the token before any node starts, mint it **now**, into this
+   directory, before step 5 copies it: every node then starts from the same session and audit
+   record. It lives at most one hour:
+
+   ```bash
+   SYSTEM_TOKEN=$(hearth admin token --data-dir /var/lib/hearth/data-new \
+     --config /etc/hearth/hearth.yaml --user ops@example.com --ttl 1h)
+   ```
+
+   `--user` is an operator-console account from the restored system realm holding `realm.admin`.
+   Minting with the CLI after the copy, on one node, would put the record on that node only
+   ([System-realm tokens](./clustering.md#system-realm-tokens)).
 5. **Copy that directory to every node** before any node starts, into the path each node's
    `storage.data_dir` names — which step 2 emptied. Create it fresh so the copy cannot merge into
    leftovers, then copy:
@@ -727,10 +756,14 @@ minimal service interruption as follows:
 
 1. **Take a backup** from the leader node as described in the [pre-upgrade checklist](#pre-upgrade-checklist).
 
-2. **Identify the current leader.** Query each node — exactly one reports `"role": "leader"`.
+2. **Identify the current leader.** Query each node — exactly one reports `"role": "leader"`. The
+   call needs a system-realm token: mint one in the admin console at `/ui/admin/api-tokens`
+   ([System-realm tokens](./clustering.md#system-realm-tokens)). It lives at most an hour; mint a
+   new one if the upgrade outlasts it.
 
    ```bash
-   curl -fsS -H "Authorization: Bearer <admin-token>" \
+   curl -fsS -H "Authorization: Bearer $SYSTEM_TOKEN" \
+     -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000" \
      http://10.0.0.1:8420/admin/cluster/status | jq '{role, term, last_applied_index}'
    # → { "role": "leader", "term": 4, "last_applied_index": 10432 }
    ```
@@ -740,7 +773,8 @@ minimal service interruption as follows:
    follower's `last_applied_index` against the leader's — it should converge to within a few entries:
 
    ```bash
-   curl -fsS -H "Authorization: Bearer <admin-token>" \
+   curl -fsS -H "Authorization: Bearer $SYSTEM_TOKEN" \
+     -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000" \
      http://10.0.0.2:8420/admin/cluster/status | jq '{role, term, last_applied_index}'
    # → { "role": "follower", "term": 4, "last_applied_index": 10429 }
    ```
@@ -754,7 +788,7 @@ minimal service interruption as follows:
    for an election to time out, hand off leadership gracefully first:
 
    ```bash
-   curl -fsS -X POST -H "Authorization: Bearer <system-admin-token>" \
+   curl -fsS -X POST -H "Authorization: Bearer $SYSTEM_TOKEN" \
      -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000" \
      http://10.0.0.1:8420/admin/cluster/transfer-leadership
    # → { "new_leader_id": 2, "exact_target": false }

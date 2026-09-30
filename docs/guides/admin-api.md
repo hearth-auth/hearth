@@ -8,6 +8,26 @@ The Admin REST API is a bearer-token-authenticated HTTP API served at the root `
 
 ## Users
 
+**Privilege ceiling.** The user endpoints need `hearth.users.admin` (or `hearth.admin`). In
+addition, an admin may not modify, re-email, disable, reset or delete a user who holds an admin
+permission the admin lacks: `hearth.admin` outranks every sub-admin, and a sub-admin may act on
+another user only when it holds every admin permission (`hearth.admin`, `hearth.users.admin`,
+`hearth.clients.admin`, `hearth.realm.admin`, `hearth.agents.admin`) that user holds. A refused
+call answers `403` with `"error_description": "the target user holds admin permissions the caller
+lacks"`, and `503` when the target's permissions cannot be resolved. A user's admin permissions
+include those it holds only through an organization-scoped role or grant. The rule covers:
+
+- modification: `PATCH`/`DELETE /admin/users/{id}`, `DELETE /admin/users/{id}/device-fingerprints`,
+  the `disable` operation of `POST /admin/users/bulk` (a batch naming any such user is refused
+  whole), `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`, gRPC `UpdateUser` /
+  `DeleteUser`, SCIM `/scim/v2/Users`;
+- demotion: `DELETE /admin/assignments/{id}` (for a group assignment, every member of the group
+  and of groups nested in it), `DELETE /admin/groups/{id}/members/{member_id}`,
+  `DELETE /admin/groups/{id}`, gRPC `UnassignUserRole`, `UnassignGroupRole`,
+  `RevokeUserPermission`, `RemoveAdditionalRole`, `RemoveGroupMember`, `DeleteGroup`;
+- sign-out and consents: `DELETE /admin/sessions/{id}`, `POST /admin/sessions/{id}/sv-bump`,
+  `DELETE /admin/users/{id}/consents/{client_id}`, gRPC `RevokeConsent`.
+
 ### List users
 
 `GET /admin/users`
@@ -534,12 +554,52 @@ To provision a realm:
 
 1. Add an entry under `realms:` in `hearth.yaml`.
 2. Restart Hearth (or send `SIGHUP` for a hot reload). The reconciler creates the realm on first startup.
-3. To suspend a realm, change its `status:` key to `suspended` in `hearth.yaml` and reload.
+3. To freeze a realm during an incident, suspend it with `POST /admin/realms/{id}/suspend`
+   and reinstate it with `POST /admin/realms/{id}/unsuspend` (see [Suspend and unsuspend a
+   realm](#suspend-and-unsuspend-a-realm)). Suspension is runtime state: `hearth.yaml` has no
+   realm `status:` key, and reconciliation never clears a suspension. gRPC `CreateRealm` /
+   `UpdateRealm` answer `FAILED_PRECONDITION` with the same message as the REST `405`.
 4. To permanently delete a realm, remove it from `hearth.yaml` and restart. Hearth archives it automatically. Then call `DELETE /admin/realms/{id}` to purge the archived realm's data.
 
 → See [Configuration reference](../specs/CONFIGURATION.md#realmsname) for the full `realms.<name>` YAML schema.
 
-**Authentication:** Realm admin endpoints require the `hearth.realm.admin` permission, which is held by the system token (returned by `POST /admin/bootstrap` as `system_access_token`). A per-realm admin token cannot list or delete realms — use the system token with `X-Realm-ID: <system_realm_id>`.
+**Authentication:** Realm admin endpoints need a **system-realm** token — the system realm is the nil UUID, `00000000-0000-0000-0000-000000000000` — that carries `hearth.admin` or `hearth.realm.admin`, sent with that UUID as `X-Realm-ID`. A per-realm admin token cannot list or delete realms.
+
+On a running server, mint one in the admin console. Sign in at `/ui/admin/login` with an
+operator-console account that holds the `realm.admin` role and open **API Tokens**
+(`/ui/admin/api-tokens`). Choose a lifetime from 1 to 60 minutes (default 15) and confirm with your
+password **and** your second factor: a current authenticator code, or a passkey that verifies you
+(PIN or biometric — a touch alone is refused). An account with no second factor enrolled cannot
+mint one. The token is shown once, on a page served with `Cache-Control: no-store`; copy it into
+the shell that needs it:
+
+```bash
+read -rs SYSTEM_TOKEN            # paste the token from the console page
+SYSTEM_REALM_ID=00000000-0000-0000-0000-000000000000
+```
+
+The token carries the operator's system-realm permissions (`hearth.admin` among them) and is bound
+to a new session of its own, which expires with it: revoke that session (on your account's
+sessions page, `/ui/account/sessions`, or with `DELETE /admin/sessions/{id}` and the nil
+`X-Realm-ID`) to end the token early. The result page names the session. The issuance is recorded in the system
+realm's audit trail (`token_issued`, actor = the operator, `issued_via: "admin console"`, the
+lifetime and the token's `jti` — never the token). The session and the audit record are written
+through the normal write path, so in cluster mode they replicate: mint on the **leader** (a
+follower cannot accept the write) and the token then works against every node.
+
+For a **stopped** store — the server is down, or the data directory is being rebuilt — mint one on
+the host with `hearth admin token` instead. The command opens the data directory itself, so it
+refuses while `hearth serve` holds the directory, and needs the same `HEARTH_MASTER_KEY` in the
+environment as the server:
+
+```bash
+systemctl stop hearth
+SYSTEM_TOKEN=$(hearth admin token --config /etc/hearth/hearth.yaml --user ops@example.com)
+SYSTEM_REALM_ID=00000000-0000-0000-0000-000000000000
+systemctl start hearth
+```
+
+`--user` names an operator-console account holding the `realm.admin` role. The token lives for `--ttl` (1 minute to 1 hour, default `15m`), is written to stdout only, and its issuance is recorded in the system realm's audit trail (`token_issued`, `issued_via: "hearth admin token"`). A cluster node's data directory is refused; see [System-realm tokens](./clustering.md#system-realm-tokens). In a `dev-endpoints` build running `--dev`, `POST /admin/bootstrap` returns such a token as `system_access_token`.
 
 ### List realms
 
@@ -602,6 +662,43 @@ curl -s \
 | `200` | Realm found — body is a single Realm object |
 | `404` | Realm not found |
 
+### Suspend and unsuspend a realm
+
+```
+POST /admin/realms/{realm_id}/suspend
+POST /admin/realms/{realm_id}/unsuspend
+```
+
+The incident-response freeze control. Suspending a realm makes every token it issued stop
+validating (including tokens issued before the suspension), revokes its sessions and refuses
+new logins until it is reinstated. Unsuspend restores service; users sign in again.
+
+- **Caller:** a system-realm admin holding `hearth.realm.admin` or `hearth.admin`, with
+  `X-Realm-ID` set to the system realm. A tenant realm's own admins may not suspend or
+  reinstate it. The target realm's cross-realm trust policy applies, as for every other
+  `/admin/realms/{id}/*` crossing.
+- **The system realm cannot be suspended** (`403`).
+- **Archived or deleting realms do not move** (`409`, `HEARTH_REALM_ARCHIVED`): only
+  reappearing in `hearth.yaml` reactivates an archived realm.
+- **Audited** in the target realm as `realm_updated`, attributed to the caller, with
+  `previous_status` and `status` in the metadata.
+- **Survives reloads:** YAML reconciliation (startup or `SIGHUP`) never clears a suspension.
+- gRPC twins: `IdentityAdminService/SuspendRealm` and `/UnsuspendRealm`.
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $SYSTEM_TOKEN" \
+  -H "X-Realm-ID: $SYSTEM_REALM_ID" \
+  http://127.0.0.1:8420/admin/realms/550e8400-e29b-41d4-a716-446655440000/suspend
+```
+
+| Status | Meaning |
+|--------|---------|
+| `200` | The realm, in its new status (`REALM_STATUS_SUSPENDED` / `REALM_STATUS_ACTIVE`) |
+| `403` | Not a system-realm `hearth.realm.admin`, the target is the system realm, or the target's trust policy refuses the crossing |
+| `404` | Realm not found |
+| `409` | Realm is archived or being deleted |
+
 ### Delete realm
 
 ```
@@ -620,8 +717,12 @@ curl -s -X DELETE \
 | Status | Meaning |
 |--------|---------|
 | `204` | Realm permanently deleted |
+| `403` | Not your realm, or the target realm's cross-realm trust policy names the system realm without granting `hearth.admin` |
 | `404` | Realm not found |
 | `409` | Realm is not archived — remove it from `hearth.yaml` and restart first |
+
+`GET` and `DELETE /admin/realms/{realm_id}` and their gRPC twins (`GetRealm`, `DeleteRealm`)
+apply the same realm-scope rule, trust policies included.
 
 ---
 

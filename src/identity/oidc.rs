@@ -1005,6 +1005,9 @@ pub struct RpLogoutRequest {
 /// Result of RP-initiated logout.
 #[derive(Debug, Clone)]
 pub struct RpLogoutResult {
+    /// The realm's issuer identifier — the `iss` of the session's ID tokens
+    /// and of its logout tokens, sent as the front-channel `iss` parameter.
+    pub issuer: String,
     /// The user whose session was terminated.
     pub user_id: crate::core::UserId,
     /// The session that was revoked.
@@ -1432,6 +1435,12 @@ pub(crate) struct StoredAuthorizationCode {
     /// Propagated verbatim to both access and ID token claims at exchange time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) amr_values: Vec<String>,
+    /// What the session that authorized this code proved about a second
+    /// factor. The session the exchange opens records exactly this — never
+    /// more (GA audit round 3, D-7). A code written without it (or minted
+    /// with no session behind it) carries [`crate::identity::MfaProof::None`].
+    #[serde(default)]
+    pub(crate) mfa_proof: crate::identity::MfaProof,
 }
 
 /// Context from the refresh request used to detect binding drift (A-49).
@@ -1883,6 +1892,11 @@ pub(crate) struct StoredDeviceCode {
     pub(crate) interval: i64,
     /// Last time the device polled (for rate limiting).
     pub(crate) last_polled_at: Option<Timestamp>,
+    /// What the session that approved the device proved about a second
+    /// factor; the device's token session records exactly this (GA audit
+    /// round 3, D-7). [`crate::identity::MfaProof::None`] until approved.
+    #[serde(default)]
+    pub(crate) mfa_proof: crate::identity::MfaProof,
 }
 
 // ===== Grant Family (Refresh Token Rotation) =====
@@ -2083,6 +2097,26 @@ pub struct DecidePermissionRequest {
 pub struct DecidePermissionResponse {
     /// Whether the token holder has the requested permission.
     pub allowed: bool,
+}
+
+/// The RBAC authority an access token carries when it is resolved live —
+/// by an `introspection` or `decision` resource server, or
+/// `GET /v1/me/permissions` (GA audit 3 B-2 / C-8).
+///
+/// It is what an `embedded` token issued to the same client for the same
+/// grant would carry, resolved at the time of the call: the token client's
+/// claim profile applies (a third-party client gets no `roles`, `groups` or
+/// `permissions` unless the realm releases them to it), every
+/// permission-bearing scope of the token narrows the permissions, and a
+/// delegated (`act`) token is capped at the permissions fixed at exchange.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiveTokenAuthority {
+    /// Role names released to the token's client.
+    pub roles: Vec<String>,
+    /// Group slugs released to the token's client.
+    pub groups: Vec<String>,
+    /// Effective permissions of the token.
+    pub permissions: Vec<String>,
 }
 
 // ===== UserInfo (OIDC Core §5.3) =====
@@ -2389,6 +2423,7 @@ mod tests {
             nonce: Some("test-nonce-abc".to_string()),
             resource: None,
             amr_values: Vec::new(),
+            mfa_proof: crate::identity::MfaProof::None,
         };
 
         let json = serde_json::to_string(&code).expect("serialize");

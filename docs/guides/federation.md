@@ -383,8 +383,8 @@ realms:
           want_assertions_signed: true # reject unsigned assertions
           # Map SAML attributes to Hearth user fields.
           attribute_map:
-            email: "urn:oid:0.9.2342.19200300.100.1.3"   # mail OID
-            name:  "urn:oid:2.16.840.1.113730.3.1.241"   # displayName OID
+            email:        "urn:oid:0.9.2342.19200300.100.1.3"   # mail OID
+            display_name: "urn:oid:2.16.840.1.113730.3.1.241"   # displayName OID
 ```
 
 SAML login is initiated at:
@@ -403,10 +403,10 @@ https://auth.example.com/ui/realms/<realm>/federation/saml/begin?idp=corp-saml
 | `entity_id` | Yes | IdP SAML entity ID (`entityID` in IdP metadata) |
 | `sso_url` | Yes | IdP Single Sign-On Service URL (HTTP-Redirect binding) |
 | `slo_url` | No | IdP Single Logout Service URL |
-| `idp_certificate_pem` | Yes | IdP signing certificate, PEM-encoded (inline) |
+| `idp_certificate_pem` | Yes | IdP signing certificate, PEM-encoded (inline). During an IdP key rollover, paste the outgoing and the incoming certificate one after the other: an assertion signed by either is accepted. Remove the old one once the IdP has switched. Every certificate is parsed when the configuration is loaded or reloaded: an unusable one refuses startup (and `hearth config validate` names the realm and connector) instead of failing the first login. |
 | `sign_authn_requests` | No | Sign outbound AuthnRequests (default: false) |
 | `want_assertions_signed` | No | Reject assertions not individually signed (default: false; **strongly recommended `true` in production**) |
-| `attribute_map` | No | Maps Hearth field names to SAML attribute URIs |
+| `attribute_map` | No | Maps Hearth field names (`email`, `display_name`, `first_name`, `last_name`, `external_sub`) to SAML attribute names; the value `NameID` takes the assertion's subject `NameID` instead of an attribute |
 
 > **`want_assertions_signed` is enforced.** When set to `true`, the ACS rejects any inbound
 > assertion that is not individually signed. A Response-level signature alone is not
@@ -448,6 +448,19 @@ realms:
 | `disabled` | Never link — always JIT-provision a new account, even if the email matches | Strict isolation; users get separate accounts per IdP |
 | `confirm` | Prompt the user to authenticate with their local password or passkey before linking **(default; Keycloak-equivalent safety posture)** | Any public-facing realm |
 | `auto` | Silently link on verified email match — no re-auth step | Single high-trust IdP where the IdP verifies email (Google, Microsoft) — **account-takeover risk otherwise** |
+
+**A new account on an address the upstream did not verify waits for that address.** When a
+federated login provisions a user just in time, the upstream's email is taken as verified only
+if the upstream said so (`email_verified: true`; for SAML, only when the connector sets
+`trust_asserted_email: true`). Otherwise the account is created `PendingVerification`, like a
+self-registered one: Hearth mails the address a verification link and shows the "check your
+email" page instead of signing the user in. The verification keeps the federated link only
+when it is completed in the browser that performed the federated login (a cookie that login
+set, bound to the mailed token); the same federated login then signs in normally. Completed in
+any other browser, the account is activated **without** the federated link, and the removal is
+audited as `federation_account_unlinked` (`reason:
+email_verified_outside_federated_login_browser`). This stops an upstream that lets users claim
+any address from pre-creating — and keeping a way into — an account on someone else's address.
 
 > ⚠️ **`auto` is an account-takeover risk.** It removes the phishing-protection gate: Hearth
 > attaches the upstream identity to whatever local account already holds that email address,
@@ -576,7 +589,7 @@ need to be specified unless you want to override a default.
 | `entity_id` | string | — | **SAML only.** IdP entity ID |
 | `sso_url` | string | — | **SAML only.** IdP SSO URL (HTTP-Redirect binding) |
 | `slo_url` | string | — | **SAML only.** IdP Single Logout URL (optional) |
-| `idp_certificate_pem` | string | — | **SAML only.** IdP signing certificate, PEM inline |
+| `idp_certificate_pem` | string | — | **SAML only.** IdP signing certificate, PEM inline; several concatenated certificates during a key rollover. Parsed at load and reload — an unusable certificate refuses startup |
 | `sign_authn_requests` | bool | — | **SAML only.** Sign outbound AuthnRequests (default: false) |
 | `want_assertions_signed` | bool | — | **SAML only.** Reject unsigned assertions (default: false) |
 | `attribute_map` | map | — | **SAML only.** Maps Hearth field names to SAML attribute URIs |

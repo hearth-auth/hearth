@@ -610,6 +610,7 @@ pub(super) fn otp_factor_for(
     state: &Arc<WebState>,
     realm: &crate::identity::Realm,
     user: &crate::identity::User,
+    first: super::auth::FirstFactor,
 ) -> Option<OtpFactor> {
     // An ABSENT `mfa_methods` restricts nothing — that is the semantics
     // `EmbeddedIdentityEngine::require_mfa_method` enforces, and the same rule
@@ -619,7 +620,9 @@ pub(super) fn otp_factor_for(
     let methods = realm.config().mfa_methods.clone();
     let offers = |name: &str| methods.as_ref().is_none_or(|m| m.iter().any(|x| x == name));
     let holds_sms = offers("sms") && user.phone_verified();
-    let holds_email = offers("email_otp") && user.email_otp_enabled();
+    // An email OTP proves the inbox a magic link already proved: after a
+    // magic link it is not a second factor at all (GA audit round 3, D-4).
+    let holds_email = offers("email_otp") && user.email_otp_enabled() && first.allows_email_otp();
     let sms_deliverable = state.sms.is_some() && state.sms_otp_hmac_key.is_some();
     let email_deliverable = state.email.is_some();
     // Prefer a factor we can actually send a code for.
@@ -739,7 +742,7 @@ pub async fn mfa_otp_challenge_form(
     ) else {
         return Redirect::to("/ui/login").into_response();
     };
-    let Some(factor) = otp_factor_for(&state, &realm, &user) else {
+    let Some(factor) = otp_factor_for(&state, &realm, &user, pending.first_factor) else {
         // The factor went away between login and here — start over rather
         // than silently dropping the second-factor requirement.
         return Redirect::to("/ui/login").into_response();
@@ -913,7 +916,7 @@ pub async fn mfa_otp_challenge_submit(
     ) else {
         return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
     };
-    if otp_factor_for(&state, &realm, &user) != Some(factor) {
+    if otp_factor_for(&state, &realm, &user, pending.first_factor) != Some(factor) {
         return Redirect::to("/ui/mfa-otp-challenge").into_response();
     }
 
@@ -1001,6 +1004,12 @@ pub async fn mfa_otp_challenge_submit(
         &pending.realm_id,
         &pending.user_id,
         pending.return_to.as_deref(),
+        // The OTP just verified is a proved second factor, as in
+        // `finish_otp_login`; the RA flow carries it to the session.
+        &SessionContext {
+            mfa_proof: MfaProof::Proved,
+            ..session_ctx.clone()
+        },
         &headers,
         now_ra,
     ) {
@@ -1517,15 +1526,27 @@ fn verify_email_impl(
     };
     let product_name = state.product_name.clone();
     let logo_url = state.logo_url.clone();
+    // A pending federated account keeps its federated link only when the
+    // browser that performed the federated login completes this (GA audit
+    // round 3, G-3).
+    let origin = link_token::verification_origin(&state.cookie_secret, headers, &token);
 
     link_token::mark_spent(
-        match state.identity.verify_email_token(realm.id(), &token) {
+        match state
+            .identity
+            .verify_email_token_from(realm.id(), &token, origin)
+        {
             Ok(_) => {
                 let login_url = format!("{action_prefix}/login");
                 let mut tmpl = VerifyOkTemplate::new(login_url, product_name, logo_url);
                 tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
                 tmpl.inline_theme_css = state.inline_theme_css();
-                render(&tmpl)
+                let mut response = render(&tmpl);
+                append_cookie(
+                    &mut response,
+                    &link_token::clear_federated_origin_cookie(state.is_secure_request(headers)),
+                );
+                response
             }
             Err(IdentityError::VerificationTokenInvalid) => {
                 let tmpl = VerifyInvalidTemplate::new(
@@ -2239,7 +2260,12 @@ fn login_finish(
     // Neither branch decides whether the policy is met: the engine gate reads
     // factor use from `SessionContext::mfa_proof` (§4.18#3).
     let secure = state.is_secure_request(&headers);
-    let step = match super::second_factor::second_factor_step(&state, &realm, &user) {
+    let step = match super::second_factor::second_factor_step(
+        &state,
+        &realm,
+        &user,
+        super::auth::FirstFactor::Credential,
+    ) {
         Ok(step) => step,
         Err(e) => {
             // A factor lookup failed: the factors are unknown, so refuse
@@ -2285,6 +2311,7 @@ fn login_finish(
                 realm.id(),
                 user.id(),
                 other,
+                super::auth::FirstFactor::Credential,
                 return_to.as_deref(),
                 secure,
             );
@@ -2308,6 +2335,8 @@ fn login_finish(
         realm.id(),
         user.id(),
         return_to.as_deref(),
+        // The password alone: nothing proved beyond the first factor.
+        &session_ctx,
         &headers,
         now,
     ) {
@@ -2650,7 +2679,12 @@ fn passkey_second_factor_gate(
             return Some(refuse());
         }
     };
-    let owed = match super::second_factor::non_passkey_factor_step(state, realm, &user) {
+    let owed = match super::second_factor::non_passkey_factor_step(
+        state,
+        realm,
+        &user,
+        super::auth::FirstFactor::Credential,
+    ) {
         Ok(step) => step,
         Err(e) => {
             // The user's factors are unknown: refuse rather than skip one.
@@ -2665,6 +2699,7 @@ fn passkey_second_factor_gate(
             realm.id(),
             user_id,
             step,
+            super::auth::FirstFactor::Credential,
             None, // no return_to for passkey flow
             secure,
         );
@@ -2767,6 +2802,20 @@ fn passkey_complete_for_user(
     // operator-forced password change, email verification or enrolment could
     // be walked around by signing in with a passkey instead of the password.
     // Same gate as the password form, answered in this endpoint's JSON shape.
+    // The engine's own `mfa_required` gate reads this proof, so it must carry
+    // what the ceremony proved rather than an assumption made before it ran.
+    // `ProvedWebAuthn` rather than the generic `Proved`: a realm that sets
+    // `webauthn_required` accepts only a WebAuthn assertion, and this is the
+    // one path that can produce it (audit 2026-08-28 §4.18#3, task 25.26).
+    let mfa_proof = if user_verified {
+        crate::identity::MfaProof::ProvedWebAuthn
+    } else {
+        // Possession of the passkey the account holds (GA audit B5): the
+        // engine admits it only when the user holds no other factor, which
+        // the gate above has already challenged.
+        crate::identity::MfaProof::PasskeyPossession
+    };
+
     let now = crate::core::Timestamp::from_micros(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2774,11 +2823,16 @@ fn passkey_complete_for_user(
             .and_then(|d| i64::try_from(d.as_micros()).ok())
             .unwrap_or(0),
     );
+    let mut session_ctx = session_ctx.clone();
+    session_ctx.mfa_proof = mfa_proof;
+    // A required-action detour carries the same proof to the session it
+    // ends in (GA audit round 3, I-2).
     if let Some(ra) = super::required_action::required_action_check_browser(
         state,
         realm.id(),
         auth_result.user_id(),
         None,
+        &session_ctx,
         headers,
         now,
     ) {
@@ -2788,21 +2842,6 @@ fn passkey_complete_for_user(
 
     // A-41: Destroy any pre-existing session cookie before issuing a new one.
     revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
-
-    // The engine's own `mfa_required` gate reads this proof, so it must carry
-    // what the ceremony proved rather than an assumption made before it ran.
-    // `ProvedWebAuthn` rather than the generic `Proved`: a realm that sets
-    // `webauthn_required` accepts only a WebAuthn assertion, and this is the
-    // one path that can produce it (audit 2026-08-28 §4.18#3, task 25.26).
-    let mut session_ctx = session_ctx.clone();
-    session_ctx.mfa_proof = if user_verified {
-        crate::identity::MfaProof::ProvedWebAuthn
-    } else {
-        // Possession of the passkey the account holds (GA audit B5): the
-        // engine admits it only when the user holds no other factor, which
-        // the gate above has already challenged.
-        crate::identity::MfaProof::PasskeyPossession
-    };
 
     match state
         .identity
@@ -3061,6 +3100,13 @@ pub async fn mfa_challenge_submit(
         &pending.realm_id,
         &pending.user_id,
         pending.return_to.as_deref(),
+        // The TOTP or recovery code just verified — and nothing more. The
+        // detour used to end in `Inherited`, which a passkey-only realm
+        // accepts (GA audit round 3, D-1).
+        &SessionContext {
+            mfa_proof: MfaProof::Proved,
+            ..session_ctx.clone()
+        },
         &headers,
         now_ra,
     ) {
@@ -3152,7 +3198,7 @@ fn forced_enrolment_refusal(
     ) else {
         return Some(Redirect::to("/ui/login").into_response());
     };
-    match super::second_factor::second_factor_step(state, &realm, &user) {
+    match super::second_factor::second_factor_step(state, &realm, &user, pending.first_factor) {
         Ok(Some(super::second_factor::SecondFactorStep::EnrolTotp)) => None,
         Ok(Some(step)) => Some(Redirect::to(step.path()).into_response()),
         Ok(None) => Some(Redirect::to("/ui/login").into_response()),
@@ -3415,6 +3461,11 @@ pub async fn mfa_enroll_required_submit(
         &pending.realm_id,
         &pending.user_id,
         pending.return_to.as_deref(),
+        // The live code that confirmed the enrolment (see below).
+        &SessionContext {
+            mfa_proof: MfaProof::Proved,
+            ..session_ctx.clone()
+        },
         &headers,
         now_ra,
     ) {
@@ -4779,13 +4830,16 @@ fn magic_link_redeem_impl(
             return internal_error_response();
         }
     };
-    match super::second_factor::second_factor_step(&state, &realm, &user) {
+    // The link proves the inbox: an email OTP cannot be its second factor.
+    let first = super::auth::FirstFactor::Inbox;
+    match super::second_factor::second_factor_step(&state, &realm, &user, first) {
         Ok(Some(step)) => {
             return super::second_factor::redirect_to_second_factor(
                 &state,
                 realm.id(),
                 &user_id,
                 step,
+                first,
                 None,
                 secure,
             );
@@ -4811,6 +4865,8 @@ fn magic_link_redeem_impl(
         realm.id(),
         &user_id,
         None,
+        // The link proves the inbox, one factor; nothing was owed above.
+        &build_session_context(headers, peer_addr, &state.trusted_proxies),
         headers,
         now,
     ) {
@@ -5451,64 +5507,83 @@ fn register_submit_impl(
         }
     };
 
-    if let Some(email_service) = state.email.clone() {
-        let base = derive_base_url(
-            state
-                .config
-                .as_ref()
-                .and_then(|c| c.onboarding.base_url.as_deref()),
-            &state.fallback_base_url(),
-            &headers,
-        );
-        let verify_url = format!(
-            "{base}{action_prefix}/verify-email?token={}",
-            response.verification_token
-        );
-        let branding = realm.config().email_branding.clone();
-        let stored_verification = realm.config().email_templates.get("verification").cloned();
-        // Off the request path: the mail send must not add latency that
-        // distinguishes a fresh address from a registered one
-        // (audit 2026-08-28 §4.24#4).
-        let recipient = form.email.clone();
-        // A-4 + A-50 (task 20.13) — see the identical block in
-        // `forgot_password_submit_impl`. Inside the off-request-path closure
-        // so the arm adds no measurable latency to either outcome.
-        let guards = Arc::clone(&state.abuse_guards);
-        let realm_key = realm.id().as_uuid().to_string();
-        spawn_off_request_path(move || {
-            match guards.check_outbound_email(&realm_key, &recipient) {
-                crate::abuse::runtime::OutboundVerdict::Deny { reason } => {
-                    tracing::warn!(
-                        guard = reason,
-                        "register_submit: outbound cap reached; verification email not sent"
-                    );
-                    return;
-                }
-                crate::abuse::runtime::OutboundVerdict::Warn { reason } => {
-                    tracing::warn!(guard = reason, "register_submit: outbound soft cap reached");
-                }
-                crate::abuse::runtime::OutboundVerdict::Allow => {}
-            }
-            if let Err(e) = email_service.send_verification_email(
-                &recipient,
-                &verify_url,
-                branding.as_ref(),
-                stored_verification.as_ref(),
-                None,
-            ) {
-                tracing::warn!(
-                    error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
-                    "register_submit: failed to send verification email"
-                );
-            }
-        });
-    } else {
-        tracing::warn!(
-            "register_submit: no email transport configured; verification cannot be delivered"
-        );
-    }
+    send_verification_email_off_path(
+        &state,
+        &realm,
+        form.email.clone(),
+        &response.verification_token,
+        &action_prefix,
+        &headers,
+    );
 
     Redirect::to(&sent_url).into_response()
+}
+
+/// Sends the email-verification link for `token` to `recipient` — the mail
+/// self-registration sends, and the one a federated account whose upstream
+/// did not verify its address is sent (GA audit round 3, G-3).
+///
+/// Off the request path: the mail send must not add latency that
+/// distinguishes a fresh address from a registered one (audit 2026-08-28
+/// §4.24#4). The A-4 / A-50 outbound caps (task 20.13) apply, inside the
+/// off-path closure so they add no measurable latency either.
+pub(super) fn send_verification_email_off_path(
+    state: &Arc<WebState>,
+    realm: &Realm,
+    recipient: String,
+    token: &str,
+    action_prefix: &str,
+    headers: &HeaderMap,
+) {
+    let Some(email_service) = state.email.clone() else {
+        tracing::warn!(
+            "verification email: no email transport configured; verification cannot be delivered"
+        );
+        return;
+    };
+    let base = derive_base_url(
+        state
+            .config
+            .as_ref()
+            .and_then(|c| c.onboarding.base_url.as_deref()),
+        &state.fallback_base_url(),
+        headers,
+    );
+    let verify_url = format!("{base}{action_prefix}/verify-email?token={token}");
+    let branding = realm.config().email_branding.clone();
+    let stored_verification = realm.config().email_templates.get("verification").cloned();
+    let guards = Arc::clone(&state.abuse_guards);
+    let realm_key = realm.id().as_uuid().to_string();
+    spawn_off_request_path(move || {
+        match guards.check_outbound_email(&realm_key, &recipient) {
+            crate::abuse::runtime::OutboundVerdict::Deny { reason } => {
+                tracing::warn!(
+                    guard = reason,
+                    "verification email: outbound cap reached; not sent"
+                );
+                return;
+            }
+            crate::abuse::runtime::OutboundVerdict::Warn { reason } => {
+                tracing::warn!(
+                    guard = reason,
+                    "verification email: outbound soft cap reached"
+                );
+            }
+            crate::abuse::runtime::OutboundVerdict::Allow => {}
+        }
+        if let Err(e) = email_service.send_verification_email(
+            &recipient,
+            &verify_url,
+            branding.as_ref(),
+            stored_verification.as_ref(),
+            None,
+        ) {
+            tracing::warn!(
+                error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
+                "verification email: send failed"
+            );
+        }
+    });
 }
 
 /// Renders the post-submission confirmation page for the bare URL.
@@ -6032,11 +6107,10 @@ pub async fn device_approve_submit(
         session.user_id.as_uuid()
     );
     let peer_ip = captcha_client_ip(&headers, peer_addr, &state.trusted_proxies);
-    let realm_key = session.realm_id.as_uuid().to_string();
 
     match state
         .device_approval_guard
-        .check(&guard_key, peer_ip, &realm_key)
+        .check(&guard_key, peer_ip, &session.realm_id)
     {
         DeviceApprovalDecision::Allow => {}
         decision => return device_approval_refusal(decision),
@@ -6088,6 +6162,12 @@ pub async fn device_approve_submit(
         &session.realm_id,
         &session.user_id,
         Some("/ui/device"),
+        // What the login behind this session proved; the session the
+        // detour ends in records no more than that.
+        &SessionContext {
+            mfa_proof: session.mfa_proof,
+            ..build_session_context(&headers, peer_addr, &state.trusted_proxies)
+        },
         &headers,
         now,
     ) {
@@ -6106,7 +6186,13 @@ pub async fn device_approve_submit(
         return sms_response;
     }
 
-    finish_device_approval(&state, &session.realm_id, &session.user_id, &code)
+    finish_device_approval(
+        &state,
+        &session.realm_id,
+        &session.user_id,
+        &code,
+        session.mfa_proof,
+    )
 }
 
 /// Approves device user code `code` for `user_id` once every gate has passed,
@@ -6120,12 +6206,18 @@ pub(super) fn finish_device_approval(
     realm: &RealmId,
     user_id: &crate::core::UserId,
     code: &str,
+    mfa_proof: MfaProof,
 ) -> Response {
     let guard_key = format!("{}:{}", realm.as_uuid(), user_id.as_uuid());
     if let Err(resp) = record_device_consent(state, realm, user_id, code) {
         return resp;
     }
-    match state.identity.approve_device(realm, code, user_id) {
+    // The device's token session records what the approving session proved
+    // (GA audit round 3, D-7).
+    match state
+        .identity
+        .approve_device_from_session(realm, code, user_id, mfa_proof)
+    {
         Ok(()) => {
             state.device_approval_guard.record_success(&guard_key);
             Redirect::to("/ui/device?flash=approved").into_response()

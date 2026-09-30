@@ -232,7 +232,23 @@ only. A `client_assertion` is verified against the client's registered keys:
 
 `jwks_uri` is not fetched: a client registered with only a `jwks_uri` cannot authenticate and
 must register its keys inline. The assertion rules are those of §8.1 (`iss` = `sub` = the
-client, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min). Under FAPI 2.0 — a FAPI 2.0
+client, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min). "The client" is its
+`client_id` exactly as registration returned it — the bare UUID it also sends as the `client_id`
+parameter (RFC 7523 §3, OIDC Core §9). Hearth's internal `client_<uuid>` subject form, or any
+other spelling of the UUID, is refused; the same rule covers a request object's `iss` and
+`client_id` claims (RFC 9101 §4) and the JWT-bearer grant's `iss`/`sub`.
+
+**Every field Hearth issues that names a client carries the same issued `client_id`:** an ID
+token's `aud` and `azp` (OIDC Core §2), an access token's `client_id` claim (RFC 9068 §2.2), the
+introspection response's `client_id` (RFC 7662 §2.2), a JARM response's `aud` (success and
+error), a back-channel logout token's `aud`, an exchanged token's `act.sub` (RFC 8693 §4.1), and
+the pre-token webhook payload's `client_id`. Hearth parses these back (first-party gate,
+non-interactive `/authorize` client match, revocation and introspection ownership) in that form
+only. The one exception is `sub` of a sessionless client token (`client_credentials`,
+JWT-bearer), which stays in Hearth's subject namespace (`client_<uuid>`, beside `user_<uuid>`) so
+a client subject can never be read as a user. `end_session` with both `id_token_hint` and
+`client_id` refuses a hint whose `aud` does not contain that client (`400 invalid_request`,
+RP-Initiated Logout §2). Under FAPI 2.0 — a FAPI 2.0
 client, or any client of a realm with a `fapi_profile` — `aud` MUST be the realm issuer as a
 single JSON string (FAPI 2.0 Security Profile §5.3.2.1); an array is refused even when it holds
 only the issuer. Other clients follow RFC 7523 §3: `aud` may be an array that contains the issuer.
@@ -345,6 +361,23 @@ Endpoints that enforce the sender-constraint:
 
 Tokens **without** `cnf.jkt` are unaffected — plain Bearer tokens continue to work at every endpoint
 above with no `DPoP` header.
+
+#### Account and realm-feed endpoints take first-party tokens only
+
+Several of the endpoints above act with the user's full authority over their own account, or read
+realm-wide data, so they also judge the client the token was issued to (RFC 9068 `client_id`; none
+means a first-party session token) — the gate the admin API applies (GA audit 3 B-5 / I-14):
+
+- `GET /oauth/consents`, `GET /webauthn/credentials`, `DELETE /webauthn/credentials/{credential_id}`,
+  `GET /oauth/session-versions[/snapshot]` and the DCR initial access token (`POST /register`, both
+  forms) refuse a **third-party** client's token with `403`, whatever permissions the realm's claim
+  profile released to it.
+- `DELETE /oauth/consents/{client_id}` refuses a third-party client's token unless `client_id` is
+  that client itself — an app may disconnect itself, never revoke the user's consent to another app.
+- `DELETE /webauthn/credentials/{credential_id}` additionally requires a **step-up proof** in its JSON
+  body — `password`, `totp_code` or `assertion`, the same proof enrolment takes — and answers
+  `403 step_up_required` without one (GA audit 3 D-6). The browser console's passkey removal
+  (`POST /ui/account/passkeys/{id}/delete`) requires the same proof.
 
 #### Proof requirements at resource endpoints
 
@@ -682,6 +715,24 @@ When the session is already gone, the endpoint still redirects cleanly (idempote
 
 On successful logout, Hearth fans out back-channel logout tokens to all registered RPs that have a `backchannel_logout_uri` configured. Front-channel logout URIs are served via a redirect page when `post_logout_redirect_uri` is absent.
 
+A logout token's `iss`, `sub` and `sid` are the exact strings the session's ID tokens carry — the
+realm issuer, `user_<uuid>` and `session_<uuid>` — because the RP matches them against the ID
+token it holds (BCL §2.4, §2.6); its `aud` is the issued `client_id`. The front-channel iframe
+URL carries the same `iss` and `sid` (FCL §2). A `client_id` sent with an `id_token_hint` must be
+one the hint's `aud` names (`400 invalid_request` otherwise).
+
+### 7.3.1 Issuer identifier
+
+Each realm is its own OIDC issuer: `{oidc.issuer}/realms/{name}`, the `issuer` of the realm
+discovery document (`/realms/{name}/.well-known/openid-configuration`). Every realm-issued
+artifact carries it — ID tokens (code exchange, device grant), access and refresh tokens, the
+RFC 9207 `iss` authorization-response parameter, JARM responses, logout tokens and the
+front-channel `iss` parameter — whichever route (realm-scoped or `X-Realm-ID`) produced it, so it
+always equals the realm document's `issuer` (OIDC Core §3.1.3.7 step 2, Discovery §4.3).
+The server-level document at `/.well-known/openid-configuration` describes the host itself
+(`issuer` = `oidc.issuer`); its endpoints need an `X-Realm-ID` header no standard RP sends, and
+no realm token carries its issuer. Relying parties configure the realm document.
+
 ### 7.4 Authorization Endpoint — GET Shim for SPAs
 
 The OIDC discovery document advertises `authorization_endpoint` as `{issuer}/authorize`. Browser-based PKCE clients (SPAs) redirect the user's browser there via `GET`. The interactive login+consent UI lives at `/ui/realms/{realm}/oauth/authorize`, so:
@@ -714,7 +765,25 @@ Content-Type: application/json
 }
 ```
 
-The same Bearer-auth requirement applies to the equivalent gRPC `Authorize` RPC.
+The same Bearer-auth requirement applies to the equivalent gRPC `Authorize` RPC. Both JSON routes
+(`POST /authorize` with `X-Realm-ID` and `POST /realms/{realm}/authorize`) accept a pushed request
+(RFC 9126): with `request_uri` the pushed entry is consumed — single-use — and supplies every
+parameter; a `client_id` in the body must match it.
+
+**The token authorizes only its own client** (GA audit 3 B-1). These surfaces cannot show a consent
+screen, so a code is minted only for a client the bearer token may speak for:
+
+- a token issued to a client (RFC 9068 `client_id` claim) MAY authorize **that client only**;
+- a token that names no client — a Hearth first-party session token — MAY authorize a
+  **first-party** client only.
+
+Any other request is refused with `403` and `error_code: "HEARTH_CLIENT_MISMATCH"` (gRPC
+`PERMISSION_DENIED`) before any side effect. Without this rule a third-party app's token minted a
+code for a first-party public client — which needs neither consent nor a secret — and redeemed it
+for that client's tokens carrying the user's full permissions. The consent rule (a third-party
+client needs a recorded consent covering the scopes, `HEARTH_CONSENT_REQUIRED`) and the MFA-use rule
+still apply on top. Enforced by the engine (`authorize_non_interactive`), so the global, realm and
+gRPC surfaces cannot diverge; pinned by `tests/oauth_non_interactive_authorize.rs`.
 
 ---
 

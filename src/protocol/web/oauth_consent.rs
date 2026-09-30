@@ -63,7 +63,7 @@ use subtle::ConstantTimeEq;
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{ClientId, RealmId, Timestamp, UserId};
 use crate::identity::{
-    canonicalize_scopes, CodeChallengeMethod, IdentityError, PendingAuthorizationRequest,
+    canonicalize_scopes, CodeChallengeMethod, IdentityError, MfaProof, PendingAuthorizationRequest,
     ResponseMode,
 };
 
@@ -229,10 +229,13 @@ async fn authorize_get_impl(
     headers: &axum::http::HeaderMap,
 ) -> Response {
     let now = Timestamp::from_micros(now_micros());
-    let params = match authorize_params(state, realm, q) {
+    let mut params = match authorize_params(state, realm, q) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
+    // The code carries what this session proved into the token session
+    // (GA audit round 3, D-7).
+    params.mfa_proof = session.mfa_proof;
     // A client or role that demands a second factor needs a session that
     // PROVED one (GA audit B5). Fresh entry only: the interstitial resumes
     // continue a request this check already admitted.
@@ -393,6 +396,8 @@ fn plain_params(
         response_mode,
         resource,
         via_par: false,
+        // Set from the session by `authorize_get_impl`.
+        mfa_proof: MfaProof::None,
     })
 }
 
@@ -459,6 +464,8 @@ fn par_params(
         response_mode,
         resource,
         via_par: true,
+        // Set from the session by `authorize_get_impl`.
+        mfa_proof: MfaProof::None,
     })
 }
 
@@ -729,6 +736,8 @@ pub async fn consent_submit(
                 response_mode,
                 resource: pending.resource.clone(),
                 via_par: pending.via_par,
+                // The approving session's proof (GA audit round 3, D-7).
+                mfa_proof: session.mfa_proof,
             };
             let mut response = issue_code(
                 &state,
@@ -930,16 +939,8 @@ fn jar_params(
             return Err(handlers_common::bad_request("invalid request object"));
         }
     };
-    // RFC 9101 §4: the claim, when present, must name the same client.
-    if jar
-        .client_id
-        .as_deref()
-        .is_some_and(|cid| cid != client_id.to_string())
-    {
-        return Err(handlers_common::bad_request(
-            "client_id mismatch with request object",
-        ));
-    }
+    // `verify_jar` checked the JAR's `iss` and `client_id` claims against the
+    // client (RFC 9101 §4), in the client_id form the client was issued.
 
     let redirect_uri = jar.redirect_uri.unwrap_or_else(|| q.redirect_uri.clone());
     let response_type = jar.response_type.unwrap_or_else(|| q.response_type.clone());
@@ -990,6 +991,8 @@ fn jar_params(
         response_mode,
         resource,
         via_par: false,
+        // Set from the session by `authorize_get_impl`.
+        mfa_proof: MfaProof::None,
     })
 }
 
@@ -1100,7 +1103,7 @@ pub(super) fn authorization_error_redirect(
     if mode.is_jarm() {
         match state.identity.sign_jarm_error_jwt(
             realm,
-            &to.client_id.to_string(),
+            &crate::identity::tokens::issued_client_id(to.client_id),
             error,
             description,
             to.state,

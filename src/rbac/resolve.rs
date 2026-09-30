@@ -364,6 +364,72 @@ pub(crate) fn resolve_permissions<R: Resolver + ?Sized>(
     })
 }
 
+/// Resolves the permissions an access token granted `granted_scopes` carries,
+/// re-evaluated now — the live (`introspection` / `decision`) twin of
+/// issuance-time scope narrowing (GA audit 3 C-8). See
+/// [`crate::rbac::RbacEngine::resolve_for_granted_scopes`].
+pub(crate) fn resolve_for_granted_scopes<R: Resolver + ?Sized>(
+    resolver: &R,
+    user_id: &UserId,
+    realm_id: &RealmId,
+    org_id: Option<&OrganizationId>,
+    granted_scopes: &[String],
+) -> Result<ResolvedPermissions, RbacError> {
+    let ResolvedPermissions {
+        roles,
+        groups,
+        permissions: full_perms,
+        ..
+    } = resolver.resolve_full_cached(user_id, realm_id, org_id)?;
+
+    // Union of what every permission-bearing scope admits. A scope that
+    // admits nothing identifiable — an OIDC scope, a non-narrowing registry
+    // entry, a scope this realm's registry does not know — is skipped rather
+    // than voiding the others (the `narrow_by_scope` rule that let
+    // `openid docs:read` resolve wider than `docs:read`).
+    let mut narrowing = false;
+    let mut admitted: BTreeSet<Permission> = BTreeSet::new();
+    for scope in granted_scopes {
+        let kind = classify_scope_string(scope);
+        if kind == Some(ScopeKind::OidcStandard) {
+            continue;
+        }
+        match resolver.scope_permissions(realm_id, scope)? {
+            Some(list) if !list.is_empty() => {
+                narrowing = true;
+                admitted.extend(list);
+            }
+            // A raw permission scope is a synthetic single-permission scope
+            // (AUTHZ_EXPANSION.md §"Resolution rule", rule 2).
+            _ if kind == Some(ScopeKind::Permission) => {
+                narrowing = true;
+                if let Ok(permission) = Permission::new(scope.as_str()) {
+                    admitted.insert(permission);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let permissions: Vec<Permission> = if narrowing {
+        full_perms
+            .into_iter()
+            .filter(|p| admitted.contains(p))
+            .collect()
+    } else {
+        full_perms
+    };
+
+    enforce_token_caps(&permissions, &roles, &groups)?;
+
+    Ok(ResolvedPermissions {
+        roles,
+        groups,
+        permissions,
+        granted_scopes: Vec::new(),
+    })
+}
+
 /// Scope-resolution pipeline per `AUTHZ_EXPANSION.md` §"Resolution rule".
 ///
 /// Classifies each requested scope string, performs full-satisfiability
@@ -1464,6 +1530,106 @@ mod tests {
         let resolved = resolve_permissions(&fake, &alice, &realm, None, Some("unknown_scope"))
             .expect("resolve");
         assert!(resolved.permissions.is_empty());
+    }
+
+    /// A user holding `docs.view`, `docs.edit` and `hearth.admin`, with the
+    /// `docs` bundle (`docs.view`, `docs.edit`) and a non-narrowing `openid`
+    /// registered — the fixture for the live scope-narrowing tests.
+    fn granted_scopes_fixture() -> (Fake, RealmId, UserId) {
+        let realm = RealmId::generate();
+        let alice = UserId::generate();
+        let role = mk_role(
+            &realm,
+            "r",
+            &["docs.view", "docs.edit", "hearth.admin"],
+            vec![],
+        );
+        let rid = role.id.clone();
+        let mut fake = Fake::new();
+        fake.upsert_role(role);
+        fake.user_asgn.insert(
+            alice.clone(),
+            vec![mk_asgn(
+                &realm,
+                Subject::User(alice.clone()),
+                rid,
+                Scope::Realm,
+            )],
+        );
+        fake.set_scope(
+            "docs",
+            Some(vec![
+                Permission::new("docs.view").expect("valid"),
+                Permission::new("docs.edit").expect("valid"),
+            ]),
+        );
+        fake.set_scope("openid", None);
+        (fake, realm, alice)
+    }
+
+    fn granted(fake: &Fake, realm: &RealmId, user: &UserId, scopes: &[&str]) -> Vec<String> {
+        let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
+        resolve_for_granted_scopes(fake, user, realm, None, &scopes)
+            .expect("resolve")
+            .permissions
+            .iter()
+            .map(|p| p.as_str().to_string())
+            .collect()
+    }
+
+    /// GA audit 3 C-8: `openid docs` resolved the user's FULL set, because a
+    /// non-narrowing scope voids every other scope's narrowing in
+    /// `resolve_permissions` — one more scope bought more authority.
+    #[test]
+    fn granted_scopes_an_oidc_scope_does_not_void_the_narrowing() {
+        let (fake, realm, alice) = granted_scopes_fixture();
+        assert_eq!(
+            granted(&fake, &realm, &alice, &["openid", "docs"]),
+            vec!["docs.edit".to_string(), "docs.view".to_string()]
+        );
+        assert_eq!(
+            granted(&fake, &realm, &alice, &["docs"]),
+            vec!["docs.edit".to_string(), "docs.view".to_string()]
+        );
+    }
+
+    /// A raw permission scope admits exactly that permission
+    /// (AUTHZ_EXPANSION.md §"Resolution rule", rule 2).
+    #[test]
+    fn granted_scopes_a_raw_permission_scope_admits_that_permission() {
+        let (fake, realm, alice) = granted_scopes_fixture();
+        assert_eq!(
+            granted(&fake, &realm, &alice, &["openid", "docs.view"]),
+            vec!["docs.view".to_string()]
+        );
+    }
+
+    /// A scope the realm registry does not know — a protected resource's MCP
+    /// scope — carries no RBAC meaning: it neither narrows nor widens.
+    #[test]
+    fn granted_scopes_an_unregistered_scope_neither_narrows_nor_widens() {
+        let (fake, realm, alice) = granted_scopes_fixture();
+        assert_eq!(
+            granted(&fake, &realm, &alice, &["mcp:tools:invoke"]).len(),
+            3,
+            "alone it leaves the full set"
+        );
+        assert_eq!(
+            granted(&fake, &realm, &alice, &["mcp:tools:invoke", "docs"]),
+            vec!["docs.edit".to_string(), "docs.view".to_string()],
+            "beside a bundle it does not widen the bundle"
+        );
+    }
+
+    /// No scope, or only OIDC scopes: the full effective set.
+    #[test]
+    fn granted_scopes_without_a_permission_scope_is_the_full_set() {
+        let (fake, realm, alice) = granted_scopes_fixture();
+        assert_eq!(granted(&fake, &realm, &alice, &[]).len(), 3);
+        assert_eq!(
+            granted(&fake, &realm, &alice, &["openid", "profile"]).len(),
+            3
+        );
     }
 
     #[test]

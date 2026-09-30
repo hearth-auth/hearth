@@ -26,6 +26,7 @@ pub mod mcp;
 pub mod migration;
 pub mod oidc;
 pub mod onboarding;
+pub mod operator_token;
 pub mod pre_token_webhook;
 pub mod ra_token;
 pub mod reconcile;
@@ -99,11 +100,15 @@ pub use oidc::{
     ClientTrustLevel, CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     GeneratedClientSecret, IdTokenSigningAlg, IntrospectionResponse, JarClaims, JwtBearerRequest,
-    OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest,
-    PasswordGrantResponse, PushedAuthorizationRequest, PushedAuthorizationResponse,
-    RefreshBindContext, RegisterClientRequest, ResponseMode, StepUpMfaGrantRequest,
-    TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
-    UserInfoResponse,
+    LiveTokenAuthority, OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse,
+    PasswordGrantRequest, PasswordGrantResponse, PushedAuthorizationRequest,
+    PushedAuthorizationResponse, RefreshBindContext, RegisterClientRequest, ResponseMode,
+    StepUpMfaGrantRequest, TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest,
+    UpdateClientRequest, UserInfoResponse,
+};
+pub use operator_token::{
+    OperatorToken, OperatorTokenIssuer, OPERATOR_TOKEN_DEFAULT_TTL, OPERATOR_TOKEN_MAX_TTL,
+    OPERATOR_TOKEN_MIN_TTL,
 };
 pub use session_version::{SessionVersionStore, SvDeltaEntry, SvDeltaResponse, SvSnapshotResponse};
 pub use sms::{
@@ -111,7 +116,8 @@ pub use sms::{
     StubSmsHttpTransport, TwilioSmsSender,
 };
 pub use step_up::{
-    has_step_up_credential, verify_step_up, StepUpAssertion, StepUpError, StepUpProof,
+    has_step_up_credential, verify_operator_step_up, verify_step_up, SecondFactorProof,
+    StepUpAssertion, StepUpError, StepUpProof,
 };
 pub use tokens::{
     decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
@@ -134,7 +140,7 @@ pub use types::{
     RegistrationPolicy, RequiredAction, ScimMappingExport, ScimMappingKind, Session,
     SessionContext, SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest,
     UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
-    WebAuthnAttestationPolicy, Webhook,
+    VerificationOrigin, WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
     AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
@@ -229,6 +235,30 @@ pub trait IdentityEngine: Send + Sync {
         request: &UpdateRealmRequest,
     ) -> Result<Realm, IdentityError>;
 
+    /// Suspends (`suspended = true`) or reinstates a realm — the
+    /// incident-response freeze control.
+    ///
+    /// Suspension reuses [`RealmStatus::Suspended`]: every token of the realm
+    /// stops validating, its sessions are revoked, and no new session starts
+    /// until the realm is reinstated. Only an `Active` or `Suspended` realm
+    /// moves; the check runs under the realm-ops lock. The `RealmUpdated`
+    /// audit event is attributed to `audit_ctx` and carries
+    /// `previous_status` / `status`. YAML reconciliation never clears a
+    /// suspension (it only unarchives).
+    ///
+    /// Returns the status the realm had before, and the updated realm.
+    ///
+    /// # Errors
+    ///
+    /// `SystemRealmProtected` for the system realm, `RealmNotFound`,
+    /// `RealmArchived` for an archived or deleting realm.
+    fn set_realm_suspended(
+        &self,
+        realm_id: &RealmId,
+        suspended: bool,
+        audit_ctx: &AuditContext,
+    ) -> Result<(RealmStatus, Realm), IdentityError>;
+
     /// Deletes a realm and all associated data.
     ///
     /// Cascading deletion removes all users, sessions, credentials,
@@ -246,13 +276,16 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Signs with the realm's Ed25519 key. The `pending_actions` list is
     /// embedded in the token verbatim — callers are responsible for sorting by
-    /// priority before calling this function.
+    /// priority before calling this function. `flow` continues an existing
+    /// flow ([`ra_token::RaClaims::flow`]); `None` starts a new one. The token
+    /// records the user's current required-action generation.
     fn generate_ra_token(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         pending_actions: Vec<RequiredAction>,
         oidc_params: ra_token::OidcParams,
+        flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
 
@@ -261,28 +294,45 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// After all actions complete, the flow resumes by creating a session
     /// cookie and redirecting to `return_to` (or `/ui` when `None`).
-    /// `webauthn_verified` carries forward that this flow registered a
-    /// user-verified passkey (see [`ra_token::RaClaims::webauthn_verified`]).
+    /// `mfa_proof` is what the login has proved so far; the session created
+    /// when the flow ends records it (see [`ra_token::RaClaims::mfa_proof`]).
+    /// `flow` as for [`Self::generate_ra_token`].
+    #[allow(clippy::too_many_arguments)]
     fn generate_browser_ra_token(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         pending_actions: Vec<RequiredAction>,
         return_to: Option<String>,
-        webauthn_verified: bool,
+        mfa_proof: MfaProof,
+        flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
 
     /// Validates a Required-Action session JWT using the realm's public key.
     ///
-    /// Checks signature, `alg`/`typ` headers, and expiry. Returns the decoded
-    /// claims on success.
+    /// Checks signature, `alg`/`typ` headers and expiry, and that the token
+    /// was minted under the user's current required-action generation:
+    /// revoking any of the user's sessions ends every flow under way
+    /// ([`ra_token::RaTokenError::Revoked`], GA audit round 3, D-2). Returns
+    /// the decoded claims on success.
     fn validate_ra_token(
         &self,
         realm_id: &RealmId,
         token: &str,
         now: Timestamp,
     ) -> Result<ra_token::RaClaims, ra_token::RaTokenError>;
+
+    /// Ends the required-action flow `claims` belongs to, once: the first
+    /// call succeeds, and every later call for the same flow — a replayed
+    /// copy of any of the flow's tokens — fails with
+    /// [`IdentityError::InvalidToken`] (GA audit round 3, D-2). Callers claim
+    /// the flow before the session or authorization code it ends in.
+    fn consume_required_action_flow(
+        &self,
+        realm_id: &RealmId,
+        claims: &ra_token::RaClaims,
+    ) -> Result<(), IdentityError>;
 
     /// Rotates the Ed25519 signing key for a realm.
     ///
@@ -307,6 +357,28 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         request: &CreateUserRequest,
+    ) -> Result<User, IdentityError>;
+
+    /// Creates the local account for a just-in-time federated login, with
+    /// the checks [`Self::create_user`] applies.
+    ///
+    /// `email_verified` is whether the upstream identity provider asserted
+    /// that it verified `request.email`. A verified address gives an account
+    /// in the engine's default status whose email is recorded as verified. An
+    /// unverified one gives a `PendingVerification` account, exactly as
+    /// self-registration does: `create_session` refuses it until the owner of
+    /// the address consumes an email-verification token.
+    ///
+    /// A federated login used to create an `Active` account on whatever
+    /// address the upstream named, verified or not (GA audit round 3, G-3).
+    /// Behind an IdP that lets a user claim any address, that pre-created
+    /// someone else's account — and Hearth's SAML IdP then asserted that
+    /// address to every registered service provider.
+    fn provision_federated_user(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateUserRequest,
+        email_verified: bool,
     ) -> Result<User, IdentityError>;
 
     /// Creates a new user record in the reserved system realm.
@@ -646,6 +718,37 @@ pub trait IdentityEngine: Send + Sync {
         ctx: &TokenIssuanceContext,
     ) -> Result<TokenPair, IdentityError>;
 
+    /// Mints a short-lived access token for a **system-realm** operator
+    /// account (GA audit 3 DOC-2): the token the realm and cluster admin API
+    /// need, carried as a Bearer with `X-Realm-ID` set to the nil UUID.
+    ///
+    /// The token is bound to a new session that expires with it (revoking
+    /// that session revokes the token), carries the account's resolved RBAC
+    /// claims — which must include `hearth.admin` — and has no usable refresh
+    /// token. The issuance is written to the system realm's audit trail
+    /// (actor, `issuer`, lifetime, `jti`; never the token) before the token
+    /// is returned; if that write fails, no token is returned.
+    ///
+    /// The caller authenticates the requester first: this method runs no
+    /// interactive gate. See [`OperatorTokenIssuer`].
+    ///
+    /// # Errors
+    ///
+    /// - [`IdentityError::InvalidInput`] — `ttl` is outside
+    ///   [`OPERATOR_TOKEN_MIN_TTL`]..=[`OPERATOR_TOKEN_MAX_TTL`].
+    /// - [`IdentityError::UserNotFound`] — no such account in the system realm.
+    /// - [`IdentityError::UserNotVerified`] / [`IdentityError::Unauthorized`] —
+    ///   the account is pending verification or disabled.
+    /// - [`IdentityError::Unauthorized`] — the token would not carry
+    ///   `hearth.admin`.
+    /// - [`IdentityError::AuditFailure`] — the issuance could not be audited.
+    fn issue_operator_token(
+        &self,
+        user_id: &UserId,
+        ttl: std::time::Duration,
+        issuer: &OperatorTokenIssuer,
+    ) -> Result<OperatorToken, IdentityError>;
+
     /// Validates an access token: verifies the Ed25519 signature, enforces
     /// `exp`, checks the realm binding (`tid`), and confirms the session is
     /// still active. Returns decoded claims only when all checks pass.
@@ -704,29 +807,51 @@ pub trait IdentityEngine: Send + Sync {
     /// Validates the client, redirect URI, response type, and state parameter.
     /// Generates a cryptographically random authorization code, stores it
     /// (hashed), and returns the code with the echoed state.
+    ///
+    /// The code records no second-factor proof, so the session its exchange
+    /// opens proves none ([`MfaProof::None`]); a code minted for a browser
+    /// session goes through [`Self::authorize_from_session`].
     fn authorize(
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
+    /// [`Self::authorize`] for a code minted from a browser session whose
+    /// login proved `mfa_proof`. The code records it, and the session its
+    /// exchange opens records exactly that proof — never more (GA audit
+    /// round 3, D-7). The exchange used to open every token session as
+    /// `MfaProof::Inherited`, which every later second-factor gate read as
+    /// proved.
+    fn authorize_from_session(
+        &self,
+        realm_id: &RealmId,
+        request: &AuthorizationRequest,
+        mfa_proof: MfaProof,
+    ) -> Result<AuthorizationResponse, IdentityError>;
+
     /// [`Self::authorize`] for a surface that cannot show a consent screen —
     /// JSON `POST /authorize`, `POST /realms/{realm}/authorize` and gRPC
     /// `Authorize`, which mint a code from a bearer token alone.
     ///
-    /// Issues only when the client does not require consent or a recorded
-    /// consent covers every requested scope — the browser consent gate's
-    /// rule — and otherwise fails with [`IdentityError::ConsentRequired`]
-    /// (GA audit B2). For a client or role that demands a second factor,
-    /// `session_id` — the session behind the caller's bearer token — must
-    /// have proved one, or the call fails with [`IdentityError::MfaRequired`]
-    /// (the browser MFA-use gate's rule, GA audit B5). [`Self::authorize`] is
-    /// for callers that have already run those gates interactively.
+    /// `bearer` is the validated claims of the caller's bearer token, which
+    /// must belong to `request.user_id` and name a session. A token issued
+    /// to a client (RFC 9068 `client_id`) may authorize that client only; a
+    /// first-party session token (no `client_id`) a first-party client only.
+    /// Anything else fails with [`IdentityError::ClientMismatch`] (GA audit 3
+    /// B-1). Issues only when the client does not require consent or a
+    /// recorded consent covers every requested scope — the browser consent
+    /// gate's rule — and otherwise fails with
+    /// [`IdentityError::ConsentRequired`] (GA audit B2). For a client or role
+    /// that demands a second factor, the token's session must have proved
+    /// one, or the call fails with [`IdentityError::MfaRequired`] (the
+    /// browser MFA-use gate's rule, GA audit B5). [`Self::authorize`] is for
+    /// callers that have already run those gates interactively.
     fn authorize_non_interactive(
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
-        session_id: &SessionId,
+        bearer: &TokenClaims,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     /// Exchanges an authorization code for access, ID, and refresh tokens.
@@ -839,6 +964,8 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Validates signature, `iss == sub == client_id`, `exp` in the future,
     /// `aud` contains the realm issuer URL, and JTI replay prevention.
+    /// `client_id` means the value the client was issued at registration (the
+    /// bare UUID), exactly — not the internal `client_<uuid>` display form.
     fn verify_client_assertion(
         &self,
         realm_id: &RealmId,
@@ -850,8 +977,10 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Looks up the client's registered `jwks`, selects the key matching the
     /// JWT header `kid`/`alg`, verifies the signature (EdDSA or RS256), and
-    /// validates `iss == client_id`, `aud` contains the realm issuer URL, and
-    /// `exp` is in the future. Returns the decoded [`JarClaims`] on success.
+    /// validates `iss == client_id` (and a `client_id` claim, when present,
+    /// `== client_id`), `aud` contains the realm issuer URL, and `exp` is in
+    /// the future. `client_id` means the value the client was issued (the bare
+    /// UUID), exactly. Returns the decoded [`JarClaims`] on success.
     ///
     /// Rejects `alg: none`, missing JWKS, unknown `kid`, and any claim
     /// validation failure with [`IdentityError::InvalidJar`].
@@ -874,12 +1003,26 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Approves a device authorization by user code.
     ///
-    /// Transitions the device code status from `Pending` to `Approved`.
+    /// Transitions the device code status from `Pending` to `Approved`. The
+    /// device's token session proves no second factor ([`MfaProof::None`]);
+    /// an approval from a browser session goes through
+    /// [`Self::approve_device_from_session`].
     fn approve_device(
         &self,
         realm_id: &RealmId,
         user_code: &str,
         user_id: &UserId,
+    ) -> Result<(), IdentityError>;
+
+    /// [`Self::approve_device`] from a browser session whose login proved
+    /// `mfa_proof`: the device's token session records exactly that proof
+    /// (GA audit round 3, D-7).
+    fn approve_device_from_session(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+        user_id: &UserId,
+        mfa_proof: MfaProof,
     ) -> Result<(), IdentityError>;
 
     /// Returns the pending device authorization a user code names — the
@@ -969,15 +1112,40 @@ pub trait IdentityEngine: Send + Sync {
     /// Evaluates whether the bearer token holder has a specific permission
     /// (`POST /oauth/authorize` — decision endpoint, HEA-922).
     ///
-    /// Validates the token (signature, expiry, session, revocation), resolves
-    /// the subject's live RBAC permissions, and returns `allowed: true` only
-    /// when the resolved set contains the requested permission.  Fail-closed:
-    /// any validation or resolution error returns `allowed: false`.
+    /// Validates the token exactly as [`Self::validate_token`] does
+    /// (signature, expiry, session, revocation, audience cutoff, DPoP key
+    /// blocklist), refuses a `resource` the token's `aud` does not name
+    /// (RFC 8707), resolves the token's [`Self::live_token_authority`], and
+    /// returns `allowed: true` only when it contains the requested
+    /// permission. Fail-closed: any validation or resolution error returns
+    /// `allowed: false`.
     fn decide_token_permission(
         &self,
         realm_id: &RealmId,
         request: &oidc::DecidePermissionRequest,
     ) -> Result<oidc::DecidePermissionResponse, IdentityError>;
+
+    /// Resolves the live RBAC authority of a validated user access token
+    /// (GA audit 3 B-2 / C-8) — what an `embedded` token issued to the same
+    /// client for the same grant would carry, resolved now.
+    ///
+    /// The client the token was issued to (RFC 9068 `client_id`; none means
+    /// a first-party session token) selects the claim profile, so a
+    /// third-party client gets no roles, groups or permissions by default.
+    /// The token's permission-bearing scopes narrow the permissions (OIDC
+    /// scopes carry none and do not widen), `narrow_scope` — the caller's own
+    /// optional filter — narrows them further, and a delegated (`act`) token
+    /// is capped at the permissions it carries. A token whose subject, user
+    /// or client is unknown resolves to no authority.
+    ///
+    /// `claims` MUST already be validated by the caller.
+    fn live_token_authority(
+        &self,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+        org_id: Option<&crate::core::OrganizationId>,
+        narrow_scope: Option<&str>,
+    ) -> Result<oidc::LiveTokenAuthority, IdentityError>;
 
     // ===== MFA / TOTP (Step 23) =====
 
@@ -1367,7 +1535,29 @@ pub trait IdentityEngine: Send + Sync {
     /// Returns `Err(VerificationTokenInvalid)` if the token is not found,
     /// expired, or already used. Intentionally vague for enumeration
     /// resistance.
-    fn verify_email_token(&self, realm_id: &RealmId, token: &str) -> Result<UserId, IdentityError>;
+    ///
+    /// Completed from no particular browser ([`VerificationOrigin::Elsewhere`]):
+    /// a `PendingVerification` account is activated without its federated
+    /// links. See [`Self::verify_email_token_from`].
+    fn verify_email_token(&self, realm_id: &RealmId, token: &str) -> Result<UserId, IdentityError> {
+        self.verify_email_token_from(realm_id, token, VerificationOrigin::Elsewhere)
+    }
+
+    /// [`Self::verify_email_token`], completed from `origin`.
+    ///
+    /// A `PendingVerification` account keeps its federated links only when
+    /// `origin` is [`VerificationOrigin::FederatedLoginBrowser`]; otherwise
+    /// every link is removed (audited as `federation_account_unlinked`)
+    /// before the account is activated, so an upstream identity that named
+    /// someone else's address at just-in-time provisioning never reaches the
+    /// account its owner activates (GA audit round 3, G-3). An account that
+    /// is not pending keeps its links either way.
+    fn verify_email_token_from(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        origin: VerificationOrigin,
+    ) -> Result<UserId, IdentityError>;
 
     // ===== A-19: Email-change re-verification flow =====
 
@@ -1601,6 +1791,22 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<Vec<BulkResult<()>>, IdentityError>;
 
     // ===== Organizations =====
+
+    /// Creates an organization on behalf of SCIM: as
+    /// [`IdentityEngine::create_organization`], and the organization carries
+    /// the durable "provisioned by SCIM" marker
+    /// ([`Organization::scim_provisioned`]). Only SCIM's `POST /Groups` calls
+    /// it; a realm's provisioning token may modify or delete only marked
+    /// organizations.
+    ///
+    /// # Errors
+    ///
+    /// As [`IdentityEngine::create_organization`].
+    fn create_scim_organization(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateOrganizationRequest,
+    ) -> Result<Organization, IdentityError>;
 
     /// Creates a new organization within a realm.
     ///

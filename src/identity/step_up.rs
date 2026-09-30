@@ -1,4 +1,5 @@
-//! Step-up verification for credential enrolment (audit 2026-08-28 §4.18#2).
+//! Step-up verification for credential enrolment (audit 2026-08-28 §4.18#2)
+//! and for privileged operator actions ([`verify_operator_step_up`]).
 //!
 //! A session, or an access token, is one factor. Enrolling a new passkey from
 //! that alone turns a stolen session into a permanent credential the account
@@ -22,7 +23,7 @@ use std::sync::Arc;
 
 use crate::core::{RealmId, UserId};
 use crate::identity::webauthn::CompleteAuthenticationParams;
-use crate::identity::{CleartextPassword, IdentityEngine, KdfGateError};
+use crate::identity::{CleartextPassword, IdentityEngine, IdentityError, KdfGateError};
 
 /// An assertion from an already-enrolled passkey, offered as a step-up proof.
 #[derive(Debug)]
@@ -80,6 +81,13 @@ pub enum StepUpError {
         /// Suggested `Retry-After` duration for the client.
         retry_after: std::time::Duration,
     },
+    /// An operator step-up needs a second factor and the account holds none
+    /// (no TOTP factor, no passkey). Enrolling one is the only way forward.
+    SecondFactorNotEnrolled,
+    /// The account's login lockout, or its TOTP guess budget, is spent: too
+    /// many wrong passwords or codes. No proof is checked until the window
+    /// passes, however correct. The caller SHOULD answer `429`.
+    Locked,
 }
 
 impl std::fmt::Display for StepUpError {
@@ -87,6 +95,10 @@ impl std::fmt::Display for StepUpError {
         match self {
             Self::Required => f.write_str("step-up authentication required"),
             Self::Overloaded { .. } => f.write_str("step-up verification shed — overloaded"),
+            Self::SecondFactorNotEnrolled => {
+                f.write_str("step-up needs a second factor and the account holds none")
+            }
+            Self::Locked => f.write_str("step-up refused — too many failed attempts"),
         }
     }
 }
@@ -102,6 +114,10 @@ impl std::error::Error for StepUpError {}
 /// # Errors
 ///
 /// - [`StepUpError::Required`] when the step-up was not proven.
+/// - [`StepUpError::Locked`] when the account's login lockout (password) or
+///   TOTP guess budget (code) is spent. Wrong proofs spend the same budgets a
+///   login does, so a stolen session cannot guess faster here than at the
+///   login form.
 /// - [`StepUpError::Overloaded`] when the KDF gate shed a password verify.
 pub async fn verify_step_up(
     identity: &Arc<dyn IdentityEngine>,
@@ -111,16 +127,29 @@ pub async fn verify_step_up(
 ) -> Result<(), StepUpError> {
     match proof {
         StepUpProof::Password(password) => {
-            // Argon2id — route through the shared admission gate rather than an
-            // ungated `spawn_blocking` (HEA-1891 / F3).
+            // Argon2id — route through the KDF admission gate rather than an
+            // ungated `spawn_blocking` (HEA-1891 / F3), and through the same
+            // gate the account's login uses: a system-realm operator's verify
+            // draws from the admin-reserved pool, so a tenant-login flood
+            // that fills the shared gate cannot shed it (HEA-1892 / F2).
+            //
+            // `verify_password` applies the account's login lockout itself:
+            // a wrong password here counts as a failed login, and a locked
+            // account is refused before its credential is checked.
+            let kdf_gate = if realm_id.as_uuid().is_nil() {
+                crate::identity::admin_gate()
+            } else {
+                crate::identity::gate()
+            };
             let engine = Arc::clone(identity);
             let realm = realm_id.clone();
             let user = user_id.clone();
-            match crate::identity::gate()
+            match kdf_gate
                 .run(move || engine.verify_password(&realm, &user, &password))
                 .await
             {
                 Ok(Ok(true)) => Ok(()),
+                Ok(Err(IdentityError::RateLimited)) => Err(StepUpError::Locked),
                 Ok(Ok(false) | Err(_)) => Err(StepUpError::Required),
                 Err(KdfGateError::Overloaded { retry_after }) => {
                     Err(StepUpError::Overloaded { retry_after })
@@ -131,8 +160,11 @@ pub async fn verify_step_up(
                 }
             }
         }
+        // `verify_totp` spends the account's TOTP guess budget — the one its
+        // login's second factor draws from — and refuses once it is spent.
         StepUpProof::TotpCode(code) => match identity.verify_totp(realm_id, user_id, &code) {
             Ok(()) => Ok(()),
+            Err(IdentityError::RateLimited) => Err(StepUpError::Locked),
             Err(_) => Err(StepUpError::Required),
         },
         StepUpProof::WebAuthnAssertion(assertion) => {
@@ -158,6 +190,98 @@ pub async fn verify_step_up(
                 Ok(())
             }
         }
+    }
+}
+
+/// The second factor offered with an operator step-up.
+#[non_exhaustive]
+pub enum SecondFactorProof {
+    /// A current code from the account's enrolled TOTP factor.
+    TotpCode(String),
+    /// An assertion from an enrolled passkey. It counts only when the
+    /// authenticator proved user verification (the UV flag).
+    WebAuthnAssertion(Box<StepUpAssertion>),
+    /// No second factor was offered.
+    None,
+}
+
+impl std::fmt::Debug for SecondFactorProof {
+    /// Names the variant only: the value is a live credential.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TotpCode(_) => "TotpCode",
+            Self::WebAuthnAssertion(_) => "WebAuthnAssertion",
+            Self::None => "None",
+        })
+    }
+}
+
+/// Verifies a fresh two-factor step-up before a privileged operator action:
+/// minting a system-realm API token in the admin console (GA audit 3 DOC-2).
+///
+/// Stricter than [`verify_step_up`], which accepts any one proof:
+///
+/// * the account's password is required whenever the account has one;
+/// * a second factor the account holds is always required — a current TOTP
+///   code, or a passkey assertion that proved user verification (a touch
+///   alone is possession, one factor);
+/// * an account that holds no second factor is refused with
+///   [`StepUpError::SecondFactorNotEnrolled`], never waved through.
+///
+/// The password is checked first, so a wrong password does not spend a TOTP
+/// code. Every probe fails closed: an unreadable credential counts as held,
+/// so its proof is demanded.
+///
+/// # Errors
+///
+/// - [`StepUpError::SecondFactorNotEnrolled`] — no TOTP factor and no passkey.
+/// - [`StepUpError::Required`] — a required proof is missing or does not
+///   verify.
+/// - [`StepUpError::Locked`] — the account's login lockout or TOTP guess
+///   budget is spent (see [`verify_step_up`]).
+/// - [`StepUpError::Overloaded`] — the KDF gate shed the password verify.
+pub async fn verify_operator_step_up(
+    identity: &Arc<dyn IdentityEngine>,
+    realm_id: &RealmId,
+    user_id: &UserId,
+    password: Option<CleartextPassword>,
+    second: SecondFactorProof,
+) -> Result<(), StepUpError> {
+    let has_password = identity
+        .has_password_credential(realm_id, user_id)
+        .unwrap_or(true);
+    let has_totp = identity.mfa_enabled(realm_id, user_id).unwrap_or(true);
+    let has_passkey = identity
+        .list_webauthn_credentials(realm_id, user_id)
+        .map_or(true, |creds| !creds.is_empty());
+    if !has_totp && !has_passkey {
+        return Err(StepUpError::SecondFactorNotEnrolled);
+    }
+    if has_password {
+        let Some(password) = password else {
+            return Err(StepUpError::Required);
+        };
+        verify_step_up(identity, realm_id, user_id, StepUpProof::Password(password)).await?;
+    }
+    match second {
+        SecondFactorProof::TotpCode(code) if has_totp => {
+            verify_step_up(identity, realm_id, user_id, StepUpProof::TotpCode(code)).await
+        }
+        SecondFactorProof::WebAuthnAssertion(assertion) if has_passkey => {
+            let params = CompleteAuthenticationParams {
+                credential_id: &assertion.credential_id,
+                client_data_json: &assertion.client_data_json,
+                authenticator_data: &assertion.authenticator_data,
+                signature: &assertion.signature,
+                user_handle: assertion.user_handle.as_deref(),
+                origin: &assertion.origin,
+            };
+            match identity.complete_webauthn_authentication(realm_id, &params) {
+                Ok(result) if result.user_id() == user_id && result.user_verified() => Ok(()),
+                _ => Err(StepUpError::Required),
+            }
+        }
+        _ => Err(StepUpError::Required),
     }
 }
 

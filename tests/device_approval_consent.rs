@@ -377,3 +377,65 @@ async fn an_mfa_required_device_client_is_approved_from_a_proved_session() {
     rig.poll(&client, &device_code)
         .expect("a proved session approves the MFA-required client");
 }
+
+// ── GA audit round 3, D-7: the device token session records the approving
+// session's proof, not `Inherited` ─────────────────────────────────────────
+
+impl Rig {
+    /// Approves `user_code` through `/ui/device` and polls the device's
+    /// tokens; returns the `mfa_proof` of the session the tokens name.
+    async fn approved_device_session_proof(
+        &self,
+        client: &ClientId,
+        device_code: &str,
+        user_code: &str,
+    ) -> MfaProof {
+        let (_, location, _) = self
+            .post(&format!("user_code={user_code}&decision=approve"))
+            .await;
+        assert_eq!(location.as_deref(), Some("/ui/device?flash=approved"));
+        let tokens = self
+            .state
+            .identity
+            .poll_device_token(&self.realm, device_code, client)
+            .expect("the device collects its tokens");
+        let claims = self
+            .state
+            .identity
+            .validate_token(&self.realm, tokens.access_token())
+            .expect("valid token");
+        let sid = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
+        self.state
+            .identity
+            .get_session(
+                &self.realm,
+                &hearth::core::SessionId::new(sid.parse().expect("session uuid")),
+            )
+            .expect("lookup")
+            .expect("token session")
+            .mfa_proof()
+    }
+}
+
+#[tokio::test]
+async fn a_device_token_session_records_the_approving_sessions_proof() {
+    let rig = rig_with_proof(MfaProof::Proved);
+    let (client, device_code, user_code) = rig.start();
+    assert_eq!(
+        rig.approved_device_session_proof(&client, &device_code, &user_code)
+            .await,
+        MfaProof::Proved
+    );
+}
+
+#[tokio::test]
+async fn a_device_approved_from_an_unproved_session_gets_an_unproved_session() {
+    let rig = rig();
+    let (client, device_code, user_code) = rig.start();
+    assert_eq!(
+        rig.approved_device_session_proof(&client, &device_code, &user_code)
+            .await,
+        MfaProof::None,
+        "the device proved nothing the approving session did not"
+    );
+}

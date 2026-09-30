@@ -111,6 +111,12 @@ enum Commands {
         #[command(subcommand)]
         action: BackupAction,
     },
+    /// Operator tools that run on the host, against a stopped node's data
+    /// directory.
+    Admin {
+        #[command(subcommand)]
+        action: AdminAction,
+    },
     /// Print a shell completion script to stdout.
     ///
     /// Pipe the output to your shell's completions directory.
@@ -118,6 +124,56 @@ enum Commands {
     Completions {
         /// Shell to generate completions for.
         shell: clap_complete::Shell,
+    },
+}
+
+/// Host-side operator subcommands.
+#[derive(Subcommand)]
+enum AdminAction {
+    /// Print a short-lived system-realm admin token for an operator account.
+    ///
+    /// For runbooks that need `$SYSTEM_TOKEN` (the realm and cluster admin
+    /// API) in production, where `POST /admin/bootstrap` does not exist:
+    /// `SYSTEM_TOKEN=$(hearth admin token --config /etc/hearth/hearth.yaml
+    /// --user ops@example.com)`. The token is written to stdout and nowhere
+    /// else; logs go to stderr. Its issuance is recorded in the system realm's
+    /// audit trail.
+    ///
+    /// The command opens the data directory itself, so `hearth serve` must be
+    /// stopped on this node while it runs; start it again afterwards and use
+    /// the token within `--ttl`. On a cluster node the session and audit
+    /// record it writes would exist on that node alone, outside Raft, so a
+    /// data directory holding `raft.db` is refused unless
+    /// `--sole-cluster-node` says why that is safe.
+    Token {
+        /// Email of the operator account in the system realm. It must hold
+        /// `hearth.admin` (the `realm.admin` role).
+        #[arg(long)]
+        user: String,
+
+        /// Token lifetime, `<n>s`, `<n>m` or `<n>h`, from 1m to 1h.
+        #[arg(long, default_value = "15m")]
+        ttl: String,
+
+        /// Path to the data directory. Defaults to `storage.data_dir` from
+        /// `--config`, else `data`.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Path to `hearth.yaml`, read for `storage.data_dir` and
+        /// `security.key_encryption_key`. `HEARTH_KEK` takes precedence for
+        /// the key.
+        #[arg(long, short)]
+        config: Option<PathBuf>,
+
+        /// Accept a cluster node's data directory. Only for a node that next
+        /// starts as its cluster's ONLY member, with every other node
+        /// rejoining empty and receiving a snapshot of this store (the
+        /// disaster-recovery rebuild). Anywhere else the session and audit
+        /// record exist on this node alone and fork the replicated audit
+        /// chain.
+        #[arg(long)]
+        sole_cluster_node: bool,
     },
 }
 
@@ -748,6 +804,36 @@ async fn main() {
                     }
                 },
                 BackupAction::Inspect { input } => match run_backup_inspect(&input) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        tracing::error!("error: {e}");
+                        2
+                    }
+                },
+            };
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::Admin { action } => {
+            // stderr, not the CLI default of stdout: stdout carries the token
+            // alone, so `SYSTEM_TOKEN=$(hearth admin token ...)` captures
+            // nothing else.
+            init_cli_stderr_tracing();
+            let code = match action {
+                AdminAction::Token {
+                    user,
+                    ttl,
+                    data_dir,
+                    config,
+                    sole_cluster_node,
+                } => match run_admin_token(
+                    &user,
+                    &ttl,
+                    data_dir.as_deref(),
+                    config.as_deref(),
+                    sole_cluster_node,
+                ) {
                     Ok(()) => 0,
                     Err(e) => {
                         tracing::error!("error: {e}");
@@ -2675,11 +2761,9 @@ async fn run_serve(
         hearth::abuse::shaper::RequestShaper::disabled()
     } else {
         match config.security.request_shaper.as_ref() {
+            // `0` disables a dimension (GA sweep 3): `Some(0)` shed every request.
             Some(cfg) => hearth::abuse::shaper::RequestShaper::with_config(
-                hearth::abuse::shaper::ShaperConfig {
-                    ip_rps: Some(cfg.ip_rps),
-                    realm_rps: Some(cfg.realm_rps),
-                },
+                hearth::abuse::shaper::ShaperConfig::from_operator(cfg.ip_rps, cfg.realm_rps),
             ),
             None => hearth::abuse::shaper::RequestShaper::new(),
         }
@@ -4590,6 +4674,127 @@ fn cli_storage_config(data_dir: &std::path::Path) -> StorageConfig {
     config
 }
 
+/// Runs `hearth admin token`: mints a short-lived system-realm token for an
+/// operator account against a stopped, single-node data directory, and prints
+/// it — alone — to stdout (GA audit 3 DOC-2).
+fn run_admin_token(
+    user: &str,
+    ttl: &str,
+    data_dir: Option<&std::path::Path>,
+    config_path: Option<&std::path::Path>,
+    sole_cluster_node: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use hearth::identity::{OperatorTokenIssuer, OPERATOR_TOKEN_MAX_TTL, OPERATOR_TOKEN_MIN_TTL};
+    use std::io::Write as _;
+
+    let ttl_micros =
+        hearth::config::parse_duration_to_micros(ttl).map_err(|e| format!("--ttl: {e}"))?;
+    let ttl = u64::try_from(ttl_micros)
+        .map(Duration::from_micros)
+        .map_err(|_| "--ttl must be positive")?;
+    if !(OPERATOR_TOKEN_MIN_TTL..=OPERATOR_TOKEN_MAX_TTL).contains(&ttl) {
+        return Err(format!(
+            "--ttl must be between {}m and {}m: this token is for one maintenance step, \
+             not a standing credential",
+            OPERATOR_TOKEN_MIN_TTL.as_secs() / 60,
+            OPERATOR_TOKEN_MAX_TTL.as_secs() / 60
+        )
+        .into());
+    }
+
+    // `from_file_unchecked`, like every one-shot command: two keys are needed
+    // from the file, and a config that has drifted elsewhere must not block
+    // an operator in the middle of a recovery.
+    let config = config_path
+        .map(|path| {
+            Config::from_file_unchecked(path)
+                .map_err(|e| format!("failed to read {}: {e}", path.display()))
+        })
+        .transpose()?;
+    let data_dir = data_dir.map_or_else(
+        || {
+            config.as_ref().map_or_else(
+                || PathBuf::from("data"),
+                |c| PathBuf::from(&c.storage.data_dir),
+            )
+        },
+        std::path::Path::to_path_buf,
+    );
+    if !data_dir.is_dir() {
+        return Err(format!(
+            "data directory '{}' does not exist; pass --data-dir or a --config whose \
+             storage.data_dir names the node's store",
+            data_dir.display()
+        )
+        .into());
+    }
+    // A cluster node's store must not be written outside Raft: the session
+    // would exist on this node only, and the audit record would fork the
+    // system realm's replicated audit chain on it. The one exception is a
+    // node every other node will copy through a snapshot.
+    if data_dir.join("raft.db").exists() && !sole_cluster_node {
+        return Err(format!(
+            "'{}' is a cluster node's data directory (it holds raft.db). `hearth admin token` \
+             writes a session and an audit record straight into the store, outside Raft: they \
+             would exist on this node only and fork the replicated audit chain. Pass \
+             --sole-cluster-node only when this node next starts as the cluster's only member \
+             and every other node rejoins empty from its snapshot",
+            data_dir.display()
+        )
+        .into());
+    }
+
+    let kek = if std::env::var_os("HEARTH_KEK").is_some() {
+        resolve_storage_kek(None)?
+    } else {
+        resolve_storage_kek(
+            config
+                .as_ref()
+                .and_then(|c| c.security.key_encryption_key.as_deref()),
+        )?
+    };
+    let storage = match EmbeddedStorageEngine::open(cli_storage_config(&data_dir)) {
+        Ok(storage) => Arc::new(storage),
+        Err(hearth::storage::StorageError::AlreadyLocked { data_dir }) => {
+            return Err(format!(
+                "data directory '{}' is locked by another process. `hearth admin token` opens \
+                 the store itself: stop `hearth serve` on this node, run it, then start the \
+                 server again and use the token",
+                data_dir.display()
+            )
+            .into());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let (identity, _audit, _rbac) =
+        build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>, kek)?;
+
+    let system_realm = hearth::core::RealmId::new(uuid::Uuid::nil());
+    let operator = identity
+        .get_user_by_email(&system_realm, user)?
+        .ok_or_else(|| format!("no account '{user}' in the system realm"))?;
+    let token = identity
+        .issue_operator_token(operator.id(), ttl, &OperatorTokenIssuer::HostCli)
+        .map_err(|e| match e {
+            hearth::identity::IdentityError::Unauthorized => format!(
+                "'{user}' may not administer the system realm: the account is disabled or its \
+                 token would not carry hearth.admin (grant it the realm.admin role)"
+            ),
+            other => other.to_string(),
+        })?;
+
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{}", token.access_token())?;
+    stdout.flush()?;
+    tracing::info!(
+        expires_at_micros = token.expires_at().as_micros(),
+        session_id = %token.session_id().as_uuid(),
+        "system-realm token for '{user}' written to stdout; use it with \
+         `X-Realm-ID: 00000000-0000-0000-0000-000000000000` once the server is running again"
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 fn run_backup_create(
     output: Option<&std::path::Path>,
@@ -5671,6 +5876,25 @@ fn init_cli_tracing() -> Option<hearth::telemetry::TracingGuard> {
         ..hearth::config::ObservabilityConfig::default()
     };
     Some(hearth::telemetry::init(&observability))
+}
+
+/// Installs a stderr-only tracing subscriber for a one-shot command whose
+/// stdout is its result (`hearth admin token` prints a token there).
+///
+/// `init_cli_tracing` writes to stdout, which would mix log lines into the
+/// value an operator captures with `$(...)`.
+fn init_cli_stderr_tracing() {
+    if tracing::dispatcher::has_been_set() {
+        return;
+    }
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_target(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    // Losing a race to another subscriber only means logs go there instead.
+    let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
 fn report_startup_fatal(msg: &str) {

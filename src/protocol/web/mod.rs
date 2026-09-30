@@ -879,6 +879,7 @@ fn web_civil_from_days(z: i64) -> (i64, i64, i64) {
 /// | `/ui/admin/sessions` | GET | Admin sessions list |
 /// | `/ui/admin/sessions/{id}/revoke` | POST | Revoke session |
 /// | `/ui/admin/audit` | GET | Audit log viewer |
+/// | `/ui/admin/api-tokens` | GET/POST | Mint a short-lived system-realm API token (step-up) |
 /// | `/ui/static/{file}` | GET | Static assets (CSS, theme, htmx, logo) |
 #[allow(clippy::too_many_lines)]
 pub fn router(state: WebState) -> Router {
@@ -1337,6 +1338,11 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/admin-users/import/template.csv",
             axum::routing::get(admin::admin_admin_users_import_template_csv),
+        )
+        // --- System-realm API tokens (GA audit 3 DOC-2) ---
+        .route(
+            "/admin/api-tokens",
+            axum::routing::get(admin::admin_api_token_form).post(admin::admin_api_token_issue),
         )
         // --- Migration history + orphan recovery ---
         .route(
@@ -2007,6 +2013,7 @@ const PASSKEY_JS: &[u8] = include_bytes!("assets/passkey.js");
 /// can stay `script-src 'self'` (HEA-886).
 const ADMIN_SLUG_SYNC_JS: &[u8] = include_bytes!("assets/admin/slug-sync.js");
 const ADMIN_WEBHOOKS_NEW_JS: &[u8] = include_bytes!("assets/admin/webhooks-new.js");
+const ADMIN_API_TOKENS_JS: &[u8] = include_bytes!("assets/admin/api-tokens.js");
 const ADMIN_USERS_IMPORT_JS: &[u8] = include_bytes!("assets/admin/users-import.js");
 const ADMIN_USERS_LIST_JS: &[u8] = include_bytes!("assets/admin/users-list.js");
 const ADMIN_USERS_NEW_JS: &[u8] = include_bytes!("assets/admin/users-new.js");
@@ -2212,6 +2219,9 @@ async fn serve_static(
             ADMIN_WEBHOOKS_NEW_JS,
             "application/javascript; charset=utf-8",
         )),
+        "admin/api-tokens.js" => {
+            Some((ADMIN_API_TOKENS_JS, "application/javascript; charset=utf-8"))
+        }
         "admin/users-import.js" => Some((
             ADMIN_USERS_IMPORT_JS,
             "application/javascript; charset=utf-8",

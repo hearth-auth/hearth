@@ -33,7 +33,7 @@ use crate::identity::federation::{
     verify_federation_state_mac, FederationOutcome, FederationService,
 };
 use crate::identity::SessionContext;
-use crate::identity::{CreateUserRequest, IdentityError};
+use crate::identity::{CreateUserRequest, IdentityError, UserStatus};
 use crate::protocol::client_info::{build_session_context, PeerAddr};
 
 use super::auth;
@@ -465,7 +465,8 @@ pub(super) fn complete_federation_outcome(
                     }
                 }
             };
-            let email = if identity.email.is_empty() || email_taken {
+            let synthetic = identity.email.is_empty() || email_taken;
+            let email = if synthetic {
                 // Synthesized email for providers that don't expose
                 // one (GitHub private-email users, or minimal-scope
                 // flows), and for "treat as separate" cases where the
@@ -492,7 +493,22 @@ pub(super) fn complete_federation_outcome(
                 last_name: identity.last_name.clone(),
                 attributes: Default::default(),
             };
-            let new_user = match state.identity.create_user(realm_id, &req) {
+            // An upstream address is recorded as the account's only if the
+            // upstream said it verified it; otherwise the account waits for
+            // the address owner, as a self-registered one does (GA audit
+            // round 3, G-3). It used to be created `Active` on whatever the
+            // upstream named — an attacker's IdP could name the victim's
+            // address and pre-create (and, through Hearth's SAML IdP,
+            // assert) the victim's account. A synthesized address names
+            // no mailbox and nobody, so that account is active, unverified.
+            let created = if synthetic {
+                state.identity.create_user(realm_id, &req)
+            } else {
+                state
+                    .identity
+                    .provision_federated_user(realm_id, &req, identity.email_verified)
+            };
+            let new_user = match created {
                 Ok(u) => u,
                 Err(e) => {
                     tracing::warn!(error = %e, "JIT user create failed");
@@ -510,6 +526,9 @@ pub(super) fn complete_federation_outcome(
             }
             audit_federation_jit(state, realm_id, &identity.idp_id, new_user.id());
             audit_federation_linked(state, realm_id, &identity.idp_id, new_user.id(), "initial");
+            if new_user.status() == UserStatus::PendingVerification {
+                return await_email_verification(state, headers, realm_id, realm_name, &new_user);
+            }
             audit_federation_completed(state, realm_id, &identity.idp_id, new_user.id(), true);
             complete_login(
                 state,
@@ -902,13 +921,15 @@ fn complete_login(
     // factor — this used to send every non-TOTP user on an `mfa_required`
     // realm to TOTP enrolment. The MFA pending cookie carries the proven
     // identity across the hop, exactly as the direct login does.
-    match super::second_factor::second_factor_step(state, &realm, &user) {
+    let first = auth::FirstFactor::Credential;
+    match super::second_factor::second_factor_step(state, &realm, &user, first) {
         Ok(Some(step)) => {
             let mut response = super::second_factor::redirect_to_second_factor(
                 state,
                 realm_id,
                 user_id,
                 step,
+                first,
                 Some(return_to),
                 secure,
             );
@@ -929,6 +950,8 @@ fn complete_login(
         realm_id,
         user_id,
         Some(return_to),
+        // The upstream login is one factor; nothing was owed above.
+        &build_session_context(headers, peer_addr, &state.trusted_proxies),
         headers,
         now,
     ) {
@@ -958,6 +981,60 @@ fn complete_login(
     super::handlers::append_cookie(&mut response, &session_cookie);
     super::handlers::append_cookie(&mut response, &csrf_cookie);
     super::handlers::append_cookie(&mut response, &clear_bind);
+    response
+}
+
+/// Sends a just-provisioned federated account whose address the upstream did
+/// not verify the verification link, and shows the "check your email" page.
+/// The account signs in through its link once the address owner has
+/// verified it (GA audit round 3, G-3).
+fn await_email_verification(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    realm_id: &RealmId,
+    realm_name: &str,
+    user: &crate::identity::User,
+) -> Response {
+    let clear_bind = format!("{FED_BIND_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0");
+    let realm = match state.identity.get_realm(realm_id) {
+        Ok(Some(r)) => r,
+        Ok(None) | Err(_) => {
+            tracing::warn!("federation: realm lookup failed after JIT provisioning");
+            return handlers_common::server_error();
+        }
+    };
+    let token = match state
+        .identity
+        .issue_email_verification_token(realm_id, user.id())
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "federation: verification token issue failed");
+            return handlers_common::server_error();
+        }
+    };
+    let action_prefix = format!("/ui/realms/{realm_name}");
+    super::handlers::send_verification_email_off_path(
+        state,
+        &realm,
+        user.email().to_string(),
+        &token,
+        &action_prefix,
+        headers,
+    );
+    let mut response = Redirect::to(&format!("{action_prefix}/register/sent")).into_response();
+    super::handlers::append_cookie(&mut response, &clear_bind);
+    // This browser performed the federated login: a verification completed
+    // here keeps the account's federated link; one completed anywhere else
+    // activates the account without it (GA audit round 3, G-3).
+    super::handlers::append_cookie(
+        &mut response,
+        &super::link_token::federated_origin_cookie(
+            &state.cookie_secret,
+            &token,
+            state.is_secure_request(headers),
+        ),
+    );
     response
 }
 

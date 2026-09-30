@@ -16,7 +16,7 @@ use crate::protocol::client_info::PeerAddr;
 use crate::protocol::step_up::StepUpProofBody;
 
 use super::{
-    extract_realm_id, extract_user_auth, identity_error_to_response, make_ip_rate_limit_response,
+    extract_realm_id, identity_error_to_response, make_ip_rate_limit_response,
     resolve_realm_by_name, AppState,
 };
 
@@ -82,7 +82,7 @@ fn step_up_error_response(error: &StepUpError) -> impl IntoResponse {
                 "error": "step_up_required",
                 "error_description":
                     "supply the account password, a current TOTP code, or an assertion from an \
-                     enrolled passkey to enrol a credential",
+                     enrolled passkey to enrol or remove a credential",
             })),
         )
             .into_response(),
@@ -241,7 +241,15 @@ async fn webauthn_register_begin(
         Err(e) => return e.into_response(),
     };
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
+    // Adding a credential to the user's account is first-party only, like
+    // listing and removing one (GA audit 3 B-5, round 3).
+    let user_id = match super::auth::extract_first_party_user_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -297,7 +305,15 @@ async fn webauthn_register_complete(
         Err(e) => return e.into_response(),
     };
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
+    // Adding a credential to the user's account is first-party only, like
+    // listing and removing one (GA audit 3 B-5, round 3).
+    let user_id = match super::auth::extract_first_party_user_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -477,7 +493,14 @@ async fn webauthn_list_credentials(
         Err(e) => return e.into_response(),
     };
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
+    // The user's factors are no third-party app's business (GA audit 3 B-5).
+    let user_id = match super::auth::extract_first_party_user_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -503,19 +526,34 @@ async fn webauthn_list_credentials(
     }
 }
 
+/// `DELETE /webauthn/credentials/{credential_id}` — removes one of the
+/// caller's passkeys.
+///
+/// First-party tokens only (GA audit 3 B-5), and — like enrolment — the body
+/// MUST carry a step-up proof (`password`, `totp_code` or `assertion`, GA
+/// audit 3 D-6): an access token alone is one factor, and removing the
+/// phishing-resistant one with it turned a stolen token into a factor strip.
+/// The body is read only after the caller is authenticated.
 async fn webauthn_delete_credential(
     State(state): State<Arc<AppState>>,
     method: axum::http::Method,
     uri: axum::http::Uri,
     headers: HeaderMap,
     Path(credential_id_b64): Path<String>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let realm_id = match extract_realm_id(&headers) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
+    let user_id = match super::auth::extract_first_party_user_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -523,6 +561,35 @@ async fn webauthn_delete_credential(
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
+    // No body is no proof; a malformed one is refused rather than read as none.
+    let step_up: StepUpProofBody = if body.iter().all(u8::is_ascii_whitespace) {
+        StepUpProofBody::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(b) => b,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": "the body must be a JSON step-up proof"
+                    })),
+                )
+                    .into_response()
+            }
+        }
+    };
+    let (origin, _) = pinned_origin_and_rp_id(&state);
+    if let Err(e) = verify_step_up(
+        &state.identity,
+        &realm_id,
+        &user_id,
+        step_up.into_proof(&origin),
+    )
+    .await
+    {
+        return step_up_error_response(&e).into_response();
+    }
     match state
         .identity
         .revoke_webauthn_credential(&realm_id, &user_id, &credential_id)

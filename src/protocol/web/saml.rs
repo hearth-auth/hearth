@@ -11,6 +11,7 @@ use axum::extract::{Form, Path as AxumPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::audit::{AuditAction, CreateAuditEvent};
@@ -166,7 +167,11 @@ pub async fn sp_acs(
         entity_id: idp_cfg.issuer.clone(),
         sso_url: idp_cfg.authorization_endpoint.clone(),
         slo_url: idp_cfg.userinfo_endpoint.clone(),
-        idp_certificates_pem: vec![idp_cfg.client_secret.expose_secret().to_string()],
+        // `idp_certificate_pem` may be a bundle (outgoing + incoming
+        // certificate during an IdP key rollover); each block is trusted.
+        idp_certificates_pem: crate::identity::federation::saml::split_pem_certificates(
+            idp_cfg.client_secret.expose_secret(),
+        ),
         sign_authn_requests: false,
         want_assertions_signed: idp_cfg.want_assertions_signed,
         trust_asserted_email: idp_cfg.trust_asserted_email,
@@ -622,6 +627,10 @@ async fn idp_complete_sso(
     // requester controls. The NameID is the session user's email (the
     // EmailAddress NameID format that registered SPs default to).
     let subject_name_id = session.user_email.clone();
+    let attributes = match asserted_attributes(&state, &realm, session) {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
 
     let Some(realm_url) = realm_base_url_for_realm(&headers, &state, &realm) else {
         return saml_origin_unconfigured();
@@ -653,7 +662,7 @@ async fn idp_complete_sso(
         session_index: &session_index,
         not_before: now,
         not_on_or_after: Timestamp::from_micros(now.as_micros() + 600 * 1_000_000),
-        attributes: &Default::default(),
+        attributes: &attributes,
     });
     let signed_xml = match sign_element(response_xml.as_bytes(), &response_id, &key) {
         Ok(b) => b,
@@ -707,6 +716,10 @@ pub async fn idp_sso_init(
         return (StatusCode::NOT_FOUND, "SP not registered").into_response();
     };
     let subject_name_id = session.user_email.clone();
+    let attributes = match asserted_attributes(&state, &realm, &session) {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
 
     let Some(realm_url) = realm_base_url_from_headers(&state, &headers, &realm_name) else {
         return saml_origin_unconfigured();
@@ -738,7 +751,7 @@ pub async fn idp_sso_init(
         session_index: &session_index,
         not_before: now,
         not_on_or_after: Timestamp::from_micros(now.as_micros() + 600 * 1_000_000),
-        attributes: &Default::default(),
+        attributes: &attributes,
     });
 
     let signed_xml = match sign_element(response_xml.as_bytes(), &response_id, &key) {
@@ -942,6 +955,28 @@ fn post_binding_response(
             .insert(axum::http::header::CONTENT_SECURITY_POLICY, value);
     }
     resp
+}
+
+/// The attributes an assertion Hearth issues as IdP carries alongside the
+/// NameID: `email_verified`, whether the account proved the address the
+/// NameID names (GA audit round 3, G-3). An SP that keys accounts on the
+/// email could not tell a verified address from one an operator — or, before
+/// G-3, an upstream IdP — merely typed in. `Err` is the response to return.
+fn asserted_attributes(
+    state: &WebState,
+    realm: &RealmId,
+    session: &UiSession,
+) -> Result<BTreeMap<String, Vec<String>>, Response> {
+    match state.identity.get_user(realm, &session.user_id) {
+        Ok(Some(user)) => Ok(BTreeMap::from([(
+            "email_verified".to_string(),
+            vec![user.email_verified().to_string()],
+        )])),
+        Ok(None) | Err(_) => {
+            tracing::warn!("saml idp: the session user could not be loaded; refusing");
+            Err((StatusCode::INTERNAL_SERVER_ERROR, "user lookup failed").into_response())
+        }
+    }
 }
 
 /// Rejects a request whose authenticated session belongs to a different

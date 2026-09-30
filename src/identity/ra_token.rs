@@ -4,7 +4,13 @@
 //! state across required-action completion pages.  Transported as an HttpOnly
 //! SameSite=Strict cookie scoped to `/required-action`.
 //!
-//! TTL: 15 minutes (900 seconds).  Stateless — no storage record needed.
+//! TTL: 15 minutes (900 seconds). The token itself is stateless, but two
+//! small storage records bound it (GA audit round 3, D-2): the flow it
+//! belongs to ([`RaClaims::flow`]) is claimed once when the flow ends, so a
+//! copy of the cookie cannot end it again; and the user's RA generation
+//! ([`RaClaims::generation`]) is bumped whenever one of the user's sessions
+//! is revoked (sign-out, sign-out everywhere, a password change, a disable),
+//! which invalidates every RA token minted before.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -14,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 use crate::identity::tokens::SigningKey;
-use crate::identity::types::RequiredAction;
+use crate::identity::types::{MfaProof, RequiredAction};
 
 /// Cookie name for the RA session token.
 pub const RA_SESSION_COOKIE: &str = "hearth_ra_session";
@@ -65,6 +71,11 @@ pub struct OidcParams {
     /// actions applies the same prompt semantics as a direct request.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub prompt: String,
+    /// What the browser session authorizing the request proved about a
+    /// second factor; the code issued on resume carries it into the token
+    /// session (GA audit round 3, D-7).
+    #[serde(default)]
+    pub mfa_proof: MfaProof,
     /// RFC 8707 resource indicator from a verified request object (JAR) or
     /// PAR entry. Preserved so the code issued on resume is bound to the
     /// audience the client asked for.
@@ -101,12 +112,33 @@ pub struct RaClaims {
     /// and redirects to this path (or `/ui` when `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_return_to: Option<String>,
-    /// Whether this required-action flow has registered a passkey with user
-    /// verification. The browser-login session created when the flow ends
-    /// then records `MfaProof::ProvedWebAuthn`: the user just proved a
-    /// user-verified passkey.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub webauthn_verified: bool,
+    /// What this login has proved about a second factor: the proof of the
+    /// authentication that started the flow, raised only by a factor the flow
+    /// itself proved (see [`RaClaims::record_verified_passkey`] and
+    /// [`RaClaims::record_enrolled_factor`]).
+    ///
+    /// The browser-login session created when the flow ends records exactly
+    /// this, and the engine's `mfa_required` / `webauthn_required` gates read
+    /// it (GA audit round 3, D-1). The flow used to resume with
+    /// `MfaProof::Inherited`, which satisfies both gates, so any pending
+    /// action turned a TOTP code, a UV-less passkey or the password alone into
+    /// a session the same login was refused without the detour. Unused on
+    /// the OIDC path, which resumes from the session the user already holds
+    /// and carries its proof in [`OidcParams::mfa_proof`].
+    #[serde(default)]
+    pub mfa_proof: MfaProof,
+    /// Identifier of the required-action flow this token belongs to, kept by
+    /// every token the flow re-mints. The flow's end claims it once, so the
+    /// flow ends — in a session or an authorization code — at most once
+    /// (GA audit round 3, D-2). Empty only in a token minted before this
+    /// field existed, which can no longer end a flow.
+    #[serde(default)]
+    pub flow: String,
+    /// The user's required-action generation when the token was minted. The
+    /// engine refuses a token whose generation is not the user's current one:
+    /// revoking any of the user's sessions bumps it.
+    #[serde(default)]
+    pub generation: u64,
     /// Issued-at time (Unix seconds).
     pub iat: i64,
     /// Expiry time (Unix seconds).
@@ -129,6 +161,17 @@ pub enum RaTokenError {
     /// The `sub` claim does not match the expected user ID.
     #[error("RA session token subject does not match the expected user")]
     UserMismatch,
+    /// The user's sessions were revoked after the token was minted (a
+    /// sign-out, a password change, an operator action), or the revocation
+    /// state could not be read.
+    #[error("RA session token was revoked")]
+    Revoked,
+}
+
+/// A fresh required-action flow identifier (128 random bits, hex).
+#[must_use]
+pub fn new_flow_id() -> String {
+    crate::core::random_secret_hex()
 }
 
 /// Minimal JWT header used when decoding incoming tokens.
@@ -140,12 +183,16 @@ struct JwtHeader {
 
 /// Generates a signed RA session JWT for the OIDC login path.
 ///
-/// The token is valid for [`RA_TOKEN_TTL_SECS`] seconds from `now`.
+/// The token is valid for [`RA_TOKEN_TTL_SECS`] seconds from `now`. `flow`
+/// and `generation` are [`RaClaims::flow`] and [`RaClaims::generation`].
+#[allow(clippy::too_many_arguments)]
 pub fn generate(
     user_id: &str,
     realm_id: &str,
     pending_actions: Vec<RequiredAction>,
     oidc_params: OidcParams,
+    flow: String,
+    generation: u64,
     signing_key: &SigningKey,
     now: Timestamp,
 ) -> Result<String, IdentityError> {
@@ -158,7 +205,9 @@ pub fn generate(
         pending_actions,
         oidc_params: Some(oidc_params),
         browser_return_to: None,
-        webauthn_verified: false,
+        mfa_proof: MfaProof::None,
+        flow,
+        generation,
         iat,
         exp,
     };
@@ -170,12 +219,19 @@ pub fn generate(
 ///
 /// After all required actions complete, the flow resumes by creating a
 /// session cookie and redirecting to `return_to` (or `/ui` when `None`).
+/// `mfa_proof` is what the authentication that started the flow proved; the
+/// session created at the end records it (see [`RaClaims::mfa_proof`]).
+/// `flow` and `generation` are [`RaClaims::flow`] and
+/// [`RaClaims::generation`].
+#[allow(clippy::too_many_arguments)]
 pub fn generate_browser(
     user_id: &str,
     realm_id: &str,
     pending_actions: Vec<RequiredAction>,
     return_to: Option<String>,
-    webauthn_verified: bool,
+    mfa_proof: MfaProof,
+    flow: String,
+    generation: u64,
     signing_key: &SigningKey,
     now: Timestamp,
 ) -> Result<String, IdentityError> {
@@ -188,12 +244,39 @@ pub fn generate_browser(
         pending_actions,
         oidc_params: None,
         browser_return_to: return_to,
-        webauthn_verified,
+        mfa_proof,
+        flow,
+        generation,
         iat,
         exp,
     };
 
     signing_key.sign_jwt(&claims, RA_TOKEN_TYPE)
+}
+
+impl RaClaims {
+    /// Records that this flow registered a passkey whose ceremony proved user
+    /// verification: the login has just proved exactly the factor a
+    /// `webauthn_required` realm asks for.
+    pub fn record_verified_passkey(&mut self) {
+        self.mfa_proof = MfaProof::ProvedWebAuthn;
+    }
+
+    /// Records that this flow enrolled a TOTP, SMS or email-OTP factor and
+    /// the user proved it by typing back a live code.
+    ///
+    /// That counts as a second factor only for a login that had proved none
+    /// ([`MfaProof::None`]): the first-login enrolment a realm requiring MFA
+    /// relies on, which forced TOTP enrolment already records as
+    /// [`MfaProof::Proved`]. A login that proved something keeps its proof —
+    /// in particular a UV-less passkey ([`MfaProof::PasskeyPossession`]) is
+    /// not raised by enrolling a factor of the presenter's choosing, the way
+    /// forced enrolment is never offered to a user who holds a factor.
+    pub fn record_enrolled_factor(&mut self) {
+        if self.mfa_proof == MfaProof::None {
+            self.mfa_proof = MfaProof::Proved;
+        }
+    }
 }
 
 /// Validates an RA session JWT and returns the decoded claims.
@@ -319,6 +402,7 @@ mod tests {
             response_type: "code".to_string(),
             response_mode: None,
             prompt: String::new(),
+            mfa_proof: MfaProof::None,
             resource: None,
             via_par: false,
         }
@@ -341,6 +425,8 @@ mod tests {
             "realm_xyz",
             vec![RequiredAction::VerifyEmail, RequiredAction::UpdatePassword],
             test_oidc_params(),
+            "flow-1".to_string(),
+            0,
             &key,
             now,
         )
@@ -370,6 +456,8 @@ mod tests {
             "realm_xyz",
             vec![RequiredAction::VerifyEmail],
             test_oidc_params(),
+            "flow-1".to_string(),
+            0,
             &key,
             issue_time,
         )
@@ -397,6 +485,8 @@ mod tests {
             "realm_xyz",
             vec![RequiredAction::VerifyEmail],
             test_oidc_params(),
+            "flow-1".to_string(),
+            0,
             &signing_key,
             now,
         )
@@ -419,6 +509,8 @@ mod tests {
             "realm_xyz",
             vec![RequiredAction::VerifyEmail],
             test_oidc_params(),
+            "flow-1".to_string(),
+            0,
             &key,
             now,
         )
@@ -441,6 +533,8 @@ mod tests {
             "realm_xyz",
             vec![],
             test_oidc_params(),
+            "flow-1".to_string(),
+            0,
             &key,
             now,
         )
@@ -488,5 +582,58 @@ mod tests {
         let err =
             validate("not.a.valid.jwt.at.all", key.public_key_bytes(), now).expect_err("malformed");
         assert_eq!(err, RaTokenError::MalformedClaims);
+    }
+
+    // ── MFA proof carried to the resumed session (GA audit round 3, D-1) ────
+
+    fn browser_claims(proof: MfaProof) -> RaClaims {
+        let key = SigningKey::generate().expect("key generation");
+        let now = test_now();
+        let token = generate_browser(
+            "user_abc",
+            "realm_xyz",
+            vec![RequiredAction::UpdatePassword],
+            None,
+            proof,
+            "flow-1".to_string(),
+            0,
+            &key,
+            now,
+        )
+        .expect("generate");
+        validate(&token, key.public_key_bytes(), now).expect("validate")
+    }
+
+    #[test]
+    fn a_browser_token_carries_the_proof_of_the_login_that_minted_it() {
+        for proof in [
+            MfaProof::None,
+            MfaProof::Proved,
+            MfaProof::ProvedWebAuthn,
+            MfaProof::PasskeyPossession,
+        ] {
+            assert_eq!(browser_claims(proof).mfa_proof, proof);
+        }
+    }
+
+    #[test]
+    fn an_enrolled_factor_raises_only_a_login_that_proved_nothing() {
+        for (before, after) in [
+            (MfaProof::None, MfaProof::Proved),
+            (MfaProof::Proved, MfaProof::Proved),
+            (MfaProof::ProvedWebAuthn, MfaProof::ProvedWebAuthn),
+            (MfaProof::PasskeyPossession, MfaProof::PasskeyPossession),
+        ] {
+            let mut claims = browser_claims(before);
+            claims.record_enrolled_factor();
+            assert_eq!(claims.mfa_proof, after, "from {before:?}");
+        }
+    }
+
+    #[test]
+    fn a_verified_passkey_registration_proves_webauthn() {
+        let mut claims = browser_claims(MfaProof::Proved);
+        claims.record_verified_passkey();
+        assert_eq!(claims.mfa_proof, MfaProof::ProvedWebAuthn);
     }
 }

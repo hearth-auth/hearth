@@ -212,7 +212,7 @@ fn jar_valid_signed_request_object_accepted() {
     let jwks = jwks_json(&pub_bytes);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
 
     let jar = sign_jar(
         &pkcs8,
@@ -247,7 +247,7 @@ fn jar_tampered_signature_rejected() {
     let jwks = jwks_json(&pub_bytes);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
 
     let jar = sign_jar(
         &pkcs8,
@@ -291,7 +291,7 @@ fn jar_alg_none_rejected() {
     let jwks = jwks_json(&pub_bytes);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
 
     // Build a "none" JWT: valid-looking header but alg=none, empty signature.
     let jar = sign_jar(
@@ -328,7 +328,7 @@ fn jar_wrong_aud_rejected() {
     let jwks = jwks_json(&pub_bytes);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
 
     let jar = sign_jar(
         &pkcs8,
@@ -361,7 +361,7 @@ fn jar_expired_rejected() {
     let jwks = jwks_json(&pub_bytes);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
 
     // exp = 1 second before the fake clock's "now"
     let past_exp = EPOCH_MICROS / 1_000_000 - 1;
@@ -396,7 +396,7 @@ fn jar_missing_jti_rejected() {
     let jwks = jwks_json(&pub_bytes);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
 
     // Pass None to omit jti entirely.
     let jar = sign_jar(&pkcs8, &cid_str, &env.issuer, None, None, None, None, None);
@@ -421,7 +421,7 @@ fn jar_jti_replay_rejected() {
     let jwks = jwks_json(&pub_bytes);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
 
     // First use — must succeed.
     let jar1 = sign_jar(
@@ -472,7 +472,7 @@ fn jar_jti_is_accepted_once_under_concurrency() {
     let (pkcs8, pub_bytes) = generate_ed25519();
     let client = register_client_with_jwks(&env, &jwks_json(&pub_bytes));
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
 
     for round in 0..5 {
         let jti = format!("concurrent-jti-{round}");
@@ -514,7 +514,7 @@ fn jar_nbf_in_future_rejected() {
     let jwks = jwks_json(&pub_bytes);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
 
     // nbf = 60 seconds after the fake clock's "now"
     let future_nbf = EPOCH_MICROS / 1_000_000 + 60;
@@ -857,7 +857,7 @@ fn jar_direct_authorize_eddsa_accepted() {
     let jwks = jwks_json(&pub_bytes);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
     let user_id = create_test_user(&env);
 
     let jar = sign_jar(
@@ -892,7 +892,7 @@ fn jar_direct_authorize_es256_accepted() {
     let jwks = jwks_json_es256(&x, &y);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
     let user_id = create_test_user(&env);
 
     let jar = sign_jar_es256(&pkcs8, &cid_str, &env.issuer, "jti-direct-es256-1");
@@ -918,7 +918,7 @@ fn jar_direct_authorize_rs256_accepted() {
     let jwks = jwks_json_rs256(&rs256.n_b64, &rs256.e_b64);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
     let user_id = create_test_user(&env);
 
     let jar = sign_jar_rs256(&rs256.pkcs8, &cid_str, &env.issuer, "jti-direct-rs256-1");
@@ -944,7 +944,7 @@ fn jar_direct_alg_none_rejected() {
     let jwks = jwks_json(&pub_bytes);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
     let user_id = create_test_user(&env);
 
     let jar = sign_jar(
@@ -977,7 +977,7 @@ fn jar_direct_expired_rejected() {
     let jwks = jwks_json(&pub_bytes);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
     let user_id = create_test_user(&env);
 
     let past_exp = EPOCH_MICROS / 1_000_000 - 1;
@@ -1012,7 +1012,7 @@ fn jar_direct_client_id_mismatch_rejected() {
     let jwks = jwks_json(&pub_bytes);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let outer_cid = client_id.to_string();
+    let outer_cid = client_id.as_uuid().to_string();
     let user_id = create_test_user(&env);
 
     // Build a JAR where iss == outer client_id (satisfies verify_jar) but
@@ -1076,7 +1076,7 @@ fn jar_direct_missing_jwks_rejected() {
         )
         .expect("register client");
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
     let user_id = create_test_user(&env);
 
     let _ = pub_bytes; // unused — no JWKS registered for this client
@@ -1112,7 +1112,7 @@ fn jar_direct_authorize_ps256_accepted() {
     let jwks = jwks_json_ps256(&ps256.n_b64, &ps256.e_b64);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
     let user_id = create_test_user(&env);
 
     let jar = sign_jar_ps256(&ps256.pkcs8, &cid_str, &env.issuer, "jti-direct-ps256-1");
@@ -1142,7 +1142,7 @@ fn jar_ps256_wrong_key_rejected() {
     let jwks = jwks_json_ps256(&registered_key.n_b64, &registered_key.e_b64);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
     let user_id = create_test_user(&env);
 
     let jar = sign_jar_ps256(
@@ -1172,7 +1172,7 @@ fn jar_par_ps256_accepted() {
     let jwks = jwks_json_ps256(&ps256.n_b64, &ps256.e_b64);
     let client = register_client_with_jwks(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
 
     let jar = sign_jar_ps256(&ps256.pkcs8, &cid_str, &env.issuer, "jti-par-ps256-1");
     let req = par_with_jar(client_id, jar);
@@ -1263,7 +1263,7 @@ fn jar_response_mode_in_jar_overrides_outer_none() {
     let jwks = jwks_json(&pub_bytes);
     let client = register_jarm_client(&env, &jwks);
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
     let user_id = create_test_user(&env);
 
     let jar = sign_jar_with_response_mode(
@@ -1416,7 +1416,7 @@ fn authorization_response_reports_the_jar_redirect_uri_not_the_outer_one() {
     let (pkcs8, pub_bytes) = generate_ed25519();
     let client = register_client_with_jwks(&env, &jwks_json(&pub_bytes));
     let client_id = client.client_id().clone();
-    let cid_str = client_id.to_string();
+    let cid_str = client_id.as_uuid().to_string();
 
     let user = env
         .engine

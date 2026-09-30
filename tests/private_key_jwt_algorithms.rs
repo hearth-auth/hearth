@@ -92,7 +92,7 @@ impl Signer {
             URL_SAFE_NO_PAD.encode(header.to_string()),
             URL_SAFE_NO_PAD.encode(
                 serde_json::json!({
-                    "iss": client.to_string(), "sub": client.to_string(), "aud": aud,
+                    "iss": client.as_uuid().to_string(), "sub": client.as_uuid().to_string(), "aud": aud,
                     "exp": now + 60, "iat": now, "jti": uuid::Uuid::new_v4().to_string(),
                 })
                 .to_string()

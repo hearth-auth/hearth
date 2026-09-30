@@ -24,10 +24,13 @@
 //! `hearth_ra_webauthn` = an HMAC of the RA session cookie and the
 //! challenge, and `complete` refuses a challenge without the matching
 //! cookie. On success the action is cleared and recorded completed, and the
-//! RA flow continues with `webauthn_verified` set, so the browser-login
-//! session created at the end records `MfaProof::ProvedWebAuthn`.
+//! RA flow continues with its proof raised to `MfaProof::ProvedWebAuthn`
+//! (`RaClaims::record_verified_passkey`), which the browser-login session
+//! created at the end records.
 
 use std::sync::Arc;
+
+use crate::protocol::client_info::PeerAddr;
 
 use askama::Template;
 use axum::extract::State;
@@ -42,8 +45,8 @@ use super::super::link_token::keyed_binding;
 use super::super::templates::render;
 use super::super::WebState;
 use super::{
-    advance_flow, clear_persisted_action, enroll_mfa_status, ra_form_token, read_ra_cookie,
-    validated_ra_session, EnrollMfaStatus,
+    advance_flow, clear_persisted_action, client_context, enroll_mfa_status, ra_form_token,
+    read_ra_cookie, validated_ra_session, EnrollMfaStatus,
 };
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{Timestamp, UserId};
@@ -282,6 +285,7 @@ pub struct PasskeyRegistrationBody {
 /// cookies, for the page's script to navigate to.
 pub async fn passkey_complete(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Json(body): Json<PasskeyRegistrationBody>,
 ) -> Response {
@@ -343,13 +347,14 @@ pub async fn passkey_complete(
     }
 
     let secure = state.is_secure_request(&headers);
-    claims.webauthn_verified = true;
+    claims.record_verified_passkey();
     let now = Timestamp::from_micros(super::now_micros());
     let next = advance_flow(
         &state,
         &realm,
         claims,
         RequiredAction::EnrollMfa,
+        &client_context(&state, &headers, peer_addr),
         secure,
         now,
     );

@@ -64,6 +64,7 @@ impl std::error::Error for IdentityError {
             | Self::RegistrationDomainNotAllowed { .. }
             | Self::RegistrationRequiresInvitation
             | Self::ConsentRequired
+            | Self::ClientMismatch
             | Self::ConsentTicketNotFound
             | Self::ConsentTicketExpired
             | Self::ConsentScopeNotRequested
@@ -80,6 +81,7 @@ impl std::error::Error for IdentityError {
             | Self::FederationAlreadyLinked
             | Self::SystemRealmProtected { .. }
             | Self::RealmNotArchived
+            | Self::RealmArchived
             | Self::YamlManagedResource { .. }
             | Self::DuplicateScimExternalId
             | Self::ConfigInvalid { .. }

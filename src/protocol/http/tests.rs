@@ -961,7 +961,7 @@ async fn par_jar_accepted_under_fapi_advanced() {
     let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
     // HTTP body expects the raw UUID; JAR claims compare against the prefixed form.
     let cid_http = client.client_id().as_uuid().to_string();
-    let cid_jar = client.client_id().to_string();
+    let cid_jar = client.client_id().as_uuid().to_string();
     const REDIRECT: &str = "https://app.example.com/callback";
     const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
@@ -1119,7 +1119,7 @@ fn advanced_realm_client_assertion(
         b64.encode(serde_json::json!({"alg": "EdDSA", "kid": kid}).to_string()),
         b64.encode(
             serde_json::json!({
-                "iss": client.to_string(), "sub": client.to_string(), "aud": issuer,
+                "iss": client.as_uuid().to_string(), "sub": client.as_uuid().to_string(), "aud": issuer,
                 "exp": now + 60, "iat": now, "jti": uuid::Uuid::new_v4().to_string(),
             })
             .to_string()
@@ -3620,4 +3620,49 @@ async fn admin_registration_accepts_jwks_and_profile() {
     let client = stored(&id);
     assert!(client.profile().is_fapi2());
     assert!(client.jwks().is_some());
+}
+
+/// GA sweep 3 E-6: `track_metrics` must never take a label value from the
+/// request. Mounted as a plain `layer` it also runs where no route matched and
+/// no [`MatchedPath`] exists; the raw URI path used to become the `route`
+/// label there, one series per invented path.
+#[tokio::test]
+async fn track_metrics_never_labels_with_the_raw_request_path() {
+    let app = Router::new()
+        .route("/known", axum::routing::get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn(track_metrics));
+    let probe = "/ga3-e6-unmatched-path-9f1c";
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(probe)
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let rendered = crate::metrics::metrics().render();
+    assert!(
+        !rendered.contains(probe),
+        "a request-controlled path must never become a label value"
+    );
+    assert!(
+        rendered.contains("route=\"unmatched\""),
+        "requests with no matched route share one fixed label"
+    );
+}
+
+/// GA sweep 3 E-6: the method label is a closed set.
+#[test]
+fn method_label_is_a_closed_set() {
+    for m in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
+        let method = axum::http::Method::from_bytes(m.as_bytes()).expect("method");
+        assert_eq!(method_label(&method), m);
+    }
+    for m in ["TRACE", "CONNECT", "PROPFIND", "GA3PROBE", "get"] {
+        let method = axum::http::Method::from_bytes(m.as_bytes()).expect("method");
+        assert_eq!(method_label(&method), "OTHER", "{m} must fold into OTHER");
+    }
 }

@@ -262,6 +262,39 @@ cluster:
 
 ---
 
+### System-realm tokens
+
+`/admin/cluster/*` needs a token for the **system realm** (the nil UUID,
+`00000000-0000-0000-0000-000000000000`) that carries `hearth.admin`, sent with that UUID as
+`X-Realm-ID`.
+
+**On a running cluster, mint it in the admin console** of the **leader**: sign in at
+`/ui/admin/login` with an operator-console account holding `realm.admin`, open **API Tokens**
+(`/ui/admin/api-tokens`), pick a lifetime (1 to 60 minutes, default 15) and confirm with your
+password and your second factor (see the [realm admin API](./admin-api.md#realms)). The token's
+session and its audit record are ordinary writes, proposed through Raft: once they commit, the
+token validates on **every** node, and revoking its session on the leader revokes it everywhere
+(`tests/cluster_three_node_control_coherence.rs::an_operator_token_minted_on_the_leader_validates_and_revokes_on_both_followers`).
+A follower cannot accept the write and there is no leader redirect, so on a follower the page
+answers with an error and mints nothing: sign in on another node. Signing in is a write too, so
+the console login fails on a follower the same way.
+
+**For a stopped node, use `hearth admin token`.** It mints on the host from a **stopped** node's
+data directory, and on a cluster node it is limited:
+
+- **A cluster node's data directory is refused.** The command writes a session and an audit
+  record straight into the store, not through Raft, so they would exist on that node only, and
+  the audit record would fork the system realm's replicated audit chain there.
+- **`--sole-cluster-node` accepts it** for a node that next starts as the cluster's **only**
+  member while every other node rejoins empty and copies its store through a snapshot — the
+  [divergence recovery](./disaster-recovery.md#raft-divergence-and-split-brain) rebuild.
+- **A store restored for a rebuild** holds no `raft.db` yet, so the command accepts it: mint
+  into it **before** copying it to every node and the token validates on all of them (the
+  [purged-log upgrade](./upgrading.md#upgrading-a-cluster-whose-raft-logs-were-purged), step 4).
+
+Neither source helps a **cold cluster with empty data directories**: it has no operator account
+yet, so there is nobody to mint for (see the bootstrap note below).
+
 ### Bootstrap Sequence
 
 > **Usually unnecessary.** As of task 26.46 the lowest-ID node in the
@@ -281,6 +314,9 @@ Bootstrapping initializes the cluster's initial membership. Do this **once** —
 
 > **System-realm token required.** Cluster admin endpoints are gated to the system realm
 > (the nil UUID). Your admin token must carry `X-Realm-ID: 00000000-0000-0000-0000-000000000000`.
+> See [System-realm tokens](#system-realm-tokens): on a cold cluster with empty data directories
+> no operator account exists yet, so there is no token to call this endpoint with — the
+> lowest-ID node initialises the cluster itself ([G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed)).
 
 ```bash
 curl -s -X POST http://10.0.0.1:8420/admin/cluster/bootstrap \
@@ -327,6 +363,8 @@ A majority (quorum) of nodes must be reachable for writes to succeed.
 ---
 
 ### Cluster Status
+
+Needs a system-realm token — see [System-realm tokens](#system-realm-tokens).
 
 ```bash
 curl -s http://10.0.0.1:8420/admin/cluster/status \

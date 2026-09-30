@@ -507,7 +507,7 @@ async fn auth_code_flow_iss_matches_discovery_issuer() {
     let id_claims = decode_jwt_claims(token_resp.id_token());
     assert_eq!(
         id_claims["aud"].as_str(),
-        Some(client.client_id().to_string().as_str()),
+        Some(client.client_id().as_uuid().to_string().as_str()),
         "id-token aud must be the client_id per OIDC Core, got {:?}",
         id_claims["aud"]
     );

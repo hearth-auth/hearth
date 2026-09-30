@@ -57,19 +57,25 @@ The response contains the new single-use recovery codes. Store or transmit them 
 
 **Symptom:** All logins for a realm fail with a realm-suspended error.
 
-**Cause:** The realm was explicitly suspended via the admin API or UI.
+**Cause:** A system-realm operator suspended the realm with
+`POST /admin/realms/{id}/suspend` (or gRPC `IdentityAdminService/SuspendRealm`), usually as
+an incident-response freeze. The realm's `realm_updated` audit events name who did it and
+when (`previous_status` / `status` in the metadata).
 
-**Remediation:** realm status is **not** settable over the REST admin API —
-`PATCH /admin/realms/{id}` answers `405 Method Not Allowed` (realms are declared in
-`hearth.yaml`). Clear a suspension through the gRPC management API:
+**Remediation:** once the incident is closed, a system-realm admin
+(`hearth.realm.admin` or `hearth.admin`) reinstates the realm:
 
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $SYSTEM_TOKEN" \
+  -H "X-Realm-ID: $SYSTEM_REALM_ID" \
+  http://127.0.0.1:8420/admin/realms/<realm-id>/unsuspend
 ```
-hearth.identity.v1.IdentityService/UpdateRealm
-  { "id": "<realm-id>", "body": { "status": "REALM_STATUS_ACTIVE" } }
-```
 
-Startup reconciliation restores an **Archived** realm to `Active` when it reappears in
-`hearth.yaml`, but it does not clear a `Suspended` status — that transition is explicit.
+Sessions revoked by the suspension stay revoked: users sign in again. Restarting Hearth or
+reloading `hearth.yaml` does **not** clear a suspension, and `hearth.yaml` has no realm
+`status:` key. An **Archived** realm is different: it was removed from `hearth.yaml`, and
+reappearing there (not unsuspend, which answers `409`) reactivates it.
 
 ---
 

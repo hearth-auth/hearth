@@ -68,8 +68,9 @@ pub struct SamlIdpConfig {
     pub sso_url: String,
     /// The upstream IdP's SingleLogoutService URL (optional).
     pub slo_url: Option<String>,
-    /// IdP's signing certificate(s) PEM. First is primary; additional
-    /// entries support key rollover.
+    /// IdP's signing certificate(s) PEM. A signature is accepted when it
+    /// verifies under any entry, so a rollover lists the outgoing and the
+    /// incoming certificate side by side.
     pub idp_certificates_pem: Vec<String>,
     /// If true, Hearth signs outbound `<AuthnRequest>`s with the realm's
     /// SAML key. Many IdPs don't require signed AuthnRequests; when

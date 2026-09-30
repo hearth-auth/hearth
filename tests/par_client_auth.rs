@@ -170,8 +170,8 @@ fn now_secs() -> i64 {
 fn assertion(key: &SigningKey, client: &ClientId, audience: &str) -> String {
     let now = now_secs();
     key.issue_assertion_jwt(&JwtAssertionClaims {
-        iss: client.to_string(),
-        sub: client.to_string(),
+        iss: client.as_uuid().to_string(),
+        sub: client.as_uuid().to_string(),
         aud: Audience::single(audience.to_string()),
         exp: now + 60,
         jti: Some(uuid::Uuid::new_v4().to_string()),
@@ -206,12 +206,12 @@ fn request_object(key: &JarKey, iss: &ClientId, client_id: &ClientId, aud: &str)
         URL_SAFE_NO_PAD.encode(serde_json::json!({"alg": "EdDSA", "kid": JAR_KID}).to_string());
     let claims = URL_SAFE_NO_PAD.encode(
         serde_json::json!({
-            "iss": iss.to_string(),
+            "iss": iss.as_uuid().to_string(),
             "aud": aud,
             "exp": now + 300,
             "iat": now,
             "jti": uuid::Uuid::new_v4().to_string(),
-            "client_id": client_id.to_string(),
+            "client_id": client_id.as_uuid().to_string(),
             "response_type": "code",
             "redirect_uri": REDIRECT_URI,
             "scope": "openid",

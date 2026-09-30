@@ -218,6 +218,16 @@ message DeleteRealmRequest {
   string id = 1;
 }
 
+// Request to suspend a realm by id (the incident-response freeze control).
+message SuspendRealmRequest {
+  string id = 1;
+}
+
+// Request to reinstate a suspended realm by id.
+message UnsuspendRealmRequest {
+  string id = 1;
+}
+
 // Wraps an UpdateRealmRequest with the target id.
 message UpdateRealmCall {
   string id = 1;
@@ -431,6 +441,17 @@ service IdentityAdminService {
   }
   rpc DeleteRealm(DeleteRealmRequest) returns (Empty) {
     option (google.api.http) = {delete: "/admin/realms/{id}"};
+  }
+  // Suspends an active realm: its tokens stop validating, its sessions are
+  // revoked and no new session starts until it is reinstated. Caller must be
+  // a system-realm admin (`hearth.realm.admin` or `hearth.admin`); the system
+  // realm itself cannot be suspended. YAML reconciliation never clears it.
+  rpc SuspendRealm(SuspendRealmRequest) returns (Realm) {
+    option (google.api.http) = {post: "/admin/realms/{id}/suspend"};
+  }
+  // Reinstates a suspended realm. Same gate as SuspendRealm.
+  rpc UnsuspendRealm(UnsuspendRealmRequest) returns (Realm) {
+    option (google.api.http) = {post: "/admin/realms/{id}/unsuspend"};
   }
 
   // Organizations — gRPC-only (no REST routes yet; see HEA-969).

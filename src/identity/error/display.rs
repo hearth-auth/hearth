@@ -89,6 +89,11 @@ impl fmt::Display for IdentityError {
                 f,
                 "operation not permitted on the system realm: {operation}"
             ),
+            Self::RealmArchived => write!(
+                f,
+                "the realm is archived or being deleted; only an active or suspended \
+                 realm can be suspended or reinstated"
+            ),
             Self::RealmNotArchived => write!(
                 f,
                 "only archived realms can be permanently deleted; remove the realm \
@@ -109,6 +114,9 @@ impl fmt::Display for IdentityError {
                 write!(f, "self-service registration requires a valid invitation")
             }
             Self::ConsentRequired => write!(f, "user consent is required"),
+            Self::ClientMismatch => {
+                write!(f, "the bearer token was not issued to the requested client")
+            }
             Self::ConsentTicketNotFound => write!(f, "consent ticket not found"),
             Self::ConsentTicketExpired => write!(f, "consent ticket expired"),
             Self::ConsentScopeNotRequested => {

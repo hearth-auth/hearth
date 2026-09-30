@@ -40,7 +40,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::abuse::backoff::{AdaptiveBackoffStore, BackoffConfig, BackoffOutcome};
-use crate::abuse::shaper::{RequestShaper, ShaperConfig, ShaperOutcome};
+use crate::abuse::shaper::{RealmKey, RequestShaper, ShaperConfig, ShaperOutcome};
+use crate::core::RealmId;
 
 /// Tuning for [`DeviceApprovalGuard`].
 #[derive(Debug, Clone)]
@@ -136,8 +137,8 @@ impl DeviceApprovalGuard {
     /// Gate an approval attempt before any storage lookup.
     ///
     /// `key` identifies the actor whose attempts are being counted (the
-    /// `realm:user` pair); `peer_ip` and `realm_key` feed the shaper.
-    pub fn check(&self, key: &str, peer_ip: IpAddr, realm_key: &str) -> DeviceApprovalDecision {
+    /// `realm:user` pair); `peer_ip` and `realm_id` feed the shaper.
+    pub fn check(&self, key: &str, peer_ip: IpAddr, realm_id: &RealmId) -> DeviceApprovalDecision {
         if let BackoffOutcome::Locked {
             until,
             offense_level,
@@ -148,7 +149,10 @@ impl DeviceApprovalGuard {
                 offense_level,
             };
         }
-        match self.shaper.check(peer_ip, realm_key) {
+        match self
+            .shaper
+            .check(peer_ip, Some(RealmKey::Id(realm_id.clone())))
+        {
             ShaperOutcome::Allow => DeviceApprovalDecision::Allow,
             ShaperOutcome::IpLimited | ShaperOutcome::RealmLimited => {
                 DeviceApprovalDecision::RateLimited
@@ -232,6 +236,10 @@ mod tests {
 
     use super::*;
 
+    fn realm() -> RealmId {
+        RealmId::new(uuid::Uuid::from_u128(0x5eed))
+    }
+
     fn ip() -> IpAddr {
         IpAddr::V4(Ipv4Addr::LOCALHOST)
     }
@@ -254,7 +262,7 @@ mod tests {
         let guard = attempt_only_guard(5);
         for i in 1..5 {
             assert_eq!(
-                guard.check("realm:user", ip(), "realm"),
+                guard.check("realm:user", ip(), &realm()),
                 DeviceApprovalDecision::Allow,
                 "attempt {i} must still be allowed"
             );
@@ -271,7 +279,7 @@ mod tests {
         ));
         // And the 6th request is refused before any lookup happens.
         assert!(matches!(
-            guard.check("realm:user", ip(), "realm"),
+            guard.check("realm:user", ip(), &realm()),
             DeviceApprovalDecision::LockedOut { .. }
         ));
     }
@@ -282,11 +290,11 @@ mod tests {
         guard.record_failure("realm:alice");
         guard.record_failure("realm:alice");
         assert!(matches!(
-            guard.check("realm:alice", ip(), "realm"),
+            guard.check("realm:alice", ip(), &realm()),
             DeviceApprovalDecision::LockedOut { .. }
         ));
         assert_eq!(
-            guard.check("realm:bob", ip(), "realm"),
+            guard.check("realm:bob", ip(), &realm()),
             DeviceApprovalDecision::Allow,
             "one user's lockout must not lock everyone else out"
         );
@@ -302,7 +310,7 @@ mod tests {
         assert_eq!(guard.record_failure("k"), DeviceApprovalDecision::Allow);
         assert_eq!(guard.record_failure("k"), DeviceApprovalDecision::Allow);
         assert_eq!(
-            guard.check("k", ip(), "realm"),
+            guard.check("k", ip(), &realm()),
             DeviceApprovalDecision::Allow
         );
     }
@@ -334,12 +342,12 @@ mod tests {
         });
         for _ in 0..3 {
             assert_eq!(
-                guard.check("k", ip(), "realm"),
+                guard.check("k", ip(), &realm()),
                 DeviceApprovalDecision::Allow
             );
         }
         assert_eq!(
-            guard.check("k", ip(), "realm"),
+            guard.check("k", ip(), &realm()),
             DeviceApprovalDecision::RateLimited,
             "the 4th request in the same second must be shaped"
         );
@@ -350,7 +358,7 @@ mod tests {
         let guard = DeviceApprovalGuard::disabled();
         for _ in 0..100 {
             assert_eq!(
-                guard.check("k", ip(), "realm"),
+                guard.check("k", ip(), &realm()),
                 DeviceApprovalDecision::Allow
             );
             assert_eq!(guard.record_failure("k"), DeviceApprovalDecision::Allow);

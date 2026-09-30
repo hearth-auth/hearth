@@ -27,7 +27,20 @@ realms:
 openssl rand -hex 32
 ```
 
-After editing `hearth.yaml`, restart Hearth. SCIM requests are rejected with `403 Forbidden` for any realm that has no bearer token configured.
+After editing `hearth.yaml`, restart Hearth. Once a realm has a bearer token, SCIM accepts only that token for the realm; admin JWTs are rejected with `401`.
+
+### Admin-JWT fallback (no bearer token configured)
+
+A realm with no SCIM bearer token accepts an admin access token for the same realm instead. The token must carry the permission the resource's admin twin requires, or `hearth.admin`:
+
+| Resource | Required permission | Same rule as |
+|----------|---------------------|--------------|
+| `/scim/v2/Users` (every method, reads included) | `hearth.users.admin` | REST `/admin/users*` |
+| `/scim/v2/Groups` (every method, reads included) | `hearth.realm.admin` | gRPC organization RPCs |
+
+Any other admin permission (`hearth.clients.admin`, `hearth.agents.admin`, or the wrong one of the two above) is refused with `403 Forbidden`.
+
+The discovery endpoints (`/scim/v2/ServiceProviderConfig`, `/scim/v2/Schemas`, `/scim/v2/ResourceTypes`) accept the realm's SCIM bearer token as well as any admin token for the realm, on both kinds of realm.
 
 ## Authentication
 
@@ -133,15 +146,17 @@ This permanently removes the user and all associated sessions, credentials, and 
 
 ### Admin principal protection
 
-SCIM provisioning tokens (bearer-token auth) cannot modify or delete admin principals. Any PATCH, PUT, or DELETE request targeting a user whose effective permissions include `hearth.admin` or `hearth.users.admin` is rejected with `403 Forbidden`, regardless of which operations the request contains.
+SCIM provisioning tokens (bearer-token auth) cannot modify or delete admin principals. Any PATCH, PUT, or DELETE request targeting a user whose effective permissions include any admin permission — `hearth.admin`, `hearth.users.admin`, `hearth.realm.admin`, `hearth.clients.admin` or `hearth.agents.admin` — is rejected with `403 Forbidden`, regardless of which operations the request contains. The protected set is the same list that admits a token to the admin API.
 
-This applies only to the SCIM bearer-token credential. Requests authenticated with an admin JWT are not subject to this restriction.
+Requests authenticated with an admin JWT (the fallback path above) are subject to the same privilege ceiling as the REST admin API: the caller may not modify or delete a user who holds an admin permission the caller lacks. `hearth.admin` outranks everyone; a `hearth.users.admin` sub-admin may act only on users whose admin permissions it holds itself.
 
 If you need to deprovision or demote an admin user via SCIM:
 1. Remove the admin role from the user through the Admin API or Admin UI first.
 2. Retry the SCIM operation after the role change has taken effect.
 
 ## Group provisioning
+
+SCIM Groups are Hearth organizations. An organization created through SCIM (`POST /scim/v2/Groups`) carries a durable "provisioned by SCIM" marker; no request field sets or clears it, and backups carry it. The realm's SCIM **bearer token** may read every organization but may replace, patch or delete **only** the ones SCIM created — an organization created through the admin API, the console or `hearth.yaml` answers `403` to the token's `PUT`, `PATCH` and `DELETE`. Admin-token callers on the fallback path keep their rights (they need `hearth.realm.admin`, see above).
 
 ### Create a group
 
@@ -272,8 +287,9 @@ The following SCIM features are deferred to a future hardening release:
 
 | Symptom | Likely cause |
 |---------|-------------|
-| `403 Forbidden` on auth | SCIM not enabled for realm (no `bearer_token` in config), or wrong realm UUID in `X-Realm-ID`. |
-| `403 Forbidden` on PATCH / PUT / DELETE | Target user holds `hearth.admin` or `hearth.users.admin`. SCIM bearer tokens cannot mutate admin principals. Remove the admin role first, or use an admin JWT. |
+| `403 Forbidden` on auth | Wrong realm UUID in `X-Realm-ID`, realm not active, or — on the admin-JWT fallback — the token lacks `hearth.users.admin` (`/Users`) / `hearth.realm.admin` (`/Groups`) and `hearth.admin`. |
+| `403 Forbidden` on PATCH / PUT / DELETE | Target user holds an admin permission (`hearth.admin` or any `hearth.*.admin`) the caller lacks. SCIM bearer tokens cannot mutate admin principals at all. Remove the admin role first, or use an admin JWT that outranks the target. |
+| `403 Forbidden` on `PUT` / `PATCH` / `DELETE /Groups/{id}` with the bearer token | The organization was not created through SCIM; the provisioning token may modify only organizations it created. |
 | `401 Unauthorized` | Bearer token mismatch. |
 | `400 Bad Request` / `invalidValue` | Missing `X-Realm-ID` header, or non-UUID value. |
 | `412 Precondition Failed` | Stale `If-Match` validator — the resource was modified after your last read. Re-fetch the resource, capture the new `ETag`, and retry. |

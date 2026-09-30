@@ -2138,13 +2138,17 @@ impl Default for Http2SecurityYaml {
 }
 
 /// `security.request_shaper` — global per-IP + per-realm rate limiter (A-2).
+///
+/// The shaper is on with these defaults when the section is absent.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestShaperYaml {
-    /// Maximum requests per second per source IP.  Default: 100.
+    /// Maximum requests per second per client (IPv4 address, IPv6 `/64`).
+    /// Default: 100. `0` disables the per-client dimension.
     #[serde(default = "RequestShaperYaml::default_ip_rps")]
     pub ip_rps: u32,
-    /// Maximum requests per second per realm.  Default: 1000.
+    /// Maximum requests per second per realm, counting only requests that
+    /// name a realm. Default: 1000. `0` disables the per-realm dimension.
     #[serde(default = "RequestShaperYaml::default_realm_rps")]
     pub realm_rps: u32,
 }
@@ -3365,6 +3369,11 @@ pub struct FederationProviderYaml {
     /// mailboxes, because it lets that IdP claim any address in the realm.
     /// Ignored for non-SAML connectors, which carry the upstream's own
     /// `email_verified` claim (task 25.27).
+    ///
+    /// It also decides the state of a just-in-time account: an untrusted
+    /// address gives a `PendingVerification` account that is mailed a
+    /// verification link and gets no session until it is used (GA audit
+    /// round 3, G-3).
     #[serde(default)]
     pub trust_asserted_email: Option<bool>,
     /// Attribute mapping: Hearth field → SAML attribute URI.

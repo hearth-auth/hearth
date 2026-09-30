@@ -380,6 +380,7 @@ mod grant_family_revocation;
 mod id_token_keys;
 mod mfa_single_use;
 pub(super) mod oauth;
+mod operator_token;
 mod retired_keys;
 mod sharded_cache;
 mod single_use;
@@ -2443,8 +2444,16 @@ impl EmbeddedIdentityEngine {
 
     // ===== Per-IP login rate limiting helpers =====
 
+    /// The per-IP login tracker key. The address is bucketed under
+    /// [`crate::core::rate_limit_key_str`] — IPv6 per `/64` — so a host that
+    /// rotates through its `/64` does not get a fresh budget per address
+    /// (GA sweep 3, E-3).
     fn ip_login_tracker_key(realm_id: &RealmId, ip: &str) -> String {
-        format!("login-ip:{}:{ip}", realm_id.as_uuid())
+        format!(
+            "login-ip:{}:{}",
+            realm_id.as_uuid(),
+            crate::core::rate_limit_key_str(ip)
+        )
     }
 
     /// Returns the remaining window microseconds for an IP that has already hit
@@ -3071,13 +3080,15 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        // IP bucket (skipped if caller has no IP)
+        // IP bucket (skipped if caller has no IP). IPv6 is bucketed per /64
+        // (GA sweep 3, E-3).
         if let Some(ip) = client_ip {
+            let ip_key = crate::core::rate_limit_key_str(ip);
             let trackers = self
                 .registration_ip_rate_trackers
                 .lock()
                 .expect("registration ip tracker lock");
-            if let Some(tracker) = trackers.get(ip) {
+            if let Some(tracker) = trackers.get(&ip_key) {
                 if tracker.failed_count >= Self::REGISTRATION_IP_MAX_REQUESTS
                     && now - tracker.last_failure_micros < Self::REGISTRATION_RATE_WINDOW_MICROS
                 {
@@ -3130,11 +3141,12 @@ impl EmbeddedIdentityEngine {
         }
 
         if let Some(ip) = client_ip {
+            let ip_key = crate::core::rate_limit_key_str(ip);
             let mut trackers = self
                 .registration_ip_rate_trackers
                 .lock()
                 .expect("registration ip tracker lock");
-            let tracker = trackers.entry(ip.to_string()).or_insert(AttemptTracker {
+            let tracker = trackers.entry(ip_key).or_insert(AttemptTracker {
                 failed_count: 0,
                 last_failure_micros: now,
             });
@@ -3272,6 +3284,34 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)
     }
 
+    /// The checks every non-admin account creation passes before it writes:
+    /// the system realm is reserved for Hearth admins and must be reached only
+    /// through `create_admin_user`, which also provisions the `realm.admin`
+    /// RBAC assignment atomically (without this guard an operator could
+    /// create a non-admin account in the system realm and gain a session
+    /// bound to it but without the admin role — harmless today, but a trap
+    /// for future refactors); the realm must be active; and the realm's user
+    /// quota (A-24) must have room.
+    fn check_user_creation(
+        &self,
+        realm_id: &RealmId,
+        operation: &'static str,
+    ) -> Result<(), IdentityError> {
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected { operation });
+        }
+        self.require_active_realm(realm_id)?;
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_users {
+                    let prefix = keys::user_id_scan_prefix();
+                    self.check_resource_quota(realm_id, "users", &prefix, max)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Creates a user with an explicit initial status, bypassing the
     /// engine-wide `default_status`. Used by self-service registration
     /// (always `PendingVerification`) while ordinary `create_user` continues
@@ -3281,6 +3321,20 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &CreateUserRequest,
         status: UserStatus,
+        audit_ctx: Option<&AuditContext>,
+    ) -> Result<User, IdentityError> {
+        self.create_user_record(realm_id, request, status, false, audit_ctx)
+    }
+
+    /// [`Self::create_user_with_status`], also recording whether the email
+    /// address is already verified — written with the record, so the account
+    /// never exists with the wrong verification state.
+    fn create_user_record(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateUserRequest,
+        status: UserStatus,
+        email_verified: bool,
         audit_ctx: Option<&AuditContext>,
     ) -> Result<User, IdentityError> {
         let email = validation::validate_email(&request.email)?;
@@ -3360,6 +3414,9 @@ impl EmbeddedIdentityEngine {
             if !request.attributes.is_empty() {
                 user.set_attributes(request.attributes.clone());
             }
+        }
+        if email_verified {
+            user.set_email_verified(true);
         }
 
         let user_bytes = Self::serialize_user(&user)?;
@@ -4083,14 +4140,22 @@ impl EmbeddedIdentityEngine {
         // loop (audit 2026-08-28 §4.16#4). This mirrors
         // `issue_tokens_with_context`: RBAC resolve, claim profile, size
         // validation, and the pre-token webhook all run per rotation. Scope,
-        // `oid`, resources and AMR stay bound to the original grant.
+        // `oid`, resources and AMR stay bound to the original grant — and so
+        // does the scope narrowing: resolving with no scope handed a token
+        // narrowed to a bundle at the exchange the user's full set, admin
+        // permissions included, on its first rotation (GA audit 3 B-4).
         use crate::identity::oidc::AccessTokenAuthorization;
         let user = self
             .get_user(realm_id, user_id)?
             .ok_or(IdentityError::UserNotFound)?;
+        let grant_scopes: Vec<String> = claims
+            .scope
+            .as_deref()
+            .map(|s| s.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default();
         let resolved = self
             .rbac
-            .resolve_permissions(user_id, realm_id, None, None)
+            .resolve_for_granted_scopes(user_id, realm_id, None, &grant_scopes)
             .map_err(|e| match e {
                 RbacError::TokenSizeExceeded {
                     limit,
@@ -4125,11 +4190,7 @@ impl EmbeddedIdentityEngine {
             &crate::rbac::ResolvedPermissions::default()
         };
 
-        let granted_scopes: BTreeSet<String> = claims
-            .scope
-            .as_deref()
-            .map(|s| s.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default();
+        let granted_scopes: BTreeSet<String> = grant_scopes.into_iter().collect();
         let (roles, groups, permissions, custom) = self.apply_claim_profile(
             realm_id,
             &user,
@@ -4144,7 +4205,7 @@ impl EmbeddedIdentityEngine {
         let client_id_str = family
             .client_id
             .as_ref()
-            .map(|c| c.to_string())
+            .map(crate::identity::tokens::issued_client_id)
             .unwrap_or_default();
         let extra_claims = self.fire_pre_token_webhook(
             realm_id,
@@ -6681,6 +6742,12 @@ impl EmbeddedIdentityEngine {
                     .map_err(Self::storage_err)?;
 
                 user.set_email(normalized);
+                // The new address is unproven: whoever changed it (an
+                // operator, SCIM) has not shown that the user receives mail
+                // there. `/userinfo` reports this flag as `email_verified`
+                // (GA audit round 3, B-8); the self-service change flow
+                // (`confirm_email_change`) proves the address and sets it.
+                user.set_email_verified(false);
                 email_changed = true;
             }
         }
@@ -6852,6 +6919,10 @@ impl EmbeddedIdentityEngine {
                 &[
                     keys::encode_user_id(user_id),
                     keys::encode_user_email(user.email()),
+                    // The required-action generation (GA audit round 3, D-2)
+                    // names the user too; with the record gone no RA token
+                    // for it validates anyway.
+                    keys::encode_ra_generation(user_id),
                 ],
             )
             .map_err(Self::storage_err)?;
@@ -7368,6 +7439,294 @@ impl EmbeddedIdentityEngine {
     }
 }
 
+/// Stable lower-case label for a realm status in audit metadata.
+fn realm_status_label(status: RealmStatus) -> &'static str {
+    match status {
+        RealmStatus::Active => "active",
+        RealmStatus::Suspended => "suspended",
+        RealmStatus::Archived => "archived",
+        RealmStatus::DeletingInProgress => "deleting_in_progress",
+    }
+}
+
+impl EmbeddedIdentityEngine {
+    /// Shared body of [`IdentityEngine::create_organization`] and
+    /// [`IdentityEngine::create_scim_organization`]; `scim_provisioned` sets
+    /// the organization's SCIM marker in the same write.
+    fn create_organization_impl(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateOrganizationRequest,
+        scim_provisioned: bool,
+    ) -> Result<Organization, IdentityError> {
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "create_organization",
+            });
+        }
+        self.require_active_realm(realm_id)?;
+        // A-24: enforce per-realm org quota before writing.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_orgs {
+                    let prefix = keys::org_id_scan_prefix();
+                    self.check_resource_quota(realm_id, "orgs", &prefix, max)?;
+                }
+            }
+        }
+        let slug = validation::validate_slug(&request.slug)?;
+        let name = validation::validate_display_name(&request.name)?;
+
+        // A-5: reject permanently reserved slugs (operator-configured list).
+        let slug_lower = slug.to_ascii_lowercase();
+        if self.config.reserved_slugs.iter().any(|r| r == &slug_lower) {
+            return Err(IdentityError::ReservedSlug { slug: slug.clone() });
+        }
+
+        // Acquire write lock before slug check to prevent TOCTOU (A-28)
+        let _slug_guard = self.org_write_lock.lock().expect("org write lock");
+        // Check slug uniqueness
+        let slug_key = keys::encode_org_slug(&slug);
+        if self
+            .storage
+            .get(realm_id, &slug_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::DuplicateOrgSlug);
+        }
+
+        // A-5: check post-delete slug cooldown reservation.
+        let reservation_key = keys::encode_org_slug_reservation(realm_id, &slug);
+        if let Some(bytes) = self
+            .storage
+            .get(realm_id, &reservation_key)
+            .map_err(Self::storage_err)?
+        {
+            if let Ok(reservation) = serde_json::from_slice::<StoredSlugReservation>(&bytes) {
+                let now_micros = self.clock.now().as_micros();
+                if now_micros < reservation.expires_at_micros {
+                    return Err(IdentityError::SlugInCooldown { slug: slug.clone() });
+                }
+                // Cooldown expired — clean up the stale reservation.
+                let _ = self.storage.delete(realm_id, &reservation_key);
+            }
+        }
+
+        let realm = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+        let org_attr_defs = realm
+            .config()
+            .attribute_definitions
+            .as_ref()
+            .map(|d| d.organizations.as_slice());
+        validation::validate_attributes(&request.attributes, org_attr_defs)?;
+
+        let now = self.clock.now();
+        let org_id = OrganizationId::generate();
+        let description = request.description.clone().unwrap_or_default();
+        let config = request.config.clone().unwrap_or_default();
+
+        let mut org = Organization::new(
+            org_id.clone(),
+            name,
+            slug.clone(),
+            description,
+            OrganizationStatus::Active,
+            config,
+            now,
+            now,
+        );
+        org.set_attributes(request.attributes.clone());
+        if scim_provisioned {
+            org.mark_scim_provisioned();
+        }
+
+        let id_key = keys::encode_org_id(&org_id);
+        let org_bytes = serde_json::to_vec(&org).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        // Atomic: primary + slug index in one WAL record (A-28)
+        self.storage
+            .put_batch(
+                realm_id,
+                &[
+                    (id_key, org_bytes),
+                    (slug_key, org_id.as_uuid().as_bytes().to_vec()),
+                ],
+            )
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::OrgCreated,
+            "org",
+            &org_id.as_uuid().to_string(),
+        )?;
+
+        Ok(org)
+    }
+
+    /// Shared body of [`IdentityEngine::update_realm`] and
+    /// [`IdentityEngine::set_realm_suspended`].
+    ///
+    /// `precondition` runs on the stored realm under the realm-ops lock, so a
+    /// lifecycle check cannot race a concurrent status change. `audit_ctx`
+    /// attributes the `RealmUpdated` event; on a status change its metadata
+    /// gains `previous_status` and `status`. Returns the status the realm had
+    /// before the update, and the updated realm.
+    fn update_realm_impl(
+        &self,
+        realm_id: &RealmId,
+        request: &UpdateRealmRequest,
+        operation: &'static str,
+        audit_ctx: Option<&AuditContext>,
+        precondition: impl FnOnce(&Realm) -> Result<(), IdentityError>,
+    ) -> Result<(RealmStatus, Realm), IdentityError> {
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected { operation });
+        }
+        if matches!(request.name.as_deref(), Some(n) if n == keys::SYSTEM_REALM_NAME) {
+            return Err(IdentityError::SystemRealmProtected { operation });
+        }
+        // If the rename targets a new name, validate it the same way
+        // create_realm does — including the admin-URL reserved-keyword
+        // set (UI_ROUTING.md R-4). Skip when name is unchanged.
+        if let Some(ref new_name) = request.name {
+            super::validation::validate_realm_name(new_name)?;
+        }
+        // Serialize against create/delete so an in-flight delete can't
+        // race with this read-modify-write and resurrect an orphaned
+        // record after its signing key has already been removed.
+        let _ops_guard = self.realm_ops_lock.lock().expect("realm ops lock");
+        let mut realm = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+
+        // Refuse updates against a realm whose cascade has already started.
+        // `delete_realm` releases the ops_lock after stamping
+        // `DeletingInProgress` so its (potentially long) cascade does not
+        // block create/update of *other* realms. Without this guard the
+        // update could re-put the realm record between the cascade's
+        // record-delete and signing-key-delete, leaving record=Some /
+        // key=None — the exact invariant the
+        // `simulation_concurrent_realm_ops_under_io_delay` test asserts.
+        if realm.status() == RealmStatus::DeletingInProgress {
+            return Err(IdentityError::RealmSuspended);
+        }
+        precondition(&realm)?;
+        let previous_status = realm.status();
+
+        let now = self.clock.now();
+        let old_name = realm.name().to_string();
+
+        // SEC-20: reject webhook config without HMAC secret before mutating state.
+        // M7: also reject approval webhook URL with non-HTTPS scheme.
+        if let Some(ref config) = request.config {
+            if let Some(ref wh) = config.pre_token_webhook {
+                wh.validate()
+                    .map_err(|reason| IdentityError::InvalidInput { reason })?;
+            }
+            if let Some(ref wh) = config.approval_webhook {
+                wh.validate()
+                    .map_err(|reason| IdentityError::InvalidInput { reason })?;
+            }
+            // 19.11: refuse an Argon2id override below the OWASP floor.
+            self.check_realm_argon2_floor(config)?;
+        }
+
+        if let Some(ref name) = request.name {
+            realm.set_name(name.clone());
+        }
+        if let Some(status) = request.status {
+            realm.set_status(status);
+        }
+        if let Some(ref config) = request.config {
+            realm.set_config(config.clone());
+        }
+        realm.set_updated_at(now);
+
+        let sys_realm = keys::system_realm_id();
+        let realm_key = keys::encode_realm_id(realm_id);
+        let realm_bytes = Self::serialize_realm(&realm)?;
+
+        // If the name changed, update the name index atomically
+        if realm.name() == old_name {
+            self.storage
+                .put(&sys_realm, &realm_key, &realm_bytes)
+                .map_err(Self::storage_err)?;
+        } else {
+            let old_name_key = keys::encode_realm_name(&old_name);
+            let new_name_key = keys::encode_realm_name(realm.name());
+            let name_value = realm_id.as_uuid().as_bytes().to_vec();
+            self.storage
+                .put_batch(
+                    &sys_realm,
+                    &[(realm_key, realm_bytes), (new_name_key, name_value)],
+                )
+                .map_err(Self::storage_err)?;
+            // Best-effort: remove old name index
+            let _ = self.storage.delete(&sys_realm, &old_name_key);
+        }
+
+        // Propagate status change to the lock-free cache so validate_token
+        // immediately reflects the new lifecycle state. Ordered before
+        // record_audit so the cache is consistent before any further writes,
+        // matching the ordering used in create_realm.
+        if request.status.is_some() {
+            let id = realm_id.clone();
+            let status = realm.status();
+            // A status change decided here binds on every node only via the
+            // control epoch: `realm_status_cache` answers "active" on a miss
+            // and is written by the serving node alone (task 24.6).
+            self.publish_control(Some(control::ControlOp::SetRealmStatus(id, status)));
+        }
+
+        let attributed = audit_ctx.map(|ctx| {
+            let mut metadata = ctx
+                .metadata
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let (Some(status), Some(map)) = (request.status, metadata.as_object_mut()) {
+                map.insert(
+                    "previous_status".to_string(),
+                    serde_json::Value::from(realm_status_label(previous_status)),
+                );
+                map.insert(
+                    "status".to_string(),
+                    serde_json::Value::from(realm_status_label(status)),
+                );
+            }
+            AuditContext {
+                actor: ctx.actor.clone(),
+                metadata: Some(metadata),
+            }
+        });
+        self.record_audit(
+            realm_id,
+            attributed.as_ref(),
+            AuditAction::RealmUpdated,
+            "realm",
+            &realm_id.as_uuid().to_string(),
+        )?;
+
+        // When suspending or archiving a realm, revoke all active sessions so
+        // existing tokens backed by those sessions fail immediately on the
+        // session-validity check inside validate_token (defense-in-depth on
+        // top of the realm-status check added to validate_token).
+        if matches!(
+            request.status,
+            Some(RealmStatus::Suspended | RealmStatus::Archived | RealmStatus::DeletingInProgress)
+        ) {
+            self.bulk_revoke_sessions(realm_id);
+        }
+
+        Ok((previous_status, realm))
+    }
+}
+
 impl IdentityEngine for EmbeddedIdentityEngine {
     fn check_ip_login_rate_limit(&self, realm_id: &RealmId, ip: &str) -> Result<(), IdentityError> {
         self.check_ip_login_rate_limit(realm_id, ip)
@@ -7576,127 +7935,38 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &UpdateRealmRequest,
     ) -> Result<Realm, IdentityError> {
-        if keys::is_system_realm(realm_id) {
-            return Err(IdentityError::SystemRealmProtected {
-                operation: "update_realm",
-            });
-        }
-        if matches!(request.name.as_deref(), Some(n) if n == keys::SYSTEM_REALM_NAME) {
-            return Err(IdentityError::SystemRealmProtected {
-                operation: "update_realm",
-            });
-        }
-        // If the rename targets a new name, validate it the same way
-        // create_realm does — including the admin-URL reserved-keyword
-        // set (UI_ROUTING.md R-4). Skip when name is unchanged.
-        if let Some(ref new_name) = request.name {
-            super::validation::validate_realm_name(new_name)?;
-        }
-        // Serialize against create/delete so an in-flight delete can't
-        // race with this read-modify-write and resurrect an orphaned
-        // record after its signing key has already been removed.
-        let _ops_guard = self.realm_ops_lock.lock().expect("realm ops lock");
-        let mut realm = self
-            .get_realm(realm_id)?
-            .ok_or(IdentityError::RealmNotFound)?;
+        self.update_realm_impl(realm_id, request, "update_realm", None, |_| Ok(()))
+            .map(|(_, realm)| realm)
+    }
 
-        // Refuse updates against a realm whose cascade has already started.
-        // `delete_realm` releases the ops_lock after stamping
-        // `DeletingInProgress` so its (potentially long) cascade does not
-        // block create/update of *other* realms. Without this guard the
-        // update could re-put the realm record between the cascade's
-        // record-delete and signing-key-delete, leaving record=Some /
-        // key=None — the exact invariant the
-        // `simulation_concurrent_realm_ops_under_io_delay` test asserts.
-        if realm.status() == RealmStatus::DeletingInProgress {
-            return Err(IdentityError::RealmSuspended);
-        }
-
-        let now = self.clock.now();
-        let old_name = realm.name().to_string();
-
-        // SEC-20: reject webhook config without HMAC secret before mutating state.
-        // M7: also reject approval webhook URL with non-HTTPS scheme.
-        if let Some(ref config) = request.config {
-            if let Some(ref wh) = config.pre_token_webhook {
-                wh.validate()
-                    .map_err(|reason| IdentityError::InvalidInput { reason })?;
-            }
-            if let Some(ref wh) = config.approval_webhook {
-                wh.validate()
-                    .map_err(|reason| IdentityError::InvalidInput { reason })?;
-            }
-            // 19.11: refuse an Argon2id override below the OWASP floor.
-            self.check_realm_argon2_floor(config)?;
-        }
-
-        if let Some(ref name) = request.name {
-            realm.set_name(name.clone());
-        }
-        if let Some(status) = request.status {
-            realm.set_status(status);
-        }
-        if let Some(ref config) = request.config {
-            realm.set_config(config.clone());
-        }
-        realm.set_updated_at(now);
-
-        let sys_realm = keys::system_realm_id();
-        let realm_key = keys::encode_realm_id(realm_id);
-        let realm_bytes = Self::serialize_realm(&realm)?;
-
-        // If the name changed, update the name index atomically
-        if realm.name() == old_name {
-            self.storage
-                .put(&sys_realm, &realm_key, &realm_bytes)
-                .map_err(Self::storage_err)?;
+    fn set_realm_suspended(
+        &self,
+        realm_id: &RealmId,
+        suspended: bool,
+        audit_ctx: &AuditContext,
+    ) -> Result<(RealmStatus, Realm), IdentityError> {
+        let (status, operation) = if suspended {
+            (RealmStatus::Suspended, "suspend_realm")
         } else {
-            let old_name_key = keys::encode_realm_name(&old_name);
-            let new_name_key = keys::encode_realm_name(realm.name());
-            let name_value = realm_id.as_uuid().as_bytes().to_vec();
-            self.storage
-                .put_batch(
-                    &sys_realm,
-                    &[(realm_key, realm_bytes), (new_name_key, name_value)],
-                )
-                .map_err(Self::storage_err)?;
-            // Best-effort: remove old name index
-            let _ = self.storage.delete(&sys_realm, &old_name_key);
-        }
-
-        // Propagate status change to the lock-free cache so validate_token
-        // immediately reflects the new lifecycle state. Ordered before
-        // record_audit so the cache is consistent before any further writes,
-        // matching the ordering used in create_realm.
-        if request.status.is_some() {
-            let id = realm_id.clone();
-            let status = realm.status();
-            // A status change decided here binds on every node only via the
-            // control epoch: `realm_status_cache` answers "active" on a miss
-            // and is written by the serving node alone (task 24.6).
-            self.publish_control(Some(control::ControlOp::SetRealmStatus(id, status)));
-        }
-
-        self.record_audit(
+            (RealmStatus::Active, "unsuspend_realm")
+        };
+        let request = UpdateRealmRequest {
+            status: Some(status),
+            ..UpdateRealmRequest::default()
+        };
+        // Only the runtime freeze moves: an archived (or deleting) realm
+        // follows `hearth.yaml` alone, so unsuspend must not revive it and
+        // suspend must not mask its archival.
+        self.update_realm_impl(
             realm_id,
-            None,
-            AuditAction::RealmUpdated,
-            "realm",
-            &realm_id.as_uuid().to_string(),
-        )?;
-
-        // When suspending or archiving a realm, revoke all active sessions so
-        // existing tokens backed by those sessions fail immediately on the
-        // session-validity check inside validate_token (defense-in-depth on
-        // top of the realm-status check added to validate_token).
-        if matches!(
-            request.status,
-            Some(RealmStatus::Suspended | RealmStatus::Archived | RealmStatus::DeletingInProgress)
-        ) {
-            self.bulk_revoke_sessions(realm_id);
-        }
-
-        Ok(realm)
+            &request,
+            operation,
+            Some(audit_ctx),
+            |realm| match realm.status() {
+                RealmStatus::Active | RealmStatus::Suspended => Ok(()),
+                _ => Err(IdentityError::RealmArchived),
+            },
+        )
     }
 
     #[allow(clippy::too_many_lines)]
@@ -7974,14 +8244,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         pending_actions: Vec<crate::identity::types::RequiredAction>,
         oidc_params: crate::identity::ra_token::OidcParams,
+        flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError> {
         let key = self.get_or_load_realm_signing_key(realm_id)?;
+        let generation = self.ra_generation(realm_id, user_id)?;
         crate::identity::ra_token::generate(
             &user_id.as_uuid().to_string(),
             &realm_id.as_uuid().to_string(),
             pending_actions,
             oidc_params,
+            flow.map_or_else(crate::identity::ra_token::new_flow_id, str::to_string),
+            generation,
             &key,
             now,
         )
@@ -7993,16 +8267,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         pending_actions: Vec<crate::identity::types::RequiredAction>,
         return_to: Option<String>,
-        webauthn_verified: bool,
+        mfa_proof: crate::identity::MfaProof,
+        flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError> {
         let key = self.get_or_load_realm_signing_key(realm_id)?;
+        let generation = self.ra_generation(realm_id, user_id)?;
         crate::identity::ra_token::generate_browser(
             &user_id.as_uuid().to_string(),
             &realm_id.as_uuid().to_string(),
             pending_actions,
             return_to,
-            webauthn_verified,
+            mfa_proof,
+            flow.map_or_else(crate::identity::ra_token::new_flow_id, str::to_string),
+            generation,
             &key,
             now,
         )
@@ -8014,10 +8292,38 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         token: &str,
         now: Timestamp,
     ) -> Result<crate::identity::ra_token::RaClaims, crate::identity::ra_token::RaTokenError> {
+        use crate::identity::ra_token::RaTokenError;
         let key = self
             .get_or_load_realm_signing_key(realm_id)
-            .map_err(|_| crate::identity::ra_token::RaTokenError::InvalidSignature)?;
-        crate::identity::ra_token::validate(token, key.public_key_bytes(), now)
+            .map_err(|_| RaTokenError::InvalidSignature)?;
+        let claims = crate::identity::ra_token::validate(token, key.public_key_bytes(), now)?;
+        // The user's sessions were revoked after this token was minted (or
+        // the revocation state cannot be read): the flow is over.
+        let user_id = uuid::Uuid::parse_str(&claims.sub)
+            .map(UserId::new)
+            .map_err(|_| RaTokenError::MalformedClaims)?;
+        match self.ra_generation(realm_id, &user_id) {
+            Ok(current) if current == claims.generation => Ok(claims),
+            _ => Err(RaTokenError::Revoked),
+        }
+    }
+
+    fn consume_required_action_flow(
+        &self,
+        realm_id: &RealmId,
+        claims: &crate::identity::ra_token::RaClaims,
+    ) -> Result<(), IdentityError> {
+        // A token minted before flows had ids cannot prove it has not ended.
+        if claims.flow.is_empty() {
+            return Err(IdentityError::InvalidToken);
+        }
+        let marker = keys::encode_consumed_ra_flow(&Self::sha256_hex(claims.flow.as_bytes()));
+        let expires_at = Timestamp::from_micros(claims.exp.saturating_mul(1_000_000));
+        if self.claim_single_use(realm_id, &marker, expires_at)? {
+            Ok(())
+        } else {
+            Err(IdentityError::InvalidToken)
+        }
     }
 
     fn rotate_realm_signing_key(
@@ -8172,29 +8478,26 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &CreateUserRequest,
     ) -> Result<User, IdentityError> {
-        // The system realm is reserved for Hearth admins and must be
-        // reached only through `create_admin_user`, which also provisions
-        // the `realm.admin` RBAC assignment atomically. Without this
-        // guard an operator could create a non-admin account in the
-        // system realm and gain a session bound to it but without the
-        // admin role — harmless today (the permission check would reject
-        // the session) but a trap for future refactors.
-        if keys::is_system_realm(realm_id) {
-            return Err(IdentityError::SystemRealmProtected {
-                operation: "create_user",
-            });
-        }
-        self.require_active_realm(realm_id)?;
-        // A-24: enforce per-realm user quota before writing.
-        if let Ok(Some(realm)) = self.get_realm(realm_id) {
-            if let Some(quotas) = &realm.config().quotas {
-                if let Some(max) = quotas.max_users {
-                    let prefix = keys::user_id_scan_prefix();
-                    self.check_resource_quota(realm_id, "users", &prefix, max)?;
-                }
-            }
-        }
+        self.check_user_creation(realm_id, "create_user")?;
         self.create_user_with_status(realm_id, request, self.config.default_status, None)
+    }
+
+    fn provision_federated_user(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateUserRequest,
+        email_verified: bool,
+    ) -> Result<User, IdentityError> {
+        self.check_user_creation(realm_id, "provision_federated_user")?;
+        // An address the upstream did not vouch for is unproven: the account
+        // waits for its owner to verify it, exactly like self-registration
+        // (GA audit round 3, G-3).
+        let status = if email_verified {
+            self.config.default_status
+        } else {
+            UserStatus::PendingVerification
+        };
+        self.create_user_record(realm_id, request, status, email_verified, None)
     }
 
     fn create_admin_user(&self, request: &CreateUserRequest) -> Result<User, IdentityError> {
@@ -8560,374 +8863,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         result
     }
 
-    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn create_session(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         context: &SessionContext,
     ) -> Result<Session, IdentityError> {
-        self.require_active_realm(realm_id)?;
-
-        // The realm's `cidr_policy` binds every path that ends in a session,
-        // not only the web password form that used to be its one reader
-        // (GA audit M13): the step-up grant, magic links, passkeys,
-        // federation and SAML all authenticate too.
-        self.check_realm_network_policy(realm_id, context.ip_address.as_deref())?;
-
-        // A-24: enforce per-realm total session quota before writing.
-        if let Ok(Some(realm)) = self.get_realm(realm_id) {
-            if let Some(quotas) = &realm.config().quotas {
-                if let Some(max) = quotas.max_sessions {
-                    let prefix = keys::session_id_scan_prefix();
-                    self.check_resource_quota(realm_id, "sessions", &prefix, max)?;
-                }
-            }
-        }
-
-        // Enforce the mfa_required policy on factor **use** (audit 2026-08-28
-        // §4.18#3). The old gate asked whether the user had a factor enrolled,
-        // so federation, the ROPC grant and the device grant — none of which
-        // run a challenge — issued sessions to MFA-required users on the
-        // strength of the enrolment alone. The caller now states what this
-        // ceremony proved; `MfaProof::None` is the default, so a path that says
-        // nothing is refused.
-        if !context.mfa_proof.satisfies_mfa_required() {
-            if let Ok(Some(realm)) = self.get_realm(realm_id) {
-                // HSEC-004 (revised): MFA defaults to opt-in for all realms. Operators
-                // enable it explicitly via `mfa_required: true` in hearth.yaml after
-                // enrolling a second factor. Defaulting to `true` for the system realm
-                // made fresh installs unbootable (no MFA enrollment path exists before
-                // the first admin session). The production hard-error in main.rs already
-                // blocks `mfa_required: false` from being set explicitly; a startup
-                // warning nudges operators who leave it `null` to enable it once enrolled.
-                let mfa_default = false;
-                if realm.config().mfa_required.unwrap_or(mfa_default) {
-                    return Err(IdentityError::MfaRequired);
-                }
-            }
-        }
-
-        // Enforce `webauthn_required` on factor **use** too (audit 2026-08-28
-        // §4.18#3, task 25.26). Task 20.14 wired the key only into the
-        // enrolment interceptor (`inject_enroll_mfa_if_needed`), which asks
-        // whether the account *holds* a passkey. Once it did, the login could
-        // still be completed with TOTP, a recovery code or an OTP, so an
-        // operator who turned the key on after a phishing incident got a
-        // passkey sitting unused in the account and no phishing resistance on
-        // the wire. Only `MfaProof::ProvedWebAuthn` — a WebAuthn assertion
-        // that proved user verification — clears this.
-        if !context.mfa_proof.satisfies_webauthn_required() {
-            if let Ok(Some(realm)) = self.get_realm(realm_id) {
-                if realm.config().webauthn_required.unwrap_or(false) {
-                    return Err(IdentityError::MfaRequired);
-                }
-            }
-        }
-
-        // Ensure the user exists and is permitted to start a session.
-        // Unverified users must complete the email-verification flow first;
-        // disabled users are blocked entirely (distinguished from
-        // `UserNotFound` because an operator deliberately disabled them).
-        let user = self
-            .get_user(realm_id, user_id)?
-            .ok_or(IdentityError::UserNotFound)?;
-        match user.status() {
-            UserStatus::Active => {}
-            UserStatus::PendingVerification => return Err(IdentityError::UserNotVerified),
-            UserStatus::Disabled => return Err(IdentityError::Unauthorized),
-        }
-
-        // A second factor the USER holds binds on every login path, whatever
-        // the realm's policy (GA audit B4/B5). The gates above read realm
-        // policy only, so a magic link, a federated login or a password
-        // login that never challenged an enrolled TOTP, OTP or passkey opened
-        // a full session: the factor existed to stop exactly that. Every path
-        // that proves a factor says so in `mfa_proof`; a path that proved
-        // nothing is refused for a user who holds one, and must send the user
-        // to the factor's challenge instead.
-        match context.mfa_proof {
-            crate::identity::MfaProof::Proved
-            | crate::identity::MfaProof::ProvedWebAuthn
-            | crate::identity::MfaProof::Inherited => {}
-            crate::identity::MfaProof::None => {
-                if self.held_second_factors(realm_id, user_id)?.any() {
-                    return Err(IdentityError::MfaRequired);
-                }
-            }
-            // A UV-less passkey used the passkey the account holds; it still
-            // owes any other factor the user enrolled.
-            crate::identity::MfaProof::PasskeyPossession => {
-                if self
-                    .held_second_factors(realm_id, user_id)?
-                    .any_besides_webauthn()
-                {
-                    return Err(IdentityError::MfaRequired);
-                }
-            }
-        }
-
-        // Enforce per-realm concurrent session limit when configured.
-        if let Ok(Some(realm)) = self.get_realm(realm_id) {
-            if let Some(limit) = realm.config().max_concurrent_sessions {
-                let policy = realm.config().session_over_limit_policy.clone();
-                let lock_key = format!("{}:{}", realm_id.as_uuid(), user_id.as_uuid());
-
-                // Acquire per-user lock — serializes the count-check + create
-                // sequence to prevent TOCTOU races under concurrent logins.
-                let user_lock = {
-                    let mut locks = self
-                        .session_limit_locks
-                        .lock()
-                        .expect("session_limit_locks poisoned");
-                    locks
-                        .entry(lock_key)
-                        // INVARIANT: inner guard held only across the sync session count-check + write window; no .await in scope.
-                        .or_insert_with(|| Arc::new(Mutex::new(())))
-                        .clone()
-                };
-                let _guard = user_lock
-                    .lock()
-                    .expect("session_limit_locks user lock poisoned");
-
-                let now = self.clock.now();
-                // Use a large-but-safe limit (u32::MAX avoids the take(limit+1)
-                // overflow that usize::MAX would cause inside list_sessions_by_user).
-                // Use max page limit to get all sessions; the engine now counts via total.
-                let page = self.list_sessions_by_user(
-                    realm_id,
-                    user_id,
-                    &crate::core::PageRequest::new(0, crate::core::MAX_PAGE_LIMIT),
-                )?;
-                let mut live: Vec<_> = page.items.into_iter().filter(|s| s.is_valid(now)).collect();
-                let active = live.len() as u32;
-
-                if active >= limit {
-                    // `evicted` is the count that actually succeeded, and
-                    // `required` the count the limit needs (task 24.1). They
-                    // used to be the same number: the loop below discarded
-                    // every `revoke_session` error, audited the number of
-                    // *attempts* as `"evicted"`, and let the new session
-                    // through. A failing revocation therefore took the realm
-                    // over `max_concurrent_sessions` while the audit log said
-                    // the limit had been enforced.
-                    let (evicted, required) = match &policy {
-                        SessionLimitPolicy::RejectNew => {
-                            let ctx = AuditContext {
-                                actor: Actor::User(user_id.clone()),
-                                metadata: Some(serde_json::json!({
-                                    "user_id": user_id.as_uuid().to_string(),
-                                    "evicted": 0u32,
-                                    "policy": "reject_new",
-                                    "limit": limit,
-                                })),
-                            };
-                            let _ = self.record_audit(
-                                realm_id,
-                                Some(&ctx),
-                                AuditAction::SessionLimitEnforced,
-                                "session",
-                                &user_id.as_uuid().to_string(),
-                            );
-                            return Err(IdentityError::SessionLimitExceeded { limit, active });
-                        }
-                        SessionLimitPolicy::EvictOldest => {
-                            let to_evict = (active + 1 - limit) as usize;
-                            live.sort_by_key(|s| s.created_at());
-                            let mut evicted = 0u32;
-                            for s in live.iter().take(to_evict) {
-                                match self.revoke_session(realm_id, s.id()) {
-                                    Ok(()) => evicted += 1,
-                                    Err(e) => tracing::error!(
-                                        error = %e,
-                                        session_id = %s.id().as_uuid(),
-                                        user_id = %user_id.as_uuid(),
-                                        "session-limit eviction failed; the new \
-                                         session will be refused rather than \
-                                         admitted over the limit"
-                                    ),
-                                }
-                            }
-                            (evicted, u32::try_from(to_evict).unwrap_or(u32::MAX))
-                        }
-                    };
-
-                    let ctx = AuditContext {
-                        actor: Actor::User(user_id.clone()),
-                        metadata: Some(serde_json::json!({
-                            "user_id": user_id.as_uuid().to_string(),
-                            "evicted": evicted,
-                            "policy": "evict_oldest",
-                            "limit": limit,
-                        })),
-                    };
-                    // DISCARD-OK: `SessionLimitEnforced` is a `LogOnly` action,
-                    // so `record_audit` has already applied the policy — it
-                    // logged the loss at `warn` and returned `Ok`.
-                    let _ = self.record_audit(
-                        realm_id,
-                        Some(&ctx),
-                        AuditAction::SessionLimitEnforced,
-                        "session",
-                        &user_id.as_uuid().to_string(),
-                    );
-
-                    // Fail closed. Admitting the new session here is the whole
-                    // defect: the limit exists to cap concurrent sessions, and
-                    // an eviction that did not happen does not make room.
-                    if evicted < required {
-                        return Err(IdentityError::SessionLimitExceeded { limit, active });
-                    }
-                }
-            }
-        }
-
-        // Capture per-realm lifecycle timeouts once and embed them in the
-        // session record so hot-path get_session avoids a realm lookup (A-18).
-        //
-        // `session_ttl_micros` is captured in the same lookup (task 25.25). It
-        // is the landing field for `auth.session_ttl` and
-        // `realms.<name>.session_ttl`, both of which parsed, validated, reached
-        // `RealmConfig` — and were then never read: every session expired on
-        // the compiled-in 24 h `SessionConfig::default()`, which `main.rs` never
-        // overrides either. An operator who shortened a realm's session
-        // lifetime got a clean boot, a clean `config validate` and 24 h
-        // sessions. Widening the liveness registry to `auth.*` is what found it.
-        let (idle_timeout_secs, absolute_timeout_secs, realm_session_ttl_micros) =
-            if let Ok(Some(realm)) = self.get_realm(realm_id) {
-                (
-                    realm.config().idle_timeout_secs,
-                    realm.config().absolute_timeout_secs,
-                    realm.config().session_ttl_micros,
-                )
-            } else {
-                (None, None, None)
-            };
-
-        // Generate session
-        //
-        // 22.27 (audit 2026-08-28 §4.25#5): the session ID is an unguessable
-        // handle, so it is drawn with a full 128 bits rather than
-        // `SessionId::generate()`'s UUID v4, which reserves the version nibble
-        // and the variant bits and carries only 122. It is still a `Uuid`, so
-        // storage keys, cookie encoding, and the wire shape are unchanged.
-        let session_id = SessionId::new(crate::core::random_secret_uuid());
-        let now = self.clock.now();
-        // A realm's own `session_ttl` wins; the engine-wide default is the
-        // fallback. A non-positive stored value is ignored rather than honoured:
-        // it would expire the session before it was written.
-        let ttl_micros = realm_session_ttl_micros
-            .filter(|t| *t > 0)
-            .unwrap_or(self.config.session.ttl_micros);
-        let expires_at = now.add_micros(ttl_micros);
-        let session = Session::new(
-            session_id.clone(),
-            user_id.clone(),
-            now,
-            expires_at,
-            context,
-            idle_timeout_secs,
-            absolute_timeout_secs,
-        );
-
-        // ── Merged write: session + index + audit event → 1 WAL record (HEA-1954) ──
-        //
-        // Build the session and index KV pairs, then pass them alongside the
-        // audit KV pairs via `with_pending_append`'s closure so that all writes
-        // land in a single `enqueue_batch` call — one fsync, one WAL record.
-        //
-        // Failure model:
-        //  • MergedAppendNotSupported → non-embedded audit engine; fall back to
-        //    the two-record path (session write + separate audit append).
-        //  • Other Err → audit setup failed before enqueue; session not written.
-        //    SessionCreated is LogOnly so we write the session alone and attempt
-        //    a standalone audit append.
-        //  • Ok + await failure → both session and audit failed together; return
-        //    storage error.
-        let session_bytes = Self::serialize_session(&session)?;
-        let id_key = keys::encode_session_id(session.id());
-        let user_session_key = keys::encode_user_session(user_id, &session_id);
-        let session_kvs: Vec<(Vec<u8>, Vec<u8>)> =
-            vec![(id_key, session_bytes), (user_session_key, Vec::new())];
-
-        let session_audit_ctx = AuditContext {
-            actor: Actor::User(user_id.clone()),
-            metadata: Some(serde_json::json!({
-                "ip": context.ip_address,
-                "ua": context.user_agent_raw,
-            })),
-        };
-        let audit_request = CreateAuditEvent {
-            realm_id: realm_id.clone(),
-            actor: Actor::User(user_id.clone()).label(),
-            action: AuditAction::SessionCreated,
-            resource_type: "session".to_string(),
-            resource_id: session_id.as_uuid().to_string(),
-            metadata: session_audit_ctx.metadata.clone(),
-        };
-
-        let storage_for_enqueue = Arc::clone(&self.storage);
-        let realm_id_for_enqueue = realm_id.clone();
-        let merged = self.audit.with_pending_append(
-            &audit_request,
-            Box::new(move |audit_kvs| {
-                // Combine session KV pairs with audit KV pairs in a single batch.
-                let mut combined = session_kvs;
-                combined.extend_from_slice(audit_kvs);
-                storage_for_enqueue.enqueue_batch(&realm_id_for_enqueue, &combined)
-            }),
-        );
-
-        match merged {
-            Ok(pending) => {
-                let dur = self.storage.await_batch_durable(pending.handle);
-                if dur.is_err() {
-                    (pending.on_failure)();
-                } else {
-                    (pending.on_success)();
-                    if session.is_valid(self.clock.now()) {
-                        self.session_cache_insert(realm_id, &session);
-                    } else {
-                        self.session_cache_invalidate(realm_id, session.id());
-                    }
-                }
-                dur.map_err(Self::storage_err)?;
-            }
-            Err(crate::audit::AuditError::MergedAppendNotSupported) => {
-                // Non-embedded audit engine: two-record fallback (HEA-1945 behaviour).
-                let user_session_key = keys::encode_user_session(user_id, &session_id);
-                self.persist_session_with(
-                    realm_id,
-                    &session,
-                    vec![(user_session_key, Vec::new())],
-                )?;
-                self.record_audit(
-                    realm_id,
-                    Some(&session_audit_ctx),
-                    AuditAction::SessionCreated,
-                    "session",
-                    &session_id.as_uuid().to_string(),
-                )?;
-            }
-            Err(e) => {
-                // Audit setup failed before the enqueue; session not yet written.
-                // SessionCreated is LogOnly: write session without merged audit.
-                tracing::warn!(
-                    error = %e,
-                    "audit pre-enqueue failed for SessionCreated (LogOnly); \
-                     falling back to session-only write"
-                );
-                let user_session_key = keys::encode_user_session(user_id, &session_id);
-                self.persist_session_with(
-                    realm_id,
-                    &session,
-                    vec![(user_session_key, Vec::new())],
-                )?;
-                let _ = self.audit.append(&audit_request);
-            }
-        }
-
-        Ok(session)
+        self.create_session_gated(realm_id, user_id, context, false)
     }
 
     fn get_session(
@@ -8971,6 +8913,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             self.persist_session(realm_id, &session)?;
             session
         };
+        // A sign-out (or any revocation) also ends the user's required-action
+        // flows under way (GA audit round 3, D-2).
+        self.bump_ra_generation(realm_id, session.user_id())?;
 
         // Cascade: revoke all refresh-token grant families issued under this session.
         //
@@ -9193,6 +9138,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
+        // Revoke-all ends the user's required-action flows too, even when the
+        // user holds no session to revoke (GA audit round 3, D-2).
+        self.bump_ra_generation(realm_id, user_id)?;
         let mut offset = 0u64;
         let batch = crate::core::MAX_PAGE_LIMIT;
         let mut revoked: u32 = 0;
@@ -9275,6 +9223,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         )
     }
 
+    fn issue_operator_token(
+        &self,
+        user_id: &UserId,
+        ttl: std::time::Duration,
+        issuer: &crate::identity::OperatorTokenIssuer,
+    ) -> Result<crate::identity::OperatorToken, IdentityError> {
+        self.issue_operator_token_impl(user_id, ttl, issuer)
+    }
+
     #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn issue_tokens_with_context(
         &self,
@@ -9299,10 +9256,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         let now = self.clock.now();
-        // Resolve effective permissions via RBAC at token-issue time.
+        // Resolve effective permissions via RBAC at token-issue time, narrowed
+        // by every permission-bearing granted scope — the rule the code
+        // exchange, refresh and live resolution share (GA audit 3 B-4).
+        let grant_scopes: Vec<String> = ctx.granted_scopes.iter().cloned().collect();
         let resolved = self
             .rbac
-            .resolve_permissions(user_id, realm_id, None, None)
+            .resolve_for_granted_scopes(user_id, realm_id, None, &grant_scopes)
             .map_err(|e| match e {
                 RbacError::TokenSizeExceeded {
                     limit,
@@ -9414,7 +9374,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let client_id_str = ctx
             .client_id
             .as_ref()
-            .map(|c| c.to_string())
+            .map(crate::identity::tokens::issued_client_id)
             .unwrap_or_default();
         let extra_claims = self.fire_pre_token_webhook(
             realm_id,
@@ -9944,16 +9904,31 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &AuthorizationRequest,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        self.authorize_inner(realm_id, request, None)
+        self.authorize_inner(realm_id, request, None, crate::identity::MfaProof::None)
+    }
+
+    fn authorize_from_session(
+        &self,
+        realm_id: &RealmId,
+        request: &AuthorizationRequest,
+        mfa_proof: crate::identity::MfaProof,
+    ) -> Result<AuthorizationResponse, IdentityError> {
+        self.authorize_inner(realm_id, request, None, mfa_proof)
     }
 
     fn authorize_non_interactive(
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
-        session_id: &SessionId,
+        bearer: &TokenClaims,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        self.authorize_inner(realm_id, request, Some(session_id))
+        // The bearer token's own session supplies the proof.
+        self.authorize_inner(
+            realm_id,
+            request,
+            Some(bearer),
+            crate::identity::MfaProof::None,
+        )
     }
 
     #[allow(clippy::too_many_lines)]
@@ -10082,7 +10057,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_code: &str,
         user_id: &UserId,
     ) -> Result<(), IdentityError> {
-        self.approve_device_inner(realm_id, user_code, user_id)
+        self.approve_device_inner(
+            realm_id,
+            user_code,
+            user_id,
+            crate::identity::MfaProof::None,
+        )
+    }
+
+    fn approve_device_from_session(
+        &self,
+        realm_id: &RealmId,
+        user_code: &str,
+        user_id: &UserId,
+        mfa_proof: crate::identity::MfaProof,
+    ) -> Result<(), IdentityError> {
+        self.approve_device_inner(realm_id, user_code, user_id, mfa_proof)
     }
 
     fn pending_device_authorization(
@@ -10163,6 +10153,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Ok(crate::identity::oidc::DecidePermissionResponse { allowed: false });
         }
         self.decide_token_permission_inner(realm_id, request)
+    }
+
+    fn live_token_authority(
+        &self,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+        org_id: Option<&crate::core::OrganizationId>,
+        narrow_scope: Option<&str>,
+    ) -> Result<crate::identity::oidc::LiveTokenAuthority, IdentityError> {
+        self.live_token_authority_inner(realm_id, claims, org_id, narrow_scope)
     }
 
     // ===== MFA / TOTP (Step 23) =====
@@ -11631,7 +11631,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(token)
     }
 
-    fn verify_email_token(&self, realm_id: &RealmId, token: &str) -> Result<UserId, IdentityError> {
+    fn verify_email_token_from(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        origin: crate::identity::VerificationOrigin,
+    ) -> Result<UserId, IdentityError> {
         let token_hash = Self::sha256_hex(token.as_bytes());
         let key = keys::encode_email_verify_token(&token_hash);
 
@@ -11692,6 +11697,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let mut user = self
             .get_user(realm_id, &user_id)?
             .ok_or(IdentityError::VerificationTokenInvalid)?;
+        // A pending account's federated links survive only a verification
+        // completed in the browser that performed the federated login that
+        // created it (GA audit round 3, G-3). Removed BEFORE the account is
+        // activated, so the upstream identity never signs in to it.
+        if user.status() == UserStatus::PendingVerification
+            && origin == crate::identity::VerificationOrigin::Elsewhere
+        {
+            self.drop_federated_links_on_verification(realm_id, &user_id)?;
+        }
         let needs_update =
             user.status() == UserStatus::PendingVerification || !user.email_verified();
         if needs_update {
@@ -12913,111 +12927,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &CreateOrganizationRequest,
     ) -> Result<Organization, IdentityError> {
-        if keys::is_system_realm(realm_id) {
-            return Err(IdentityError::SystemRealmProtected {
-                operation: "create_organization",
-            });
-        }
-        self.require_active_realm(realm_id)?;
-        // A-24: enforce per-realm org quota before writing.
-        if let Ok(Some(realm)) = self.get_realm(realm_id) {
-            if let Some(quotas) = &realm.config().quotas {
-                if let Some(max) = quotas.max_orgs {
-                    let prefix = keys::org_id_scan_prefix();
-                    self.check_resource_quota(realm_id, "orgs", &prefix, max)?;
-                }
-            }
-        }
-        let slug = validation::validate_slug(&request.slug)?;
-        let name = validation::validate_display_name(&request.name)?;
+        self.create_organization_impl(realm_id, request, false)
+    }
 
-        // A-5: reject permanently reserved slugs (operator-configured list).
-        let slug_lower = slug.to_ascii_lowercase();
-        if self.config.reserved_slugs.iter().any(|r| r == &slug_lower) {
-            return Err(IdentityError::ReservedSlug { slug: slug.clone() });
-        }
-
-        // Acquire write lock before slug check to prevent TOCTOU (A-28)
-        let _slug_guard = self.org_write_lock.lock().expect("org write lock");
-        // Check slug uniqueness
-        let slug_key = keys::encode_org_slug(&slug);
-        if self
-            .storage
-            .get(realm_id, &slug_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            return Err(IdentityError::DuplicateOrgSlug);
-        }
-
-        // A-5: check post-delete slug cooldown reservation.
-        let reservation_key = keys::encode_org_slug_reservation(realm_id, &slug);
-        if let Some(bytes) = self
-            .storage
-            .get(realm_id, &reservation_key)
-            .map_err(Self::storage_err)?
-        {
-            if let Ok(reservation) = serde_json::from_slice::<StoredSlugReservation>(&bytes) {
-                let now_micros = self.clock.now().as_micros();
-                if now_micros < reservation.expires_at_micros {
-                    return Err(IdentityError::SlugInCooldown { slug: slug.clone() });
-                }
-                // Cooldown expired — clean up the stale reservation.
-                let _ = self.storage.delete(realm_id, &reservation_key);
-            }
-        }
-
-        let realm = self
-            .get_realm(realm_id)?
-            .ok_or(IdentityError::RealmNotFound)?;
-        let org_attr_defs = realm
-            .config()
-            .attribute_definitions
-            .as_ref()
-            .map(|d| d.organizations.as_slice());
-        validation::validate_attributes(&request.attributes, org_attr_defs)?;
-
-        let now = self.clock.now();
-        let org_id = OrganizationId::generate();
-        let description = request.description.clone().unwrap_or_default();
-        let config = request.config.clone().unwrap_or_default();
-
-        let mut org = Organization::new(
-            org_id.clone(),
-            name,
-            slug.clone(),
-            description,
-            OrganizationStatus::Active,
-            config,
-            now,
-            now,
-        );
-        org.set_attributes(request.attributes.clone());
-
-        let id_key = keys::encode_org_id(&org_id);
-        let org_bytes = serde_json::to_vec(&org).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        // Atomic: primary + slug index in one WAL record (A-28)
-        self.storage
-            .put_batch(
-                realm_id,
-                &[
-                    (id_key, org_bytes),
-                    (slug_key, org_id.as_uuid().as_bytes().to_vec()),
-                ],
-            )
-            .map_err(Self::storage_err)?;
-
-        self.record_audit(
-            realm_id,
-            None,
-            AuditAction::OrgCreated,
-            "org",
-            &org_id.as_uuid().to_string(),
-        )?;
-
-        Ok(org)
+    fn create_scim_organization(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateOrganizationRequest,
+    ) -> Result<Organization, IdentityError> {
+        self.create_organization_impl(realm_id, request, true)
     }
 
     fn get_organization(
@@ -18181,13 +18099,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .scope
                     .unwrap_or_else(|| subject_claims.scope.clone().unwrap_or_default());
 
-                (actor_claims.sub, scope, actor_claims.permissions.clone())
+                // `act.sub` names the acting client by its issued client_id
+                // (the actor token's own `sub` is Hearth's `client_<uuid>`
+                // subject form, checked above).
+                (
+                    crate::identity::tokens::issued_client_id(&request.client_id),
+                    scope,
+                    actor_claims.permissions.clone(),
+                )
             } else {
                 // No actor_token: the client is acting on its own behalf (no delegation chain).
                 // Preserve the original behavior — actor ceiling matches the subject's own scope
                 // so this path doesn't further restrict scope beyond subject ∩ requested.
                 // For permissions, use the subject's full set as the ceiling (no attenuation).
-                let actor_sub = request.client_id.as_uuid().to_string();
+                let actor_sub = crate::identity::tokens::issued_client_id(&request.client_id);
                 let actor_scope = subject_claims.scope.clone().unwrap_or_default();
                 (actor_sub, actor_scope, subject_claims.permissions.clone())
             };
@@ -18812,6 +18737,499 @@ fn classify_phc_algorithm(phc: &str) -> Option<crate::identity::credentials::Pas
 }
 
 impl EmbeddedIdentityEngine {
+    /// Removes every federated link of `user_id`, auditing each removal as
+    /// `federation_account_unlinked` with the reason. Used when a
+    /// `PendingVerification` account's address is verified outside the
+    /// browser that performed the federated login which created it
+    /// (GA audit round 3, G-3): the address owner activates the account, and
+    /// the upstream identity that named their address does not come with it.
+    fn drop_federated_links_on_verification(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<(), IdentityError> {
+        for (idp_id, external_sub) in self.list_external_identities_for_user(realm_id, user_id)? {
+            let reverse_key = keys::encode_federation_ext_key(&idp_id, &external_sub);
+            self.storage
+                .delete(realm_id, &reverse_key)
+                .map_err(Self::storage_err)?;
+            self.storage
+                .delete(
+                    realm_id,
+                    &keys::encode_federation_ext_fwd_key(user_id, &idp_id),
+                )
+                .map_err(Self::storage_err)?;
+            let ctx = AuditContext {
+                actor: Actor::System,
+                metadata: Some(serde_json::json!({
+                    "user_id": user_id.as_uuid().to_string(),
+                    "reason": "email_verified_outside_federated_login_browser",
+                })),
+            };
+            self.record_audit(
+                realm_id,
+                Some(&ctx),
+                AuditAction::FederationAccountUnlinked,
+                "federation",
+                &idp_id.as_uuid().to_string(),
+            )?;
+            tracing::info!(
+                "email verification: federated link removed from a pending account verified \
+                 outside the federated login's browser"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl EmbeddedIdentityEngine {
+    /// Creates a session derived from another one — the token session of an
+    /// authorization-code exchange or a device grant. It records `mfa_proof`,
+    /// the proof the authorizing session made, and passes every check
+    /// `create_session` makes except the second-factor gates, which that
+    /// session already cleared (GA audit round 3, D-7). It used to be created
+    /// with `MfaProof::Inherited`, which later gates read as a proved factor
+    /// whatever the authorizing session had proved.
+    pub(crate) fn create_derived_session(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        mfa_proof: crate::identity::MfaProof,
+    ) -> Result<Session, IdentityError> {
+        self.create_session_gated(
+            realm_id,
+            user_id,
+            &SessionContext {
+                mfa_proof,
+                ..SessionContext::default()
+            },
+            true,
+        )
+    }
+
+    /// `create_session`, with the second-factor gates skipped for a
+    /// `derived` session (see [`Self::create_derived_session`]).
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
+    fn create_session_gated(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        context: &SessionContext,
+        derived: bool,
+    ) -> Result<Session, IdentityError> {
+        self.require_active_realm(realm_id)?;
+
+        // The realm's `cidr_policy` binds every path that ends in a session,
+        // not only the web password form that used to be its one reader
+        // (GA audit M13): the step-up grant, magic links, passkeys,
+        // federation and SAML all authenticate too.
+        self.check_realm_network_policy(realm_id, context.ip_address.as_deref())?;
+
+        // A-24: enforce per-realm total session quota before writing.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_sessions {
+                    let prefix = keys::session_id_scan_prefix();
+                    self.check_resource_quota(realm_id, "sessions", &prefix, max)?;
+                }
+            }
+        }
+
+        // A derived session (a code exchange, a device grant) cleared these
+        // gates when the session that authorized it was created; it records
+        // that session's proof and is not judged again (GA audit round 3, D-7).
+        if !derived {
+            // Enforce the mfa_required policy on factor **use** (audit 2026-08-28
+            // §4.18#3). The old gate asked whether the user had a factor enrolled,
+            // so federation, the ROPC grant and the device grant — none of which
+            // run a challenge — issued sessions to MFA-required users on the
+            // strength of the enrolment alone. The caller now states what this
+            // ceremony proved; `MfaProof::None` is the default, so a path that says
+            // nothing is refused.
+            if !context.mfa_proof.satisfies_mfa_required() {
+                if let Ok(Some(realm)) = self.get_realm(realm_id) {
+                    // HSEC-004 (revised): MFA defaults to opt-in for all realms. Operators
+                    // enable it explicitly via `mfa_required: true` in hearth.yaml after
+                    // enrolling a second factor. Defaulting to `true` for the system realm
+                    // made fresh installs unbootable (no MFA enrollment path exists before
+                    // the first admin session). The production hard-error in main.rs already
+                    // blocks `mfa_required: false` from being set explicitly; a startup
+                    // warning nudges operators who leave it `null` to enable it once enrolled.
+                    let mfa_default = false;
+                    if realm.config().mfa_required.unwrap_or(mfa_default) {
+                        return Err(IdentityError::MfaRequired);
+                    }
+                }
+            }
+
+            // Enforce `webauthn_required` on factor **use** too (audit 2026-08-28
+            // §4.18#3, task 25.26). Task 20.14 wired the key only into the
+            // enrolment interceptor (`inject_enroll_mfa_if_needed`), which asks
+            // whether the account *holds* a passkey. Once it did, the login could
+            // still be completed with TOTP, a recovery code or an OTP, so an
+            // operator who turned the key on after a phishing incident got a
+            // passkey sitting unused in the account and no phishing resistance on
+            // the wire. Only `MfaProof::ProvedWebAuthn` — a WebAuthn assertion
+            // that proved user verification — clears this.
+            if !context.mfa_proof.satisfies_webauthn_required() {
+                if let Ok(Some(realm)) = self.get_realm(realm_id) {
+                    if realm.config().webauthn_required.unwrap_or(false) {
+                        return Err(IdentityError::MfaRequired);
+                    }
+                }
+            }
+        }
+
+        // Ensure the user exists and is permitted to start a session.
+        // Unverified users must complete the email-verification flow first;
+        // disabled users are blocked entirely (distinguished from
+        // `UserNotFound` because an operator deliberately disabled them).
+        let user = self
+            .get_user(realm_id, user_id)?
+            .ok_or(IdentityError::UserNotFound)?;
+        match user.status() {
+            UserStatus::Active => {}
+            UserStatus::PendingVerification => return Err(IdentityError::UserNotVerified),
+            UserStatus::Disabled => return Err(IdentityError::Unauthorized),
+        }
+
+        if !derived {
+            // A second factor the USER holds binds on every login path, whatever
+            // the realm's policy (GA audit B4/B5). The gates above read realm
+            // policy only, so a magic link, a federated login or a password
+            // login that never challenged an enrolled TOTP, OTP or passkey opened
+            // a full session: the factor existed to stop exactly that. Every path
+            // that proves a factor says so in `mfa_proof`; a path that proved
+            // nothing is refused for a user who holds one, and must send the user
+            // to the factor's challenge instead.
+            match context.mfa_proof {
+                crate::identity::MfaProof::Proved | crate::identity::MfaProof::ProvedWebAuthn => {}
+                crate::identity::MfaProof::None => {
+                    if self.held_second_factors(realm_id, user_id)?.any() {
+                        return Err(IdentityError::MfaRequired);
+                    }
+                }
+                // A UV-less passkey used the passkey the account holds; it still
+                // owes any other factor the user enrolled.
+                crate::identity::MfaProof::PasskeyPossession => {
+                    if self
+                        .held_second_factors(realm_id, user_id)?
+                        .any_besides_webauthn()
+                    {
+                        return Err(IdentityError::MfaRequired);
+                    }
+                }
+            }
+        }
+
+        // Enforce per-realm concurrent session limit when configured.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(limit) = realm.config().max_concurrent_sessions {
+                let policy = realm.config().session_over_limit_policy.clone();
+                let lock_key = format!("{}:{}", realm_id.as_uuid(), user_id.as_uuid());
+
+                // Acquire per-user lock — serializes the count-check + create
+                // sequence to prevent TOCTOU races under concurrent logins.
+                let user_lock = {
+                    let mut locks = self
+                        .session_limit_locks
+                        .lock()
+                        .expect("session_limit_locks poisoned");
+                    locks
+                        .entry(lock_key)
+                        // INVARIANT: inner guard held only across the sync session count-check + write window; no .await in scope.
+                        .or_insert_with(|| Arc::new(Mutex::new(())))
+                        .clone()
+                };
+                let _guard = user_lock
+                    .lock()
+                    .expect("session_limit_locks user lock poisoned");
+
+                let now = self.clock.now();
+                // Use a large-but-safe limit (u32::MAX avoids the take(limit+1)
+                // overflow that usize::MAX would cause inside list_sessions_by_user).
+                // Use max page limit to get all sessions; the engine now counts via total.
+                let page = self.list_sessions_by_user(
+                    realm_id,
+                    user_id,
+                    &crate::core::PageRequest::new(0, crate::core::MAX_PAGE_LIMIT),
+                )?;
+                let mut live: Vec<_> = page.items.into_iter().filter(|s| s.is_valid(now)).collect();
+                let active = live.len() as u32;
+
+                if active >= limit {
+                    // `evicted` is the count that actually succeeded, and
+                    // `required` the count the limit needs (task 24.1). They
+                    // used to be the same number: the loop below discarded
+                    // every `revoke_session` error, audited the number of
+                    // *attempts* as `"evicted"`, and let the new session
+                    // through. A failing revocation therefore took the realm
+                    // over `max_concurrent_sessions` while the audit log said
+                    // the limit had been enforced.
+                    let (evicted, required) = match &policy {
+                        SessionLimitPolicy::RejectNew => {
+                            let ctx = AuditContext {
+                                actor: Actor::User(user_id.clone()),
+                                metadata: Some(serde_json::json!({
+                                    "user_id": user_id.as_uuid().to_string(),
+                                    "evicted": 0u32,
+                                    "policy": "reject_new",
+                                    "limit": limit,
+                                })),
+                            };
+                            let _ = self.record_audit(
+                                realm_id,
+                                Some(&ctx),
+                                AuditAction::SessionLimitEnforced,
+                                "session",
+                                &user_id.as_uuid().to_string(),
+                            );
+                            return Err(IdentityError::SessionLimitExceeded { limit, active });
+                        }
+                        SessionLimitPolicy::EvictOldest => {
+                            let to_evict = (active + 1 - limit) as usize;
+                            live.sort_by_key(|s| s.created_at());
+                            let mut evicted = 0u32;
+                            for s in live.iter().take(to_evict) {
+                                match self.revoke_session(realm_id, s.id()) {
+                                    Ok(()) => evicted += 1,
+                                    Err(e) => tracing::error!(
+                                        error = %e,
+                                        session_id = %s.id().as_uuid(),
+                                        user_id = %user_id.as_uuid(),
+                                        "session-limit eviction failed; the new \
+                                         session will be refused rather than \
+                                         admitted over the limit"
+                                    ),
+                                }
+                            }
+                            (evicted, u32::try_from(to_evict).unwrap_or(u32::MAX))
+                        }
+                    };
+
+                    let ctx = AuditContext {
+                        actor: Actor::User(user_id.clone()),
+                        metadata: Some(serde_json::json!({
+                            "user_id": user_id.as_uuid().to_string(),
+                            "evicted": evicted,
+                            "policy": "evict_oldest",
+                            "limit": limit,
+                        })),
+                    };
+                    // DISCARD-OK: `SessionLimitEnforced` is a `LogOnly` action,
+                    // so `record_audit` has already applied the policy — it
+                    // logged the loss at `warn` and returned `Ok`.
+                    let _ = self.record_audit(
+                        realm_id,
+                        Some(&ctx),
+                        AuditAction::SessionLimitEnforced,
+                        "session",
+                        &user_id.as_uuid().to_string(),
+                    );
+
+                    // Fail closed. Admitting the new session here is the whole
+                    // defect: the limit exists to cap concurrent sessions, and
+                    // an eviction that did not happen does not make room.
+                    if evicted < required {
+                        return Err(IdentityError::SessionLimitExceeded { limit, active });
+                    }
+                }
+            }
+        }
+
+        // Capture per-realm lifecycle timeouts once and embed them in the
+        // session record so hot-path get_session avoids a realm lookup (A-18).
+        //
+        // `session_ttl_micros` is captured in the same lookup (task 25.25). It
+        // is the landing field for `auth.session_ttl` and
+        // `realms.<name>.session_ttl`, both of which parsed, validated, reached
+        // `RealmConfig` — and were then never read: every session expired on
+        // the compiled-in 24 h `SessionConfig::default()`, which `main.rs` never
+        // overrides either. An operator who shortened a realm's session
+        // lifetime got a clean boot, a clean `config validate` and 24 h
+        // sessions. Widening the liveness registry to `auth.*` is what found it.
+        let (idle_timeout_secs, absolute_timeout_secs, realm_session_ttl_micros) =
+            if let Ok(Some(realm)) = self.get_realm(realm_id) {
+                (
+                    realm.config().idle_timeout_secs,
+                    realm.config().absolute_timeout_secs,
+                    realm.config().session_ttl_micros,
+                )
+            } else {
+                (None, None, None)
+            };
+
+        // Generate session
+        //
+        // 22.27 (audit 2026-08-28 §4.25#5): the session ID is an unguessable
+        // handle, so it is drawn with a full 128 bits rather than
+        // `SessionId::generate()`'s UUID v4, which reserves the version nibble
+        // and the variant bits and carries only 122. It is still a `Uuid`, so
+        // storage keys, cookie encoding, and the wire shape are unchanged.
+        let session_id = SessionId::new(crate::core::random_secret_uuid());
+        let now = self.clock.now();
+        // A realm's own `session_ttl` wins; the engine-wide default is the
+        // fallback. A non-positive stored value is ignored rather than honoured:
+        // it would expire the session before it was written.
+        let ttl_micros = realm_session_ttl_micros
+            .filter(|t| *t > 0)
+            .unwrap_or(self.config.session.ttl_micros);
+        let expires_at = now.add_micros(ttl_micros);
+        let session = Session::new(
+            session_id.clone(),
+            user_id.clone(),
+            now,
+            expires_at,
+            context,
+            idle_timeout_secs,
+            absolute_timeout_secs,
+        );
+
+        // ── Merged write: session + index + audit event → 1 WAL record (HEA-1954) ──
+        //
+        // Build the session and index KV pairs, then pass them alongside the
+        // audit KV pairs via `with_pending_append`'s closure so that all writes
+        // land in a single `enqueue_batch` call — one fsync, one WAL record.
+        //
+        // Failure model:
+        //  • MergedAppendNotSupported → non-embedded audit engine; fall back to
+        //    the two-record path (session write + separate audit append).
+        //  • Other Err → audit setup failed before enqueue; session not written.
+        //    SessionCreated is LogOnly so we write the session alone and attempt
+        //    a standalone audit append.
+        //  • Ok + await failure → both session and audit failed together; return
+        //    storage error.
+        let session_bytes = Self::serialize_session(&session)?;
+        let id_key = keys::encode_session_id(session.id());
+        let user_session_key = keys::encode_user_session(user_id, &session_id);
+        let session_kvs: Vec<(Vec<u8>, Vec<u8>)> =
+            vec![(id_key, session_bytes), (user_session_key, Vec::new())];
+
+        let session_audit_ctx = AuditContext {
+            actor: Actor::User(user_id.clone()),
+            metadata: Some(serde_json::json!({
+                "ip": context.ip_address,
+                "ua": context.user_agent_raw,
+            })),
+        };
+        let audit_request = CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: Actor::User(user_id.clone()).label(),
+            action: AuditAction::SessionCreated,
+            resource_type: "session".to_string(),
+            resource_id: session_id.as_uuid().to_string(),
+            metadata: session_audit_ctx.metadata.clone(),
+        };
+
+        let storage_for_enqueue = Arc::clone(&self.storage);
+        let realm_id_for_enqueue = realm_id.clone();
+        let merged = self.audit.with_pending_append(
+            &audit_request,
+            Box::new(move |audit_kvs| {
+                // Combine session KV pairs with audit KV pairs in a single batch.
+                let mut combined = session_kvs;
+                combined.extend_from_slice(audit_kvs);
+                storage_for_enqueue.enqueue_batch(&realm_id_for_enqueue, &combined)
+            }),
+        );
+
+        match merged {
+            Ok(pending) => {
+                let dur = self.storage.await_batch_durable(pending.handle);
+                if dur.is_err() {
+                    (pending.on_failure)();
+                } else {
+                    (pending.on_success)();
+                    if session.is_valid(self.clock.now()) {
+                        self.session_cache_insert(realm_id, &session);
+                    } else {
+                        self.session_cache_invalidate(realm_id, session.id());
+                    }
+                }
+                dur.map_err(Self::storage_err)?;
+            }
+            Err(crate::audit::AuditError::MergedAppendNotSupported) => {
+                // Non-embedded audit engine: two-record fallback (HEA-1945 behaviour).
+                let user_session_key = keys::encode_user_session(user_id, &session_id);
+                self.persist_session_with(
+                    realm_id,
+                    &session,
+                    vec![(user_session_key, Vec::new())],
+                )?;
+                self.record_audit(
+                    realm_id,
+                    Some(&session_audit_ctx),
+                    AuditAction::SessionCreated,
+                    "session",
+                    &session_id.as_uuid().to_string(),
+                )?;
+            }
+            Err(e) => {
+                // Audit setup failed before the enqueue; session not yet written.
+                // SessionCreated is LogOnly: write session without merged audit.
+                tracing::warn!(
+                    error = %e,
+                    "audit pre-enqueue failed for SessionCreated (LogOnly); \
+                     falling back to session-only write"
+                );
+                let user_session_key = keys::encode_user_session(user_id, &session_id);
+                self.persist_session_with(
+                    realm_id,
+                    &session,
+                    vec![(user_session_key, Vec::new())],
+                )?;
+                let _ = self.audit.append(&audit_request);
+            }
+        }
+
+        Ok(session)
+    }
+}
+
+impl EmbeddedIdentityEngine {
+    /// The user's current required-action generation (`0` until the first
+    /// revocation). See [`keys::encode_ra_generation`].
+    pub(crate) fn ra_generation(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<u64, IdentityError> {
+        let bytes = self
+            .storage
+            .get(realm_id, &keys::encode_ra_generation(user_id))
+            .map_err(Self::storage_err)?;
+        Ok(bytes
+            .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+            .map_or(0, u64::from_le_bytes))
+    }
+
+    /// Ends every required-action flow under way for `user_id` by bumping
+    /// the user's required-action generation (GA audit round 3, D-2). Called
+    /// whenever one of the user's sessions is revoked. Serialised per user so
+    /// two concurrent bumps cannot both write the same successor.
+    pub(crate) fn bump_ra_generation(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<(), IdentityError> {
+        let lock = self.token_redemption_lock(&format!(
+            "ra-gen:{}:{}",
+            realm_id.as_uuid(),
+            user_id.as_uuid()
+        ));
+        let _guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = self.ra_generation(realm_id, user_id)?.wrapping_add(1);
+        self.storage
+            .put(
+                realm_id,
+                &keys::encode_ra_generation(user_id),
+                &next.to_le_bytes(),
+            )
+            .map_err(Self::storage_err)
+    }
+
     /// Returns the current session-version for `session_id`, or `1` if not tracked.
     pub(crate) fn get_session_sv(&self, realm_id: &RealmId, session_id: &SessionId) -> u64 {
         self.sv_store.get_version(realm_id, session_id).unwrap_or(1)

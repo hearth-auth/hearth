@@ -423,7 +423,7 @@ async fn fapi_a02_authorize_without_jarm_client_rejected() {
         .expect("get_realm")
         .unwrap();
     let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
-    let cid_str = client.client_id().to_string();
+    let cid_str = client.client_id().as_uuid().to_string();
     let jar = sign_jar(&pkcs8, &cid_str, &issuer);
 
     let par_req = PushedAuthorizationRequest {
@@ -566,7 +566,7 @@ async fn fapi_a04_valid_advanced_request_accepted() {
         .expect("get_realm")
         .unwrap();
     let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
-    let cid_str = client.client_id().to_string();
+    let cid_str = client.client_id().as_uuid().to_string();
     let jar = sign_jar(&pkcs8, &cid_str, &issuer);
 
     let par_req = PushedAuthorizationRequest {
@@ -659,7 +659,7 @@ async fn fapi_a06_par_pkce_only_in_jar_accepted() {
         .expect("get_realm")
         .unwrap();
     let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
-    let cid_str = client.client_id().to_string();
+    let cid_str = client.client_id().as_uuid().to_string();
 
     // JAR carries PKCE; outer request deliberately omits code_challenge.
     let jar = sign_jar(&pkcs8, &cid_str, &issuer);
@@ -738,7 +738,7 @@ async fn fapi_a07_realm_advanced_enforces_dpop_for_standard_profile_client() {
         .expect("get_realm")
         .unwrap();
     let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
-    let cid_str = client.client_id().to_string();
+    let cid_str = client.client_id().as_uuid().to_string();
     let jar = sign_jar(&pkcs8, &cid_str, &issuer);
 
     // PAR: PKCE in both outer and JAR so the authorize auth_req carries it forward.
@@ -1611,7 +1611,7 @@ async fn start_fapi_advanced_http_server() -> FapiAdvancedServer {
     let realm_uuid = realm_id.as_uuid().to_string();
     let realm_name = realm_rec.name().to_string();
     let client_uuid = client.client_id().as_uuid().to_string();
-    let client_id_str = client.client_id().to_string();
+    let client_id_str = client.client_id().as_uuid().to_string();
     let user_uuid = user.id().as_uuid().to_string();
 
     // Issue a Bearer token for the test user so tests can authenticate POST /authorize (HEA-1721).

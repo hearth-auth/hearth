@@ -114,6 +114,7 @@ impl IdentityError {
             Self::KdfOverloaded { .. } => Some("HEARTH_RATE_LIMITED"),
 
             Self::ConsentRequired => Some("HEARTH_CONSENT_REQUIRED"),
+            Self::ClientMismatch => Some("HEARTH_CLIENT_MISMATCH"),
             Self::ConsentTicketNotFound | Self::ConsentTicketExpired => {
                 Some("HEARTH_CONSENT_TICKET_INVALID")
             }
@@ -138,6 +139,7 @@ impl IdentityError {
             Self::Unauthorized => Some("HEARTH_FORBIDDEN"),
             Self::SystemRealmProtected { .. } => Some("HEARTH_SYSTEM_REALM_PROTECTED"),
             Self::RealmNotArchived => Some("HEARTH_REALM_NOT_ARCHIVED"),
+            Self::RealmArchived => Some("HEARTH_REALM_ARCHIVED"),
             Self::YamlManagedResource { .. } => Some("HEARTH_YAML_MANAGED_RESOURCE"),
 
             Self::InvalidPushedAuthorizationRequest => Some("invalid_request"),

@@ -74,6 +74,16 @@ reason = "Same bundled ip-address 10.5.0 inside the npm CLI (release tooling, de
 id = "GHSA-3wwx-pv8p-q78v"
 reason = "undici 6.28.0 bundled inside the npm CLI (node_modules/npm/node_modules/undici, via node-gyp header downloads) in the release-tooling lockfile; no npm 11.x release bundles 6.28.1 yet. The flaw is a DoS in undici's WebSocket handling; npm/node-gyp make plain HTTPS requests, no WebSocket. docs-site's undici was upgraded to 7.29.1 instead. Revisit when npm 11.x bundles undici >= 6.28.1."
 
+# guard: package=undici lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-rfgv-xxqx-mfg5"
+reason = "Same bundled undici 6.28.0 inside the npm CLI (node_modules/npm/node_modules/undici, release-tooling lockfile, dev scope). Checked 2026-09-29: npm 11.20.0 (the lockfile's version) and npm 12.1.0 (latest) both still bundle undici 6.28.0, so no lockfile change can reach it. The flaw is an uncaught TypeError in undici's WebSocket client handshake; npm/node-gyp open no WebSocket. The root lockfile's own node_modules/undici is 6.29.0 (fixed). Revisit when npm bundles undici >= 6.28.1."
+
+# guard: package=undici lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-r53p-7pc4-xj5r"
+reason = "Same bundled undici 6.28.0 inside the npm CLI (release tooling, dev scope; no npm release bundles >= 6.28.1 as of 2026-09-29). The flaw needs undici's retry interceptor AND an application that forwards the resumed response downstream (a proxy/gateway); npm publish only downloads and uploads, it forwards nothing. Revisit when npm bundles undici >= 6.28.1."
+
 # CVE-2026-42507, CVE-2026-42504 and CVE-2026-27145 were removed on 2026-09-28
 # (GA audit supply-chain fix). Their reasons blamed google.golang.org/protobuf
 # and genproto, but osv.dev aliases them to GO-2026-5039 (net/textproto),

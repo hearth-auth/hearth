@@ -232,7 +232,7 @@ async fn valid_assertion_issues_client_credentials_token() {
     let aud = token_endpoint_aud(&env.harness, &env.realm);
     let assertion = make_assertion(
         &env.auth_key,
-        &env.client_id.to_string(),
+        &env.client_id.as_uuid().to_string(),
         &aud,
         300,
         Some(uuid::Uuid::new_v4().to_string()),
@@ -296,7 +296,7 @@ async fn valid_assertion_exchanges_auth_code() {
 
     let assertion = make_assertion(
         &env.auth_key,
-        &env.client_id.to_string(),
+        &env.client_id.as_uuid().to_string(),
         &aud,
         300,
         Some(uuid::Uuid::new_v4().to_string()),
@@ -335,7 +335,7 @@ async fn expired_assertion_rejected() {
     let aud = token_endpoint_aud(&env.harness, &env.realm);
     let assertion = make_assertion(
         &env.auth_key,
-        &env.client_id.to_string(),
+        &env.client_id.as_uuid().to_string(),
         &aud,
         -60, // expired 60 seconds ago
         Some(uuid::Uuid::new_v4().to_string()),
@@ -379,7 +379,7 @@ async fn replayed_jti_rejected() {
 
     let assertion = make_assertion(
         &env.auth_key,
-        &env.client_id.to_string(),
+        &env.client_id.as_uuid().to_string(),
         &aud,
         300,
         Some(jti.clone()),
@@ -437,7 +437,7 @@ async fn wrong_audience_rejected() {
     let env = setup_cc_client().await;
     let assertion = make_assertion(
         &env.auth_key,
-        &env.client_id.to_string(),
+        &env.client_id.as_uuid().to_string(),
         "https://wrong-audience.example.com/token",
         300,
         Some(uuid::Uuid::new_v4().to_string()),
@@ -521,7 +521,7 @@ async fn tampered_signature_rejected() {
     let aud = token_endpoint_aud(&env.harness, &env.realm);
     let assertion = make_assertion(
         &env.auth_key,
-        &env.client_id.to_string(),
+        &env.client_id.as_uuid().to_string(),
         &aud,
         300,
         Some(uuid::Uuid::new_v4().to_string()),
@@ -604,7 +604,7 @@ async fn no_assertion_key_registered_rejected() {
     );
     let assertion = make_assertion(
         &orphan_key,
-        &client.client_id().to_string(),
+        &client.client_id().as_uuid().to_string(),
         &aud,
         300,
         Some(uuid::Uuid::new_v4().to_string()),
@@ -665,8 +665,8 @@ async fn assertion_without_jti_rejected() {
 
     // Omit jti entirely — the server must reject rather than silently skip replay protection.
     let claims = JwtAssertionClaims {
-        iss: env.client_id.to_string(),
-        sub: env.client_id.to_string(),
+        iss: env.client_id.as_uuid().to_string(),
+        sub: env.client_id.as_uuid().to_string(),
         aud: Audience::single(aud),
         exp: now_secs() + 60,
         jti: None,
@@ -711,7 +711,7 @@ async fn assertion_excessive_lifetime_rejected() {
     // exp = now + 301 seconds — just over the 5-minute ceiling.
     let assertion = make_assertion(
         &env.auth_key,
-        &env.client_id.to_string(),
+        &env.client_id.as_uuid().to_string(),
         &aud,
         301,
         Some(uuid::Uuid::new_v4().to_string()),

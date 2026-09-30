@@ -1,13 +1,12 @@
 //! Admin service implementations: users, realms, organizations, applications.
 
-use tonic::{Code, Request, Response, Status};
+use tonic::{Request, Response, Status};
 
 use crate::core::{AgentCredentialId, AgentId, ClientId, OrganizationId, UserId};
 use crate::identity::{
     self as domain, AgentOwner, CreateAgentApiKeyRequest, CreateAgentRequest,
-    CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, RegisterClientRequest,
-    UpdateAgentRequest, UpdateClientRequest, UpdateOrganizationRequest, UpdateRealmRequest,
-    UpdateUserRequest,
+    CreateOrganizationRequest, CreateUserRequest, RegisterClientRequest, UpdateAgentRequest,
+    UpdateClientRequest, UpdateOrganizationRequest, UpdateUserRequest,
 };
 use crate::protocol::convert::identity::{
     domain_realm_status_to_proto, domain_user_status_to_proto, realm_page_to_proto,
@@ -18,7 +17,9 @@ use crate::protocol::proto::identity::v1 as pb;
 use crate::protocol::proto::identity::v1::application_admin_service_server::ApplicationAdminService;
 use crate::protocol::proto::identity::v1::identity_admin_service_server::IdentityAdminService;
 
-use super::auth::{authenticate_admin, grpc_require_permission};
+use super::auth::{
+    authenticate_admin, grpc_require_permission, grpc_require_user_ceiling, grpc_scoped_realm,
+};
 use super::convert::identity_to_status;
 use super::server::GrpcState;
 
@@ -34,6 +35,38 @@ impl IdentityAdminSvc {
     pub fn new(state: GrpcState) -> Self {
         Self { state }
     }
+
+    /// Shared body of `SuspendRealm` / `UnsuspendRealm`, with the REST gate:
+    /// a system-realm admin holding `hearth.realm.admin` (or `hearth.admin`),
+    /// subject to the target's cross-realm trust policy. The engine refuses
+    /// the system realm and archived realms, and audits the transition.
+    fn set_realm_suspended(
+        &self,
+        auth: &super::auth::AdminAuth,
+        id: &str,
+        suspended: bool,
+    ) -> Result<Response<pb::Realm>, Status> {
+        grpc_require_permission(auth, "hearth.realm.admin")?;
+        if !crate::identity::keys::is_system_realm(&auth.realm_id) {
+            return Err(Status::permission_denied(
+                "only a system-realm admin may suspend or unsuspend a realm",
+            ));
+        }
+        let target = grpc_scoped_realm(&self.state, auth, parse_realm_id(id)?)?;
+        let audit_ctx = crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(auth.user_id.clone()),
+            metadata: Some(serde_json::json!({
+                "via": "grpc",
+                "operation": if suspended { "suspend" } else { "unsuspend" },
+            })),
+        };
+        let (_, realm) = self
+            .state
+            .identity
+            .set_realm_suspended(&target, suspended, &audit_ctx)
+            .map_err(identity_to_status)?;
+        Ok(Response::new(pb::Realm::from(&realm)))
+    }
 }
 
 fn parse_user_id(s: &str) -> Result<UserId, Status> {
@@ -46,6 +79,13 @@ fn parse_realm_id(s: &str) -> Result<crate::core::RealmId, Status> {
     s.parse::<uuid::Uuid>()
         .map(crate::core::RealmId::new)
         .map_err(|_| Status::invalid_argument("invalid realm id"))
+}
+
+/// The refusal for `CreateRealm` / `UpdateRealm`: the same message REST's
+/// `405` carries, as `FAILED_PRECONDITION` (the RPC exists on the wire, but
+/// the server's realm source of truth is its configuration file).
+fn realms_are_yaml_managed() -> Status {
+    Status::failed_precondition(crate::protocol::admin_auth::REALMS_ARE_YAML_MANAGED)
 }
 
 fn parse_org_id(s: &str) -> Result<OrganizationId, Status> {
@@ -161,6 +201,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         grpc_require_permission(&auth, "hearth.users.admin")?;
         let call = req.into_inner();
         let user_id = parse_user_id(&call.id)?;
+        grpc_require_user_ceiling(&self.state, &auth, &user_id)?;
         let body: UpdateUserRequest = call
             .body
             .ok_or_else(|| Status::invalid_argument("body required"))?
@@ -181,6 +222,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         grpc_require_permission(&auth, "hearth.users.admin")?;
         let body = req.into_inner();
         let user_id = parse_user_id(&body.id)?;
+        grpc_require_user_ceiling(&self.state, &auth, &user_id)?;
         self.state
             .identity
             .delete_user(&auth.realm_id, &user_id)
@@ -237,10 +279,9 @@ impl IdentityAdminService for IdentityAdminSvc {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let body = req.into_inner();
-        let realm_id = parse_realm_id(&body.id)?;
-        if realm_id != auth.realm_id && !crate::identity::keys::is_system_realm(&auth.realm_id) {
-            return Err(Status::new(Code::PermissionDenied, "forbidden"));
-        }
+        // The shared BOLA guard, trust policies included — parity with REST
+        // `GET /admin/realms/{id}` (GA audit round 3).
+        let realm_id = grpc_scoped_realm(&self.state, &auth, parse_realm_id(&body.id)?)?;
         let realm = self
             .state
             .identity
@@ -250,55 +291,31 @@ impl IdentityAdminService for IdentityAdminSvc {
         Ok(Response::new(pb::Realm::from(&realm)))
     }
 
+    /// Refused: realms are declared in `hearth.yaml` (REST `POST /admin/realms`
+    /// answers `405` for the same reason). Authenticates and authorizes first, like
+    /// every RPC on this service, then answers `FAILED_PRECONDITION` without writing.
     async fn create_realm(
         &self,
         req: Request<pb::CreateRealmRequest>,
     ) -> Result<Response<pb::Realm>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
         grpc_require_permission(&auth, "hearth.realm.admin")?;
-        // Only system-realm admins may create new realms.
-        if !crate::identity::keys::is_system_realm(&auth.realm_id) {
-            return Err(Status::new(Code::PermissionDenied, "forbidden"));
-        }
-        let body: CreateRealmRequest = req.into_inner().into();
-        let realm = self
-            .state
-            .identity
-            .create_realm(&body)
-            .map_err(identity_to_status)?;
-        // Seed the RBAC defaults on the new realm. Hard error: the caller
-        // must see the failure so they can retry or rollback. The realm record
-        // is already committed but the unsurfaced-failure path would leave the
-        // realm permanently broken with no admin roles.
-        self.state.rbac.seed_realm(realm.id()).map_err(|e| {
-            let error_id = uuid::Uuid::new_v4();
-            tracing::error!(error = %e, %error_id, "RBAC realm seed failed");
-            Status::internal(format!("internal error [{error_id}]"))
-        })?;
-        Ok(Response::new(pb::Realm::from(&realm)))
+        Err(realms_are_yaml_managed())
     }
 
+    /// Refused: realms are declared in `hearth.yaml` (REST
+    /// `PATCH /admin/realms/{id}` answers `405`). It used to replace the
+    /// realm's whole config with the three fields the proto carries plus
+    /// defaults, wiping MFA, CIDR, lockout, SCIM-token and webhook settings
+    /// until the next reload, and could rename or suspend a realm the YAML
+    /// still declares (GA audit round 3, G-7).
     async fn update_realm(
         &self,
         req: Request<pb::UpdateRealmCall>,
     ) -> Result<Response<pb::Realm>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
         grpc_require_permission(&auth, "hearth.realm.admin")?;
-        let call = req.into_inner();
-        let realm_id = parse_realm_id(&call.id)?;
-        if realm_id != auth.realm_id && !crate::identity::keys::is_system_realm(&auth.realm_id) {
-            return Err(Status::new(Code::PermissionDenied, "forbidden"));
-        }
-        let body: UpdateRealmRequest = call
-            .body
-            .ok_or_else(|| Status::invalid_argument("body required"))?
-            .into();
-        let realm = self
-            .state
-            .identity
-            .update_realm(&realm_id, &body)
-            .map_err(identity_to_status)?;
-        Ok(Response::new(pb::Realm::from(&realm)))
+        Err(realms_are_yaml_managed())
     }
 
     async fn delete_realm(
@@ -308,15 +325,49 @@ impl IdentityAdminService for IdentityAdminSvc {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let body = req.into_inner();
-        let realm_id = parse_realm_id(&body.id)?;
-        if realm_id != auth.realm_id && !crate::identity::keys::is_system_realm(&auth.realm_id) {
-            return Err(Status::new(Code::PermissionDenied, "forbidden"));
-        }
+        // The shared BOLA guard, trust policies included — parity with REST
+        // `DELETE /admin/realms/{id}` (GA audit round 3).
+        let realm_id = grpc_scoped_realm(&self.state, &auth, parse_realm_id(&body.id)?)?;
         self.state
             .identity
             .delete_realm(&realm_id)
             .map_err(identity_to_status)?;
+        // The same event REST `DELETE /admin/realms/{id}` records. Scoped to
+        // the SYSTEM realm: appending under the realm just deleted would
+        // re-create `audit:*` keys in a key space the cascade must leave
+        // empty (GA audit round 3).
+        crate::protocol::audit_log::record(
+            self.state.audit.as_ref(),
+            &crate::audit::CreateAuditEvent {
+                realm_id: crate::identity::keys::system_realm_id(),
+                actor: auth.user_id.as_uuid().to_string(),
+                action: crate::audit::AuditAction::RealmDeleted,
+                resource_type: "realm".to_string(),
+                resource_id: realm_id.as_uuid().to_string(),
+                metadata: Some(serde_json::json!({"via": "grpc"})),
+            },
+        );
         Ok(Response::new(pb::Empty {}))
+    }
+
+    /// The gRPC twin of `POST /admin/realms/{id}/suspend`.
+    async fn suspend_realm(
+        &self,
+        req: Request<pb::SuspendRealmRequest>,
+    ) -> Result<Response<pb::Realm>, Status> {
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        let id = req.into_inner().id;
+        self.set_realm_suspended(&auth, &id, true)
+    }
+
+    /// The gRPC twin of `POST /admin/realms/{id}/unsuspend`.
+    async fn unsuspend_realm(
+        &self,
+        req: Request<pb::UnsuspendRealmRequest>,
+    ) -> Result<Response<pb::Realm>, Status> {
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        let id = req.into_inner().id;
+        self.set_realm_suspended(&auth, &id, false)
     }
 
     // ----- Organizations -----

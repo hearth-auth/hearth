@@ -165,12 +165,13 @@ async fn mfa_pending_cookie_contains_nonce() {
         .next()
         .expect("must have a value part");
 
-    // Format: uid.realm.expires.return_to_b64.nonce.mac — 6 dot-separated fields.
-    let parts: Vec<&str> = value.splitn(7, '.').collect();
+    // Format: uid.realm.expires.return_to_b64.nonce.first_factor.mac — 7
+    // dot-separated fields (the first factor since GA audit round 3, D-4).
+    let parts: Vec<&str> = value.splitn(8, '.').collect();
     assert_eq!(
         parts.len(),
-        6,
-        "pending cookie must have 6 dot-separated fields (uid.realm.exp.return.nonce.mac)"
+        7,
+        "pending cookie must have 7 dot-separated fields (uid.realm.exp.return.nonce.first.mac)"
     );
     let nonce_field = parts[4];
     assert!(!nonce_field.is_empty(), "nonce field must not be empty");
@@ -275,7 +276,7 @@ async fn id_token_contains_azp_claim() {
         .expect("azp MUST be present in ID tokens");
     assert_eq!(
         azp,
-        &client.client_id().to_string(),
+        &client.client_id().as_uuid().to_string(),
         "azp must equal client_id"
     );
 }

@@ -22,9 +22,9 @@ use crate::protocol::proto::identity::v1 as pb;
 use super::now_micros;
 use super::{
     check_anonymous_token_rate_limit, check_token_rate_limit, extract_bearer_token,
-    extract_realm_id, extract_user_auth, identity_error_response, identity_error_to_response,
-    kdf_shed_json_response, make_ip_rate_limit_response, proto_to_rest_json,
-    rbac_error_to_response, resolve_realm_by_name, validate_user_token_with_dpop, AppState,
+    extract_realm_id, identity_error_response, identity_error_to_response, kdf_shed_json_response,
+    make_ip_rate_limit_response, proto_to_rest_json, resolve_realm_by_name,
+    validate_user_token_with_dpop, AppState,
 };
 
 /// Registers global OAuth/OIDC routes.
@@ -1882,12 +1882,24 @@ const DCR_INITIAL_ACCESS_PERMISSION: &str = "hearth.clients.admin";
 
 /// Refuses (`403 insufficient_scope`, RFC 6750 §3.1) a valid bearer token that
 /// is not an initial access token: one without `hearth.clients.admin` or
-/// `hearth.admin` in its `permissions` claim.
-fn require_dcr_initial_access(claims: &crate::identity::TokenClaims) -> Result<(), Response> {
+/// `hearth.admin` in its `permissions` claim, or one held by a third-party
+/// client — which never registers clients for the realm even when a claim
+/// profile releases those permissions to it, exactly as the admin
+/// `POST /clients` API refuses it (GA audit 3 I-14).
+fn require_dcr_initial_access(
+    state: &AppState,
+    realm_id: &RealmId,
+    claims: &crate::identity::TokenClaims,
+) -> Result<(), Response> {
     if claims
         .permissions
         .iter()
         .any(|p| p == "hearth.admin" || p == DCR_INITIAL_ACCESS_PERMISSION)
+        && crate::protocol::admin_auth::token_client_may_administer(
+            state.identity.as_ref(),
+            realm_id,
+            claims,
+        )
     {
         return Ok(());
     }
@@ -1970,7 +1982,7 @@ async fn register_client_dynamic(
                 )
                     .into_response();
             };
-            if let Err(resp) = require_dcr_initial_access(&claims) {
+            if let Err(resp) = require_dcr_initial_access(&state, &realm_id, &claims) {
                 return resp;
             }
         }
@@ -2133,60 +2145,38 @@ async fn authorize_browser_redirect(uri: axum::http::Uri) -> impl IntoResponse {
     axum::response::Redirect::to(&target)
 }
 
-/// Initiate an OAuth 2.0 authorization code flow.
+/// Builds the authorization request of a non-interactive `/authorize` call —
+/// `POST /authorize` and `POST /realms/{realm}/authorize` share it, so the two
+/// cannot drift (the realm twin ignored `request_uri`, GA audit 3 round 2).
 ///
-/// Requires `X-Realm-ID` header and a valid Bearer token. The token's `sub`
-/// claim determines the user on whose behalf the code is issued — the caller
-/// cannot supply an arbitrary `user_id` (HEA-1721).
-async fn authorize(
-    State(state): State<Arc<AppState>>,
-    method: axum::http::Method,
-    uri: axum::http::Uri,
-    headers: HeaderMap,
-    Json(body): Json<pb::AuthorizationRequest>,
-) -> impl IntoResponse {
+/// With `request_uri` (RFC 9126 PAR) the pushed entry is consumed —
+/// single-use — and supplies every parameter (`via_par = true`); a `client_id`
+/// in the body must match it. Otherwise the body is the request. Either way
+/// `user_id` is the authenticated caller, never the body's (HEA-1721).
+fn non_interactive_authorization_request(
+    state: &AppState,
+    realm_id: &RealmId,
+    body: pb::AuthorizationRequest,
+    authenticated_user_id: UserId,
+) -> Result<crate::identity::AuthorizationRequest, Response> {
     use crate::identity::{AuthorizationRequest, IdentityError};
 
-    let realm_id = match extract_realm_id(&headers) {
-        Ok(t) => t,
-        Err(e) => return e.into_response(),
-    };
-
-    // HEA-1721: authenticate the caller; their token's `sub` is the authoritative
-    // user identity.  The body's `user_id` field is ignored to prevent unauthenticated
-    // account takeover via caller-supplied user IDs.
-    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    // The bearer token's session is kept: the engine judges the factor it
-    // proved (GA audit B2/B5).
-    let (authenticated_user_id, bearer_session) = match super::auth::extract_user_session_auth(
-        &headers,
-        &state,
-        &realm_id,
-        method.as_str(),
-        &htu,
-    ) {
-        Ok(auth) => auth,
-        Err(e) => return e.into_response(),
-    };
-
-    // PAR path: when `request_uri` is present, consume the stored entry to
-    // obtain the pre-validated parameters and set `via_par = true`.
-    let request = if let Some(ref request_uri) = body.request_uri {
-        let stored = match state.identity.consume_par(&realm_id, request_uri) {
+    Ok(if let Some(ref request_uri) = body.request_uri {
+        let stored = match state.identity.consume_par(realm_id, request_uri) {
             Ok(s) => s,
             Err(IdentityError::InvalidPushedAuthorizationRequest) => {
-                return (
+                return Err((
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
                         "error": "invalid_request",
                         "error_description": "invalid or expired request_uri"
                     })),
                 )
-                    .into_response();
+                    .into_response());
             }
             Err(e) => {
                 tracing::warn!(error = %e, "consume_par failed");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
             }
         };
 
@@ -2196,25 +2186,25 @@ async fn authorize(
             let body_client_id = match uuid::Uuid::parse_str(&body.client_id) {
                 Ok(u) => ClientId::new(u),
                 Err(_) => {
-                    return (
+                    return Err((
                         StatusCode::BAD_REQUEST,
                         Json(serde_json::json!({
                             "error": "invalid_request",
                             "error_description": "invalid client_id"
                         })),
                     )
-                        .into_response();
+                        .into_response());
                 }
             };
             if body_client_id != stored.client_id {
-                return (
+                return Err((
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
                         "error": "invalid_request",
                         "error_description": "client_id mismatch with pushed authorization request"
                     })),
                 )
-                    .into_response();
+                    .into_response());
             }
         }
 
@@ -2238,11 +2228,11 @@ async fn authorize(
         let r = match proto_authorize_to_domain(body) {
             Ok(r) => r,
             Err(msg) => {
-                return (
+                return Err((
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({"error": msg})),
                 )
-                    .into_response();
+                    .into_response());
             }
         };
         // Override body-supplied user_id with the authenticated identity (HEA-1721).
@@ -2250,13 +2240,55 @@ async fn authorize(
             user_id: authenticated_user_id,
             ..r
         }
+    })
+}
+
+/// Initiate an OAuth 2.0 authorization code flow.
+///
+/// Requires `X-Realm-ID` header and a valid Bearer token. The token's `sub`
+/// claim determines the user on whose behalf the code is issued — the caller
+/// cannot supply an arbitrary `user_id` (HEA-1721).
+async fn authorize(
+    State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    Json(body): Json<pb::AuthorizationRequest>,
+) -> impl IntoResponse {
+    let realm_id = match extract_realm_id(&headers) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
     };
+
+    // HEA-1721: authenticate the caller; their token's `sub` is the authoritative
+    // user identity.  The body's `user_id` field is ignored to prevent unauthenticated
+    // account takeover via caller-supplied user IDs.
+    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+    // The bearer token's claims are kept: the engine judges the client it was
+    // issued to (GA audit 3 B-1) and the factor its session proved (B2/B5).
+    let (authenticated_user_id, bearer) = match super::auth::extract_user_session_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
+        Ok(auth) => auth,
+        Err(e) => return e.into_response(),
+    };
+
+    let request =
+        match non_interactive_authorization_request(&state, &realm_id, body, authenticated_user_id)
+        {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
 
     // No consent screen here: issue only for a client that needs no consent
     // or one the user already consented to (GA audit B2).
     match state
         .identity
-        .authorize_non_interactive(&realm_id, &request, &bearer_session)
+        .authorize_non_interactive(&realm_id, &request, &bearer)
     {
         Ok(response) => (
             StatusCode::OK,
@@ -3533,18 +3565,14 @@ async fn me_permissions(
         Err(e) => return e.into_response(),
     };
 
-    let uuid_str = claims.sub.strip_prefix("user_").unwrap_or(&claims.sub);
-    let user_uuid: uuid::Uuid = match uuid_str.parse() {
-        Ok(u) => u,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "invalid_token"})),
-            )
-                .into_response();
-        }
-    };
-    let user_id = UserId::new(user_uuid);
+    // Only a user's token has a user to answer for.
+    if claims.sub.parse::<UserId>().is_err() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid_token"})),
+        )
+            .into_response();
+    }
 
     // A suspended or archived organisation grants nothing: drop the org
     // context so only realm-scoped authority is reported
@@ -3565,25 +3593,27 @@ async fn me_permissions(
         });
     let scope = params.get("scope").cloned();
 
-    let resolved =
-        match state
-            .rbac
-            .resolve_permissions(&user_id, &realm_id, org_id.as_ref(), scope.as_deref())
-        {
-            Ok(r) => r,
-            Err(e) => return rbac_error_to_response(&e).into_response(),
-        };
+    // The TOKEN's live authority, not the user's (GA audit 3 B-2/B-5): a
+    // third-party client's token reads only what the claim profile releases
+    // to that client — by default no roles, groups or permissions — and a
+    // scoped or delegated token no more than it carries. `scope` narrows it
+    // further.
+    let authority = match state.identity.live_token_authority(
+        &realm_id,
+        &claims,
+        org_id.as_ref(),
+        scope.as_deref(),
+    ) {
+        Ok(a) => a,
+        Err(e) => return identity_error_to_response(&e).into_response(),
+    };
 
     (
         StatusCode::OK,
         Json(MePermissionsResponse {
-            roles: resolved.roles,
-            groups: resolved.groups,
-            permissions: resolved
-                .permissions
-                .into_iter()
-                .map(|p| p.into_string())
-                .collect(),
+            roles: authority.roles,
+            groups: authority.groups,
+            permissions: authority.permissions,
             scope,
         }),
     )
@@ -3601,7 +3631,15 @@ async fn self_list_consents(
         Err(e) => return e.into_response(),
     };
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
+    // The user's consents to every app are theirs to read, not a third-party
+    // app's (GA audit 3 B-5): first-party tokens only.
+    let user_id = match super::auth::extract_first_party_user_auth(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -3637,8 +3675,14 @@ async fn self_revoke_consent(
         Err(e) => return e.into_response(),
     };
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
-        Ok(u) => u,
+    let (user_id, claims) = match super::auth::extract_user_auth_claims(
+        &headers,
+        &state,
+        &realm_id,
+        method.as_str(),
+        &htu,
+    ) {
+        Ok(auth) => auth,
         Err(e) => return e.into_response(),
     };
     let Ok(uuid) = client_id_str.parse::<uuid::Uuid>() else {
@@ -3649,6 +3693,22 @@ async fn self_revoke_consent(
             .into_response();
     };
     let client_id = crate::core::ClientId::new(uuid);
+    // A third-party app may withdraw the consent the user granted IT
+    // ("disconnect"), never the user's consent to another app (GA audit 3
+    // B-5); a first-party token revokes any of the user's consents.
+    let own_consent = claims
+        .client_id()
+        .and_then(|raw| raw.parse::<crate::core::ClientId>().ok())
+        .is_some_and(|issued_to| issued_to == client_id);
+    if !own_consent
+        && !crate::protocol::admin_auth::token_client_may_administer(
+            state.identity.as_ref(),
+            &realm_id,
+            &claims,
+        )
+    {
+        return super::auth::third_party_token_forbidden().into_response();
+    }
     match state
         .identity
         .revoke_consent(&realm_id, &user_id, &client_id)
@@ -3752,9 +3812,9 @@ async fn realm_authorize(
 
     // HEA-1721: authenticate the caller; their token's `sub` is the authoritative user identity.
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    // The bearer token's session is kept: the engine judges the factor it
-    // proved (GA audit B2/B5).
-    let (authenticated_user_id, bearer_session) = match super::auth::extract_user_session_auth(
+    // The bearer token's claims are kept: the engine judges the client it was
+    // issued to (GA audit 3 B-1) and the factor its session proved (B2/B5).
+    let (authenticated_user_id, bearer) = match super::auth::extract_user_session_auth(
         &headers,
         &state,
         &realm_id,
@@ -3765,23 +3825,18 @@ async fn realm_authorize(
         Err(e) => return e.into_response(),
     };
 
-    let mut request = match proto_authorize_to_domain(body) {
-        Ok(r) => r,
-        Err(msg) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": msg})),
-            )
-                .into_response()
-        }
-    };
-    // Override body-supplied user_id with the authenticated identity (HEA-1721).
-    request.user_id = authenticated_user_id;
+    // PAR (`request_uri`) and the body alike, exactly as `POST /authorize`.
+    let request =
+        match non_interactive_authorization_request(&state, &realm_id, body, authenticated_user_id)
+        {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
     // No consent screen here: issue only for a client that needs no consent
     // or one the user already consented to (GA audit B2).
     match state
         .identity
-        .authorize_non_interactive(&realm_id, &request, &bearer_session)
+        .authorize_non_interactive(&realm_id, &request, &bearer)
     {
         Ok(response) => (
             StatusCode::OK,
@@ -4683,7 +4738,7 @@ async fn realm_register_client_dynamic(
                 )
                     .into_response();
             };
-            if let Err(resp) = require_dcr_initial_access(&claims) {
+            if let Err(resp) = require_dcr_initial_access(&state, &realm_id, &claims) {
                 return resp;
             }
         }

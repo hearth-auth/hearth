@@ -129,8 +129,8 @@ impl ClientKey {
         self.jws(
             &serde_json::json!({"alg": self.alg(), "kid": self.kid(), "typ": "JWT"}),
             &serde_json::json!({
-                "iss": client.to_string(),
-                "sub": client.to_string(),
+                "iss": client.as_uuid().to_string(),
+                "sub": client.as_uuid().to_string(),
                 "aud": aud,
                 "exp": now + 60,
                 "iat": now,

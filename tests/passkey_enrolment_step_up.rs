@@ -857,3 +857,217 @@ async fn step_up_user_verification(rig: &WebRig) -> String {
         .unwrap_or_default()
         .to_string()
 }
+
+// ---------------------------------------------------------------------------
+// Removal (GA audit 3 D-6): removing a passkey needs the same step-up as
+// enrolling one. A session alone stripped the phishing-resistant factor.
+// ---------------------------------------------------------------------------
+
+/// Enrols a passkey for the rig's user directly through the engine.
+fn enrol_web_passkey(rig: &WebRig) -> TestAuthenticator {
+    let authenticator = TestAuthenticator::new(TEST_RP_ID);
+    let challenge = rig
+        .identity
+        .start_webauthn_registration(
+            &rig.realm_id,
+            &rig.user_id,
+            &hearth::identity::RegistrationOptions {
+                rp_id: TEST_RP_ID.to_string(),
+                discoverable: true,
+            },
+        )
+        .expect("start registration");
+    let (cdj, att) = authenticator.registration(&challenge, TEST_ORIGIN);
+    rig.identity
+        .complete_webauthn_registration(&rig.realm_id, &rig.user_id, &cdj, &att, TEST_ORIGIN, true)
+        .expect("complete registration");
+    authenticator
+}
+
+fn web_passkey_count(rig: &WebRig) -> usize {
+    rig.identity
+        .list_webauthn_credentials(&rig.realm_id, &rig.user_id)
+        .expect("list")
+        .len()
+}
+
+/// Posts the browser removal form for `credential` with extra form fields.
+async fn web_remove_passkey(
+    rig: &WebRig,
+    credential: &TestAuthenticator,
+    fields: &[(&str, &str)],
+) -> StatusCode {
+    let mut form = form_urlencoded::Serializer::new(String::new());
+    form.append_pair("_csrf", "csrf-abc");
+    for (name, value) in fields {
+        form.append_pair(name, value);
+    }
+    rig.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/ui/account/passkeys/{}/delete",
+                    b64(&credential.credential_id)
+                ))
+                .header(header::COOKIE, auth_cookie(rig, "csrf-abc"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form.finish()))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot")
+        .status()
+}
+
+#[tokio::test]
+async fn web_passkey_removal_without_a_proof_is_refused() {
+    let rig = build_web_rig(true);
+    let passkey = enrol_web_passkey(&rig);
+
+    let status = web_remove_passkey(&rig, &passkey, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a session alone must not remove a passkey"
+    );
+    let status = web_remove_passkey(&rig, &passkey, &[("step_up_secret", WRONG_PASSWORD)]).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a wrong password is no proof"
+    );
+    assert_eq!(web_passkey_count(&rig), 1, "the passkey must survive");
+}
+
+#[tokio::test]
+async fn web_passkey_removal_with_the_current_password_is_allowed() {
+    let rig = build_web_rig(true);
+    let passkey = enrol_web_passkey(&rig);
+
+    let status = web_remove_passkey(&rig, &passkey, &[("step_up_secret", PASSWORD)]).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "back to the account page");
+    assert_eq!(web_passkey_count(&rig), 0, "the passkey is removed");
+}
+
+/// A passkey-only account proves itself with an assertion.
+#[tokio::test]
+async fn web_passkey_removal_with_a_passkey_assertion_is_allowed() {
+    let rig = build_web_rig(false);
+    let passkey = enrol_web_passkey(&rig);
+    let challenge = rig
+        .identity
+        .start_webauthn_authentication(
+            &rig.realm_id,
+            Some(&rig.user_id),
+            &AuthenticationOptions {
+                rp_id: TEST_RP_ID.to_string(),
+            },
+        )
+        .expect("start authentication");
+    let (cdj, auth_data, sig) = passkey.assertion(&challenge, TEST_ORIGIN, 1);
+    let assertion = serde_json::json!({
+        "credential_id": b64(&passkey.credential_id),
+        "client_data_json": b64(&cdj),
+        "authenticator_data": b64(&auth_data),
+        "signature": b64(&sig),
+    })
+    .to_string();
+
+    let status =
+        web_remove_passkey(&rig, &passkey, &[("step_up_assertion", assertion.as_str())]).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(web_passkey_count(&rig), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Console enrolment is first-party only (GA audit 3 B-5, round 3)
+// ---------------------------------------------------------------------------
+
+/// The console enrolment endpoints authenticate by Hearth's own MAC-checked
+/// session cookie only; a third-party client's bearer token — even with a
+/// valid step-up proof and CSRF token — must not start or finish an
+/// enrolment. Guards the console twin of the REST first-party gate.
+#[tokio::test]
+async fn web_enrolment_refuses_a_third_party_clients_bearer_token() {
+    use hearth::identity::{ClientTrustLevel, RegisterClientRequest};
+
+    let rig = build_web_rig(true);
+    let client = rig
+        .identity
+        .register_client(
+            &rig.realm_id,
+            &RegisterClientRequest {
+                client_name: "third-party-app".into(),
+                redirect_uris: vec!["https://app.example.com/cb".into()],
+                grant_types: vec!["authorization_code".into()],
+                require_consent: true,
+                trust_level: ClientTrustLevel::ThirdParty,
+                declared_scopes: vec!["openid".into()],
+                ..RegisterClientRequest::default()
+            },
+        )
+        .expect("register client")
+        .client_id()
+        .clone();
+    let session = rig
+        .identity
+        .create_session(&rig.realm_id, &rig.user_id, &SessionContext::default())
+        .expect("session");
+    let token = rig
+        .identity
+        .issue_tokens_with_context(
+            &rig.realm_id,
+            &rig.user_id,
+            session.id(),
+            &TokenIssuanceContext {
+                client_id: Some(client),
+                ..TokenIssuanceContext::default()
+            },
+        )
+        .expect("tokens")
+        .access_token()
+        .to_string();
+
+    for (path, body) in [
+        (
+            "/ui/account/passkeys/register-begin",
+            serde_json::json!({ "password": PASSWORD }),
+        ),
+        (
+            "/ui/account/passkeys/register-complete",
+            serde_json::json!({ "client_data_json": "e30", "attestation_object": "oA" }),
+        ),
+    ] {
+        let response = rig
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::COOKIE, "hearth_ui_csrf=csrf-abc")
+                    .header("x-csrf-token", "csrf-abc")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("oneshot");
+        let status = response.status();
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            status.is_redirection() && location.contains("/login"),
+            "{path}: a bearer token is no console session — expected a redirect to \
+             login, got {status} (location {location:?})"
+        );
+    }
+    assert_eq!(web_passkey_count(&rig), 0, "no credential may be added");
+}

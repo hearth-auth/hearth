@@ -75,8 +75,8 @@ fn sign(
     let exp = now + ttl_secs;
     let jwt = key
         .issue_assertion_jwt(&JwtAssertionClaims {
-            iss: client_id.to_string(),
-            sub: client_id.to_string(),
+            iss: client_id.as_uuid().to_string(),
+            sub: client_id.as_uuid().to_string(),
             aud: Audience::single(engine.realm_issuer_url(realm)),
             exp,
             jti: Some(jti.to_string()),

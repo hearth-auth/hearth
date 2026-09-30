@@ -93,8 +93,8 @@ fn fapi2_client_assertion(
         .as_secs();
     let header = serde_json::json!({"alg": "EdDSA", "kid": "fapi2-test"});
     let claims = serde_json::json!({
-        "iss": client.to_string(),
-        "sub": client.to_string(),
+        "iss": client.as_uuid().to_string(),
+        "sub": client.as_uuid().to_string(),
         "aud": aud,
         "exp": now + 60,
         "iat": now,

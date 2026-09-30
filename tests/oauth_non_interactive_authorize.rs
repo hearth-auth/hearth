@@ -19,6 +19,12 @@
 //!
 //! gRPC `Authorize` and `Decide` ignored the DPoP `cnf` binding; they now
 //! refuse a sender-constrained token as the gRPC admin surface does.
+//!
+//! GA audit 3 B-1: the consent rule alone still let a third-party client's
+//! token mint a code for a first-party public client (which needs no consent)
+//! and redeem it for that client's tokens. A token issued to a client now
+//! authorizes that client only, and a first-party session token a first-party
+//! client only (`HEARTH_CLIENT_MISMATCH` otherwise).
 
 mod common;
 
@@ -207,6 +213,13 @@ impl Fixture {
 
     /// Mints a DPoP-bound (`cnf.jkt`) access token for `user` via `client`.
     fn bound_token(&self, client: &ClientId, jkt: &str) -> String {
+        self.client_token(client, Some(jkt))
+    }
+
+    /// Mints an access token for `user` issued to `client` (RFC 9068
+    /// `client_id` = `client`) through the interactive code flow, optionally
+    /// DPoP-bound to `jkt`.
+    fn client_token(&self, client: &ClientId, jkt: Option<&str>) -> String {
         let auth = self
             .harness
             .identity()
@@ -241,7 +254,7 @@ impl Fixture {
                     code: auth.code().to_string(),
                     redirect_uri: REDIRECT_URI.into(),
                     code_verifier: Some(PKCE_VERIFIER.into()),
-                    dpop_jkt: Some(jkt.to_string()),
+                    dpop_jkt: jkt.map(str::to_string),
                     client_assertion_type: None,
                     client_assertion: None,
                 },
@@ -313,11 +326,14 @@ fn assert_consent_required(status: StatusCode, body: &serde_json::Value, what: &
 async fn json_authorize_refuses_a_client_that_requires_consent_without_a_recorded_consent() {
     let f = setup().await;
     let client = f.register(ClientTrustLevel::ThirdParty, true);
+    // The client's own token: a third-party client may only re-authorize
+    // itself here (GA audit 3 B-1), so the consent gate is what decides.
+    let own = f.client_token(&client, None);
 
     let (status, body) = post_authorize(
         &f,
         "/authorize",
-        &f.token,
+        &own,
         authorize_body(&client, "openid"),
         None,
     )
@@ -328,7 +344,7 @@ async fn json_authorize_refuses_a_client_that_requires_consent_without_a_recorde
     let (status, body) = post_authorize(
         &f,
         &realm_uri,
-        &f.token,
+        &own,
         authorize_body(&client, "openid"),
         None,
     )
@@ -340,6 +356,7 @@ async fn json_authorize_refuses_a_client_that_requires_consent_without_a_recorde
 async fn json_authorize_issues_a_code_when_a_recorded_consent_covers_the_scopes() {
     let f = setup().await;
     let client = f.register(ClientTrustLevel::ThirdParty, true);
+    let own = f.client_token(&client, None);
     f.harness
         .identity()
         .grant_consent(&f.realm, &f.user, &client, &["openid".to_string()])
@@ -348,7 +365,7 @@ async fn json_authorize_issues_a_code_when_a_recorded_consent_covers_the_scopes(
     let (status, body) = post_authorize(
         &f,
         "/authorize",
-        &f.token,
+        &own,
         authorize_body(&client, "openid"),
         None,
     )
@@ -367,12 +384,134 @@ async fn json_authorize_issues_a_code_when_a_recorded_consent_covers_the_scopes(
     let (status, body) = post_authorize(
         &f,
         "/authorize",
-        &f.token,
+        &own,
         authorize_body(&client, "openid profile"),
         None,
     )
     .await;
     assert_consent_required(status, &body, "POST /authorize with an unconsented scope");
+}
+
+// ── GA audit 3 B-1: the bearer token must have been issued to the client ────
+
+fn assert_client_mismatch(status: StatusCode, body: &serde_json::Value, what: &str) {
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "{what}: a token issued to another client must be refused; body {body}"
+    );
+    assert_eq!(
+        body["error_code"].as_str(),
+        Some("HEARTH_CLIENT_MISMATCH"),
+        "{what}: the refusal must name the client mismatch; body {body}"
+    );
+    assert!(body.get("code").is_none(), "{what}: no code may be issued");
+}
+
+/// A token issued to third-party client T (RFC 9068 `client_id` = T) minted
+/// a code for first-party public client F: F needs no consent, so T turned
+/// its narrow token into F's tokens carrying the user's full permissions.
+#[tokio::test]
+async fn json_authorize_refuses_a_third_party_clients_token_for_a_first_party_client() {
+    let f = setup().await;
+    let third_party = f.register(ClientTrustLevel::ThirdParty, true);
+    let first_party = f.register(ClientTrustLevel::FirstParty, false);
+    let stolen = f.client_token(&third_party, None);
+
+    let (status, body) = post_authorize(
+        &f,
+        "/authorize",
+        &stolen,
+        authorize_body(&first_party, "openid"),
+        None,
+    )
+    .await;
+    assert_client_mismatch(status, &body, "POST /authorize");
+
+    let realm_uri = format!("/realms/{}/authorize", f.realm_name);
+    let (status, body) = post_authorize(
+        &f,
+        &realm_uri,
+        &stolen,
+        authorize_body(&first_party, "openid"),
+        None,
+    )
+    .await;
+    assert_client_mismatch(status, &body, "POST /realms/{realm}/authorize");
+
+    // Control: the same token re-authorizes its own client once consented.
+    f.harness
+        .identity()
+        .grant_consent(&f.realm, &f.user, &third_party, &["openid".to_string()])
+        .expect("grant consent");
+    let (status, body) = post_authorize(
+        &f,
+        "/authorize",
+        &stolen,
+        authorize_body(&third_party, "openid"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a token issued to the requested client is accepted; body {body}"
+    );
+    assert!(
+        body["code"].as_str().is_some_and(|c| !c.is_empty()),
+        "a code must be issued; body {body}"
+    );
+}
+
+/// A token issued to one first-party client may not mint a code for another
+/// client either — the rule is equality, not trust level.
+#[tokio::test]
+async fn json_authorize_refuses_a_token_issued_to_a_different_first_party_client() {
+    let f = setup().await;
+    let issued_to = f.register(ClientTrustLevel::FirstParty, false);
+    let other = f.register(ClientTrustLevel::FirstParty, false);
+    let token = f.client_token(&issued_to, None);
+
+    let (status, body) = post_authorize(
+        &f,
+        "/authorize",
+        &token,
+        authorize_body(&other, "openid"),
+        None,
+    )
+    .await;
+    assert_client_mismatch(
+        status,
+        &body,
+        "POST /authorize (first-party to first-party)",
+    );
+}
+
+/// A first-party session token (no `client_id` claim) may authorize a
+/// first-party client only; a consented third-party client is refused, since
+/// a code for it would otherwise come from any leaked session token.
+#[tokio::test]
+async fn json_authorize_refuses_a_session_token_for_a_third_party_client() {
+    let f = setup().await;
+    let third_party = f.register(ClientTrustLevel::ThirdParty, true);
+    f.harness
+        .identity()
+        .grant_consent(&f.realm, &f.user, &third_party, &["openid".to_string()])
+        .expect("grant consent");
+
+    let (status, body) = post_authorize(
+        &f,
+        "/authorize",
+        &f.token,
+        authorize_body(&third_party, "openid"),
+        None,
+    )
+    .await;
+    assert_client_mismatch(
+        status,
+        &body,
+        "POST /authorize (session token, third party)",
+    );
 }
 
 #[tokio::test]
@@ -532,12 +671,18 @@ fn grpc_authorize_body(client: &ClientId) -> pb::AuthorizationRequest {
 async fn grpc_authorize_refuses_a_client_that_requires_consent_without_a_recorded_consent() {
     let f = setup().await;
     let client = f.register(ClientTrustLevel::ThirdParty, true);
+    // The client's own token (GA audit 3 B-1), so the consent gate decides.
+    let own = f.client_token(&client, None);
     let err = f
         .grpc()
-        .authorize(grpc_request(&f, &f.token, grpc_authorize_body(&client)))
+        .authorize(grpc_request(&f, &own, grpc_authorize_body(&client)))
         .await
         .expect_err("gRPC Authorize must not issue a code without consent");
     assert_eq!(err.code(), tonic::Code::PermissionDenied, "got {err:?}");
+    assert!(
+        err.message().contains("consent"),
+        "the refusal must be the consent refusal: {err:?}"
+    );
 
     // Control: once consent is recorded, the same call issues a code.
     f.harness
@@ -546,9 +691,45 @@ async fn grpc_authorize_refuses_a_client_that_requires_consent_without_a_recorde
         .expect("grant consent");
     let code = f
         .grpc()
-        .authorize(grpc_request(&f, &f.token, grpc_authorize_body(&client)))
+        .authorize(grpc_request(&f, &own, grpc_authorize_body(&client)))
         .await
         .expect("covered consent issues a code")
+        .into_inner()
+        .code;
+    assert!(!code.is_empty(), "a code must be issued");
+}
+
+/// GA audit 3 B-1 over gRPC: a third-party client's token must not mint a
+/// code for a first-party client.
+#[tokio::test]
+async fn grpc_authorize_refuses_a_third_party_clients_token_for_a_first_party_client() {
+    let f = setup().await;
+    let third_party = f.register(ClientTrustLevel::ThirdParty, true);
+    let first_party = f.register(ClientTrustLevel::FirstParty, false);
+    let stolen = f.client_token(&third_party, None);
+
+    let err = f
+        .grpc()
+        .authorize(grpc_request(&f, &stolen, grpc_authorize_body(&first_party)))
+        .await
+        .expect_err("gRPC Authorize must not mint a code for another client");
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "got {err:?}");
+    assert!(
+        err.message().contains("client"),
+        "the refusal must name the client mismatch: {err:?}"
+    );
+
+    // Control: a session token (no client_id claim) still authorizes a
+    // first-party client.
+    let code = f
+        .grpc()
+        .authorize(grpc_request(
+            &f,
+            &f.token,
+            grpc_authorize_body(&first_party),
+        ))
+        .await
+        .expect("a session token authorizes a first-party client")
         .into_inner()
         .code;
     assert!(!code.is_empty(), "a code must be issued");
@@ -623,5 +804,77 @@ async fn grpc_decide_denies_a_dpop_bound_token() {
         !bound.allowed,
         "a cnf-bound token replayed without a DPoP proof must be denied, as \
          POST /oauth/authorize denies it"
+    );
+}
+
+// ── Round 2: PAR on the realm twin ──────────────────────────────────────────
+
+/// `POST /realms/{realm}/authorize` ignored `request_uri`: a client that had
+/// pushed its request (RFC 9126) — mandatory in a FAPI realm — could use only
+/// the header-routed `POST /authorize`. The realm twin now consumes the pushed
+/// request exactly as the global handler does.
+#[tokio::test]
+async fn realm_authorize_consumes_a_pushed_authorization_request() {
+    use hearth::identity::PushedAuthorizationRequest;
+
+    let f = setup().await;
+    let client = f.register(ClientTrustLevel::FirstParty, false);
+    let push = || {
+        f.harness
+            .identity()
+            .push_authorization_request(
+                &f.realm,
+                &PushedAuthorizationRequest {
+                    client_id: client.clone(),
+                    redirect_uri: REDIRECT_URI.into(),
+                    scope: "openid".into(),
+                    state: "pushed-state".into(),
+                    resource: None,
+                    response_type: "code".into(),
+                    code_challenge: Some(PKCE_CHALLENGE.into()),
+                    code_challenge_method: Some(CodeChallengeMethod::S256),
+                    nonce: None,
+                    request: None,
+                    response_mode: None,
+                    prompt: None,
+                },
+            )
+            .expect("push authorization request")
+            .request_uri
+    };
+    let par_body = |request_uri: &str| {
+        serde_json::json!({
+            "client_id": client.as_uuid().to_string(),
+            "request_uri": request_uri,
+        })
+        .to_string()
+    };
+
+    // Control: the global handler consumes it.
+    let (status, body) = post_authorize(&f, "/authorize", &f.token, par_body(&push()), None).await;
+    assert_eq!(status, StatusCode::OK, "global PAR; body {body}");
+    assert_eq!(body["state"], "pushed-state", "body {body}");
+
+    let realm_uri = format!("/realms/{}/authorize", f.realm_name);
+    let request_uri = push();
+    let (status, body) =
+        post_authorize(&f, &realm_uri, &f.token, par_body(&request_uri), None).await;
+    assert_eq!(status, StatusCode::OK, "realm-twin PAR; body {body}");
+    assert!(
+        body["code"].as_str().is_some_and(|c| !c.is_empty()),
+        "a code must be issued; body {body}"
+    );
+    assert_eq!(
+        body["state"], "pushed-state",
+        "the pushed parameters are used; body {body}"
+    );
+
+    // Single use, as on the global handler.
+    let (status, body) =
+        post_authorize(&f, &realm_uri, &f.token, par_body(&request_uri), None).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a spent request_uri; body {body}"
     );
 }

@@ -695,6 +695,16 @@ impl RbacEngine for EmbeddedRbacEngine {
         resolve::resolve_permissions(self, user_id, realm_id, org_id, requested_scope)
     }
 
+    fn resolve_for_granted_scopes(
+        &self,
+        user_id: &UserId,
+        realm_id: &RealmId,
+        org_id: Option<&OrganizationId>,
+        granted_scopes: &[String],
+    ) -> Result<ResolvedPermissions, RbacError> {
+        resolve::resolve_for_granted_scopes(self, user_id, realm_id, org_id, granted_scopes)
+    }
+
     fn resolve_with_scopes(
         &self,
         user_id: &UserId,
@@ -1436,6 +1446,14 @@ impl RbacEngine for EmbeddedRbacEngine {
         }
 
         Ok(())
+    }
+
+    fn get_assignment(
+        &self,
+        realm_id: &RealmId,
+        assignment_id: &AssignmentId,
+    ) -> Result<Option<RoleAssignment>, RbacError> {
+        self.load_assignment(realm_id, assignment_id)
     }
 
     fn list_user_assignments(

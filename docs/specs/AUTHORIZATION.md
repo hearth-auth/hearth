@@ -570,13 +570,16 @@ Constraints:
 
 When a client is in `introspection` mode, issued JWTs carry only standard identity claims (`sub`, `tid`, `sid`, `iss`, `exp`, `iat`, `jti`, `scope`). The RBAC claim fields (`roles`, `groups`, `permissions`) are OMITTED from the token.
 
-Resource servers MUST call `POST /realms/{realm}/introspect` to obtain current RBAC data. Hearth resolves live permissions at introspection time and includes them in the response body alongside standard RFC 7662 fields, **only** when the introspecting client (`client_id` in HTTP Basic Auth) itself has `access_token_authorization: introspection`. Introspecting clients in `embedded` mode receive a standard RFC 7662 response without RBAC extension fields.
+Resource servers MUST call `POST /realms/{realm}/introspect` to obtain current RBAC data. Hearth resolves live permissions at introspection time and includes them in the response body alongside standard RFC 7662 fields, **only** when the introspecting client (`client_id` in HTTP Basic Auth) itself has `access_token_authorization: introspection` (or `decision`). Introspecting clients in `embedded` mode receive a standard RFC 7662 response without RBAC extension fields.
 
 Resource server contract:
 1. Forward the bearer token in the `token` form-parameter.
 2. Authenticate with `client_id` and `client_secret` via HTTP Basic Auth.
 3. Treat `active: false` or any network error as a denial.
 4. Authorize the request using the `permissions` field in the response body.
+
+The live `roles` / `groups` / `permissions` are the **token's** authority, not the user's — see
+§7.4.4.
 
 #### 7.4.3 Decision mode
 
@@ -591,10 +594,20 @@ Content-Type: application/json
 
 {
   "permission": "docs.edit",
-  "organization_id": "<org_uuid>",   // optional: for org-scoped checks
+  "organization_id": "<org_uuid>",   // optional: must be the token's own `oid`
   "resource": "<resource_uri>"        // optional: RFC 8707 audience check
 }
 ```
+
+The organisation context is the token's own `oid` (absent: realm scope only). `organization_id`
+may restate it; naming any other organisation — or any organisation for a token minted without
+`oid` — answers `{"allowed": false}`. A token minted in organisation A is never answered with the
+user's authority in organisation B.
+
+`resource`, when present, MUST be named by the token's `aud` (compared in canonical form);
+otherwise the answer is `{"allowed": false}` — a token minted for resource server A is never
+authorized at resource server B. The decision is taken against the token's live authority
+(§7.4.4), and the token must pass every check `validate_token` applies.
 
 **Response shape:**
 ```json
@@ -607,9 +620,42 @@ Failure-mode contract (MUST be implemented by all resource servers using this mo
 - HTTP 400 — missing `permission` field. Treat as a client programming error; deny the request.
 - HTTP 5xx — transient server failure. Resource servers SHOULD deny the request and SHOULD NOT retry in the hot path to avoid cascading failures.
 
-**Fail-closed invariant:** Hearth MUST return `{"allowed": false}` — never `{"allowed": true}` — when any of the following are true: signature invalid, token expired, session revoked, token on the JTI blocklist, subject does not hold the requested permission after live resolution.
+**Fail-closed invariant:** Hearth MUST return `{"allowed": false}` — never `{"allowed": true}` — when any of the following are true: signature invalid, token expired, session revoked, token on the JTI blocklist, token's `aud` names a removed protected resource (AGENT_AUTH.md §2.5), token's `cnf.jkt` is blocked, `resource` not in the token's `aud`, the requested permission is not in the token's live authority (§7.4.4). gRPC `Decide` applies the same rule, and additionally denies any `cnf`-bound token (it has no DPoP proof channel).
 
 **Security requirement:** `POST /oauth/authorize` MUST be treated as an internal service endpoint. Operators MUST NOT expose it to public internet or browser clients. Resource servers SHOULD implement a circuit breaker or timeout so a Hearth slowdown does not stall all protected requests indefinitely.
+
+#### 7.4.4 Live resolution answers for the token
+
+Introspection (§7.4.2), decision (§7.4.3) and `GET /v1/me/permissions` (§8.1) resolve RBAC **live**,
+but they answer for the **token**, never for the user behind it (GA audit 3 B-2 / C-8). The live
+authority is what an `embedded` token issued to the same client for the same grant would carry,
+resolved at the time of the call:
+
+1. **The token client's claim profile applies.** The client the token was issued to (RFC 9068
+   `client_id` claim; none means a Hearth first-party session token) selects the claim profile
+   (AUTHZ_EXPANSION.md §"Claim release gates"). Under the default profile `roles`, `groups` and
+   `permissions` are `first_party_only`, so a **third-party client's token resolves to no roles,
+   groups or permissions** — `introspect` returns empty lists and `decide` answers
+   `{"allowed": false}` — unless the realm releases them to that client. A `client_id` naming an
+   unknown client resolves to nothing.
+2. **Every permission-bearing scope narrows.** The user's effective set is intersected with the
+   union of what the token's scopes admit: a raw permission scope (`docs.view`) admits that
+   permission; a scope registered in the realm's scope registry with a permission list admits
+   those permissions. OIDC standard scopes and scopes the realm registry does not know (a protected
+   resource's MCP scope) admit nothing and narrow nothing; a token with no permission-bearing
+   scope resolves to the full effective set. `openid docs:read` therefore resolves exactly as
+   `docs:read` — an extra scope never buys more authority.
+3. **A delegated token stays delegated.** A token carrying `act` (RFC 8693) is capped at the
+   `permissions` it carries — the actor ∩ subject intersection fixed at exchange (§16) — and
+   carries no roles or groups.
+
+A client-credentials token has no user and resolves to nothing.
+
+Issuance applies the same scope rule (rule 2): the authorization-code exchange, every refresh
+rotation (the refresh token carries the grant's `scope`) and the device grant resolve an
+`embedded` token's `permissions` with `RbacEngine::resolve_for_granted_scopes`, so a token narrowed
+to a bundle stays narrowed after refresh and live resolution never disagrees with it (GA audit 3
+B-4).
 
 ---
 
@@ -619,7 +665,7 @@ Failure-mode contract (MUST be implemented by all resource servers using this mo
 
 #### `GET /v1/me/permissions`
 
-Returns the freshly-resolved permission set for the bearer-token user. Used by backends that want to confirm current permissions during long-running operations rather than trusting a possibly-stale JWT.
+Returns the freshly-resolved permission set of the bearer **token** — its live authority (§7.4.4): a third-party client's token reads only what the claim profile releases to that client (by default no roles, groups or permissions), and a scoped or delegated token no more than it carries. Used by backends that want to confirm current permissions during long-running operations rather than trusting a possibly-stale JWT. An optional `scope` query parameter narrows the result further.
 
 **Headers:**
 - `Authorization: Bearer <access_token>` — required.

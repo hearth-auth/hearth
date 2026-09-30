@@ -36,6 +36,7 @@ Admin pages that operate on system-wide state, or that span all realms, MUST liv
 - `/ui/admin/api/config/reload` — config reload
 - `/ui/admin/api/nav/realms` — sidebar realm tree
 - `/ui/admin/test-email` — email transport test
+- `/ui/admin/api-tokens` — mint a short-lived system-realm API token (system-realm operators only; fresh password + second-factor step-up)
 
 ### R-3: System realm sentinel
 

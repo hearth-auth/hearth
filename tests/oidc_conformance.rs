@@ -153,7 +153,9 @@ async fn oidc_core_required_claims_and_signing() {
     assert!(!claims.sub.is_empty(), "sub claim MUST be present");
     assert!(!claims.iss.is_empty(), "iss claim MUST be present");
     assert!(
-        claims.aud.contains(&client.client_id().to_string()),
+        claims
+            .aud
+            .contains(&client.client_id().as_uuid().to_string()),
         "aud must contain client_id"
     );
     assert!(
@@ -164,12 +166,18 @@ async fn oidc_core_required_claims_and_signing() {
 
     // 3. aud MUST contain the client_id
     assert!(
-        claims.aud.contains(&client.client_id().to_string()),
+        claims
+            .aud
+            .contains(&client.client_id().as_uuid().to_string()),
         "aud must match client_id"
     );
 
-    // 4. iss MUST match the issuer in discovery
-    let discovery = harness.identity().oidc_discovery();
+    // 4. iss MUST match the issuer of the realm's discovery document — the
+    //    one an RP of this realm uses (OIDC Core §3.1.3.7 step 2).
+    let discovery = harness
+        .identity()
+        .realm_oidc_discovery(&realm_id)
+        .expect("realm discovery");
     assert_eq!(
         claims.iss, discovery.issuer,
         "iss must match discovery issuer"
@@ -426,8 +434,11 @@ async fn oidc_id_token_required_claims_with_nonce() {
     let claims = decode_claims_unverified(id_token).expect("decode ID token");
 
     // 2. Verify all OIDC Core §2 REQUIRED claims
-    // iss — MUST exactly match the issuer in the discovery document
-    let discovery = harness.identity().oidc_discovery();
+    // iss — MUST exactly match the issuer in the realm's discovery document
+    let discovery = harness
+        .identity()
+        .realm_oidc_discovery(&realm_id)
+        .expect("realm discovery");
     assert_eq!(claims.iss, discovery.issuer, "iss must match discovery");
 
     // sub — MUST be present and identify the user
@@ -439,7 +450,9 @@ async fn oidc_id_token_required_claims_with_nonce() {
 
     // aud — MUST contain the client_id
     assert!(
-        claims.aud.contains(&client.client_id().to_string()),
+        claims
+            .aud
+            .contains(&client.client_id().as_uuid().to_string()),
         "aud must contain the client_id"
     );
 

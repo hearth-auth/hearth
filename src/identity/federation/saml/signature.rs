@@ -14,10 +14,12 @@ use base64::Engine as _;
 use ring::signature::{RsaPublicKeyComponents, RSA_PKCS1_2048_8192_SHA256};
 use sha2::{Digest, Sha256};
 
-use std::collections::BTreeMap;
-
-use super::c14n::{canonicalize, canonicalize_with_inherited};
-use super::xml::{alg, escape_attr, find_child_element_range, find_element_range, ns, parse_err};
+use super::c14n::{canonicalize, canonicalize_with_inherited, EnvelopedSignature};
+use super::xml::{
+    alg, child_elements, count_child_elements, escape_attr, find_child_element_range,
+    find_child_element_range_in, find_element_range, in_scope_namespaces, ns, parse_err,
+    Namespaces,
+};
 use crate::identity::error::IdentityError;
 use crate::identity::federation::saml::SamlError;
 use crate::identity::tokens::RsaSigningKey;
@@ -46,15 +48,28 @@ pub struct SignedElement {
 /// This is a minimal implementation: it assumes the root element has no
 /// leading whitespace content and that the first child insertion point
 /// is well-defined.
+///
+/// # Errors
+///
+/// Refuses an element that already carries a direct-child `<ds:Signature>`:
+/// the result would carry two, and an element carries exactly one enveloped
+/// signature (`verify_signed_element` rejects the second). Also fails on
+/// malformed XML or a signing-key error.
 pub fn sign_element(
     element_xml: &[u8],
     element_id: &str,
     key: &RsaSigningKey,
 ) -> Result<Vec<u8>, IdentityError> {
-    // 1. Canonicalize the element with the enveloped-signature transform
-    //    applied (strip any existing <Signature> — there shouldn't be
-    //    one, but be safe).
-    let canonical = canonicalize(element_xml, true)?;
+    if find_child_element_range(element_xml, ns::DS, "Signature")?.is_some() {
+        return Err(parse_err(
+            "element already carries an enveloped <ds:Signature>",
+        ));
+    }
+
+    // 1. Canonicalize the element. The enveloped-signature transform removes
+    //    the signature being created, which is not in the input yet, so
+    //    nothing is removed here.
+    let canonical = canonicalize(element_xml, EnvelopedSignature::Keep)?;
 
     // 2. Compute the digest.
     let mut hasher = Sha256::new();
@@ -70,7 +85,7 @@ pub fn sign_element(
     let signed_info = build_signed_info(element_id, &digest_b64);
     // Detached canonicalization — xml-crypto and other SAML libraries
     // do the same. The visibly-utilized `xmlns:ds` emits onto SignedInfo.
-    let canonical_si = canonicalize(signed_info.as_bytes(), false)?;
+    let canonical_si = canonicalize(signed_info.as_bytes(), EnvelopedSignature::Keep)?;
 
     // 4. Sign.
     let signature_bytes = key.sign(&canonical_si)?;
@@ -134,6 +149,14 @@ fn build_signature_block(signed_info: &str, signature_b64: &str, cert_b64: &str)
 ///
 /// Rejects:
 /// - Missing `<Signature>` or `<SignedInfo>`.
+/// - An element with more than one direct-child `<ds:Signature>`. The
+///   enveloped-signature transform removes exactly the signature being
+///   verified; a second one would be a region of the element that no digest
+///   covers and no verifier reads (GA audit 3, G-1).
+/// - A `<ds:Signature>` with any child other than one `<ds:SignedInfo>`, one
+///   `<ds:SignatureValue>` and at most one `<ds:KeyInfo>`. Nothing else in a
+///   signature is covered by it, so extra content there is unsigned content
+///   placed inside the signed element.
 /// - A `<ds:SignedInfo>` carrying anything other than exactly one
 ///   `<ds:Reference>`. Only the first reference is ever read, so a list would
 ///   let every entry after it pass unverified — the classic multiple-reference
@@ -158,10 +181,33 @@ fn build_signature_block(signed_info: &str, signature_b64: &str, cert_b64: &str)
 ///   half. The caller must additionally bound the assertion count for the
 ///   whole document and confirm that the element it consumes is the element
 ///   whose ID was verified — see `sp.rs::complete_inner`.
+/// - What the caller reads afterwards. The verified `<ds:Signature>` is, by
+///   construction, excluded from the digest; a field parser that reads inside
+///   it reads unsigned data. Every SAML parser therefore reads through
+///   `xml::walk_outside_signatures`.
 pub fn verify_signed_element(
     full_xml: &[u8],
     local_name: &str,
     signing_cert_pem: &str,
+) -> Result<SignedElement, IdentityError> {
+    verify_signed_element_with_any(full_xml, local_name, &[signing_cert_pem])
+}
+
+/// [`verify_signed_element`] against a set of trusted certificates: the
+/// signature is accepted when it verifies under **any** of them.
+///
+/// An IdP rolling its signing key publishes the incoming certificate before
+/// it switches, so for a while the connector trusts two. Every structural and
+/// digest check runs once; only the final RSA check is tried per certificate.
+///
+/// # Errors
+///
+/// As [`verify_signed_element`]. With no usable certificate at all, the first
+/// certificate's parse error (or [`SamlError::Signature`] for an empty list).
+pub fn verify_signed_element_with_any<S: AsRef<str>>(
+    full_xml: &[u8],
+    local_name: &str,
+    signing_certs_pem: &[S],
 ) -> Result<SignedElement, IdentityError> {
     // Locate the element.
     let range = find_element_range(full_xml, ns::SAMLP, local_name, None)?
@@ -169,10 +215,21 @@ pub fn verify_signed_element(
         .ok_or(IdentityError::Saml(SamlError::Signature))?;
     let element_bytes = &full_xml[range.0..range.1];
 
+    // The namespace bindings the element inherits from its ancestors. The
+    // element is scanned and canonicalized as a slice; both must see the
+    // bindings it has in the document (GA audit 3, round 2).
+    let element_scope = in_scope_namespaces(full_xml, &Namespaces::new(), range.0)?;
+
     // Extract ID and Signature sub-block.
     let element_id = extract_id_attr(element_bytes)?;
-    let (signed_info_bytes, signature_value_b64, reference_uri, digest_b64) =
-        extract_signature_fields(element_bytes)?;
+    let SignatureFields {
+        signature_start,
+        signed_info: signed_info_bytes,
+        signed_info_scope,
+        signature_value: signature_value_b64,
+        reference_uri,
+        digest: digest_b64,
+    } = extract_signature_fields(element_bytes, &element_scope)?;
 
     // Algorithm-downgrade defence: the transform chain the document declares
     // must be the one we actually apply. Checked before any crypto so a
@@ -187,14 +244,21 @@ pub fn verify_signed_element(
         return Err(IdentityError::Saml(SamlError::Signature));
     }
 
-    // Verify referenced element digest.
-    let canonical_element = canonicalize(element_bytes, true)?;
+    // Verify referenced element digest. The enveloped-signature transform
+    // removes exactly the signature read above — never any other element —
+    // and exclusive C14N renders on the apex every visibly used namespace
+    // declaration it inherits (e.g. `xmlns:saml` declared only on the
+    // `<Response>`, as Keycloak emits it).
+    let canonical_element = canonicalize_with_inherited(
+        element_bytes,
+        EnvelopedSignature::RemoveAt(signature_start),
+        &element_scope,
+    )?;
     let mut hasher = Sha256::new();
     hasher.update(&canonical_element);
     let actual_digest = hasher.finalize();
-    let expected_digest = B64
-        .decode(digest_b64.trim())
-        .map_err(|_| IdentityError::Saml(SamlError::Signature))?;
+    let expected_digest =
+        decode_base64_content(&digest_b64).ok_or(IdentityError::Saml(SamlError::Signature))?;
     if actual_digest.as_slice() != expected_digest.as_slice() {
         return Err(IdentityError::Saml(SamlError::Signature));
     }
@@ -209,31 +273,121 @@ pub fn verify_signed_element(
         return Err(IdentityError::Saml(SamlError::UnsupportedAlgorithm));
     }
 
-    // Canonicalize SignedInfo with the ds prefix declared-but-not-emitted
-    // in the context. The extracted bytes don't carry `xmlns:ds` on the
-    // SignedInfo element itself (it's inherited from the <ds:Signature>
-    // parent in the source), but exclusive-C14N of a detached subtree
-    // SHOULD emit that decl — xml-crypto and peer libraries do the
-    // same when signing, so our canonical form must match theirs.
-    let mut ds_declared: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
-    ds_declared.insert(b"ds".to_vec(), ns::DS.as_bytes().to_vec());
-    let canonical_si = canonicalize_with_inherited(&signed_info_bytes, false, &ds_declared)?;
+    // Canonicalize SignedInfo in its context: the bindings in scope where it
+    // sits (typically `xmlns:ds` — or, Entra-style, the default namespace —
+    // declared on the enclosing `<Signature>`). Exclusive C14N renders the
+    // visibly used ones on SignedInfo, exactly as the signer computed it.
+    let canonical_si = canonicalize_with_inherited(
+        &signed_info_bytes,
+        EnvelopedSignature::Keep,
+        &signed_info_scope,
+    )?;
 
-    // Verify signature over canonicalized SignedInfo.
-    let sig_bytes = B64
-        .decode(signature_value_b64.trim())
-        .map_err(|_| IdentityError::Saml(SamlError::Signature))?;
-
-    let public_key = parse_cert_public_key(signing_cert_pem)?;
-    public_key
-        .verify(&RSA_PKCS1_2048_8192_SHA256, &canonical_si, &sig_bytes)
-        .map_err(|_| IdentityError::Saml(SamlError::Signature))?;
+    // Verify signature over canonicalized SignedInfo, under any trusted key.
+    let sig_bytes = decode_base64_content(&signature_value_b64)
+        .ok_or(IdentityError::Saml(SamlError::Signature))?;
+    let mut first_unusable: Option<IdentityError> = None;
+    let mut any_usable = false;
+    let mut verified = false;
+    for pem in signing_certs_pem {
+        match parse_cert_public_key(pem.as_ref()) {
+            Ok(key) => {
+                any_usable = true;
+                if key
+                    .verify(&RSA_PKCS1_2048_8192_SHA256, &canonical_si, &sig_bytes)
+                    .is_ok()
+                {
+                    verified = true;
+                    break;
+                }
+            }
+            Err(e) => {
+                first_unusable.get_or_insert(e);
+            }
+        }
+    }
+    if !verified {
+        // A signature that no usable key verifies is a signature failure; a
+        // list with no usable key at all reports why the first one was not.
+        return Err(match first_unusable {
+            Some(e) if !any_usable => e,
+            _ => IdentityError::Saml(SamlError::Signature),
+        });
+    }
 
     Ok(SignedElement {
         local_name: local_name.to_string(),
         id: element_id,
         canonical: canonical_element,
     })
+}
+
+/// Decodes XML-DSIG base64 content. `ds:CryptoBinary` / `base64Binary` text
+/// may be line-wrapped (Shibboleth wraps at 76 columns), so all XML
+/// whitespace is removed before decoding.
+fn decode_base64_content(text: &str) -> Option<Vec<u8>> {
+    let compact: String = text
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '\t' | '\r' | '\n'))
+        .collect();
+    B64.decode(compact).ok()
+}
+
+/// Splits a PEM bundle — certificates concatenated, as an operator lists an
+/// IdP's outgoing and incoming signing certificate during a key rollover —
+/// into one PEM string per `CERTIFICATE` block.
+///
+/// Input with no complete `CERTIFICATE` block is returned unchanged as the
+/// single entry, so a malformed value fails verification exactly as before
+/// rather than silently becoming "no certificate".
+#[must_use]
+pub fn split_pem_certificates(pem: &str) -> Vec<String> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    let mut out = Vec::new();
+    let mut rest = pem;
+    while let Some(begin) = rest.find(BEGIN) {
+        let block = &rest[begin..];
+        let Some(end) = block.find(END) else {
+            break;
+        };
+        let end = end + END.len();
+        out.push(format!("{}\n", &block[..end]));
+        rest = &block[end..];
+    }
+    if out.is_empty() {
+        out.push(pem.to_string());
+    }
+    out
+}
+
+/// Checks a connector's `idp_certificate_pem` exactly as the assertion
+/// consumer will use it: split with [`split_pem_certificates`], each block
+/// parsed by the verifier's own certificate parser. Returns the number of
+/// certificates.
+///
+/// Stricter than login in one way, deliberately: login skips a block it
+/// cannot use as long as another verifies, but configuration refuses a
+/// bundle with any unusable block — a broken incoming certificate would
+/// otherwise surface only when the IdP switches keys.
+///
+/// # Errors
+///
+/// Returns a parse error naming the failing block (`certificate N of M`).
+/// Certificates are public, but the reason still carries no PEM content.
+pub fn validate_idp_certificate_bundle(pem: &str) -> Result<usize, IdentityError> {
+    let blocks = split_pem_certificates(pem);
+    let total = blocks.len();
+    for (i, block) in blocks.iter().enumerate() {
+        parse_cert_public_key(block).map_err(|e| {
+            let why = match e {
+                IdentityError::Saml(SamlError::Parse { reason }) => reason,
+                other => other.to_string(),
+            };
+            parse_err(format!("certificate {} of {total}: {why}", i + 1))
+        })?;
+    }
+    Ok(total)
 }
 
 fn extract_id_attr(element_bytes: &[u8]) -> Result<String, IdentityError> {
@@ -256,33 +410,62 @@ fn extract_id_attr(element_bytes: &[u8]) -> Result<String, IdentityError> {
     Err(parse_err("no ID attribute on signed element"))
 }
 
+/// The parts of an element's enveloped `<ds:Signature>` the verifier uses.
+struct SignatureFields {
+    /// Byte offset of the `<ds:Signature>` start tag within the element —
+    /// the one element the enveloped-signature transform removes.
+    signature_start: usize,
+    /// The raw `<ds:SignedInfo>` element.
+    signed_info: Vec<u8>,
+    /// The namespace bindings in scope for `<ds:SignedInfo>` in the document.
+    signed_info_scope: Namespaces,
+    /// `<ds:SignatureValue>` text (base64).
+    signature_value: String,
+    /// `<ds:Reference URI>`.
+    reference_uri: String,
+    /// `<ds:DigestValue>` text (base64).
+    digest: String,
+}
+
 fn extract_signature_fields(
     element_bytes: &[u8],
-) -> Result<(Vec<u8>, String, String, String), IdentityError> {
-    // Find <ds:Signature> as a DIRECT CHILD of the signed element only.
+    element_scope: &Namespaces,
+) -> Result<SignatureFields, IdentityError> {
+    // Find <ds:Signature> as a DIRECT CHILD of the signed element only, by
+    // namespace URI (a `ds:` prefix bound elsewhere is not XML-DSIG; an
+    // unprefixed `<Signature>` in the DSIG default namespace is).
     //
-    // An enveloped signature is by definition a child of what it signs, and
-    // `c14n::canonicalize(.., true)` strips exactly the depth-2 element when
-    // it computes the digest. Searching at any depth would let a signature
-    // belonging to a descendant (e.g. the `<Assertion>` inside a
-    // `<Response>`) be read as though it were this element's own — audit
-    // 2026-08-28 §25.6.
-    let sig_range = find_child_element_range(element_bytes, ns::DS, "Signature")?
+    // An enveloped signature is by definition a child of what it signs.
+    // Searching at any depth would let a signature belonging to a descendant
+    // (e.g. the `<Assertion>` inside a `<Response>`) be read as though it
+    // were this element's own — audit 2026-08-28 §25.6.
+    let sig_range = find_child_element_range_in(element_bytes, element_scope, ns::DS, "Signature")?
         .ok_or(IdentityError::Saml(SamlError::Signature))?;
-    let sig_bytes = &element_bytes[sig_range.0..sig_range.1];
 
-    // Find SignedInfo — likewise a direct child of <ds:Signature>.
-    let signed_info_range = find_child_element_range(sig_bytes, ns::DS, "SignedInfo")?
-        .ok_or(IdentityError::Saml(SamlError::Signature))?;
+    // Exactly one. The digest is computed with this signature — and only
+    // this one — removed, so a second direct-child `<ds:Signature>` would be
+    // covered by the digest while no verifier ever read it. Refusing it keeps
+    // "the signature" unambiguous (GA audit 3, G-1).
+    if count_child_elements(element_bytes, element_scope, ns::DS, "Signature")? != 1 {
+        return Err(IdentityError::Saml(SamlError::Signature));
+    }
+
+    let sig_bytes = &element_bytes[sig_range.0..sig_range.1];
+    let signature_scope = in_scope_namespaces(element_bytes, element_scope, sig_range.0)?;
+
+    // Only the parts XML-DSIG defines for a signature we verify. Everything
+    // in a `<ds:Signature>` except `<ds:SignedInfo>` is outside what the
+    // signature covers, so any other child is unsigned content smuggled into
+    // the signed element (G-1, "moved signature" variant).
+    let (signed_info_range, signature_value) =
+        read_signature_children(sig_bytes, &signature_scope)?;
     let signed_info = sig_bytes[signed_info_range.0..signed_info_range.1].to_vec();
+    let signed_info_scope = in_scope_namespaces(sig_bytes, &signature_scope, signed_info_range.0)?;
 
     // Exactly one <ds:Reference> — checked before anything reads one, so the
     // "first reference" the extractors below pick up is the only one there
     // is (audit 2026-08-28 §25.20).
     enforce_single_reference(&signed_info)?;
-
-    // Extract <ds:SignatureValue>…</ds:SignatureValue> textual content.
-    let sv = extract_text_element(sig_bytes, "SignatureValue")?;
 
     // Extract Reference URI.
     let reference_uri = extract_attr_of_child(&signed_info, "Reference", "URI")?;
@@ -290,7 +473,58 @@ fn extract_signature_fields(
     // Extract DigestValue.
     let digest = extract_text_element(&signed_info, "DigestValue")?;
 
-    Ok((signed_info, sv, reference_uri, digest))
+    Ok(SignatureFields {
+        signature_start: sig_range.0,
+        signed_info,
+        signed_info_scope,
+        signature_value,
+        reference_uri,
+        digest,
+    })
+}
+
+/// Reads a `<ds:Signature>`'s direct children, refusing anything but one
+/// `<ds:SignedInfo>`, one `<ds:SignatureValue>` and at most one
+/// `<ds:KeyInfo>` — all in the XML-DSIG namespace. Returns the
+/// `SignedInfo` byte range within `signature` and the `SignatureValue` text.
+///
+/// XML-DSIG also allows `<ds:Object>` children; Hearth processes none, no
+/// SAML IdP it interoperates with emits them, and — like every other part of
+/// a signature except `SignedInfo` — their content is not covered by the
+/// signature. The SAML field parsers skip the whole `<ds:Signature>` subtree
+/// regardless (`xml::walk_outside_signatures`), so this check is a structural
+/// tripwire, not the only line of defence.
+///
+/// # Errors
+///
+/// Returns [`SamlError::Signature`] on a missing, unexpected or repeated
+/// child, and a parse error on malformed XML.
+fn read_signature_children(
+    signature: &[u8],
+    signature_scope: &Namespaces,
+) -> Result<((usize, usize), String), IdentityError> {
+    let refuse = || IdentityError::Saml(SamlError::Signature);
+    let mut signed_info: Option<(usize, usize)> = None;
+    let mut signature_value: Option<String> = None;
+    let mut key_info = false;
+    for child in child_elements(signature, signature_scope)? {
+        if child.namespace.as_deref() != Some(ns::DS.as_bytes()) {
+            return Err(refuse());
+        }
+        let repeated = match child.local_name.as_slice() {
+            b"SignedInfo" => signed_info.replace(child.range).is_some(),
+            b"SignatureValue" => signature_value.replace(child.text).is_some(),
+            b"KeyInfo" => std::mem::replace(&mut key_info, true),
+            _ => return Err(refuse()),
+        };
+        if repeated {
+            return Err(refuse());
+        }
+    }
+    match (signed_info, signature_value) {
+        (Some(range), Some(value)) => Ok((range, value)),
+        _ => Err(refuse()),
+    }
 }
 
 /// The number of `<ds:Reference>` elements a `<ds:SignedInfo>` may carry.
@@ -854,13 +1088,15 @@ mod tests {
         let payload =
             br#"<Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" ID="a1">hello</Assertion>"#;
 
-        let canonical = canonicalize(payload, true).expect("canonicalize element");
+        let canonical =
+            canonicalize(payload, EnvelopedSignature::Keep).expect("canonicalize element");
         let mut hasher = Sha256::new();
         hasher.update(&canonical);
         let digest_b64 = B64.encode(hasher.finalize());
 
         let signed_info = rewrite(&build_signed_info("a1", &digest_b64));
-        let canonical_si = canonicalize(signed_info.as_bytes(), false).expect("canonicalize si");
+        let canonical_si = canonicalize(signed_info.as_bytes(), EnvelopedSignature::Keep)
+            .expect("canonicalize si");
         let signature_b64 = B64.encode(key.sign(&canonical_si).expect("sign"));
         let signature_xml =
             build_signature_block(&signed_info, &signature_b64, &B64.encode(key.cert_der()));
@@ -955,6 +1191,225 @@ mod tests {
         let verified = verify_signed_element(&signed, "Assertion", &cert_pem)
             .expect("a single-reference signature must still verify");
         assert_eq!(verified.id, "a1");
+    }
+
+    // ---------------------------------------------------------------
+    // GA audit 3, G-1 — one enveloped signature per element, and nothing
+    // but SignedInfo / SignatureValue / KeyInfo inside it
+    // ---------------------------------------------------------------
+
+    /// Signs `payload` exactly as `sign_element` does but WITHOUT its
+    /// "already signed" guard, so a test can produce an element that carries
+    /// a second, digest-covered `<ds:Signature>` — the one shape only the
+    /// count rule can reject.
+    fn sign_over(payload: &[u8], id: &str) -> (Vec<u8>, String) {
+        let key = RsaSigningKey::generate("hearth-test", 365).expect("key");
+        let cert_pem = cert_der_to_pem(key.cert_der());
+        let canonical = canonicalize(payload, EnvelopedSignature::Keep).expect("canon");
+        let digest_b64 = B64.encode(Sha256::digest(&canonical));
+        let signed_info = build_signed_info(id, &digest_b64);
+        let canonical_si =
+            canonicalize(signed_info.as_bytes(), EnvelopedSignature::Keep).expect("canon si");
+        let signature_b64 = B64.encode(key.sign(&canonical_si).expect("sign"));
+        let signature_xml =
+            build_signature_block(&signed_info, &signature_b64, &B64.encode(key.cert_der()));
+        let open_end = payload.iter().position(|&b| b == b'>').expect("root tag");
+        let mut out = payload[..=open_end].to_vec();
+        out.extend_from_slice(signature_xml.as_bytes());
+        out.extend_from_slice(&payload[open_end + 1..]);
+        (out, cert_pem)
+    }
+
+    /// Control for [`second_direct_child_signature_rejected`]: `sign_over` on
+    /// an ordinary payload verifies, so the helper itself is sound.
+    #[test]
+    fn sign_over_produces_a_verifiable_signature() {
+        let payload =
+            br#"<Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" ID="a1">hello</Assertion>"#;
+        let (signed, cert_pem) = sign_over(payload, "a1");
+        let verified = verify_signed_element(&signed, "Assertion", &cert_pem).expect("verify");
+        assert_eq!(verified.id, "a1");
+    }
+
+    /// Two direct-child `<ds:Signature>` elements are refused even when the
+    /// digest would match. Here the second signature was part of the payload
+    /// the key signed, so with the first one removed the digest is correct —
+    /// only the one-signature rule stands between this and "verified".
+    #[test]
+    fn second_direct_child_signature_rejected() {
+        let payload = br#"<Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="a1">hello<ds:Signature><ds:SignedInfo></ds:SignedInfo></ds:Signature></Assertion>"#;
+        let (signed, cert_pem) = sign_over(payload, "a1");
+        let err = verify_signed_element(&signed, "Assertion", &cert_pem)
+            .err()
+            .expect("an element with two direct-child signatures must be rejected");
+        assert!(
+            matches!(err, IdentityError::Saml(SamlError::Signature)),
+            "wrong error: {err:?}"
+        );
+    }
+
+    /// Anything but SignedInfo / SignatureValue / one KeyInfo inside the
+    /// verified `<ds:Signature>` is refused. The signature is valid in every
+    /// case (the verified signature is removed from the digest), so only the
+    /// shape rule can reject these.
+    #[test]
+    fn signature_with_unexpected_children_rejected() {
+        let cases = [
+            (
+                "foreign element after KeyInfo",
+                "</ds:KeyInfo>",
+                "</ds:KeyInfo><Subject>ceo</Subject>",
+            ),
+            (
+                "ds:Object",
+                "</ds:KeyInfo>",
+                "</ds:KeyInfo><ds:Object>x</ds:Object>",
+            ),
+            (
+                "second KeyInfo",
+                "</ds:KeyInfo>",
+                "</ds:KeyInfo><ds:KeyInfo></ds:KeyInfo>",
+            ),
+            (
+                "second SignatureValue",
+                "<ds:KeyInfo>",
+                "<ds:SignatureValue>AA==</ds:SignatureValue><ds:KeyInfo>",
+            ),
+        ];
+        for (case, anchor, replacement) in cases {
+            let (signed, cert_pem) = signed_assertion();
+            let tampered = replace_once(&signed, anchor, replacement);
+            let err = verify_signed_element(&tampered, "Assertion", &cert_pem)
+                .err()
+                .unwrap_or_else(|| panic!("{case}: must be rejected"));
+            assert!(
+                matches!(err, IdentityError::Saml(SamlError::Signature)),
+                "{case}: wrong error: {err:?}"
+            );
+        }
+    }
+
+    /// Whitespace between a pretty-printed element's children — including
+    /// right before the `<ds:Signature>` — does not disturb which element the
+    /// enveloped transform removes.
+    #[test]
+    fn pretty_printed_signature_position_still_verifies() {
+        let key = RsaSigningKey::generate("hearth-test", 365).expect("key");
+        let cert_pem = cert_der_to_pem(key.cert_der());
+        let payload = b"<Assertion xmlns=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"a1\">\n  <Subject>alice</Subject>\n</Assertion>";
+        let signed =
+            String::from_utf8(sign_element(payload, "a1", &key).expect("sign")).expect("utf8");
+        // Move the signature after the leading whitespace text node.
+        let start = signed.find("<ds:Signature").expect("signature");
+        let end = signed.find("</ds:Signature>").expect("end") + "</ds:Signature>".len();
+        let signature = &signed[start..end];
+        let without = format!("{}{}", &signed[..start], &signed[end..]);
+        let moved = without.replacen("\n  <Subject>", &format!("\n  {signature}<Subject>"), 1);
+        assert_ne!(moved, signed, "the signature must have moved");
+        let verified =
+            verify_signed_element(moved.as_bytes(), "Assertion", &cert_pem).expect("verify");
+        assert_eq!(verified.id, "a1");
+    }
+
+    /// The signer refuses an element that already carries a signature: the
+    /// output would carry two, which the verifier rejects.
+    #[test]
+    fn sign_element_refuses_an_already_signed_element() {
+        let (signed, _) = signed_assertion();
+        let key = RsaSigningKey::generate("hearth-test", 365).expect("key");
+        let err =
+            sign_element(&signed, "a1", &key).expect_err("signing a signed element must fail");
+        assert!(
+            matches!(err, IdentityError::Saml(SamlError::Parse { .. })),
+            "wrong error: {err:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // GA audit 3 round 2 — certificate rollover, wrapped base64
+    // ---------------------------------------------------------------
+
+    /// A bundle splits into one PEM per certificate, each usable on its own.
+    #[test]
+    fn split_pem_certificates_separates_a_bundle() {
+        let a = cert_der_to_pem(RsaSigningKey::generate("a", 365).expect("key").cert_der());
+        let b = cert_der_to_pem(RsaSigningKey::generate("b", 365).expect("key").cert_der());
+        let parts = split_pem_certificates(&format!("{a}\n{b}"));
+        assert_eq!(parts.len(), 2, "{parts:?}");
+        for part in &parts {
+            validate_signing_cert_pem(part).expect("each block is a usable certificate");
+        }
+        assert_eq!(split_pem_certificates(&a).len(), 1);
+        assert_eq!(split_pem_certificates("not a pem"), ["not a pem"]);
+    }
+
+    /// Any listed certificate may verify; an unusable entry does not stop
+    /// the search, and a list with no usable entry says why.
+    #[test]
+    fn verify_with_any_certificate() {
+        let (signed, cert_pem) = signed_assertion();
+        let other = cert_der_to_pem(RsaSigningKey::generate("x", 365).expect("key").cert_der());
+        let verified =
+            verify_signed_element_with_any(&signed, "Assertion", &[other.as_str(), &cert_pem])
+                .expect("the second certificate verifies");
+        assert_eq!(verified.id, "a1");
+        verify_signed_element_with_any(&signed, "Assertion", &["garbage", cert_pem.as_str()])
+            .expect("an unusable entry is skipped");
+
+        let wrong = verify_signed_element_with_any(&signed, "Assertion", &[other.as_str()])
+            .err()
+            .expect("a non-matching certificate must not verify");
+        assert!(
+            matches!(wrong, IdentityError::Saml(SamlError::Signature)),
+            "{wrong:?}"
+        );
+        let unusable = verify_signed_element_with_any(&signed, "Assertion", &["garbage"])
+            .err()
+            .expect("no usable certificate");
+        assert!(
+            matches!(unusable, IdentityError::Saml(SamlError::Parse { .. })),
+            "{unusable:?}"
+        );
+        let empty: [&str; 0] = [];
+        let none = verify_signed_element_with_any(&signed, "Assertion", &empty)
+            .err()
+            .expect("an empty list verifies nothing");
+        assert!(
+            matches!(none, IdentityError::Saml(SamlError::Signature)),
+            "{none:?}"
+        );
+    }
+
+    /// XML-DSIG base64 content may be line-wrapped (Shibboleth wraps at 76
+    /// columns). A signature whose signed `DigestValue` and whose
+    /// `SignatureValue` are both wrapped still verifies.
+    #[test]
+    fn line_wrapped_base64_values_still_verify() {
+        fn wrap_between(s: &str, open: &str, close: &str) -> String {
+            let start = s.find(open).expect("open tag") + open.len();
+            let end = s.find(close).expect("close tag");
+            let lines: Vec<&str> = s.as_bytes()[start..end]
+                .chunks(16)
+                .map(|c| std::str::from_utf8(c).expect("base64 is ASCII"))
+                .collect();
+            format!("{}\n{}\n{}", &s[..start], lines.join("\n"), &s[end..])
+        }
+        let (signed, cert_pem) = signed_assertion_with_rewritten_signed_info(&|si| {
+            wrap_between(si, "<ds:DigestValue>", "</ds:DigestValue>")
+        });
+        let signed = wrap_between(
+            std::str::from_utf8(&signed).expect("utf8"),
+            "<ds:SignatureValue>",
+            "</ds:SignatureValue>",
+        );
+        assert!(
+            signed.contains("<ds:SignatureValue>\n"),
+            "fixture must be wrapped"
+        );
+        match verify_signed_element(signed.as_bytes(), "Assertion", &cert_pem) {
+            Ok(verified) => assert_eq!(verified.id, "a1"),
+            Err(error) => panic!("line-wrapped base64 rejected: {error:?}"),
+        }
     }
 
     /// A reference carrying no `<ds:Transforms>` at all is equally

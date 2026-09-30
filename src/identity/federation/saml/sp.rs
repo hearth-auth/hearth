@@ -4,7 +4,7 @@
 //! combine these primitives with their own state-stores.
 
 use super::response::{extract_and_validate_assertion, parse_response, Assertion, ValidateParams};
-use super::signature::verify_signed_element;
+use super::signature::verify_signed_element_with_any;
 use super::types::{AttributeMap, SamlIdpConfig};
 use super::xml::{count_elements, ns};
 use crate::core::Timestamp;
@@ -71,10 +71,14 @@ impl SamlSpService {
         now: Timestamp,
         xml: &[u8],
     ) -> Result<(ExternalIdentity, Option<String>, Assertion), IdentityError> {
-        let primary_cert = idp
-            .idp_certificates_pem
-            .first()
-            .ok_or(IdentityError::Saml(SamlError::Signature))?;
+        // Every configured certificate is trusted: during a key rollover the
+        // connector lists the outgoing and the incoming one, and an assertion
+        // signed by either must verify (GA audit 3, round 2 — only the first
+        // used to be tried).
+        let certs = idp.idp_certificates_pem.as_slice();
+        if certs.is_empty() {
+            return Err(IdentityError::Saml(SamlError::Signature));
+        }
 
         // XML Signature Wrapping defence, part 1 (audit 2026-08-28 B5).
         //
@@ -96,14 +100,14 @@ impl SamlSpService {
 
         // Signature verification: prefer Assertion-level signature if
         // want_assertions_signed, else accept Response-level signature.
-        let verified_assertion_id = match verify_signed_element(xml, "Assertion", primary_cert) {
+        let verified_assertion_id = match verify_signed_element_with_any(xml, "Assertion", certs) {
             Ok(verified) => Some(verified.id),
             Err(_) => {
                 if idp.want_assertions_signed {
                     return Err(IdentityError::Saml(SamlError::Signature));
                 }
                 // Fall back to Response-level signature.
-                verify_signed_element(xml, "Response", primary_cert)?;
+                verify_signed_element_with_any(xml, "Response", certs)?;
                 None
             }
         };
@@ -212,7 +216,7 @@ mod tests {
             subject_name_id_format: None,
             not_before: None,
             not_on_or_after: None,
-            audience: None,
+            audience_restrictions: Vec::new(),
             attributes: BTreeMap::new(),
             in_response_to: None,
             session_index: None,

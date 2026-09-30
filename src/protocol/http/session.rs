@@ -139,6 +139,14 @@ async fn end_session(
             )
                 .into_response();
         }
+        Err(crate::identity::IdentityError::ClientMismatch) => {
+            // RP-Initiated Logout §2: the hint was issued to another client.
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid_request", "error_description": "id_token_hint was not issued to client_id"})),
+            )
+                .into_response();
+        }
         Err(e) => return identity_error_to_response(&e).into_response(),
     };
 
@@ -165,10 +173,10 @@ async fn end_session(
 
     // Serve front-channel logout page (with iframes) or redirect directly.
     if !result.frontchannel_targets.is_empty() {
-        let sid = result.session_id.as_uuid().to_string();
+        // FCL §2: `iss` and `sid` are the values of the session's ID tokens.
+        let sid = result.session_id.to_string();
         let issuer_enc =
-            form_urlencoded::byte_serialize(state.identity.oidc_discovery().issuer.as_bytes())
-                .collect::<String>();
+            form_urlencoded::byte_serialize(result.issuer.as_bytes()).collect::<String>();
         let sid_enc = form_urlencoded::byte_serialize(sid.as_bytes()).collect::<String>();
 
         let iframes: Vec<String> = result
@@ -312,6 +320,27 @@ struct SvDeltaQuery {
     limit: Option<usize>,
 }
 
+/// Whether `claims` may read the realm-wide session-version feed: the token
+/// carries `hearth.sv_feed` or `hearth.admin`, and was not issued to a
+/// third-party client — the feed is an administrative read that a third-party
+/// token never gets, even when a claim profile releases those permissions to
+/// it (GA audit 3 I-14; the admin API's B1 gate).
+fn may_read_sv_feed(
+    state: &AppState,
+    realm_id: &crate::core::RealmId,
+    claims: &crate::identity::TokenClaims,
+) -> bool {
+    claims
+        .permissions
+        .iter()
+        .any(|p| p == "hearth.sv_feed" || p == "hearth.admin")
+        && crate::protocol::admin_auth::token_client_may_administer(
+            state.identity.as_ref(),
+            realm_id,
+            claims,
+        )
+}
+
 /// `GET /oauth/session-versions?since=<seq>` — session-version delta feed.
 ///
 /// Returns all bump events with `seq > since`, up to `limit` (default: 1000).
@@ -357,9 +386,7 @@ async fn oauth_sv_delta_feed(
         Err(e) => return e.into_response(),
     };
 
-    let has_feed_perm = claims.permissions.iter().any(|p| p == "hearth.sv_feed");
-    let is_admin = claims.permissions.iter().any(|p| p == "hearth.admin");
-    if !has_feed_perm && !is_admin {
+    if !may_read_sv_feed(&state, &realm_id, &claims) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "requires hearth.sv_feed permission"})),
@@ -451,9 +478,7 @@ async fn oauth_sv_snapshot(
         Err(e) => return e.into_response(),
     };
 
-    let has_feed_perm = claims.permissions.iter().any(|p| p == "hearth.sv_feed");
-    let is_admin = claims.permissions.iter().any(|p| p == "hearth.admin");
-    if !has_feed_perm && !is_admin {
+    if !may_read_sv_feed(&state, &realm_id, &claims) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "requires hearth.sv_feed permission"})),
