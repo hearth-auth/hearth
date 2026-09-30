@@ -1373,7 +1373,10 @@ pub async fn admin_role_delete(
 
     let realm_name = target.0.name().to_string();
 
-    match state.rbac.delete_role(target.id(), &role_id) {
+    // The console deletes with cascade: a role's assignments, parent links
+    // and extra org-role rows go with it (the page asks for confirmation, and
+    // only `hearth.admin` reaches it), so nothing is left dangling.
+    match state.rbac.delete_role(target.id(), &role_id, true) {
         Ok(()) => {
             Redirect::to(&format!("/ui/admin/realms/{}/rbac/roles", realm_name)).into_response()
         }

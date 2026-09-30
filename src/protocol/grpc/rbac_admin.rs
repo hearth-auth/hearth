@@ -518,7 +518,7 @@ impl RbacAdminService for RbacAdminSvc {
         .map_err(ceiling_status)?;
         self.state
             .rbac
-            .delete_role(&realm_id, &role_id)
+            .delete_role(&realm_id, &role_id, inner.cascade)
             .map_err(rbac_to_status)?;
         Ok(Response::new(pb::DeleteRoleResponse {}))
     }
@@ -1082,6 +1082,22 @@ impl RbacAdminService for RbacAdminSvc {
             .map_err(rbac_to_status)?
             .ok_or_else(|| Status::not_found("role not found"))?;
         check_role_permission_ceiling(&auth, &self.state, &realm_id, &ceiling_role.id)?;
+        // An additional role belongs to a membership (the trait's contract).
+        // Resolution expands the stored row whether or not the user is a
+        // member, and the admin privilege ceiling finds a user's extra roles
+        // through its memberships, so a row for a non-member would be
+        // authority the ceiling cannot see (GA sweep 4).
+        if self
+            .state
+            .identity
+            .get_membership(&realm_id, &org_id, &user_id)
+            .map_err(identity_to_status)?
+            .is_none()
+        {
+            return Err(Status::failed_precondition(
+                "the user is not a member of the organization",
+            ));
+        }
         let granted_by = if inner.granted_by.is_empty() {
             None
         } else {

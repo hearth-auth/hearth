@@ -4165,10 +4165,20 @@ async fn admin_update_role(
     }
 }
 
+/// Query of `DELETE /admin/roles/{id}`.
+#[derive(Debug, Default, Deserialize)]
+struct DeleteRoleParams {
+    /// Also remove the role's assignments, parent links and extra org-role
+    /// rows; without it a referenced role answers `409 role_in_use`.
+    #[serde(default)]
+    cascade: bool,
+}
+
 async fn admin_delete_role(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(params): Query<DeleteRoleParams>,
 ) -> axum::response::Response {
     let auth = match extract_admin_auth(&headers, &state) {
         Ok(a) => a,
@@ -4194,7 +4204,10 @@ async fn admin_delete_role(
     ) {
         return ceiling_refusal(e).into_response();
     }
-    match state.rbac.delete_role(&auth.realm_id, &role_id) {
+    match state
+        .rbac
+        .delete_role(&auth.realm_id, &role_id, params.cascade)
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => rbac_error_to_response(&e).into_response(),
     }

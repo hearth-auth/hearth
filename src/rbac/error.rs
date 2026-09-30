@@ -80,6 +80,16 @@ pub enum RbacError {
     /// assignments are preserved for audit coherence. Restore the role to
     /// `Active` before creating new assignments.
     RoleArchived,
+    /// The role is still referenced and the deletion did not ask to
+    /// cascade. Counts are of the references that block it.
+    RoleInUse {
+        /// Role assignments (user or group, realm- or org-scoped).
+        assignments: usize,
+        /// Roles that list this role as a parent.
+        child_roles: usize,
+        /// Extra org-scoped role rows naming this role.
+        org_roles: usize,
+    },
     /// One or more requested OAuth scopes could not be granted.
     ///
     /// Returned by `resolve_with_scopes` when a `ThirdParty` client requests
@@ -131,6 +141,15 @@ impl fmt::Display for RbacError {
                 "permission '{permission}' is in the reserved namespace and may not be granted by operator roles"
             ),
             Self::RoleArchived => f.write_str("role is archived; restore it before assigning"),
+            Self::RoleInUse {
+                assignments,
+                child_roles,
+                org_roles,
+            } => write!(
+                f,
+                "role is in use ({assignments} assignments, {child_roles} child roles, \
+                 {org_roles} extra organization roles); delete with cascade to remove them"
+            ),
             Self::InvalidScope { reason } => write!(f, "invalid_scope: {reason}"),
             Self::Storage(err) => write!(f, "storage error: {err}"),
             Self::Serialization { reason } => write!(f, "serialization error: {reason}"),

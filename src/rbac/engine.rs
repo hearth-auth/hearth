@@ -102,6 +102,19 @@ impl EmbeddedRbacEngine {
         Ok(())
     }
 
+    /// [`StorageEngine::write_batch`] (atomic puts + deletes) followed by
+    /// cache invalidation for the realm.
+    fn write_batch(
+        &self,
+        realm_id: &RealmId,
+        puts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> Result<(), StorageError> {
+        self.storage.write_batch(realm_id, puts, deletes)?; // rbac-storage-write-ok
+        self.invalidate_realm(realm_id);
+        Ok(())
+    }
+
     /// [`StorageEngine::delete`] followed by cache invalidation for the realm.
     fn write_delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
         self.storage.delete(realm_id, key)?; // rbac-storage-write-ok
@@ -154,6 +167,47 @@ impl EmbeddedRbacEngine {
         let mut parts = rest.splitn(4, ':');
         let (_realm, _org, user) = (parts.next(), parts.next(), parts.next());
         user.is_some_and(|u| u == user_id.as_uuid().to_string())
+    }
+
+    /// Every reference to `role`: its assignments (by-role index key, the
+    /// assignment if it still loads, and its id), the roles naming it as a
+    /// parent, and the extra org-role row keys naming it (stored by name).
+    fn role_references(
+        &self,
+        realm_id: &RealmId,
+        role: &Role,
+    ) -> Result<RoleReferences, RbacError> {
+        let asgn_prefix = keys::assign_role_scan_prefix(&role.id);
+        let asgn_end = keys::prefix_end(&asgn_prefix);
+        let mut assignments = Vec::new();
+        for e in self.storage.scan(realm_id, &asgn_prefix, &asgn_end)? {
+            let aid: AssignmentId = Self::de(&e.value)?;
+            assignments.push((e.key, self.load_assignment(realm_id, &aid)?, aid));
+        }
+        let name_prefix = keys::role_name_scan_prefix(realm_id);
+        let name_end = keys::prefix_end(&name_prefix);
+        let mut children = Vec::new();
+        for e in self.storage.scan(realm_id, &name_prefix, &name_end)? {
+            let id: RoleId = Self::de(&e.value)?;
+            if let Some(r) = self.load_role(realm_id, &id)? {
+                if r.parent_roles.contains(&role.id) {
+                    children.push(r);
+                }
+            }
+        }
+        let org_prefix = keys::org_extra_role_realm_scan_prefix(realm_id);
+        let org_end = keys::prefix_end(&org_prefix);
+        let org_rows = self
+            .storage
+            .scan_keys(realm_id, &org_prefix, &org_end)?
+            .into_iter()
+            .filter(|k| Self::org_role_key_holder(k, &role.name).is_some())
+            .collect();
+        Ok(RoleReferences {
+            assignments,
+            children,
+            org_rows,
+        })
     }
 
     /// The `{user}` of an `rba:org_role:{realm}:{org}:{user}:{role}` row when
@@ -686,6 +740,16 @@ impl Resolver for EmbeddedRbacEngine {
 // RbacEngine trait impl
 // ---------------------------------------------------------------------------
 
+/// What refers to a role, as found by `EmbeddedRbacEngine::role_references`.
+struct RoleReferences {
+    /// `(by-role index key, assignment if it loads, assignment id)`.
+    assignments: Vec<(Vec<u8>, Option<RoleAssignment>, AssignmentId)>,
+    /// Roles that list the role as a parent.
+    children: Vec<Role>,
+    /// Extra org-role row keys naming the role.
+    org_rows: Vec<Vec<u8>>,
+}
+
 impl RbacEngine for EmbeddedRbacEngine {
     fn on_replicated_row(&self, realm_id: &RealmId, key: &[u8]) {
         // One prefix compare on the apply path; every non-RBAC row costs
@@ -1049,13 +1113,60 @@ impl RbacEngine for EmbeddedRbacEngine {
         Ok(role)
     }
 
-    fn delete_role(&self, realm_id: &RealmId, role_id: &RoleId) -> Result<(), RbacError> {
+    fn delete_role(
+        &self,
+        realm_id: &RealmId,
+        role_id: &RoleId,
+        cascade: bool,
+    ) -> Result<(), RbacError> {
         let Some(role) = self.load_role(realm_id, role_id)? else {
             return Err(RbacError::RoleNotFound);
         };
-        self.write_delete(realm_id, &keys::encode_role(role_id))?;
-        self.storage
-            .delete(realm_id, &keys::encode_role_name(realm_id, &role.name))?;
+
+        let RoleReferences {
+            assignments,
+            children,
+            org_rows,
+        } = self.role_references(realm_id, &role)?;
+        if !cascade && (!assignments.is_empty() || !children.is_empty() || !org_rows.is_empty()) {
+            return Err(RbacError::RoleInUse {
+                assignments: assignments.len(),
+                child_roles: children.len(),
+                org_roles: org_rows.len(),
+            });
+        }
+
+        let now = self.clock.now();
+        let mut puts = Vec::with_capacity(children.len());
+        for mut child in children {
+            child.parent_roles.retain(|p| p != role_id);
+            child.updated_at = now;
+            puts.push((keys::encode_role(&child.id), Self::ser(&child)?));
+        }
+        let mut deletes = org_rows;
+        let mut subjects = Vec::new();
+        for (role_idx, assignment, aid) in assignments {
+            deletes.push(role_idx);
+            deletes.push(keys::encode_assignment(&aid));
+            if let Some(a) = assignment {
+                deletes.push(match &a.subject {
+                    Subject::User(u) => keys::encode_assign_user(u, &aid),
+                    Subject::Group(g) => keys::encode_assign_group(g, &aid),
+                });
+                subjects.push(a.subject);
+            }
+        }
+        deletes.push(keys::encode_role(role_id));
+        deletes.push(keys::encode_role_name(realm_id, &role.name));
+        self.write_batch(realm_id, &puts, &deletes)?;
+
+        // As `unassign_role`: the subjects' live sessions re-read authority.
+        for subject in &subjects {
+            match subject {
+                Subject::User(uid) => self.bump_sv_for_user(realm_id, uid),
+                Subject::Group(gid) => self.bump_sv_for_group_members(realm_id, gid),
+            }
+        }
         Ok(())
     }
 
@@ -1493,6 +1604,16 @@ impl RbacEngine for EmbeddedRbacEngine {
         assignment_id: &AssignmentId,
     ) -> Result<Option<RoleAssignment>, RbacError> {
         self.load_assignment(realm_id, assignment_id)
+    }
+
+    fn list_user_org_contexts(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<Vec<OrganizationId>, RbacError> {
+        Ok(resolve::org_contexts(self, realm_id, user_id)?
+            .into_iter()
+            .collect())
     }
 
     fn list_user_assignments(
@@ -2962,7 +3083,7 @@ mod tests {
                 },
             )
             .expect("r");
-        RbacEngine::delete_role(&engine, &realm, &r.id).expect("delete");
+        RbacEngine::delete_role(&engine, &realm, &r.id, false).expect("delete");
         assert!(RbacEngine::get_role(&engine, &realm, &r.id)
             .expect("get")
             .is_none());
