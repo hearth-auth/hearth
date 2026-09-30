@@ -2,7 +2,7 @@
 
 from typing import Literal, Optional, List, Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_serializer
 
 T = TypeVar("T")
 
@@ -149,7 +149,12 @@ class OAuthClient(BaseModel):
     name: str = Field(validation_alias="client_name")
     redirect_uris: List[str] = []
     trust_level: Optional[str] = None
-    secret: Optional[str] = None
+    #: The generated secret (wire key ``client_secret``) — present only on the
+    #: response that created a ``client_secret_basic`` / ``client_secret_post``
+    #: client or regenerated its secret, never again. Store it on receipt.
+    secret: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("client_secret", "secret")
+    )
 
 
 class RegisterClientRequest(BaseModel):
@@ -165,6 +170,10 @@ class RegisterClientRequest(BaseModel):
     name: str = Field(validation_alias="client_name", serialization_alias="client_name")
     redirect_uris: List[str] = []
     trust_level: Optional[str] = None
+    #: RFC 7591 §2: ``client_secret_basic`` / ``client_secret_post`` make the
+    #: server generate the secret and return it once (``OAuthClient.secret``);
+    #: ``private_key_jwt`` or ``none``. Omitted registers a public client.
+    token_endpoint_auth_method: Optional[str] = None
 
     @field_serializer("trust_level")
     def _serialize_trust_level(self, value: Optional[str]) -> Optional[str]:
@@ -183,6 +192,10 @@ class CreateClientRequest(BaseModel):
     name: str = Field(validation_alias="client_name", serialization_alias="client_name")
     redirect_uris: List[str] = []
     trust_level: Optional[str] = None
+    #: RFC 7591 §2: ``client_secret_basic`` / ``client_secret_post`` make the
+    #: server generate the secret and return it once (``OAuthClient.secret``);
+    #: ``private_key_jwt`` or ``none``. Omitted registers a public client.
+    token_endpoint_auth_method: Optional[str] = None
 
     @field_serializer("trust_level")
     def _serialize_trust_level(self, value: Optional[str]) -> Optional[str]:
