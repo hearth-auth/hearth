@@ -29,5 +29,5 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 three-node-cluster = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary(cluster_three_node_control_coherence) | binary(cluster_grpc_loopback)'
+filter = 'binary(cluster_three_node_control_coherence) | binary(cluster_grpc_loopback) | binary(cluster_follower_write_forwarding)'
 test-group = 'three-node-cluster'

@@ -600,8 +600,8 @@ sessions page, `/ui/account/sessions`, or with `DELETE /admin/sessions/{id}` and
 `X-Realm-ID`) to end the token early. The result page names the session. The issuance is recorded in the system
 realm's audit trail (`token_issued`, actor = the operator, `issued_via: "admin console"`, the
 lifetime and the token's `jti` — never the token). The session and the audit record are written
-through the normal write path, so in cluster mode they replicate: mint on the **leader** (a
-follower cannot accept the write) and the token then works against every node.
+through the normal write path, so in cluster mode they replicate: mint on any node (a follower
+forwards the writes to the leader) and the token then works against every node.
 
 For a **stopped** store — the server is down, or the data directory is being rebuilt — mint one on
 the host with `hearth admin token` instead. The command opens the data directory itself, so it

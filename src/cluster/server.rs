@@ -14,8 +14,8 @@ use tracing::{debug, info, warn};
 
 use crate::cluster::rpc::{
     raft_service_server::{RaftService, RaftServiceServer},
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
-    VoteRequest, VoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, ForwardWriteRequest, ForwardWriteResponse,
+    InstallSnapshotRequest, InstallSnapshotResponse, VoteRequest, VoteResponse,
 };
 use crate::config::ClusterConfig;
 
@@ -41,6 +41,19 @@ pub trait IncomingRpcDispatch: Send + Sync + 'static {
     /// Handle one snapshot chunk from the leader.
     /// Payload is JSON-encoded `InstallSnapshotRequest<HearthRaftConfig>`.
     fn install_snapshot(
+        &self,
+        payload: &[u8],
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
+
+    /// Handle a write a follower forwarded to this node (see
+    /// [`ClusterEngine`](crate::cluster::ClusterEngine)'s write path).
+    ///
+    /// Payload is a JSON-encoded [`RaftCommand`](crate::cluster::RaftCommand);
+    /// the answer is a JSON-encoded
+    /// [`ForwardedWriteOutcome`](crate::cluster::ForwardedWriteOutcome). Every
+    /// refusal the receiver decides on travels in-band in that outcome, so an
+    /// `Err` here means only that the answer could not be encoded.
+    fn forward_write(
         &self,
         payload: &[u8],
     ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
@@ -107,6 +120,23 @@ impl<D: IncomingRpcDispatch> RaftService for RaftRpcHandler<D> {
             .map(|resp| Response::new(InstallSnapshotResponse { payload: resp }))
             .map_err(|e| {
                 warn!(error = %e, "InstallSnapshot dispatch error");
+                Status::internal(e)
+            })
+    }
+
+    async fn forward_write(
+        &self,
+        request: Request<ForwardWriteRequest>,
+    ) -> Result<Response<ForwardWriteResponse>, Status> {
+        let payload = request.into_inner().payload;
+        debug!("received ForwardWrite from peer");
+
+        self.dispatch
+            .forward_write(&payload)
+            .await
+            .map(|resp| Response::new(ForwardWriteResponse { payload: resp }))
+            .map_err(|e| {
+                warn!(error = %e, "ForwardWrite dispatch error");
                 Status::internal(e)
             })
     }
@@ -193,6 +223,10 @@ impl IncomingRpcDispatch for NoopDispatch {
     }
 
     async fn install_snapshot(&self, _payload: &[u8]) -> Result<Vec<u8>, String> {
+        Err("Raft engine not initialised".to_string())
+    }
+
+    async fn forward_write(&self, _payload: &[u8]) -> Result<Vec<u8>, String> {
         Err("Raft engine not initialised".to_string())
     }
 }
