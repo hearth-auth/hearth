@@ -42,10 +42,14 @@ child roles, extra organization roles); `?cascade=true` removes those references
 the role. A user's organization-scoped admin permissions include those granted in an organization
 it is not a member of, since permission resolution honours them.
 
-A check that affects many users visits at most 10 000 of them (and at most 50 000 permission
-resolutions, one per user plus one per organization it belongs to); past that bound the call is
-refused with `503` rather than half-checked, so a sub-admin cannot delete a larger organization or
-strip an admin permission from a role with more holders — `hearth.admin` skips the walk. The web
+A check that affects many users resolves only the users who can out-rank anyone: it enumerates
+once the realm's admin holders (holders of any role granting an admin permission — directly,
+through a group or an inherited role, or as an extra organization role — and direct grantees of
+one), and every other affected user passes at the cost of a set lookup, so deleting a
+5 000-member organization takes about a second. The bounds fail closed with `503` rather than
+half-check: 100 000 affected users, 10 000 admin holders in the realm, and 50 000 permission
+resolutions (one per admin holder plus one per organization it belongs to). `hearth.admin` skips
+the walk. The web
 console admits only `hearth.admin`, so the rule holds there by construction. `hearth.yaml`
 reconciliation (`roles:`) is operator-authoritative and is not subject to it.
 

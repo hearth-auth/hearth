@@ -1177,3 +1177,222 @@ async fn non_member_org_scoped_authority_counts_for_the_ceiling() {
         .expect_err("an additional role for a non-member");
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
 }
+
+// ── round 3: the ceiling's cost does not grow with non-admin members ─────────
+
+/// Deleting a 5,000-member organization runs the ceiling on every member.
+/// Resolving each member's permissions cost ~40 ms in a debug build (minutes
+/// for the org); the check now resolves only the realm's admin-permission
+/// holders, so plain members cost nothing. With one out-ranking member the
+/// delete is refused, without one it succeeds — both well inside the test
+/// timeout.
+#[tokio::test]
+async fn org_delete_ceiling_scales_to_large_orgs() {
+    const MEMBERS: usize = 5_000;
+    let f = Fixture::new().await;
+    let svc = IdentityAdminSvc::new(f.state());
+    let guarded = f.org("guarded");
+    f.fill(&guarded, MEMBERS);
+    let root = f.org_superuser(&guarded);
+    let open = f.org("open");
+    f.fill(&open, MEMBERS);
+    let token = f.sub_admin("hearth.realm.admin");
+    let delete = |org: &OrganizationId| {
+        f.grpc_req(
+            &token,
+            idpb::DeleteOrganizationRequest {
+                id: org.as_uuid().to_string(),
+            },
+        )
+    };
+
+    let refused = svc
+        .delete_organization(delete(&guarded))
+        .await
+        .expect_err("an org with an out-ranking member");
+    let allowed = svc.delete_organization(delete(&open)).await;
+
+    assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+    assert!(f.org_exists(&guarded) && f.is_member(&guarded, &root));
+    allowed.expect("an org of plain members");
+    assert!(!f.org_exists(&open));
+}
+
+impl Fixture {
+    /// Puts `user` in a child group nested in a parent group that is
+    /// assigned `role`.
+    fn nested_group_holder(&self, user: &UserId, role: &RoleId) {
+        let rbac = self.h.rbac();
+        let mk_group = |slug: &str| {
+            rbac.create_group(
+                &self.realm,
+                &CreateGroupRequest {
+                    name: slug.into(),
+                    slug: slug.into(),
+                    description: None,
+                },
+            )
+            .expect("group")
+            .id
+        };
+        let (parent, child) = (mk_group("parent"), mk_group("child"));
+        rbac.add_group_member(&self.realm, &child, &GroupMember::User(user.clone()))
+            .expect("member");
+        rbac.add_group_member(&self.realm, &parent, &GroupMember::Group(child))
+            .expect("nest");
+        rbac.assign_role(
+            &self.realm,
+            &AssignRoleRequest {
+                subject: Subject::Group(parent),
+                role_id: role.clone(),
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("group assignment");
+    }
+}
+
+/// Past its first few users a multi-user check resolves only the realm's
+/// admin holders, so that set must include every way a user can hold an
+/// admin permission. Each out-ranking user below comes last, after 20 plain
+/// users, so it is judged through the holder set.
+#[tokio::test]
+async fn admin_holder_set_covers_every_source_of_admin_permission() {
+    use hearth::protocol::admin_auth::{check_users_admin_ceiling, UserCeilingError};
+
+    let f = Fixture::new().await;
+    let admin_role = f.role_id("realm.admin");
+    let plain: Vec<UserId> = (0..20).map(|i| f.user(&format!("p{i}"))).collect();
+    let actor = vec!["hearth.realm.admin".to_string()];
+    let org = f.org("acme");
+    let rbac = f.h.rbac();
+
+    // Realm-level assignment of an admin role.
+    let direct = f.user("direct");
+    f.assign(&direct, &admin_role);
+    // Through a nested group: child group ⊂ parent group, parent assigned.
+    let nested = f.user("nested");
+    f.nested_group_holder(&nested, &admin_role);
+    // A role that inherits an admin role.
+    let heir = f.user("heir");
+    let lead = rbac
+        .create_role(
+            &f.realm,
+            &CreateRoleRequest {
+                name: "lead".into(),
+                description: None,
+                permissions: vec![],
+                parent_roles: vec![admin_role.clone()],
+                scope_kind: Default::default(),
+                allow_reserved_permissions: false,
+            },
+        )
+        .expect("role")
+        .id;
+    f.assign(&heir, &lead);
+    // An extra org role.
+    let extra = f.user("extra");
+    f.join(&org, &extra);
+    rbac.add_additional_role(&f.realm, &org, &extra, "realm.admin", None)
+        .expect("extra role");
+    // An org-scoped assignment for a non-member.
+    let scoped = f.user("scoped");
+    rbac.assign_role(
+        &f.realm,
+        &AssignRoleRequest {
+            subject: Subject::User(scoped.clone()),
+            role_id: admin_role.clone(),
+            scope: Scope::Org {
+                org_id: org.clone(),
+            },
+            assigned_by: None,
+        },
+    )
+    .expect("org-scoped assignment");
+    // A direct grant of an admin permission the actor lacks.
+    let granted = f.user("granted");
+    rbac.grant_user_permission(
+        &f.realm,
+        &UserPermissionGrant {
+            realm_id: f.realm.clone(),
+            user_id: granted.clone(),
+            permission: Permission::new("hearth.users.admin").expect("perm"),
+            scope: Scope::Realm,
+            granted_at: hearth::core::Timestamp::from_micros(0),
+            granted_by: None,
+        },
+    )
+    .expect("grant");
+
+    let check = |last: Option<&UserId>| {
+        let users: Vec<&UserId> = plain.iter().chain(last).collect();
+        check_users_admin_ceiling(f.h.identity(), rbac, &f.realm, users, &actor)
+    };
+    assert_eq!(check(None), Ok(()), "plain users only");
+    for (source, user) in [
+        ("realm assignment", &direct),
+        ("nested group", &nested),
+        ("inherited role", &heir),
+        ("extra org role", &extra),
+        ("org-scoped assignment, non-member", &scoped),
+        ("direct grant", &granted),
+    ] {
+        assert_eq!(
+            check(Some(user)),
+            Err(UserCeilingError::Exceeded),
+            "{source}"
+        );
+    }
+}
+
+/// `POST /scim/v2/Groups` checks every member before creating the
+/// organization: an unknown or malformed member leaves no half-created group.
+#[tokio::test]
+async fn scim_create_group_with_a_bad_member_creates_nothing() {
+    let f = Fixture::new().await;
+    let root = f.sub_admin("realm.admin");
+    let plain = f.user("plain");
+    let ghost = UserId::new(uuid::Uuid::new_v4());
+    let malformed = json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+        "displayName": "malformed",
+        "members": [{"value": "not-a-user-id", "type": "User"}],
+    });
+
+    let unknown = f
+        .scim(
+            "POST",
+            "/scim/v2/Groups",
+            &root,
+            Some(&group_body("unknown", &[&plain, &ghost])),
+        )
+        .await;
+    let bad = f
+        .scim("POST", "/scim/v2/Groups", &root, Some(&malformed))
+        .await;
+
+    assert_eq!(unknown, StatusCode::BAD_REQUEST, "unknown member");
+    assert_eq!(bad, StatusCode::BAD_REQUEST, "malformed member");
+    let names: Vec<String> =
+        f.h.identity()
+            .list_user_organizations(&f.realm, &plain, None, 10)
+            .expect("orgs")
+            .items
+            .iter()
+            .map(|m| m.org_id().as_uuid().to_string())
+            .collect();
+    assert!(
+        names.is_empty(),
+        "the plain member joined nothing: {names:?}"
+    );
+    for slug in ["unknown", "malformed"] {
+        assert!(
+            f.h.identity()
+                .get_organization_by_slug(&f.realm, slug)
+                .expect("lookup")
+                .is_none(),
+            "no organization '{slug}' was created"
+        );
+    }
+}
