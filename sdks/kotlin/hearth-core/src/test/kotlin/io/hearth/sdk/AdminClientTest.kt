@@ -185,6 +185,20 @@ class AdminClientTest {
     }
 
     @Test
+    fun `regenerateClientSecret POSTs and returns the new secret`() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"client_id":"c1","client_name":"svc","redirect_uris":[],"grant_types":[],"client_secret":"new-secret"}""",
+            ),
+        )
+        val result = client.regenerateClientSecret("c1")
+        val req = server.takeRequest()
+        assertEquals("/admin/applications/c1/regenerate-secret", req.path)
+        assertEquals("POST", req.method)
+        assertEquals("new-secret", result.clientSecret)
+    }
+
+    @Test
     fun `getClient GETs admin slash clients slash id`() = runTest {
         server.enqueue(MockResponse().setBody(clientJson()).setResponseCode(200))
         client.getClient("c1")

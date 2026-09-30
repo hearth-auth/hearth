@@ -142,6 +142,15 @@ export class AdminClient {
     return this.request("PATCH", this.buildUrl(`/admin/applications/${id}`), params);
   }
 
+  /**
+   * Replace a confidential client's secret
+   * (`POST /admin/applications/{id}/regenerate-secret`). The response carries
+   * the new `client_secret` once; the old secret stops working immediately.
+   */
+  async regenerateClientSecret(id: string): Promise<Record<string, unknown>> {
+    return this.request("POST", this.buildUrl(`/admin/applications/${id}/regenerate-secret`), {});
+  }
+
   /** Delete an OAuth client by ID. */
   async deleteClient(id: string): Promise<void> {
     await this.request("DELETE", this.buildUrl(`/admin/applications/${id}`));

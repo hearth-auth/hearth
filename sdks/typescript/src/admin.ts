@@ -118,6 +118,15 @@ export class AdminClient {
     return this.request("PATCH", `/admin/applications/${clientId}`, params);
   }
 
+  /**
+   * POST /admin/applications/:id/regenerate-secret — replace a confidential
+   * client's secret. The response carries the new `client_secret` once; the
+   * old secret stops working immediately.
+   */
+  async regenerateClientSecret(clientId: string): Promise<Record<string, unknown>> {
+    return this.post(`/admin/applications/${clientId}/regenerate-secret`, {});
+  }
+
   /** DELETE /admin/applications/:id — delete a client. */
   async deleteClient(clientId: string): Promise<void> {
     const resp = await fetch(`${this.baseUrl}/admin/applications/${clientId}`, {

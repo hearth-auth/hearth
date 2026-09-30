@@ -414,9 +414,11 @@ SDK requirements:
   `client_secret_post`, `private_key_jwt`, `none`) and MUST surface a `client_secret` in the
   create response: it is the only time the server returns the generated secret. The server
   refuses a caller-chosen `client_secret` on these routes with `422`. All seven SDKs carry both
-  (PHP through the `createClient` array and its `AdminClient::AUTH_*` constants).
+  (PHP and Node through the `createClient` params/record; PHP also has `AdminClient::AUTH_*`).
 - `POST /admin/applications/{id}/regenerate-secret` returns the client record with a new
-  `client_secret`, once; the old secret stops working at once.
+  `client_secret`, once; the old secret stops working at once. SDKs MUST offer it on their admin
+  client: `regenerateClientSecret` (TypeScript, Node, PHP, Kotlin), `RegenerateClientSecret`
+  (Go), `regenerate_client_secret` (Python, Rust).
 - An RFC 7591 method MUST accept an optional initial access token and send it as
   `Authorization: Bearer` when it is given.
 

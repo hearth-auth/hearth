@@ -211,6 +211,20 @@ final class AdminClient
         return $this->patch("/admin/applications/{$id}", $params);
     }
 
+    /**
+     * Replaces a confidential client's secret
+     * (`POST /admin/applications/{id}/regenerate-secret`).
+     *
+     * The returned array carries the new `client_secret`, once; the old
+     * secret stops working immediately.
+     *
+     * @return array<string, mixed>
+     */
+    public function regenerateClientSecret(string $id): array
+    {
+        return $this->post("/admin/applications/{$id}/regenerate-secret", []);
+    }
+
     /** Deletes an OAuth client by ID. */
     public function deleteClient(string $id): void
     {

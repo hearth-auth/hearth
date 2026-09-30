@@ -174,6 +174,35 @@ describe("AdminClient — Clients, Roles, Groups, OrgMembers", () => {
     expect(init.method).toBe("POST");
   });
 
+  it("createClient passes token_endpoint_auth_method and returns the generated secret", async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: async () => ({ client_id: "cli_1", client_secret: "generated-once" }),
+    });
+    const created = await client.createClient({
+      client_name: "svc",
+      redirect_uris: [],
+      token_endpoint_auth_method: "client_secret_basic",
+    });
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string).token_endpoint_auth_method).toBe("client_secret_basic");
+    expect(created.client_secret).toBe("generated-once");
+  });
+
+  it("regenerateClientSecret sends POST /admin/applications/:id/regenerate-secret", async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ client_id: "cli_1", client_secret: "new-secret" }),
+    });
+    const result = await client.regenerateClientSecret("cli_1");
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://auth.example.com/admin/applications/cli_1/regenerate-secret");
+    expect(init.method).toBe("POST");
+    expect(result.client_secret).toBe("new-secret");
+  });
+
   it("listClients sends GET /admin/applications", async () => {
     fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => ({ items: [], next_cursor: null }) });
     await client.listClients();
