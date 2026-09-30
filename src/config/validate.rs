@@ -2202,6 +2202,32 @@ fn validate_app_profile_keys(
     }
 }
 
+/// A FAPI 2.0 Advanced realm accepts `private_key_jwt` only: the token
+/// endpoint refuses every client secret there, and the admin API refuses to
+/// create a secret-based client. A YAML application with a secret was
+/// accepted here and reconciled into a client that could never authenticate.
+fn validate_app_no_secret_in_fapi_advanced_realm(
+    prefix: &str,
+    realm_name: &str,
+    app_key: &str,
+    realm_fapi_profile: Option<&str>,
+    app: &super::types::ApplicationYamlConfig,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let advanced = realm_fapi_profile.is_some_and(|p| p.eq_ignore_ascii_case("advanced"));
+    if advanced && (app.confidential == Some(true) || app.client_secret.is_some()) {
+        issues.push(ValidationIssue {
+            field: format!("{prefix}.client_secret"),
+            reason: format!(
+                "application '{app_key}' in realm '{realm_name}' uses a client secret, but the \
+                 realm's fapi_profile is advanced, which accepts private_key_jwt only: a secret \
+                 could never authenticate. Remove `confidential`/`client_secret` and declare \
+                 the client's public keys in `jwks`"
+            ),
+        });
+    }
+}
+
 fn validate_realm_applications_all(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
     issues: &mut Vec<ValidationIssue>,
@@ -2240,28 +2266,14 @@ fn validate_realm_applications_all(
             }
             validate_app_id_token_alg(&prefix, app, cfg.fapi_profile.is_some(), issues);
             validate_app_profile_keys(&prefix, app, issues);
-            // A FAPI 2.0 Advanced realm accepts private_key_jwt only: the token
-            // endpoint refuses every client secret there, and the admin API
-            // refuses to create a secret-based client. A YAML application with
-            // a secret was accepted here and reconciled into a client that
-            // could never authenticate.
-            if cfg
-                .fapi_profile
-                .as_deref()
-                .is_some_and(|p| p.eq_ignore_ascii_case("advanced"))
-                && (app.confidential == Some(true) || app.client_secret.is_some())
-            {
-                issues.push(ValidationIssue {
-                    field: format!("{prefix}.client_secret"),
-                    reason: format!(
-                        "application '{app_key}' in realm '{realm_name}' uses a client secret, \
-                         but the realm's fapi_profile is advanced, which accepts \
-                         private_key_jwt only: a secret could never authenticate. Remove \
-                         `confidential`/`client_secret` and declare the client's public keys \
-                         in `jwks`"
-                    ),
-                });
-            }
+            validate_app_no_secret_in_fapi_advanced_realm(
+                &prefix,
+                realm_name,
+                app_key,
+                cfg.fapi_profile.as_deref(),
+                app,
+                issues,
+            );
             // A confidential client whose `client_secret` is present but empty
             // authenticates with `Authorization: Basic base64("<client_id>:")`,
             // which any caller who knows the client id can send. The `is_none()`
