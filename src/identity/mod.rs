@@ -1052,11 +1052,21 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Returns tokens if the user has approved, or an appropriate error
     /// (`AuthorizationPending`, `SlowDown`, `DeviceCodeExpired`, `DeviceCodeDenied`).
+    ///
+    /// `dpop_jkt` is the thumbprint of a DPoP proof (RFC 9449) the caller has
+    /// already validated on the token request. When present, the access and
+    /// refresh tokens carry `cnf.jkt`, the grant family is bound to that key
+    /// and the response's `token_type` is `DPoP` — as for the
+    /// authorization-code grant. In a realm with a `fapi_profile`, or for a
+    /// FAPI 2.0 client, `None` is refused with
+    /// [`IdentityError::FapiViolation`] and the approved code stays
+    /// redeemable.
     fn poll_device_token(
         &self,
         realm_id: &RealmId,
         device_code: &str,
         client_id: &crate::core::ClientId,
+        dpop_jkt: Option<&str>,
     ) -> Result<OidcTokenResponse, IdentityError>;
 
     /// Revokes a token (RFC 7009).

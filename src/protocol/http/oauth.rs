@@ -2974,10 +2974,12 @@ async fn token_exchange_impl(
                 }
             };
 
-            match state
-                .identity
-                .poll_device_token(&realm_id, &device_code, &oauth_client_id)
-            {
+            match state.identity.poll_device_token(
+                &realm_id,
+                &device_code,
+                &oauth_client_id,
+                dpop_jkt.as_deref(),
+            ) {
                 Ok(response) => {
                     crate::metrics::metrics()
                         .tokens_issued_total
@@ -4201,10 +4203,12 @@ async fn realm_token_exchange(
                         .into_response()
                 }
             };
-            match state
-                .identity
-                .poll_device_token(&realm_id, &device_code, &oauth_client_id)
-            {
+            match state.identity.poll_device_token(
+                &realm_id,
+                &device_code,
+                &oauth_client_id,
+                dpop_jkt.as_deref(),
+            ) {
                 Ok(response) => (
                     StatusCode::OK,
                     Json(proto_to_rest_json(&pb::OidcTokenResponse::from(&response))),

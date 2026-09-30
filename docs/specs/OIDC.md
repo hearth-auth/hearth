@@ -140,6 +140,12 @@ Enforced for every authorization request in the realm:
 2. **PKCE S256 required** — `code_challenge` MUST be present; `code_challenge_method` MUST be `S256`.
 3. **`iss` in responses** — all redirect responses include `iss` per RFC 9207.
 
+Both profiles also require **sender-constrained tokens**: every token request in the realm — the
+`authorization_code`, `refresh_token`, `client_credentials`, `device_code` and `jwt-bearer`
+grants — MUST carry a valid `DPoP` proof (§3), whatever the client's own profile. A request without
+one is refused with `400 invalid_request` before anything is consumed: an approved device code or
+a jwt-bearer assertion stays redeemable with a proof.
+
 #### 2.1.2 Advanced (`FapiProfile::Advanced`)
 
 Enforces all Baseline requirements plus:
@@ -211,7 +217,8 @@ GET /authorize?request_uri=urn:...&client_id=fapi2-client
 
 #### 2.2.3 Token Endpoint Enforcement
 
-FAPI 2.0 clients MUST provide a DPoP proof header at the token endpoint.
+FAPI 2.0 clients MUST provide a DPoP proof header at the token endpoint, on every grant
+(`authorization_code`, `refresh_token`, `client_credentials`, `device_code`, `jwt-bearer`).
 Requests without the `DPoP` header are rejected:
 
 ```
@@ -306,7 +313,7 @@ DPoP is required for FAPI 2.0 clients (§2.2) and RECOMMENDED for all public cli
 
 ### 3.1 Access Token Binding
 
-When a token request includes a `DPoP` proof header, the issued access token carries a `cnf.jkt` claim containing the SHA-256 JWK thumbprint of the DPoP public key:
+When a token request includes a `DPoP` proof header, the issued access token carries a `cnf.jkt` claim containing the SHA-256 JWK thumbprint of the DPoP public key, and the response's `token_type` is `DPoP`. This holds for every grant that issues a token to a client: `authorization_code`, `device_code`, `refresh_token`, `client_credentials` and `jwt-bearer`:
 
 ```json
 {
@@ -318,7 +325,7 @@ Resource servers MUST verify that incoming DPoP proofs are signed by the key who
 
 ### 3.2 Refresh Token Binding (RFC 9449 §5)
 
-When the initial token request includes a DPoP proof, Hearth binds the entire grant family to the JWK thumbprint of the proving key. This binding is enforced on every subsequent use of the grant family:
+When the initial token request (`authorization_code` or `device_code` grant) includes a DPoP proof, Hearth binds the entire grant family to the JWK thumbprint of the proving key. This binding is enforced on every subsequent use of the grant family:
 
 - The issued refresh token is stored against the same `cnf.jkt`. Subsequent `refresh_token` grant requests MUST include a `DPoP` proof signed by the **same key pair** used at grant issuance.
 - A mismatch between the stored thumbprint and the presented proof is rejected with `invalid_dpop_proof`.

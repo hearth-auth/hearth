@@ -830,7 +830,7 @@ async fn device_grant_signs_the_id_token_with_the_clients_algorithm() {
         .unwrap();
     let tokens = h
         .identity()
-        .poll_device_token(&realm, &auth.device_code, &client)
+        .poll_device_token(&realm, &auth.device_code, &client, None)
         .unwrap();
     assert_eq!(header_alg(tokens.id_token()), "RS256");
     assert_eq!(header_alg(tokens.access_token()), "EdDSA");
