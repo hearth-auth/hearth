@@ -79,7 +79,9 @@ describe("DiscoveryClient", () => {
   it("throws DiscoveryError on invalid JSON response", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,
-      json: async () => { throw new Error("invalid json"); },
+      json: async () => {
+        throw new Error("invalid json");
+      },
     } as unknown as Response);
     const client = new DiscoveryClient(ISSUER, 10_000);
     await expect(client.discover()).rejects.toBeInstanceOf(DiscoveryError);

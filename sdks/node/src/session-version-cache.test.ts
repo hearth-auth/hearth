@@ -2,10 +2,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SessionVersionCache, type SessionVersionConfig } from "./session-version-cache.js";
-import {
-  SessionVersionRevokedError,
-  SessionVersionCacheStaleError,
-} from "./errors.js";
+import { SessionVersionRevokedError, SessionVersionCacheStaleError } from "./errors.js";
 
 const CFG: SessionVersionConfig = {
   enabled: true,
@@ -28,8 +25,13 @@ function makeCache(cfg: Partial<SessionVersionConfig> = {}) {
 }
 
 describe("SessionVersionCache", () => {
-  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
-  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
 
   it("seeds from snapshot and exposes a finite age after start", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
@@ -76,6 +78,9 @@ describe("SessionVersionCache", () => {
 
   it("stop() is idempotent and safe before start()", () => {
     const cache = makeCache();
-    expect(() => { cache.stop(); cache.stop(); }).not.toThrow();
+    expect(() => {
+      cache.stop();
+      cache.stop();
+    }).not.toThrow();
   });
 });

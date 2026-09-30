@@ -184,7 +184,11 @@ export class HearthClient {
    * @param codeVerifier - PKCE verifier returned by {@link beginLogin}.
    * @param redirectUri - Same `redirectUri` used in {@link beginLogin}.
    */
-  async completeLogin(code: string, codeVerifier: string, redirectUri: string): Promise<TokenResponse> {
+  async completeLogin(
+    code: string,
+    codeVerifier: string,
+    redirectUri: string,
+  ): Promise<TokenResponse> {
     return this.flows.completeLogin(code, codeVerifier, redirectUri);
   }
 

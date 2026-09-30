@@ -24,10 +24,7 @@ const DISCOVERY: OidcDiscovery = {
 };
 
 function makeClient(overrides: Partial<ResolvedConfig> = {}): IntrospectionClient {
-  return new IntrospectionClient(
-    { ...CONFIG, ...overrides },
-    async () => DISCOVERY,
-  );
+  return new IntrospectionClient({ ...CONFIG, ...overrides }, async () => DISCOVERY);
 }
 
 describe("IntrospectionClient", () => {
@@ -111,7 +108,9 @@ describe("IntrospectionClient", () => {
   it("throws IntrospectionError on invalid JSON response", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,
-      json: async () => { throw new Error("bad json"); },
+      json: async () => {
+        throw new Error("bad json");
+      },
     } as unknown as Response);
     await expect(makeClient().introspect("tok")).rejects.toBeInstanceOf(IntrospectionError);
   });
@@ -119,7 +118,10 @@ describe("IntrospectionClient", () => {
   it("throws IntrospectionError when endpoint missing from discovery", async () => {
     const client = new IntrospectionClient(
       { ...CONFIG, introspection_endpoint: null },
-      async () => ({ issuer: "https://auth.example.com", jwks_uri: "https://auth.example.com/jwks" }),
+      async () => ({
+        issuer: "https://auth.example.com",
+        jwks_uri: "https://auth.example.com/jwks",
+      }),
     );
     await expect(client.introspect("tok")).rejects.toBeInstanceOf(IntrospectionError);
   });

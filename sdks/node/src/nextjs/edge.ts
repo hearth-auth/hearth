@@ -13,7 +13,13 @@
  */
 
 import { createRemoteJWKSet, jwtVerify } from "jose";
-import type { JWTPayload, RemoteJWKSetOptions, JWSHeaderParameters, FlattenedJWSInput, GetKeyFunction } from "jose";
+import type {
+  JWTPayload,
+  RemoteJWKSetOptions,
+  JWSHeaderParameters,
+  FlattenedJWSInput,
+  GetKeyFunction,
+} from "jose";
 
 // ── Constant-time comparison (Web Crypto compatible) ─────────────────────────
 
@@ -181,7 +187,9 @@ export class EdgeToken {
  * const guardAdmin = requirePermission("users:write");
  * if (!guardAdmin(token)) return new Response(null, { status: 403 });
  */
-export function requirePermission(permission: string): (token: { hasPermission(p: string): boolean }) => boolean {
+export function requirePermission(
+  permission: string,
+): (token: { hasPermission(p: string): boolean }) => boolean {
   return (token) => token.hasPermission(permission);
 }
 
@@ -251,7 +259,9 @@ type JwkKeyArg = GetKeyFunction<JWSHeaderParameters, FlattenedJWSInput>;
  *
  * export const config = { matcher: ["/api/:path*"] };
  */
-export function hearthEdgeMiddleware(options: EdgeMiddlewareOptions): (req: RequestLike) => Promise<Response | undefined> {
+export function hearthEdgeMiddleware(
+  options: EdgeMiddlewareOptions,
+): (req: RequestLike) => Promise<Response | undefined> {
   const {
     issuerUrl,
     jwksUri,
@@ -260,10 +270,10 @@ export function hearthEdgeMiddleware(options: EdgeMiddlewareOptions): (req: Requ
     jwksCacheTtlMs = 10 * 60 * 1000,
   } = options;
 
-  const jwkSet: JwkKeyArg = createRemoteJWKSet(
-    new URL(jwksUri),
-    { cacheMaxAge: jwksCacheTtlMs, cooldownDuration: 30_000 } as RemoteJWKSetOptions,
-  ) as unknown as JwkKeyArg;
+  const jwkSet: JwkKeyArg = createRemoteJWKSet(new URL(jwksUri), {
+    cacheMaxAge: jwksCacheTtlMs,
+    cooldownDuration: 30_000,
+  } as RemoteJWKSetOptions) as unknown as JwkKeyArg;
 
   return async (req: RequestLike): Promise<Response | undefined> => {
     const authHeader = req.headers.get("authorization");
@@ -333,19 +343,28 @@ export function hearthEdgeMiddleware(options: EdgeMiddlewareOptions): (req: Requ
     // Scope / role / permission guards
     if (options.requiredScope && !token.hasScope(options.requiredScope)) {
       return new Response(
-        JSON.stringify({ error: "forbidden", error_description: "Insufficient scope, role, or permission" }),
+        JSON.stringify({
+          error: "forbidden",
+          error_description: "Insufficient scope, role, or permission",
+        }),
         { status: 403, headers: { "Content-Type": "application/json" } },
       );
     }
     if (options.requiredRole && !token.hasRole(options.requiredRole)) {
       return new Response(
-        JSON.stringify({ error: "forbidden", error_description: "Insufficient scope, role, or permission" }),
+        JSON.stringify({
+          error: "forbidden",
+          error_description: "Insufficient scope, role, or permission",
+        }),
         { status: 403, headers: { "Content-Type": "application/json" } },
       );
     }
     if (options.requiredPermission && !token.hasPermission(options.requiredPermission)) {
       return new Response(
-        JSON.stringify({ error: "forbidden", error_description: "Insufficient scope, role, or permission" }),
+        JSON.stringify({
+          error: "forbidden",
+          error_description: "Insufficient scope, role, or permission",
+        }),
         { status: 403, headers: { "Content-Type": "application/json" } },
       );
     }
