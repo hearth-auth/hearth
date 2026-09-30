@@ -494,8 +494,11 @@ mod tests {
             matches!(outcome, Err(KdfGateError::Overloaded { retry_after }) if retry_after == Duration::from_secs(3)),
             "past-bound op must shed with Overloaded + Retry-After, got {outcome:?}"
         );
+        // 250 ms is still before either permit can free (~300 ms), so the
+        // bound proves the probe was shed, not served late, with headroom for
+        // a loaded CI runner.
         assert!(
-            elapsed < Duration::from_millis(150),
+            elapsed < Duration::from_millis(250),
             "shed must be fast (bounded by max_queue_wait), took {elapsed:?}"
         );
 
