@@ -69,6 +69,31 @@ reason = "ip-address 10.5.0 bundled inside the npm CLI (node_modules/npm/node_mo
 id = "GHSA-rpw4-54j3-4h4q"
 reason = "Same bundled ip-address 10.5.0 inside the npm CLI (release tooling, dev scope); NAT64 local-use range classification flaw, unused by npm publish. Revisit when npm 11.x bundles ip-address >= 10.5.1."
 
+# guard: package=brace-expansion lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-6j4f-fj2g-mc7p"
+reason = "brace-expansion 5.0.9 bundled inside the npm CLI (node_modules/npm/node_modules/brace-expansion, release-tooling lockfile, dev scope); the lockfile's own node_modules/brace-expansion is 5.0.12 (fixed). Checked 2026-09-29: npm 11.20.0 and 12.1.0 both still bundle 5.0.9. DoS by deep recursion in parseCommaParts on a crafted pattern. npm expands only the brace patterns in this repo's own package.json `files` and ignore files, never external input. Revisit when npm bundles brace-expansion >= 5.0.12."
+
+# guard: package=brace-expansion lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-qhr7-859c-m2p7"
+reason = "brace-expansion 5.0.9 bundled inside the npm CLI (node_modules/npm/node_modules/brace-expansion, release-tooling lockfile, dev scope); the lockfile's own node_modules/brace-expansion is 5.0.12 (fixed). Checked 2026-09-29: npm 11.20.0 and 12.1.0 both still bundle 5.0.9. DoS by deep recursion on nested brace groups in a crafted pattern. npm expands only the brace patterns in this repo's own package.json `files` and ignore files, never external input. Revisit when npm bundles brace-expansion >= 5.0.12."
+
+# guard: package=brace-expansion lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-q2hr-2g5m-vwhr"
+reason = "brace-expansion 5.0.9 bundled inside the npm CLI (node_modules/npm/node_modules/brace-expansion, release-tooling lockfile, dev scope); the lockfile's own node_modules/brace-expansion is 5.0.12 (fixed). Checked 2026-09-29: npm 11.20.0 and 12.1.0 both still bundle 5.0.9. Quadratic CPU on a crafted `{a},b}` pattern. npm expands only the brace patterns in this repo's own package.json `files` and ignore files, never external input. Revisit when npm bundles brace-expansion >= 5.0.12."
+
+# guard: package=ip-address lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-h3mg-xc3c-68pw"
+reason = "ip-address 10.5.0 bundled inside the npm CLI (node_modules/npm/node_modules/ip-address, via npm's socks proxy support; release tooling, dev scope); the lockfile's own node_modules/ip-address is 10.7.2 (fixed). npm 11.20.0 and 12.1.0 still bundle 10.5.0 (checked 2026-09-29). The flaw needs a very long attacker-supplied IPv6 string. The release job configures no SOCKS proxy. Revisit when npm bundles ip-address >= 10.7.1."
+
+# guard: package=ip-address lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-j6r3-76f7-8jcv"
+reason = "ip-address 10.5.0 bundled inside the npm CLI (node_modules/npm/node_modules/ip-address, via npm's socks proxy support; release tooling, dev scope); the lockfile's own node_modules/ip-address is 10.7.2 (fixed). npm 11.20.0 and 12.1.0 still bundle 10.5.0 (checked 2026-09-29). The flaw is in isInSubnet allowlist checks, which npm does not perform. The release job configures no SOCKS proxy. Revisit when npm bundles ip-address >= 10.7.1."
+
 # guard: package=undici lockfile=package-lock.json
 [[IgnoredVulns]]
 id = "GHSA-3wwx-pv8p-q78v"
