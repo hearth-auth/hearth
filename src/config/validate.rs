@@ -2240,6 +2240,28 @@ fn validate_realm_applications_all(
             }
             validate_app_id_token_alg(&prefix, app, cfg.fapi_profile.is_some(), issues);
             validate_app_profile_keys(&prefix, app, issues);
+            // A FAPI 2.0 Advanced realm accepts private_key_jwt only: the token
+            // endpoint refuses every client secret there, and the admin API
+            // refuses to create a secret-based client. A YAML application with
+            // a secret was accepted here and reconciled into a client that
+            // could never authenticate.
+            if cfg
+                .fapi_profile
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case("advanced"))
+                && (app.confidential == Some(true) || app.client_secret.is_some())
+            {
+                issues.push(ValidationIssue {
+                    field: format!("{prefix}.client_secret"),
+                    reason: format!(
+                        "application '{app_key}' in realm '{realm_name}' uses a client secret, \
+                         but the realm's fapi_profile is advanced, which accepts \
+                         private_key_jwt only: a secret could never authenticate. Remove \
+                         `confidential`/`client_secret` and declare the client's public keys \
+                         in `jwks`"
+                    ),
+                });
+            }
             // A confidential client whose `client_secret` is present but empty
             // authenticates with `Authorization: Basic base64("<client_id>:")`,
             // which any caller who knows the client id can send. The `is_none()`
@@ -3984,6 +4006,61 @@ realms:
         assert_eq!(alg_issues(fapi_realm, "", "EdDSA"), 0, "FAPI realm + EdDSA");
         assert_eq!(alg_issues("", fapi_app, "EdDSA"), 0, "FAPI 2.0 app + EdDSA");
         assert_eq!(alg_issues("", "", "RS256"), 0, "no FAPI + RS256");
+    }
+
+    /// Both loaders a config reload (SIGHUP / `POST /admin/api/config/reload`)
+    /// and startup go through refuse a secret-based application in a realm
+    /// whose `fapi_profile` is advanced, naming realm and application: the
+    /// runtime refuses every client secret there.
+    #[test]
+    fn loaders_refuse_a_secret_application_in_a_fapi_advanced_realm() {
+        let yaml = r#"
+oidc:
+  issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
+storage:
+  data_dir: "/tmp/hearth-test"
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+email:
+  transport: smtp
+  from: "auth@example.com"
+  smtp:
+    host: "mail.example.com"
+    port: 587
+realms:
+  bank:
+    fapi_profile: advanced
+    applications:
+      ledger:
+        name: "Ledger"
+        redirect_uris: ["https://ledger.example.com/cb"]
+        confidential: true
+        client_secret: "a-long-enough-secret-value-123"
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hearth.yaml");
+        std::fs::write(&path, yaml).expect("write");
+        for (loader, result) in [
+            ("from_file", Config::from_file(&path)),
+            ("from_file_as_dev", Config::from_file_as_dev(&path)),
+        ] {
+            match result {
+                Err(ConfigError::ValidationError { field, reason }) => {
+                    assert_eq!(
+                        field, "realms.bank.applications.ledger.client_secret",
+                        "{loader}"
+                    );
+                    assert!(
+                        reason.contains("'ledger'") && reason.contains("'bank'"),
+                        "{loader}: {reason}"
+                    );
+                }
+                other => panic!("{loader}: expected the FAPI Advanced refusal, got {other:?}"),
+            }
+        }
     }
 
     /// A `profile: fapi2` application authenticates with `private_key_jwt`

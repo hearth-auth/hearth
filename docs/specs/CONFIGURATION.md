@@ -1320,7 +1320,7 @@ Each realm entry supports:
 | `auth` | object | — | Per-realm auth policy (MFA, password policy, rate limits, token TTLs, self-registration, and DCR). |
 | `applications` | map | — | Declarative OAuth 2.0 client definitions. |
 | `organizations` | map | — | Declarative organization definitions. |
-| `fapi_profile` | string | — | FAPI 2.0 Security Profile for the realm: `"baseline"` or `"advanced"`. When set, all clients in the realm must comply. `"baseline"` requires PAR + PKCE (S256). `"advanced"` adds JAR + JARM. Absent means standard OAuth 2.0 / OIDC rules apply. Can also be set at runtime via `PATCH /admin/realms/{id}/config`. |
+| `fapi_profile` | string | — | FAPI 2.0 Security Profile for the realm: `"baseline"` or `"advanced"`. When set, all clients in the realm must comply. `"baseline"` requires PAR + PKCE (S256). `"advanced"` adds JAR + JARM and accepts `private_key_jwt` client authentication only: an application of an `"advanced"` realm that is `confidential` or carries a `client_secret` fails `hearth config validate`, startup and reload, naming the realm and the application (declare `jwks` instead). Absent means standard OAuth 2.0 / OIDC rules apply. Can also be set at runtime via `PATCH /admin/realms/{id}/config`. |
 | `breach_check` | object | — | HIBP k-anonymity breach check on every password set/change. See below. |
 
 ### `realms.<name>.email`

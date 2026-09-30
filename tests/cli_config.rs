@@ -351,6 +351,102 @@ fn validate_accepts_a_saml_idp_certificate_bundle() {
     );
 }
 
+// === GA sweep 4 OAUTH round 3: secret apps in a FAPI 2.0 Advanced realm ===
+
+/// `VALID_CONFIG` plus a realm `bank` with `fapi_profile: advanced` and an
+/// application `ledger` whose credential lines are `app`.
+fn config_with_advanced_realm_app(app: &str) -> String {
+    format!(
+        concat!(
+            "{base}realms:\n",
+            "  bank:\n",
+            "    fapi_profile: advanced\n",
+            "    applications:\n",
+            "      ledger:\n",
+            "        name: \"Ledger\"\n",
+            "        redirect_uris: [\"https://ledger.example.com/cb\"]\n",
+            "{app}",
+        ),
+        base = VALID_CONFIG,
+        app = app,
+    )
+}
+
+/// A FAPI 2.0 Advanced realm accepts `private_key_jwt` only; the runtime
+/// refuses a secret-based client there. `config validate` passed such an
+/// application, and the server then ran with a client that could never
+/// authenticate. It must fail, naming the realm and the application.
+#[test]
+fn validate_returns_1_for_a_secret_application_in_a_fapi_advanced_realm() {
+    for app in [
+        "        confidential: true\n        client_secret: \"a-long-enough-secret-value-123\"\n",
+        "        client_secret: \"a-long-enough-secret-value-123\"\n",
+        "        confidential: true\n",
+    ] {
+        let output = run_validate(&config_with_advanced_realm_app(app));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{app:?}: {stderr}");
+        assert!(
+            stderr.contains("realms.bank.applications.ledger.client_secret"),
+            "{app:?}: the report must name the field: {stderr}"
+        );
+        assert!(
+            stderr.contains("'bank'")
+                && stderr.contains("'ledger'")
+                && stderr.contains("private_key_jwt"),
+            "{app:?}: the report must name the realm, the app and the required method: {stderr}"
+        );
+    }
+}
+
+/// `serve` refuses the same file at startup, with the same report.
+#[test]
+fn serve_refuses_a_secret_application_in_a_fapi_advanced_realm() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("hearth.yaml");
+    std::fs::write(
+        &config_path,
+        config_with_advanced_realm_app(
+            "        confidential: true\n        client_secret: \"a-long-enough-secret-value-123\"\n",
+        ),
+    )
+    .expect("write config");
+    let output = Command::new(hearth_bin())
+        .args(["serve", "-c", config_path.to_str().expect("utf-8 path")])
+        .output()
+        .expect("spawn hearth serve");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("realms.bank.applications.ledger.client_secret"),
+        "{stderr}"
+    );
+}
+
+/// Controls: a `jwks` (private_key_jwt) application in the Advanced realm, and
+/// a secret application in a Baseline realm, both validate.
+#[test]
+fn validate_accepts_keys_in_an_advanced_realm_and_secrets_in_a_baseline_realm() {
+    let jwks = "        jwks: {keys: [{kty: OKP, crv: Ed25519, kid: k1, alg: EdDSA, use: sig, \
+                x: \"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}]}\n";
+    let output = run_validate(&config_with_advanced_realm_app(jwks));
+    assert!(
+        output.status.success(),
+        "jwks app in an Advanced realm: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let baseline = config_with_advanced_realm_app(
+        "        confidential: true\n        client_secret: \"a-long-enough-secret-value-123\"\n",
+    )
+    .replace("fapi_profile: advanced", "fapi_profile: baseline");
+    let output = run_validate(&baseline);
+    assert!(
+        output.status.success(),
+        "secret app in a Baseline realm: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // === hearth config example ===
 
 #[test]
