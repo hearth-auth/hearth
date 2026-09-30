@@ -21,9 +21,10 @@ use crate::core::{OrganizationId, RealmId, UserId};
 use crate::identity::{
     CreateOrganizationRequest, Organization, OrganizationRole, UpdateOrganizationRequest,
 };
+use crate::protocol::admin_auth::{check_org_admin_ceiling, check_users_admin_ceiling};
 use crate::protocol::http::AppState;
 use crate::protocol::scim::auth::{authenticate, ScimAuth, ScimResource};
-use crate::protocol::scim::error::{from_identity_error, ScimError};
+use crate::protocol::scim::error::{from_ceiling_error, from_identity_error, ScimError};
 use crate::protocol::scim::etag::{check_if_match, resource_response};
 use crate::protocol::scim::filter::{self, FilterExpr};
 use crate::protocol::scim::patch_apply::apply_group_patch;
@@ -152,6 +153,60 @@ fn audit(
     );
 }
 
+/// The user ids `desired` names (entries that are not UUIDs are ignored).
+fn desired_member_ids(desired: &[ScimMember]) -> std::collections::HashSet<UserId> {
+    desired
+        .iter()
+        .filter_map(|m| uuid::Uuid::parse_str(&m.value).ok().map(UserId::new))
+        .collect()
+}
+
+/// The current members a reconciliation to `desired` removes. Owners and
+/// Admins are kept: SCIM reconciliation doesn't demote operator-assigned
+/// Owners/Admins who were created out-of-band (and last-owner protection in
+/// the engine would refuse an Owner anyway).
+fn stale_members(
+    current: &[crate::identity::OrganizationMembership],
+    desired: &std::collections::HashSet<UserId>,
+) -> Vec<UserId> {
+    current
+        .iter()
+        .filter(|m| !desired.contains(m.user_id()))
+        .filter(|m| !matches!(m.role(), OrganizationRole::Owner | OrganizationRole::Admin))
+        .map(|m| m.user_id().clone())
+        .collect()
+}
+
+/// Refuses, before any write, a membership change that would drop a member
+/// who out-ranks the caller: leaving the organization strips every admin
+/// permission the user holds only in it (GA sweep 4). The provisioning token
+/// acts with no admin permission, so it may drop no admin principal.
+fn check_member_removal(
+    state: &AppState,
+    auth: &ScimAuth,
+    org_id: &OrganizationId,
+    desired: &[ScimMember],
+) -> Result<(), ScimError> {
+    let current = state
+        .identity
+        .list_members(&auth.realm_id, org_id, None, 1000)
+        .map_err(|e| from_identity_error(&e))?;
+    let removed = stale_members(&current.items, &desired_member_ids(desired));
+    check_users_admin_ceiling(
+        state.identity.as_ref(),
+        state.rbac.as_ref(),
+        &auth.realm_id,
+        &removed,
+        &auth.actor_permissions,
+    )
+    .map_err(|e| {
+        from_ceiling_error(
+            e,
+            "a member this change removes holds admin permissions the caller lacks",
+        )
+    })
+}
+
 fn reconcile_members(
     state: &AppState,
     auth: &ScimAuth,
@@ -164,11 +219,7 @@ fn reconcile_members(
         .map_err(|e| from_identity_error(&e))?;
     let current_ids: std::collections::HashSet<UserId> =
         current.items.iter().map(|m| m.user_id().clone()).collect();
-
-    let desired_ids: std::collections::HashSet<UserId> = desired
-        .iter()
-        .filter_map(|m| uuid::Uuid::parse_str(&m.value).ok().map(UserId::new))
-        .collect();
+    let desired_ids = desired_member_ids(desired);
 
     // Add missing.
     for id in desired_ids.difference(&current_ids) {
@@ -184,20 +235,9 @@ fn reconcile_members(
         }
     }
 
-    // Remove stale (but skip if the member is an Owner — last-owner
-    // protection in the engine would fail anyway).
-    for id in current_ids.difference(&desired_ids) {
-        // Skip non-Member roles so SCIM reconciliation doesn't demote
-        // operator-assigned Owners/Admins who were created out-of-band.
-        let role = current
-            .items
-            .iter()
-            .find(|m| m.user_id() == id)
-            .map(crate::identity::OrganizationMembership::role);
-        if role == Some(OrganizationRole::Owner) || role == Some(OrganizationRole::Admin) {
-            continue;
-        }
-        let _ = state.identity.remove_member(&auth.realm_id, org_id, id);
+    // Remove stale. The caller ran `check_member_removal` first.
+    for id in stale_members(&current.items, &desired_ids) {
+        let _ = state.identity.remove_member(&auth.realm_id, org_id, &id);
     }
     Ok(())
 }
@@ -434,6 +474,9 @@ pub async fn replace_group(
     if let Err(resp) = provisioning_token_may_write(&auth, &existing) {
         return resp;
     }
+    if let Err(e) = check_member_removal(&state, &auth, &org_id, &body.members) {
+        return e.into_response();
+    }
 
     let req = UpdateOrganizationRequest {
         name: Some(body.display_name.clone()),
@@ -544,6 +587,9 @@ pub async fn patch_group(
     if let Err(e) = apply_group_patch(&mut scim, &body.operations) {
         return e.into_response();
     }
+    if let Err(e) = check_member_removal(&state, &auth, &org_id, &scim.members) {
+        return e.into_response();
+    }
 
     // Apply displayName change.
     if scim.display_name != existing.name() {
@@ -647,6 +693,21 @@ pub async fn delete_group(
         }
     }
 
+    // Deleting the organization strips every admin permission its members
+    // hold only in it (GA sweep 4).
+    if let Err(e) = check_org_admin_ceiling(
+        state.identity.as_ref(),
+        state.rbac.as_ref(),
+        &auth.realm_id,
+        &org_id,
+        &auth.actor_permissions,
+    ) {
+        return from_ceiling_error(
+            e,
+            "a member of this group holds admin permissions the caller lacks",
+        )
+        .into_response();
+    }
     match state.identity.delete_organization(&auth.realm_id, &org_id) {
         Ok(()) => {
             audit(

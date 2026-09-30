@@ -150,6 +150,8 @@ SCIM provisioning tokens (bearer-token auth) cannot modify or delete admin princ
 
 Requests authenticated with an admin JWT (the fallback path above) are subject to the same privilege ceiling as the REST admin API: the caller may not modify or delete a user who holds an admin permission the caller lacks. `hearth.admin` outranks everyone; a `hearth.users.admin` sub-admin may act only on users whose admin permissions it holds itself.
 
+The same rule covers Groups: `PUT` or `PATCH /scim/v2/Groups/{id}` that removes a member holding an admin permission the caller lacks (organization-scoped admin permissions included), and `DELETE /scim/v2/Groups/{id}` of an organization with such a member, answer `403` before anything is written. The provisioning token holds no admin permission, so it may not remove an admin principal from a group or delete a group that has one as a member.
+
 If you need to deprovision or demote an admin user via SCIM:
 1. Remove the admin role from the user through the Admin API or Admin UI first.
 2. Retry the SCIM operation after the role change has taken effect.
