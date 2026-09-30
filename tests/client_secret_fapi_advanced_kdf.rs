@@ -98,7 +98,6 @@ async fn an_advanced_realm_refuses_an_argon2_secret_without_touching_the_gate() 
             ("introspect", vec![("token", "not-a-token")]),
             ("revoke", vec![("token", "not-a-token")]),
         ] {
-            let started = std::time::Instant::now();
             let resp = reqwest::Client::new()
                 .post(format!("{base}/{endpoint}"))
                 .header("X-Realm-ID", realm.as_uuid().to_string())
@@ -107,19 +106,21 @@ async fn an_advanced_realm_refuses_an_argon2_secret_without_touching_the_gate() 
                 .send()
                 .await
                 .unwrap();
-            let elapsed = started.elapsed();
             let status = resp.status().as_u16();
             let body: serde_json::Value = resp.json().await.unwrap_or_default();
-            assert_eq!(status, 401, "{who} /{endpoint}: {body}");
+            // The gate is held for the whole loop: a request that reached it
+            // would be shed with 503 after the queue-wait budget. A 401 that
+            // names private_key_jwt therefore proves the refusal came before
+            // the gate, without a wall-clock bound a loaded runner can break.
+            assert_eq!(
+                status, 401,
+                "{who} /{endpoint}: must be refused before the gate (503 = waited on it): {body}"
+            );
             assert!(
                 body["error_description"]
                     .as_str()
                     .is_some_and(|d| d.contains("private_key_jwt")),
                 "{who} /{endpoint}: the refusal names private_key_jwt: {body}"
-            );
-            assert!(
-                elapsed < Duration::from_millis(150),
-                "{who} /{endpoint}: refused without waiting on the gate ({elapsed:?})"
             );
         }
     }

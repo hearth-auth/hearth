@@ -885,6 +885,12 @@ fn a_failed_epoch_bump_is_retried_until_other_nodes_bind() {
         "a suspension whose epoch bump failed never bound on another node after the fault \
          cleared: the owed bump was not retried"
     );
+    // The reloader writes the bump first and settles its owed count after, so
+    // the other node can observe the bump a moment before the count drops.
+    // Wait for it within the same deadline rather than racing it.
+    while asserting_node.control.owed_bumps() != 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(
         asserting_node.control.owed_bumps(),
         0,
