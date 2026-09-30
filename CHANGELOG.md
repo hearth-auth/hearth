@@ -140,6 +140,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   REST router now carries `Retry-After` (2 s unless the handler sets its own).
 
 ### Fixed
+- **PHP SDK** — `TokenVerifier::verify()` now rejects a JWT whose signature is not 64 bytes, or a
+  JWKS key that is not 32 bytes, with `TokenInvalidException`. It used to let libsodium's
+  `SodiumException` escape, which `HearthMiddleware` does not catch, so such a request failed
+  with an uncaught exception instead of a `401`.
 - **SCIM Groups handle the whole membership.** `GET /scim/v2/Groups/{id}` lists every member
   (it stopped at 1,000), and `PUT` / `PATCH` reconcile against the full membership, so members
   beyond the first 1,000 are removed when a request drops them. A membership change naming a
