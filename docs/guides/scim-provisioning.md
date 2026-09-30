@@ -160,6 +160,8 @@ If you need to deprovision or demote an admin user via SCIM:
 
 SCIM Groups are Hearth organizations. An organization created through SCIM (`POST /scim/v2/Groups`) carries a durable "provisioned by SCIM" marker; no request field sets or clears it, and backups carry it. The realm's SCIM **bearer token** may read every organization but may replace, patch or delete **only** the ones SCIM created — an organization created through the admin API, the console or `hearth.yaml` answers `403` to the token's `PUT`, `PATCH` and `DELETE`. Admin-token callers on the fallback path keep their rights (they need `hearth.realm.admin`, see above).
 
+A group's `members` is always its full membership: `GET` lists every member, and `PUT` / `PATCH` reconcile against every member, however large the organization. A membership change is checked before anything is written — a member id that is not a user of the realm answers `400 invalidValue`, and removing an out-ranking member answers `403` — and a write that still fails part-way fails the request (`500`, or the underlying error's status) with a `detail` naming the failed step and how many additions and removals were applied; it is never reported as success.
+
 ### Create a group
 
 ```bash

@@ -37,6 +37,11 @@ include those it holds only through an organization-scoped role or grant. The ru
   inherits from it, members of groups assigned one, and users holding one as an extra
   organization role. An edit that removes no admin permission is not checked.
 
+`DELETE /admin/roles/{id}` answers `409 role_in_use` while the role is referenced (assignments,
+child roles, extra organization roles); `?cascade=true` removes those references atomically with
+the role. A user's organization-scoped admin permissions include those granted in an organization
+it is not a member of, since permission resolution honours them.
+
 A check that affects many users visits at most 10 000 of them (and at most 50 000 permission
 resolutions, one per user plus one per organization it belongs to); past that bound the call is
 refused with `503` rather than half-checked, so a sub-admin cannot delete a larger organization or
