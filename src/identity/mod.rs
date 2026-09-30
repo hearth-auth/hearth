@@ -3051,8 +3051,10 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Returns the realm's live token revocations — revoked access-token
     /// JTIs, blocked DPoP key thumbprints and revoked AAT JTIs — for backup
-    /// export (audit GA 2026-09-28 M3). JTIs already past their `exp` are
-    /// omitted: the token they name can no longer validate anywhere.
+    /// export (audit GA 2026-09-28 M3) — and every non-zero user
+    /// required-action generation (GA sweep 4). JTIs already past their
+    /// `exp` are omitted: the token they name can no longer validate
+    /// anywhere.
     ///
     /// Read-only: the exporter calls it while holding the backup barrier.
     fn export_revocations(
@@ -3063,6 +3065,8 @@ pub trait IdentityEngine: Send + Sync {
     /// Restores one revocation and applies it to this node's in-memory
     /// blocklists, so a token revoked before the backup stays dead after the
     /// restore. A JTI whose `exp` has passed is [`ImportOutcome::Skipped`].
+    /// A required-action generation only ever raises the node's counter; one
+    /// at or below it is [`ImportOutcome::Skipped`] in either restore mode.
     fn import_revocation(
         &self,
         realm_id: &RealmId,

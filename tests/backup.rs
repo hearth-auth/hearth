@@ -3345,8 +3345,10 @@ async fn restore_keeps_revoked_jtis_and_blocked_dpop_keys() {
         "a token bound to a DPoP key blocked before the backup validates again after the \
          restore ({after:?})"
     );
+    // The JTI and the DPoP key, plus the seeded user's required-action
+    // generation (`set_password` revokes the user's sessions, bumping it).
     assert_eq!(
-        report.revocations.created, 2,
+        report.revocations.created, 3,
         "the report counts the restored revocations"
     );
 }
@@ -3683,4 +3685,101 @@ mod export_under_blocking_pool_pressure {
             "every write parked on the barrier completes once the export releases it"
         );
     }
+}
+
+// ── required-action generations survive a restore (GA sweep 4) ────────────────
+
+/// A required-action token is refused once its user's sessions are revoked:
+/// the revocation bumps the user's `ra:gen` counter and the token carries the
+/// counter it was minted under. The archive did not carry the counter, so a
+/// restore reset it to 0 and every RA token minted before the first
+/// revocation (15-minute TTL, realm signing key restored verbatim) validated
+/// again. A second restore into the same node must not lower a counter the
+/// node has raised since.
+#[tokio::test]
+async fn restore_keeps_required_action_generations() {
+    use hearth::core::Timestamp;
+    use hearth::identity::ra_token::RaTokenError;
+    use hearth::identity::{MfaProof, RequiredAction};
+
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, email, _password) = seeded_realm(&src);
+    let user = src
+        .identity()
+        .get_user_by_email(&realm, &email)
+        .expect("lookup")
+        .expect("seeded user")
+        .id()
+        .clone();
+    let now = Timestamp::from_micros(
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_micros(),
+        )
+        .expect("micros"),
+    );
+    let mint = |h: &common::TestHarness| {
+        h.identity()
+            .generate_browser_ra_token(
+                &realm,
+                &user,
+                vec![RequiredAction::UpdatePassword],
+                None,
+                MfaProof::None,
+                None,
+                now,
+            )
+            .expect("mint RA token")
+    };
+    let revoked = mint(&src);
+    src.identity()
+        .revoke_all_user_sessions(&realm, &user, None)
+        .expect("revoke the user's sessions");
+    let live = mint(&src);
+    assert!(matches!(
+        src.identity().validate_ra_token(&realm, &revoked, now),
+        Err(RaTokenError::Revoked)
+    ));
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open archive");
+    let opts = ImportOptions {
+        mode: RestoreMode::Skip,
+        ..import_opts_with_passphrase()
+    };
+    let importer = make_importer(&dst);
+    let report = importer
+        .import_realm(&slug, &reader, &opts)
+        .expect("import realm");
+    assert_eq!(report.realms.created, 1, "realm must be restored");
+
+    dst.identity()
+        .validate_ra_token(&realm, &live, now)
+        .expect("an RA token minted after the revocation survives the restore");
+    let after = dst.identity().validate_ra_token(&realm, &revoked, now);
+    assert!(
+        matches!(after, Err(RaTokenError::Revoked)),
+        "an RA token whose flow was ended before the backup validates again after the \
+         restore ({:?})",
+        after.map(|c| c.generation)
+    );
+
+    // The restored node revokes again; restoring the same archive a second
+    // time must not wind the counter back and revive `live`.
+    dst.identity()
+        .revoke_all_user_sessions(&realm, &user, None)
+        .expect("revoke on the restored node");
+    importer
+        .import_realm(&slug, &reader, &opts)
+        .expect("second import");
+    let after = dst.identity().validate_ra_token(&realm, &live, now);
+    assert!(
+        matches!(after, Err(RaTokenError::Revoked)),
+        "a second restore lowered the generation and revived a revoked RA token ({:?})",
+        after.map(|c| c.generation)
+    );
 }
