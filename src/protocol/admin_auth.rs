@@ -568,15 +568,27 @@ pub enum UserCeilingError {
 /// organizations than this is refused (fail closed) rather than half-checked.
 const MAX_CEILING_ORGS: usize = 1_000;
 
-/// Most distinct users one multi-user ceiling check visits: the members of a
-/// group (and of every group nested in it), of an organization, or every
-/// holder of a role. A larger set is refused (fail closed) rather than
-/// half-checked; a `hearth.admin` actor skips the walk entirely.
+/// Most users in a realm who may hold an admin-grade permission (the
+/// candidates a multi-user ceiling check resolves). A realm with more is
+/// refused (fail closed) for sub-admin multi-user operations.
 const MAX_CEILING_USERS: usize = 10_000;
 
+/// Most distinct users one multi-user ceiling check visits: the members of a
+/// group (and of every group nested in it), of an organization, or every
+/// holder of a role. A plain (non-admin) user costs one set lookup, so this
+/// only bounds the listing; a larger set is refused (fail closed). A
+/// `hearth.admin` actor skips the walk entirely.
+const MAX_CEILING_AFFECTED_USERS: usize = 100_000;
+
+/// Affected users a multi-user check resolves one by one before it builds the
+/// realm's admin-holder set instead: for a handful of users direct
+/// resolution is cheaper than enumerating the holders.
+const CEILING_DIRECT_CHECKS: usize = 8;
+
 /// Most permission resolutions one multi-user ceiling check performs (each
-/// visited user costs one, plus one per organization it belongs to). Keeps a
-/// walk over many users who each belong to many organizations bounded.
+/// resolved user costs one, plus one per organization it belongs to). Keeps a
+/// walk over many admin holders who each belong to many organizations
+/// bounded.
 const MAX_CEILING_RESOLUTIONS: usize = 50_000;
 
 /// Most roles a role-change ceiling check reads to find the roles that
@@ -766,9 +778,19 @@ fn target_admin_permissions(
 }
 
 /// One multi-user ceiling check: the rule of [`check_user_admin_ceiling`]
-/// applied to every user it is shown, each user once, within
-/// [`MAX_CEILING_USERS`] users and [`MAX_CEILING_RESOLUTIONS`] resolutions.
-/// Callers skip it for a `hearth.admin` actor.
+/// applied to every user it is shown, each user once.
+///
+/// Only a user who holds an admin-grade permission can out-rank the actor,
+/// and those are few. After [`CEILING_DIRECT_CHECKS`] users resolved one by
+/// one, the walk enumerates once the realm's *admin holders* — every user
+/// who may hold an admin-grade permission, see [`admin_holders`] — and from
+/// then on resolves only affected users in that set; any other user holds
+/// no admin permission and passes at the cost of a set lookup. The rule
+/// applied to each resolved user is unchanged.
+///
+/// Bounds (each fails closed): [`MAX_CEILING_AFFECTED_USERS`] affected
+/// users, [`MAX_CEILING_USERS`] admin holders, [`MAX_CEILING_RESOLUTIONS`]
+/// resolutions. Callers skip the walk for a `hearth.admin` actor.
 struct CeilingWalk<'a> {
     identity: &'a dyn crate::identity::IdentityEngine,
     rbac: &'a dyn crate::rbac::RbacEngine,
@@ -777,6 +799,7 @@ struct CeilingWalk<'a> {
     users: std::collections::HashSet<UserId>,
     groups: std::collections::HashSet<crate::rbac::GroupId>,
     budget: usize,
+    holders: Option<std::collections::HashSet<UserId>>,
 }
 
 impl<'a> CeilingWalk<'a> {
@@ -794,6 +817,7 @@ impl<'a> CeilingWalk<'a> {
             users: std::collections::HashSet::new(),
             groups: std::collections::HashSet::new(),
             budget: MAX_CEILING_RESOLUTIONS,
+            holders: None,
         }
     }
 
@@ -801,8 +825,16 @@ impl<'a> CeilingWalk<'a> {
         if !self.users.insert(user.clone()) {
             return Ok(());
         }
-        if self.users.len() > MAX_CEILING_USERS {
+        if self.users.len() > MAX_CEILING_AFFECTED_USERS {
             return Err(ceiling_too_large(self.realm_id, "the affected users"));
+        }
+        if self.users.len() > CEILING_DIRECT_CHECKS {
+            if self.holders.is_none() {
+                self.holders = Some(admin_holders(self.rbac, self.realm_id)?);
+            }
+            if self.holders.as_ref().is_some_and(|h| !h.contains(user)) {
+                return Ok(());
+            }
         }
         user_ceiling(
             self.identity,
@@ -854,7 +886,8 @@ impl<'a> CeilingWalk<'a> {
 /// # Errors
 ///
 /// As [`check_user_admin_ceiling`]; also `Unresolved` when the group has more
-/// than [`MAX_CEILING_USERS`] members.
+/// than [`MAX_CEILING_AFFECTED_USERS`] members, or the realm more than
+/// [`MAX_CEILING_USERS`] admin holders.
 pub fn check_group_admin_ceiling(
     identity: &dyn crate::identity::IdentityEngine,
     rbac: &dyn crate::rbac::RbacEngine,
@@ -876,7 +909,7 @@ pub fn check_group_admin_ceiling(
 /// # Errors
 ///
 /// As [`check_user_admin_ceiling`]; also `Unresolved` past
-/// [`MAX_CEILING_USERS`] users.
+/// [`MAX_CEILING_AFFECTED_USERS`] users or [`MAX_CEILING_USERS`] admin holders.
 pub fn check_users_admin_ceiling<'u>(
     identity: &dyn crate::identity::IdentityEngine,
     rbac: &dyn crate::rbac::RbacEngine,
@@ -901,7 +934,8 @@ pub fn check_users_admin_ceiling<'u>(
 /// # Errors
 ///
 /// As [`check_user_admin_ceiling`]; also `Unresolved` when the organization
-/// has more than [`MAX_CEILING_USERS`] members.
+/// has more than [`MAX_CEILING_AFFECTED_USERS`] members, or the realm more
+/// than [`MAX_CEILING_USERS`] admin holders.
 pub fn check_org_admin_ceiling(
     identity: &dyn crate::identity::IdentityEngine,
     rbac: &dyn crate::rbac::RbacEngine,
@@ -954,7 +988,8 @@ pub enum RoleChange<'a> {
 /// # Errors
 ///
 /// As [`check_user_admin_ceiling`]; also `Unresolved` past
-/// [`MAX_CEILING_USERS`] holders or [`MAX_CEILING_ROLES`] roles in the realm.
+/// [`MAX_CEILING_AFFECTED_USERS`] holders, [`MAX_CEILING_USERS`] admin
+/// holders or [`MAX_CEILING_ROLES`] roles in the realm.
 /// An unknown role passes, so the operation itself answers "not found".
 pub fn check_role_change_admin_ceiling(
     identity: &dyn crate::identity::IdentityEngine,
@@ -1004,7 +1039,11 @@ pub fn check_role_change_admin_ceiling(
         }
         // One more than the bound: a full list means the walk overflows.
         let extra = rbac
-            .list_additional_role_holders(realm_id, &name, MAX_CEILING_USERS + 1)
+            .list_additional_role_holders(
+                realm_id,
+                &[name.as_str()],
+                MAX_CEILING_AFFECTED_USERS + 1,
+            )
             .map_err(|e| ceiling_unresolved(realm_id, "the role's org holders", &e))?;
         for user in &extra {
             walk.user(user)?;
@@ -1064,6 +1103,15 @@ fn roles_inheriting_from(
     realm_id: &RealmId,
     role: &crate::rbac::Role,
 ) -> Result<Vec<(crate::rbac::RoleId, String)>, UserCeilingError> {
+    let all = all_roles(rbac, realm_id)?;
+    Ok(inheriting(&all, vec![role]))
+}
+
+/// Every role of the realm; at most [`MAX_CEILING_ROLES`].
+fn all_roles(
+    rbac: &dyn crate::rbac::RbacEngine,
+    realm_id: &RealmId,
+) -> Result<Vec<crate::rbac::Role>, UserCeilingError> {
     let mut all = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
@@ -1076,25 +1124,135 @@ fn roles_inheriting_from(
         }
         match page.next_cursor {
             Some(next) => cursor = Some(next),
-            None => break,
+            None => return Ok(all),
         }
     }
-    let mut affected = std::collections::HashSet::from([role.id.clone()]);
-    let mut out = vec![(role.id.clone(), role.name.clone())];
+}
+
+/// `seeds` and every role in `all` that inherits from one of them
+/// (transitively, through `parent_roles`), as `(id, name)`.
+fn inheriting(
+    all: &[crate::rbac::Role],
+    seeds: Vec<&crate::rbac::Role>,
+) -> Vec<(crate::rbac::RoleId, String)> {
+    let mut affected: std::collections::HashSet<crate::rbac::RoleId> =
+        seeds.iter().map(|r| r.id.clone()).collect();
+    let mut out: Vec<_> = seeds
+        .into_iter()
+        .map(|r| (r.id.clone(), r.name.clone()))
+        .collect();
     // Fixpoint: each pass adds the children of roles already affected. At
     // most one pass per inheritance level, bounded by the role count.
     loop {
         let before = out.len();
-        for r in &all {
+        for r in all {
             if !affected.contains(&r.id) && r.parent_roles.iter().any(|p| affected.contains(p)) {
                 affected.insert(r.id.clone());
                 out.push((r.id.clone(), r.name.clone()));
             }
         }
         if out.len() == before {
-            return Ok(out);
+            return out;
         }
     }
+}
+
+/// Every user of the realm who may hold an admin-grade permission, at any
+/// scope — the only users who can out-rank a sub-admin. A user gets a
+/// permission only from a role assignment (to the user, or to a group it is
+/// in, transitively; realm- or org-scoped), an extra org role, or a direct
+/// grant, so the set is the union of:
+///
+/// - the holders of every *admin role* — a role whose own permissions, or
+///   whose ancestors' (`parent_roles`), include one — through
+///   `list_role_members`, expanding groups to their users;
+/// - the users holding an admin role as an extra org role;
+/// - the users with a direct grant of an admin-grade permission.
+///
+/// A superset is safe (each member is still resolved exactly); a missing
+/// holder would not be, so every source that resolution reads is covered.
+/// More than [`MAX_CEILING_USERS`] holders is refused (fail closed).
+fn admin_holders(
+    rbac: &dyn crate::rbac::RbacEngine,
+    realm_id: &RealmId,
+) -> Result<std::collections::HashSet<UserId>, UserCeilingError> {
+    use crate::rbac::{GroupMember, RoleSubject};
+
+    let all = all_roles(rbac, realm_id)?;
+    let seeds: Vec<&crate::rbac::Role> = all
+        .iter()
+        .filter(|r| {
+            r.permissions
+                .iter()
+                .any(|p| is_admin_permission(p.as_str()))
+        })
+        .collect();
+    let admin_roles = inheriting(&all, seeds);
+
+    let mut holders = std::collections::HashSet::new();
+    let add = |user: UserId, holders: &mut std::collections::HashSet<UserId>| {
+        holders.insert(user);
+        if holders.len() > MAX_CEILING_USERS {
+            return Err(ceiling_too_large(realm_id, "the realm's admin holders"));
+        }
+        Ok(())
+    };
+    let mut groups = Vec::new();
+    for (id, _) in &admin_roles {
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = rbac
+                .list_role_members(realm_id, id, cursor.as_deref(), CEILING_PAGE)
+                .map_err(|e| ceiling_unresolved(realm_id, "an admin role's holders", &e))?;
+            for subject in page.items {
+                match subject {
+                    RoleSubject::User(user) => add(user, &mut holders)?,
+                    RoleSubject::Group(group) => groups.push(group),
+                }
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+    }
+    let mut seen_groups = std::collections::HashSet::new();
+    while let Some(gid) = groups.pop() {
+        if !seen_groups.insert(gid.clone()) {
+            continue;
+        }
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = rbac
+                .list_group_members(realm_id, &gid, cursor.as_deref(), CEILING_PAGE)
+                .map_err(|e| ceiling_unresolved(realm_id, "an admin group's members", &e))?;
+            for member in page.items {
+                match member {
+                    GroupMember::User(user) => add(user, &mut holders)?,
+                    GroupMember::Group(child) => groups.push(child),
+                }
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+    }
+    let names: Vec<&str> = admin_roles.iter().map(|(_, n)| n.as_str()).collect();
+    // One more than the bound: a full list means the set overflows.
+    for user in rbac
+        .list_additional_role_holders(realm_id, &names, MAX_CEILING_USERS + 1)
+        .map_err(|e| ceiling_unresolved(realm_id, "admin extra-role holders", &e))?
+    {
+        add(user, &mut holders)?;
+    }
+    for user in rbac
+        .list_permission_grantees(realm_id, ADMIN_PERMISSIONS, MAX_CEILING_USERS + 1)
+        .map_err(|e| ceiling_unresolved(realm_id, "admin grantees", &e))?
+    {
+        add(user, &mut holders)?;
+    }
+    Ok(holders)
 }
 
 /// The privilege ceiling for removing `member` from a group: the user itself,

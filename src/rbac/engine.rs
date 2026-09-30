@@ -939,7 +939,7 @@ impl RbacEngine for EmbeddedRbacEngine {
     fn list_additional_role_holders(
         &self,
         realm_id: &RealmId,
-        role_name: &str,
+        role_names: &[&str],
         limit: usize,
     ) -> Result<Vec<UserId>, RbacError> {
         // The key layout is org-major, so a role cannot be a prefix: scan the
@@ -952,7 +952,51 @@ impl RbacEngine for EmbeddedRbacEngine {
             if out.len() >= limit {
                 break;
             }
-            if let Some(user) = Self::org_role_key_holder(&key, role_name) {
+            let holder = role_names
+                .iter()
+                .find_map(|name| Self::org_role_key_holder(&key, name));
+            if let Some(user) = holder {
+                if seen.insert(user.clone()) {
+                    out.push(user);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn list_permission_grantees(
+        &self,
+        realm_id: &RealmId,
+        permissions: &[&str],
+        limit: usize,
+    ) -> Result<Vec<UserId>, RbacError> {
+        // The primary rows (`rba:user_perm:{realm}:{user}:{scope}:{perm}`),
+        // not the by-permission index: the primary row is what resolution
+        // reads, so it is the authority on who holds a grant.
+        let prefix = keys::user_permission_realm_scan_prefix(realm_id);
+        let end = keys::prefix_end(&prefix);
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for key in self.storage.scan_keys(realm_id, &prefix, &end)? {
+            if out.len() >= limit {
+                break;
+            }
+            let Some(rest) = key
+                .strip_prefix(prefix.as_slice())
+                .and_then(|r| std::str::from_utf8(r).ok())
+            else {
+                continue;
+            };
+            let mut parts = rest.splitn(3, ':');
+            let (Some(user), Some(_scope), Some(perm)) = (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if !permissions.contains(&perm) {
+                continue;
+            }
+            if let Ok(uuid) = uuid::Uuid::parse_str(user) {
+                let user = UserId::new(uuid);
                 if seen.insert(user.clone()) {
                     out.push(user);
                 }
@@ -3169,27 +3213,79 @@ mod tests {
         }
 
         let mut admins = e
-            .list_additional_role_holders(&realm, "realm.admin", 10)
+            .list_additional_role_holders(&realm, &["realm.admin"], 10)
             .expect("list");
         admins.sort_by_key(|u| *u.as_uuid());
         let mut expected = vec![a.clone(), b.clone()];
         expected.sort_by_key(|u| *u.as_uuid());
         assert_eq!(admins, expected, "each holder once, across orgs");
         assert_eq!(
-            e.list_additional_role_holders(&realm, "realm.member", 10)
+            e.list_additional_role_holders(&realm, &["realm.member"], 10)
                 .expect("list"),
             vec![c],
         );
         assert!(e
-            .list_additional_role_holders(&realm, "realm", 10)
+            .list_additional_role_holders(&realm, &["realm"], 10)
             .expect("list")
             .is_empty());
         assert_eq!(
-            e.list_additional_role_holders(&realm, "realm.admin", 1)
+            e.list_additional_role_holders(&realm, &["realm.admin"], 1)
                 .expect("list")
                 .len(),
             1,
             "the limit caps the result"
         );
+    }
+
+    /// `list_permission_grantees` finds direct grants of the named
+    /// permissions at every scope, once per user, and nothing else.
+    #[test]
+    fn list_permission_grantees_spans_scopes_and_filters_permissions() {
+        let (e, realm) = mk_engine();
+        let org = OrganizationId::new(uuid::Uuid::new_v4());
+        let (a, b, c) = (UserId::generate(), UserId::generate(), UserId::generate());
+        for (user, permission, scope) in [
+            (&a, "hearth.admin", Scope::Realm),
+            (
+                &a,
+                "hearth.admin",
+                Scope::Org {
+                    org_id: org.clone(),
+                },
+            ),
+            (
+                &b,
+                "hearth.users.admin",
+                Scope::Org {
+                    org_id: org.clone(),
+                },
+            ),
+            (&c, "docs.read", Scope::Realm),
+        ] {
+            e.grant_user_permission(
+                &realm,
+                &UserPermissionGrant {
+                    realm_id: realm.clone(),
+                    user_id: user.clone(),
+                    permission: perm(permission),
+                    scope,
+                    granted_at: Timestamp::from_micros(1),
+                    granted_by: None,
+                },
+            )
+            .expect("grant");
+        }
+
+        let mut found = e
+            .list_permission_grantees(&realm, &["hearth.admin", "hearth.users.admin"], 10)
+            .expect("list");
+        found.sort_by_key(|u| *u.as_uuid());
+        let mut expected = vec![a, b];
+        expected.sort_by_key(|u| *u.as_uuid());
+        assert_eq!(found, expected);
+        assert!(e
+            .list_permission_grantees(&realm, &["hearth.clients.admin"], 10)
+            .expect("list")
+            .is_empty());
     }
 }
