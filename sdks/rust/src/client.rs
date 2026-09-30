@@ -1009,6 +1009,8 @@ impl HearthClient {
     /// the password, a current authenticator code, or an assertion from an
     /// enrolled passkey. The server answers `403 step_up_required` without it:
     /// an access token alone is one factor and does not enrol a credential.
+    /// A locked-out account (too many wrong passwords or codes) gets
+    /// `429 too_many_attempts` with `Retry-After` instead.
     ///
     /// # Errors
     ///

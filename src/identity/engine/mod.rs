@@ -571,6 +571,27 @@ struct AttemptTracker {
     last_failure_micros: i64,
 }
 
+/// How long `tracker`'s lockout still runs at `now_micros`, or `None` when it
+/// is not engaged (fewer than `max_attempts` failures, or the window has
+/// passed). Mirrors the refusal test in `check_rate_limit` /
+/// `check_mfa_rate_limit`.
+fn remaining_lockout(
+    tracker: &AttemptTracker,
+    max_attempts: u32,
+    lockout_micros: i64,
+    now_micros: i64,
+) -> Option<std::time::Duration> {
+    if tracker.failed_count < max_attempts {
+        return None;
+    }
+    let left =
+        lockout_micros.saturating_sub(now_micros.saturating_sub(tracker.last_failure_micros));
+    u64::try_from(left)
+        .ok()
+        .filter(|&micros| micros > 0)
+        .map(std::time::Duration::from_micros)
+}
+
 /// Prunes stale entries from an in-memory rate-tracker `HashMap`.
 ///
 /// Removes all entries whose `last_failure_micros` is strictly before
@@ -2242,6 +2263,11 @@ impl EmbeddedIdentityEngine {
     /// node is the leader at the moment `serve` reaches this point, so every
     /// node died with `raft: not the leader; redirect to unknown` before
     /// `POST /admin/cluster/bootstrap` could ever be called.
+    ///
+    /// Follower write forwarding does not make the wait unnecessary: a
+    /// follower could now forward the set, but the set is read-then-write
+    /// (each node would generate its own signing key), so it must still run
+    /// on exactly one node — the leader.
     ///
     /// Two outcomes end the wait, and between them they cover every node:
     ///
@@ -6892,7 +6918,14 @@ impl EmbeddedIdentityEngine {
             // Retry of a delete that faulted under the old order.  The user is
             // gone, but its rows are not — sweep them so the retry is not a
             // no-op, then report the user as absent as any caller expects.
-            if self.cascade_user_rows(realm_id, user_id)? {
+            let mut found_any = self.cascade_user_rows(realm_id, user_id)?;
+            // The required-action generation names the user too (GA audit
+            // round 3, D-2). The first attempt deletes it with the record; a
+            // retry — or a revocation that raced the delete and re-created
+            // it — must sweep it here. Deleted after the cascade, which may
+            // revoke sessions and so bump it.
+            found_any |= self.delete_ra_generation(realm_id, user_id)?;
+            if found_any {
                 self.sweep_orphaned_email_index(realm_id, user_id)?;
             }
             return Err(IdentityError::UserNotFound);
@@ -8659,6 +8692,39 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
     fn dummy_verify_password_for_realm(&self, realm_id: &RealmId, password: &CleartextPassword) {
         self.dummy_verify_for_realm(realm_id, password);
+    }
+
+    fn login_lockout_remaining(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Option<std::time::Duration> {
+        let (max_attempts, lockout_micros) = self.effective_rate_limit(realm_id);
+        let trackers = self.attempt_trackers.lock().expect("tracker lock");
+        let tracker = trackers.get(&Self::tracker_key(realm_id, user_id))?;
+        remaining_lockout(
+            tracker,
+            max_attempts,
+            lockout_micros,
+            self.clock.now().as_micros(),
+        )
+    }
+
+    fn mfa_lockout_remaining(&self, realm_id: &RealmId, user_id: &UserId) -> std::time::Duration {
+        let now = self.clock.now().as_micros();
+        let tracker = {
+            let trackers = self.mfa_attempt_trackers.lock().expect("mfa tracker lock");
+            trackers
+                .get(&Self::mfa_tracker_key(realm_id, user_id))
+                .and_then(|t| {
+                    remaining_lockout(t, Self::MFA_MAX_ATTEMPTS, Self::MFA_LOCKOUT_MICROS, now)
+                })
+        };
+        let (_, window_ends) = self.mfa_guess_window(user_id);
+        let window = std::time::Duration::from_micros(
+            u64::try_from(window_ends.as_micros().saturating_sub(now)).unwrap_or(0),
+        );
+        tracker.map_or(window, |t| t.max(window))
     }
 
     fn dummy_verify_password(&self, password: &CleartextPassword) {
@@ -13991,6 +14057,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         for (jti, _) in scan(keys::aat_revoked_jti_scan_prefix())? {
             out.push(RevocationExport::AatJti { jti });
         }
+        // Required-action generations (GA sweep 4). Generation 0 is the
+        // absent-row default and carries nothing a restore must keep.
+        for (user_id, value) in scan(keys::ra_generation_scan_prefix())? {
+            let generation = <[u8; 8]>::try_from(value.as_slice()).map_or(0, u64::from_le_bytes);
+            if generation != 0 {
+                out.push(RevocationExport::RaGeneration {
+                    user_id,
+                    generation,
+                });
+            }
+        }
         Ok(out)
     }
 
@@ -14006,6 +14083,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             RevocationExport::Jti { jti, .. } => (keys::encode_revoked_jti(jti), jti),
             RevocationExport::DpopJkt { jkt } => (keys::encode_blocked_dpop_jkt(jkt), jkt),
             RevocationExport::AatJti { jti } => (keys::encode_aat_revoked_jti(jti), jti),
+            RevocationExport::RaGeneration {
+                user_id,
+                generation,
+            } => return self.import_ra_generation(realm_id, user_id, *generation),
         };
         if id.is_empty() || id.len() > MAX_ID_LEN {
             return Err(IdentityError::InvalidInput {
@@ -14044,6 +14125,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .put(realm_id, &key, b"1")
                     .map_err(Self::storage_err)?;
             }
+            // Restored by `import_ra_generation`, which returned above.
+            RevocationExport::RaGeneration { .. } => {}
         }
         Ok(if exists {
             ImportOutcome::Overwritten
@@ -19230,6 +19313,82 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)
     }
 
+    /// Deletes the user's required-action generation row; `true` when one
+    /// was there. Serialised with [`Self::bump_ra_generation`].
+    fn delete_ra_generation(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<bool, IdentityError> {
+        let lock = self.token_redemption_lock(&format!(
+            "ra-gen:{}:{}",
+            realm_id.as_uuid(),
+            user_id.as_uuid()
+        ));
+        let _guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = keys::encode_ra_generation(user_id);
+        let existed = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if existed {
+            self.storage
+                .delete(realm_id, &key)
+                .map_err(Self::storage_err)?;
+        }
+        Ok(existed)
+    }
+
+    /// Restores a user's required-action generation from a backup
+    /// (GA sweep 4).
+    ///
+    /// The generation is a revocation counter, so the restore only ever
+    /// raises it: a node that has revoked the user's sessions since (a
+    /// second restore of the same archive) keeps its higher counter, in
+    /// either restore mode — lowering it would revive the RA tokens those
+    /// revocations ended. Serialised with [`Self::bump_ra_generation`].
+    fn import_ra_generation(
+        &self,
+        realm_id: &RealmId,
+        user_id: &str,
+        generation: u64,
+    ) -> Result<ImportOutcome, IdentityError> {
+        let user_id = uuid::Uuid::parse_str(user_id)
+            .map(UserId::new)
+            .map_err(|_| IdentityError::InvalidInput {
+                reason: "required-action generation names no user id".to_string(),
+            })?;
+        let lock = self.token_redemption_lock(&format!(
+            "ra-gen:{}:{}",
+            realm_id.as_uuid(),
+            user_id.as_uuid()
+        ));
+        let _guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = keys::encode_ra_generation(&user_id);
+        let exists = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        // Read through the same decoding the RA-token check uses.
+        if self.ra_generation(realm_id, &user_id)? >= generation {
+            return Ok(ImportOutcome::Skipped);
+        }
+        self.storage
+            .put(realm_id, &key, &generation.to_le_bytes())
+            .map_err(Self::storage_err)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
     /// Returns the current session-version for `session_id`, or `1` if not tracked.
     pub(crate) fn get_session_sv(&self, realm_id: &RealmId, session_id: &SessionId) -> u64 {
         self.sv_store.get_version(realm_id, session_id).unwrap_or(1)
@@ -21504,6 +21663,69 @@ mod tests {
                 .expect("get email index")
                 .is_none(),
             "the email index must not stay orphaned"
+        );
+    }
+
+    #[test]
+    fn a_retried_delete_user_removes_the_required_action_generation() {
+        // GA sweep 4: the retry path (record already gone) swept every cascade
+        // row but left `ra:gen:{user}` — a key naming a deleted user.
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let user_id = user.id().clone();
+        let pw = CleartextPassword::from_string("valid-password1".to_string());
+        engine
+            .set_password(&realm, &user_id, &pw)
+            .expect("set password");
+        engine
+            .bump_ra_generation(&realm, &user_id)
+            .expect("a revocation bumped the generation");
+        assert!(engine.ra_generation(&realm, &user_id).expect("read") > 0);
+
+        engine
+            .storage
+            .delete(&realm, &keys::encode_user_id(&user_id))
+            .expect("delete primary record");
+        assert!(matches!(
+            engine.delete_user(&realm, &user_id),
+            Err(IdentityError::UserNotFound)
+        ));
+
+        assert!(
+            engine
+                .storage
+                .get(&realm, &keys::encode_ra_generation(&user_id))
+                .expect("get ra generation")
+                .is_none(),
+            "the retry must not leave the required-action generation behind"
+        );
+    }
+
+    #[test]
+    fn a_retried_delete_user_whose_only_leftover_is_the_generation_removes_it() {
+        // A generation row is proof the user existed: the retry sweeps it even
+        // when every other row is already gone.
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let user_id = user.id().clone();
+        engine.delete_user(&realm, &user_id).expect("delete");
+        engine
+            .bump_ra_generation(&realm, &user_id)
+            .expect("a late revocation re-creates the generation");
+
+        assert!(matches!(
+            engine.delete_user(&realm, &user_id),
+            Err(IdentityError::UserNotFound)
+        ));
+        assert!(
+            engine
+                .storage
+                .get(&realm, &keys::encode_ra_generation(&user_id))
+                .expect("get ra generation")
+                .is_none(),
+            "the generation must not outlive the user"
         );
     }
 

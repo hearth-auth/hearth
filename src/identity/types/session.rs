@@ -77,6 +77,24 @@ impl MfaProof {
     pub fn satisfies_webauthn_required(self) -> bool {
         matches!(self, Self::ProvedWebAuthn)
     }
+
+    /// This proof raised by a second factor (a TOTP code, a recovery code,
+    /// an SMS or an email OTP) that was just verified on top of it.
+    ///
+    /// Every second-factor challenge records [`MfaProof::Proved`] for what it
+    /// verified. A challenge that runs inside an existing authentication —
+    /// the SMS interstitial in front of code issuance or device approval —
+    /// raises that authentication's proof the same way: `None` and a UV-less
+    /// passkey ([`MfaProof::PasskeyPossession`]) become `Proved`, and a
+    /// proof already stronger than an OTP ([`MfaProof::ProvedWebAuthn`]) is
+    /// kept, never lowered.
+    #[must_use]
+    pub fn with_proved_second_factor(self) -> Self {
+        match self {
+            Self::ProvedWebAuthn => Self::ProvedWebAuthn,
+            Self::None | Self::Proved | Self::PasskeyPossession => Self::Proved,
+        }
+    }
 }
 
 /// Device and network context captured at session creation time.
@@ -511,5 +529,17 @@ mod tests {
             .expect("decode"),
         );
         assert_eq!(round.mfa_proof(), MfaProof::ProvedWebAuthn);
+    }
+
+    #[test]
+    fn a_proved_second_factor_raises_a_weaker_proof_and_keeps_a_passkey() {
+        for (before, after) in [
+            (MfaProof::None, MfaProof::Proved),
+            (MfaProof::PasskeyPossession, MfaProof::Proved),
+            (MfaProof::Proved, MfaProof::Proved),
+            (MfaProof::ProvedWebAuthn, MfaProof::ProvedWebAuthn),
+        ] {
+            assert_eq!(before.with_proved_second_factor(), after, "from {before:?}");
+        }
     }
 }

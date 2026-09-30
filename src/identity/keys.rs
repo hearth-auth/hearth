@@ -2528,6 +2528,12 @@ pub(crate) fn encode_ra_generation(user_id: &UserId) -> Vec<u8> {
     format!("ra:gen:{}", user_id.as_uuid()).into_bytes()
 }
 
+/// Scan prefix for every user's required-action generation in a realm
+/// (backup export, GA sweep 4). See [`encode_ra_generation`].
+pub(crate) fn ra_generation_scan_prefix() -> Vec<u8> {
+    b"ra:gen:".to_vec()
+}
+
 /// Scan prefix for every single-use redemption marker in a realm.
 pub(crate) fn consumed_marker_scan_prefix() -> Vec<u8> {
     CONSUMED_PREFIX.as_bytes().to_vec()

@@ -562,7 +562,7 @@ These crates are pre-approved and need no additional justification:
 | CLI | `clap` | Derive-based |
 | Lock-free concurrency | `crossbeam-epoch` (via `core::EpochCell`) | `arc-swap` is banned — see §9.1 |
 | Memory-mapped I/O | `memmap2` | |
-| Raft consensus | `openraft` | Implemented — `src/cluster/`; gated on `cluster:` config; **EXPERIMENTAL in 1.x — not production-supported.** Known defects: C-5 (no follower cache invalidation), C-6 (immutable membership), H-3 (follower writes return HTTP 500). |
+| Raft consensus | `openraft` | Implemented — `src/cluster/`; gated on `cluster:` config; **EXPERIMENTAL in 1.x — not production-supported.** Known defects: C-5 (no follower cache invalidation), C-6 (immutable membership), H-3 fixed: follower writes are forwarded to the leader. |
 | HTTP framework | `axum` | `tower`-compatible |
 | Time handling | `std::time`, `tokio::time` | |
 | Testing | `proptest`, `criterion`, `insta` | Test-only |
