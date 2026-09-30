@@ -95,6 +95,16 @@ final class AdminClientTest extends TestCase
         self::assertSame('generated-once', $created['client_secret']);
     }
 
+    public function testRegenerateClientSecretPostsAndReturnsTheNewSecret(): void
+    {
+        $this->http->body = '{"client_id":"c1","client_secret":"new-secret"}';
+
+        $result = $this->client->regenerateClientSecret('c1');
+
+        $this->assertSent('POST', '/admin/applications/c1/regenerate-secret');
+        self::assertSame('new-secret', $result['client_secret']);
+    }
+
     public function testUpdateClientSendsPatchToApplications(): void
     {
         $this->client->updateClient('c1', ['name' => 'New']);

@@ -101,6 +101,19 @@ class AdminClient(
     suspend fun updateClient(clientId: String, request: UpdateClientRequest): OAuthClient =
         httpClient.patch("$baseUrl/admin/applications/$clientId", request, authHeaders())
 
+    /**
+     * Replaces a confidential client's secret
+     * (`POST /admin/applications/{clientId}/regenerate-secret`). The returned
+     * [OAuthClient.clientSecret] is the new secret, returned once; the old
+     * secret stops working immediately.
+     */
+    suspend fun regenerateClientSecret(clientId: String): OAuthClient =
+        httpClient.post<Map<String, String>, OAuthClient>(
+            "$baseUrl/admin/applications/$clientId/regenerate-secret",
+            emptyMap(),
+            authHeaders(),
+        )
+
     /** Deletes an OAuth client permanently. */
     suspend fun deleteClient(clientId: String): Unit =
         httpClient.delete("$baseUrl/admin/applications/$clientId", authHeaders())

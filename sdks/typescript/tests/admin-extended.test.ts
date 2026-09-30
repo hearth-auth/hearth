@@ -60,6 +60,15 @@ describe("AdminClient — OAuth Clients CRUD", () => {
     expect(init.method).toBe("PATCH");
   });
 
+  it("regenerateClientSecret POSTs /admin/applications/:id/regenerate-secret and returns the new secret", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockOk({ client_id: "cli1", client_secret: "new-secret" }));
+    const result = await makeAdmin().regenerateClientSecret("cli1");
+    const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${BASE}/admin/applications/cli1/regenerate-secret`);
+    expect(init.method).toBe("POST");
+    expect(result.client_secret).toBe("new-secret");
+  });
+
   it("deleteClient DELETEs /admin/applications/:id", async () => {
     vi.mocked(fetch).mockResolvedValue(mockNoContent());
     await makeAdmin().deleteClient("cli1");

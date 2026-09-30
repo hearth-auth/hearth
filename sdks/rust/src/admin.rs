@@ -226,6 +226,26 @@ impl AdminClient {
         Ok(resp.json().await?)
     }
 
+    /// Replace a confidential client's secret
+    /// (`POST /admin/applications/{id}/regenerate-secret`). The returned
+    /// client's [`OAuthClient::secret`] is the new secret, returned once; the
+    /// old secret stops working immediately.
+    pub async fn regenerate_client_secret(
+        &self,
+        client_id: &str,
+    ) -> Result<OAuthClient, HearthError> {
+        let resp = self
+            .http
+            .post(format!(
+                "{}/admin/applications/{client_id}/regenerate-secret",
+                self.base_url
+            ))
+            .send()
+            .await?;
+        Self::check(&resp)?;
+        Ok(resp.json().await?)
+    }
+
     /// Delete an OAuth 2.0 client registration.
     pub async fn delete_client(&self, client_id: &str) -> Result<(), HearthError> {
         let resp = self
@@ -412,6 +432,37 @@ impl AdminClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn regenerate_client_secret_posts_and_returns_the_new_secret() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap();
+            let body = r#"{"client_id":"c1","client_name":"svc","client_secret":"new-secret"}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+
+        let admin = AdminClient::new(format!("http://{addr}"), "admin-token", "realm-1");
+        let client = admin
+            .regenerate_client_secret("c1")
+            .await
+            .expect("regenerate_client_secret");
+        assert_eq!(client.secret.as_deref(), Some("new-secret"));
+        let req = server.await.unwrap();
+        assert!(
+            req.starts_with("POST /admin/applications/c1/regenerate-secret "),
+            "{req}"
+        );
+    }
 
     #[test]
     fn admin_client_url_methods_compile() {

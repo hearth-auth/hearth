@@ -116,6 +116,18 @@ func (a *AdminClient) UpdateClient(ctx context.Context, clientID string, req Upd
 	return &result, nil
 }
 
+// RegenerateClientSecret replaces a confidential client's secret
+// (POST /admin/applications/{id}/regenerate-secret). The returned client
+// carries the new secret in ClientSecret, once; the old secret stops working
+// immediately.
+func (a *AdminClient) RegenerateClientSecret(ctx context.Context, clientID string) (*OAuthClient, error) {
+	var result OAuthClient
+	if err := a.post(ctx, fmt.Sprintf("/admin/applications/%s/regenerate-secret", clientID), nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // DeleteClient deletes an OAuth client via the admin API.
 func (a *AdminClient) DeleteClient(ctx context.Context, clientID string) error {
 	return a.request(ctx, "DELETE", fmt.Sprintf("/admin/applications/%s", clientID), nil, nil)

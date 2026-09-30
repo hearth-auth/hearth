@@ -173,6 +173,20 @@ class AdminClient:
             raise HearthError(resp.status_code, resp.text)
         return OAuthClient(**resp.json())
 
+    def regenerate_client_secret(self, client_id: str) -> OAuthClient:
+        """Replace a confidential client's secret.
+
+        ``POST /admin/applications/{id}/regenerate-secret``. The returned
+        client's ``secret`` is the new secret, returned once; the old secret
+        stops working immediately.
+        """
+        resp = self._http.post(
+            f"{self._base}/admin/applications/{client_id}/regenerate-secret"
+        )
+        if resp.status_code != 200:
+            raise HearthError(resp.status_code, resp.text)
+        return OAuthClient.model_validate(resp.json())
+
     def delete_client(self, client_id: str) -> None:
         """Delete an OAuth client."""
         resp = self._http.delete(f"{self._base}/admin/applications/{client_id}")
