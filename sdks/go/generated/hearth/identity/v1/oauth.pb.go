@@ -468,8 +468,19 @@ type RegisterClientRequest struct {
 	// and EdDSA on the authenticated admin path. Only ID tokens are affected;
 	// access and refresh tokens are always EdDSA.
 	IdTokenSignedResponseAlg *string `protobuf:"bytes,7,opt,name=id_token_signed_response_alg,proto3,oneof" json:"id_token_signed_response_alg,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// How the client authenticates at the token endpoint (RFC 7591 s2):
+	// "client_secret_basic", "client_secret_post", "private_key_jwt" or "none".
+	// On the authenticated admin create paths (POST /admin/applications,
+	// POST /clients, gRPC CreateApplication and RegisterClient) a
+	// "client_secret_*" value creates a confidential client whose secret Hearth
+	// generates (256 bits from the OS CSPRNG) and returns exactly once, in the
+	// response's client_secret. Only a hash is stored. "private_key_jwt"
+	// requires jwks. Omitted or "none" registers a public client (or a
+	// private_key_jwt client when jwks is given). The REST admin paths refuse a
+	// caller-chosen client_secret; request a generated one with this field.
+	TokenEndpointAuthMethod *string `protobuf:"bytes,8,opt,name=token_endpoint_auth_method,proto3,oneof" json:"token_endpoint_auth_method,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *RegisterClientRequest) Reset() {
@@ -547,6 +558,13 @@ func (x *RegisterClientRequest) GetTrustLevel() ClientTrustLevel {
 func (x *RegisterClientRequest) GetIdTokenSignedResponseAlg() string {
 	if x != nil && x.IdTokenSignedResponseAlg != nil {
 		return *x.IdTokenSignedResponseAlg
+	}
+	return ""
+}
+
+func (x *RegisterClientRequest) GetTokenEndpointAuthMethod() string {
+	if x != nil && x.TokenEndpointAuthMethod != nil {
+		return *x.TokenEndpointAuthMethod
 	}
 	return ""
 }
@@ -650,8 +668,14 @@ type OAuthClient struct {
 	AccessTokenAuthorization AccessTokenAuthorization `protobuf:"varint,7,opt,name=access_token_authorization,json=accessTokenAuthorization,proto3,enum=hearth.identity.v1.AccessTokenAuthorization" json:"access_token_authorization,omitempty"`
 	// The algorithm this client's ID tokens are signed with: "RS256" or "EdDSA".
 	IdTokenSignedResponseAlg string `protobuf:"bytes,8,opt,name=id_token_signed_response_alg,proto3" json:"id_token_signed_response_alg,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// The client secret Hearth generated for a confidential client. Present
+	// only in the response that created the client (token_endpoint_auth_method
+	// "client_secret_basic" or "client_secret_post"); never returned again.
+	// Store it on receipt: Hearth keeps only its hash. Rotate it from the
+	// admin console.
+	ClientSecret  *string `protobuf:"bytes,9,opt,name=client_secret,proto3,oneof" json:"client_secret,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OAuthClient) Reset() {
@@ -736,6 +760,13 @@ func (x *OAuthClient) GetAccessTokenAuthorization() AccessTokenAuthorization {
 func (x *OAuthClient) GetIdTokenSignedResponseAlg() string {
 	if x != nil {
 		return x.IdTokenSignedResponseAlg
+	}
+	return ""
+}
+
+func (x *OAuthClient) GetClientSecret() string {
+	if x != nil && x.ClientSecret != nil {
+		return *x.ClientSecret
 	}
 	return ""
 }
@@ -2202,7 +2233,7 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"token_type\x18\x03 \x01(\tR\ttokenType\x12\x1d\n" +
 	"\n" +
 	"expires_in\x18\x04 \x01(\x03R\texpiresIn\x12#\n" +
-	"\rrefresh_token\x18\x05 \x01(\tR\frefreshToken\"\xec\x03\n" +
+	"\rrefresh_token\x18\x05 \x01(\tR\frefreshToken\"\xd0\x04\n" +
 	"\x15RegisterClientRequest\x12\x1f\n" +
 	"\vclient_name\x18\x01 \x01(\tR\n" +
 	"clientName\x12#\n" +
@@ -2213,10 +2244,12 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\x1aaccess_token_authorization\x18\x05 \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationR\x18accessTokenAuthorization\x12J\n" +
 	"\vtrust_level\x18\x06 \x01(\x0e2$.hearth.identity.v1.ClientTrustLevelH\x01R\n" +
 	"trustLevel\x88\x01\x01\x12G\n" +
-	"\x1cid_token_signed_response_alg\x18\a \x01(\tH\x02R\x1cid_token_signed_response_alg\x88\x01\x01B\x10\n" +
+	"\x1cid_token_signed_response_alg\x18\a \x01(\tH\x02R\x1cid_token_signed_response_alg\x88\x01\x01\x12C\n" +
+	"\x1atoken_endpoint_auth_method\x18\b \x01(\tH\x03R\x1atoken_endpoint_auth_method\x88\x01\x01B\x10\n" +
 	"\x0e_client_secretB\x0e\n" +
 	"\f_trust_levelB\x1f\n" +
-	"\x1d_id_token_signed_response_alg\"\xe7\x03\n" +
+	"\x1d_id_token_signed_response_algB\x1d\n" +
+	"\x1b_token_endpoint_auth_method\"\xe7\x03\n" +
 	"\x13UpdateClientRequest\x12$\n" +
 	"\vclient_name\x18\x01 \x01(\tH\x00R\n" +
 	"clientName\x88\x01\x01\x12#\n" +
@@ -2230,7 +2263,7 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\f_client_nameB\x1d\n" +
 	"\x1b_access_token_authorizationB\x0e\n" +
 	"\f_trust_levelB\x1f\n" +
-	"\x1d_id_token_signed_response_alg\"\x89\x03\n" +
+	"\x1d_id_token_signed_response_alg\"\xc6\x03\n" +
 	"\vOAuthClient\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x1f\n" +
 	"\vclient_name\x18\x02 \x01(\tR\n" +
@@ -2242,7 +2275,9 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\vgrant_types\x18\x06 \x03(\tR\n" +
 	"grantTypes\x12j\n" +
 	"\x1aaccess_token_authorization\x18\a \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationR\x18accessTokenAuthorization\x12B\n" +
-	"\x1cid_token_signed_response_alg\x18\b \x01(\tR\x1cid_token_signed_response_alg\"~\n" +
+	"\x1cid_token_signed_response_alg\x18\b \x01(\tR\x1cid_token_signed_response_alg\x12)\n" +
+	"\rclient_secret\x18\t \x01(\tH\x00R\rclient_secret\x88\x01\x01B\x10\n" +
+	"\x0e_client_secret\"~\n" +
 	"\x0fOAuthClientPage\x125\n" +
 	"\x05items\x18\x01 \x03(\v2\x1f.hearth.identity.v1.OAuthClientR\x05items\x12$\n" +
 	"\vnext_cursor\x18\x02 \x01(\tH\x00R\n" +
@@ -2513,6 +2548,7 @@ func file_hearth_identity_v1_oauth_proto_init() {
 	file_hearth_identity_v1_oauth_proto_msgTypes[2].OneofWrappers = []any{}
 	file_hearth_identity_v1_oauth_proto_msgTypes[4].OneofWrappers = []any{}
 	file_hearth_identity_v1_oauth_proto_msgTypes[5].OneofWrappers = []any{}
+	file_hearth_identity_v1_oauth_proto_msgTypes[6].OneofWrappers = []any{}
 	file_hearth_identity_v1_oauth_proto_msgTypes[7].OneofWrappers = []any{}
 	file_hearth_identity_v1_oauth_proto_msgTypes[8].OneofWrappers = []any{}
 	file_hearth_identity_v1_oauth_proto_msgTypes[9].OneofWrappers = []any{}

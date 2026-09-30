@@ -86,6 +86,17 @@ message RegisterClientRequest {
   // and EdDSA on the authenticated admin path. Only ID tokens are affected;
   // access and refresh tokens are always EdDSA.
   optional string id_token_signed_response_alg = 7 [json_name = "id_token_signed_response_alg"];
+  // How the client authenticates at the token endpoint (RFC 7591 s2):
+  // "client_secret_basic", "client_secret_post", "private_key_jwt" or "none".
+  // On the authenticated admin create paths (POST /admin/applications,
+  // POST /clients, gRPC CreateApplication and RegisterClient) a
+  // "client_secret_*" value creates a confidential client whose secret Hearth
+  // generates (256 bits from the OS CSPRNG) and returns exactly once, in the
+  // response's client_secret. Only a hash is stored. "private_key_jwt"
+  // requires jwks. Omitted or "none" registers a public client (or a
+  // private_key_jwt client when jwks is given). The REST admin paths refuse a
+  // caller-chosen client_secret; request a generated one with this field.
+  optional string token_endpoint_auth_method = 8 [json_name = "token_endpoint_auth_method"];
 }
 
 // Request to update an existing OAuth 2.0 client.
@@ -111,6 +122,12 @@ message OAuthClient {
   AccessTokenAuthorization access_token_authorization = 7;
   // The algorithm this client's ID tokens are signed with: "RS256" or "EdDSA".
   string id_token_signed_response_alg = 8 [json_name = "id_token_signed_response_alg"];
+  // The client secret Hearth generated for a confidential client. Present
+  // only in the response that created the client (token_endpoint_auth_method
+  // "client_secret_basic" or "client_secret_post"); never returned again.
+  // Store it on receipt: Hearth keeps only its hash. Rotate it from the
+  // admin console.
+  optional string client_secret = 9 [json_name = "client_secret"];
 }
 
 // A cursor-based page of OAuth clients.
