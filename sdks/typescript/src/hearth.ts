@@ -159,11 +159,7 @@ export function createHearth(opts: HearthOptions): HearthFacade {
 
   let svCache: SessionVersionCache | null = null;
   if (opts.sessionVersions?.enabled) {
-    svCache = new SessionVersionCache(
-      opts.baseUrl,
-      opts.realmId,
-      opts.sessionVersions,
-    );
+    svCache = new SessionVersionCache(opts.baseUrl, opts.realmId, opts.sessionVersions);
     svCache.start();
   }
 

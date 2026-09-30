@@ -1,8 +1,5 @@
 import type { SessionVersionConfig } from "./types.js";
-import {
-  SessionVersionCacheStaleError,
-  SessionVersionRevokedError,
-} from "./errors.js";
+import { SessionVersionCacheStaleError, SessionVersionRevokedError } from "./errors.js";
 
 interface SnapshotResponse {
   realm: string;
@@ -99,10 +96,7 @@ export class SessionVersionCache {
 
     const ageMs = this.age();
     if (ageMs > this.cfg.staleThresholdMs) {
-      throw new SessionVersionCacheStaleError(
-        isFinite(ageMs) ? ageMs : -1,
-        this.cfg.onStale,
-      );
+      throw new SessionVersionCacheStaleError(isFinite(ageMs) ? ageMs : -1, this.cfg.onStale);
     }
 
     const minSv = this.versions.get(sessionId) ?? 1n;

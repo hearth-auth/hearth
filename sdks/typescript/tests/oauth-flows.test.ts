@@ -6,11 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { HearthClient } from "../src/hearth-client.js";
-import {
-  ConfigurationError,
-  OAuthFlowError,
-  TokenExpiredError,
-} from "../src/errors.js";
+import { ConfigurationError, OAuthFlowError, TokenExpiredError } from "../src/errors.js";
 
 const ISSUER = "https://auth.example.com";
 const REALM_ID = "my-realm";
@@ -57,14 +53,19 @@ function mockFetch(...responses: Array<{ body: unknown; status?: number }>): voi
   );
 }
 
-beforeEach(() => { /* stub set per test */ });
-afterEach(() => { vi.unstubAllGlobals(); });
+beforeEach(() => {
+  /* stub set per test */
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 // ── clientCredentials ──────────────────────────────────────────────────────
 
 describe("HearthClient.clientCredentials()", () => {
   it("POSTs client_credentials grant to the discovered token_endpoint", async () => {
-    const fetchSpy = vi.fn()
+    const fetchSpy = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(TOKEN_RESPONSE), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
@@ -83,7 +84,8 @@ describe("HearthClient.clientCredentials()", () => {
   });
 
   it("credentials are in the POST body, never in the URL", async () => {
-    const fetchSpy = vi.fn()
+    const fetchSpy = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(TOKEN_RESPONSE), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
@@ -96,7 +98,8 @@ describe("HearthClient.clientCredentials()", () => {
   });
 
   it("includes scope when provided", async () => {
-    const fetchSpy = vi.fn()
+    const fetchSpy = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(TOKEN_RESPONSE), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
@@ -108,7 +111,8 @@ describe("HearthClient.clientCredentials()", () => {
   });
 
   it("omits scope from body when not provided", async () => {
-    const fetchSpy = vi.fn()
+    const fetchSpy = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(TOKEN_RESPONSE), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
@@ -145,7 +149,8 @@ describe("HearthClient.startDeviceFlow()", () => {
   };
 
   it("POSTs to the discovered device_authorization_endpoint", async () => {
-    const fetchSpy = vi.fn()
+    const fetchSpy = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(DEVICE_RESPONSE), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
@@ -157,7 +162,8 @@ describe("HearthClient.startDeviceFlow()", () => {
   });
 
   it("includes client_id in the POST body", async () => {
-    const fetchSpy = vi.fn()
+    const fetchSpy = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(DEVICE_RESPONSE), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
@@ -169,7 +175,8 @@ describe("HearthClient.startDeviceFlow()", () => {
   });
 
   it("includes optional scope in the POST body", async () => {
-    const fetchSpy = vi.fn()
+    const fetchSpy = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(DEVICE_RESPONSE), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
@@ -203,11 +210,17 @@ describe("HearthClient.startDeviceFlow()", () => {
 // ── pollDeviceToken ────────────────────────────────────────────────────────
 
 describe("HearthClient.pollDeviceToken()", () => {
-  beforeEach(() => { vi.useFakeTimers(); });
-  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
   it("resolves with TokenResponse when user approves", async () => {
-    const fetchSpy = vi.fn()
+    const fetchSpy = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
       .mockResolvedValue(new Response(JSON.stringify(TOKEN_RESPONSE), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
@@ -219,7 +232,8 @@ describe("HearthClient.pollDeviceToken()", () => {
   });
 
   it("sends device_code grant to token_endpoint", async () => {
-    const fetchSpy = vi.fn()
+    const fetchSpy = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
       .mockResolvedValue(new Response(JSON.stringify(TOKEN_RESPONSE), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
@@ -235,9 +249,12 @@ describe("HearthClient.pollDeviceToken()", () => {
   });
 
   it("retries silently on authorization_pending", async () => {
-    const fetchSpy = vi.fn()
+    const fetchSpy = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "authorization_pending" }), { status: 400 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "authorization_pending" }), { status: 400 }),
+      )
       .mockResolvedValue(new Response(JSON.stringify(TOKEN_RESPONSE), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
 
@@ -250,7 +267,8 @@ describe("HearthClient.pollDeviceToken()", () => {
   });
 
   it("increases interval by 5 s on slow_down", async () => {
-    const fetchSpy = vi.fn()
+    const fetchSpy = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: "slow_down" }), { status: 400 }))
       .mockResolvedValue(new Response(JSON.stringify(TOKEN_RESPONSE), { status: 200 }));
@@ -263,7 +281,8 @@ describe("HearthClient.pollDeviceToken()", () => {
   });
 
   it("throws TokenExpiredError when device code expires", async () => {
-    const fetchSpy = vi.fn()
+    const fetchSpy = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
       .mockResolvedValue(new Response(JSON.stringify({ error: "expired_token" }), { status: 400 }));
     vi.stubGlobal("fetch", fetchSpy);
@@ -280,9 +299,7 @@ describe("HearthClient.pollDeviceToken()", () => {
 
 describe("HearthClient.requestMagicLink()", () => {
   it("POSTs to /v1/{realmId}/auth/magic-link with JSON body", async () => {
-    const fetchSpy = vi.fn().mockResolvedValue(
-      new Response(null, { status: 202 }),
-    );
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
     vi.stubGlobal("fetch", fetchSpy);
 
     await makeClient().requestMagicLink("user@example.com");
@@ -300,7 +317,9 @@ describe("HearthClient.requestMagicLink()", () => {
 
   it("throws OAuthFlowError on HTTP 429 (rate limit)", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 429 })));
-    const err = await makeClient().requestMagicLink("user@example.com").catch((e) => e);
+    const err = await makeClient()
+      .requestMagicLink("user@example.com")
+      .catch((e) => e);
     expect(err).toBeInstanceOf(OAuthFlowError);
     expect((err as OAuthFlowError).statusCode).toBe(429);
   });
@@ -317,7 +336,8 @@ describe("HearthClient.requestMagicLink()", () => {
 
 describe("HearthClient.exchangeMagicLink()", () => {
   it("POSTs the magic-link grant to the discovered token_endpoint with token in body", async () => {
-    const fetchSpy = vi.fn()
+    const fetchSpy = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(TOKEN_RESPONSE), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);

@@ -20,10 +20,7 @@ export type { HearthClientConfig } from "./hearth-client.js";
 export { JwksClient } from "./jwks-client.js";
 export type { JwksClientConfig, VerifyOptions } from "./jwks-client.js";
 export { IntrospectionClient } from "./introspection-client.js";
-export type {
-  IntrospectionClientConfig,
-  IntrospectionResult,
-} from "./introspection-client.js";
+export type { IntrospectionClientConfig, IntrospectionResult } from "./introspection-client.js";
 
 // Error types (spec §5).
 export {
@@ -56,11 +53,7 @@ export { HearthApiClient, HearthError } from "./client.js";
 export type { HearthApiClientConfig, HandleCallbackParams } from "./client.js";
 export { AdminClient } from "./admin.js";
 export { createHearth } from "./hearth.js";
-export type {
-  HearthFacade,
-  HearthHttpClient,
-  HearthOptions,
-} from "./hearth.js";
+export type { HearthFacade, HearthHttpClient, HearthOptions } from "./hearth.js";
 export {
   HearthContext,
   HearthProvider,

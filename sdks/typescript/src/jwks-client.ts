@@ -1,13 +1,5 @@
-import {
-  createLocalJWKSet,
-  jwtVerify,
-  errors as joseErrors,
-} from "jose";
-import type {
-  GetKeyFunction,
-  JWSHeaderParameters,
-  FlattenedJWSInput,
-} from "jose";
+import { createLocalJWKSet, jwtVerify, errors as joseErrors } from "jose";
+import type { GetKeyFunction, JWSHeaderParameters, FlattenedJWSInput } from "jose";
 import type { JsonWebKey } from "./types.js";
 import { Claims } from "./claims.js";
 import {
@@ -87,11 +79,13 @@ export class JwksClient {
   private async getKeySet(forceRefresh = false): Promise<JwkKeyResolver> {
     const now = Date.now();
     const maxAge = this.ttl ?? 5 * 60 * 1000;
-    if (!forceRefresh && this._cache && (now - this._cache.fetchedAt) < maxAge) {
+    if (!forceRefresh && this._cache && now - this._cache.fetchedAt < maxAge) {
       return this._cache.keySet;
     }
     const keys = await this.fetchKeys();
-    const keySet = createLocalJWKSet({ keys: keys as Parameters<typeof createLocalJWKSet>[0]["keys"] });
+    const keySet = createLocalJWKSet({
+      keys: keys as Parameters<typeof createLocalJWKSet>[0]["keys"],
+    });
     this._cache = { keySet: keySet as JwkKeyResolver, fetchedAt: now };
     return keySet as JwkKeyResolver;
   }
@@ -170,7 +164,7 @@ export class JwksClient {
     if (err instanceof joseErrors.JWTClaimValidationFailed) {
       const claim = err.claim;
       if (claim === "iss") {
-        const actual = (err.payload as Record<string, unknown>)?.["iss"] as string ?? "";
+        const actual = ((err.payload as Record<string, unknown>)?.["iss"] as string) ?? "";
         throw new TokenIssuerError(options?.issuer ?? "", actual);
       }
       if (claim === "aud") {

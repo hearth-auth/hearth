@@ -94,9 +94,7 @@ export interface StepUpAssertion {
  * permanent credential. Supply exactly one field.
  */
 export type StepUpProof =
-  | { password: string }
-  | { totp_code: string }
-  | { assertion: StepUpAssertion };
+  { password: string } | { totp_code: string } | { assertion: StepUpAssertion };
 
 /** `PublicKeyCredentialCreationOptions` returned by `/webauthn/register/begin`. */
 export interface WebAuthnRegistrationBeginResponse {
@@ -220,10 +218,7 @@ export interface RegisterClientParams {
 
 /** How a client authenticates at the token endpoint (RFC 7591 §2). */
 export type TokenEndpointAuthMethod =
-  | "client_secret_basic"
-  | "client_secret_post"
-  | "private_key_jwt"
-  | "none";
+  "client_secret_basic" | "client_secret_post" | "private_key_jwt" | "none";
 
 /** OAuth client record from the API. */
 export interface OAuthClient {

@@ -1,0 +1,8 @@
+# Build and test output.
+dist/
+coverage/
+# buf output: `make proto-check` diffs it byte-for-byte against a fresh
+# generation, so it must stay exactly as the generator wrote it.
+src/generated/
+# CHANGELOG.md is written by semantic-release; prose Markdown is not linted.
+*.md
