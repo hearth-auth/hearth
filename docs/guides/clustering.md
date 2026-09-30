@@ -3,9 +3,8 @@
 > **⚠ EXPERIMENTAL — multi-node is NOT supported for production.** Single-node is the only
 > supported deployment for Hearth 1.x. **Do not** use a multi-node cluster:
 >
-> - for **load-balanced traffic** — followers do not forward writes to the leader ([H-3](#h-3--writes-to-a-follower-fail)), so every write *and every login* (a login writes a session) that lands on a follower fails;
-> - for **writes or logins on followers**, for the same reason;
-> - as **HA failover** — membership is fixed at bootstrap ([C-6](#c-6--cluster-membership-is-immutable-after-bootstrap)), there is no leader redirect, and per-node state (below) does not survive a node switch.
+> - for **load-balanced traffic** — writes and logins on a follower now succeed (they are forwarded to the leader, [H-3](#h-3--writes-to-a-follower-forwarded-to-the-leader-fixed)), but reads served by a follower may be stale ([C-5](#c-5--follower-cache-invalidation-is-partial-was-followers-never-invalidate)) and per-node state (below) differs between nodes;
+> - as **HA failover** — membership is fixed at bootstrap ([C-6](#c-6--cluster-membership-is-immutable-after-bootstrap)), and per-node state (below) does not survive a node switch.
 >
 > A cold cluster *does* start as of task 26.46 ([G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed), fixed). Starting is not the same as being fit for production: the defects below still apply to a running cluster. (An earlier revision of this banner said a cluster could not start at all; that described the pre-fix state.)
 
@@ -95,15 +94,51 @@ on a follower for an access decision that must reflect the latest revocation.
 
 **Consequence:** Nodes cannot be added or removed from a running cluster. Replacing a failed node requires a full-cluster restart with updated YAML. Online membership changes are not possible in Hearth 1.x.
 
-### H-3 — Writes to a follower fail
+### H-3 — Writes to a follower: forwarded to the leader (fixed)
 
-Cluster storage does not forward a follower's write to the leader (`src/cluster/engine.rs`,
-`is_not_leader`): the write is refused with a storage error (`raft: not the leader`), which reaches
-the caller as an HTTP 500 with no leader-address hint to retry against. Mutation requests (user
-creation, token issuance, session writes) therefore fail on a follower — **and so do logins**,
-because a successful login writes a session.
+Earlier releases refused every write that reached a follower (`raft: not the leader`, an HTTP
+500), so user creation, token issuance and **every login** (a login writes a session) failed on
+`(n-1)/n` of the nodes behind a load balancer.
 
-**Consequence:** A load balancer that distributes traffic across all nodes will cause approximately `(n-1)/n` of writes and logins to fail in an n-node cluster. Writes and logins must be routed exclusively to the leader node, which is why multi-node must not be used for load-balanced traffic.
+A follower now **forwards the write to the leader** inside the cluster — standard Raft
+client-request forwarding, as in etcd and Consul (`src/cluster/engine.rs`,
+`propose_with_response`):
+
+1. The follower sends the replicated command to the current leader over the existing peer mTLS
+   channel (the `ForwardWrite` RPC on `cluster.peer_address`). It is authenticated exactly like
+   the Raft RPCs: both ends present certificates signed by the cluster CA. No client-facing port
+   or redirect is involved, so clients and load balancers need no leader awareness.
+2. The leader proposes it and answers once it has committed and applied it, with the log index
+   and the result (a conditional write's outcome, such as a single-use claim, travels back
+   with it).
+3. The follower waits until **its own** state machine has applied that log index before it
+   answers, so a caller reads its own write on the node it wrote to — a login served by a
+   follower can use its session on that follower straight away.
+
+**Exactly once.** A forwarded write is retried — once, on a newly elected leader — only when it
+provably never entered the Raft log: the leader could not be reached at all, or it answered that
+it is no longer the leader without proposing the write. Once the request may have reached a
+leader that proposed it (the connection dropped mid-call, the leader's commit wait timed out, the
+leader died), the outcome is unknown and the write fails with
+`the write was forwarded to the leader at <addr> and its outcome is unknown` instead of being
+retried: a retried single-use claim would answer "already used" for the caller's own write, and a
+retried counter increment would count twice. The caller (and the HTTP client) should re-read
+before retrying, exactly as for a `cluster.write_timeout_ms` timeout on the leader itself.
+
+**Bounds.** Finding a leader plus the forwarded call are bounded by `cluster.write_timeout_ms`
+(default 10 s) plus 2 s; the follower's wait for its own apply is bounded by
+`cluster.write_timeout_ms` again (on expiry the write is durable but the call fails with
+`...did not apply it within ... ms`, and the write appears on that node once it catches up). A
+leader serves at most **256** forwarded writes at once and refuses the next one immediately; a
+forwarded command is limited to **3 MiB** serialized (a larger write fails on a follower with a
+message to send it to the leader). While no leader is elected, a follower's write waits for the
+election within that bound and then fails with `raft: not the leader`.
+
+**What did not change.** Only writes are forwarded. Reads are still served locally by every node
+and may be stale (C-5); the cold-start write set still runs only on the leader
+([G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed)). Covered by
+`tests/cluster_follower_write_forwarding.rs` (writes, a login and a single-use claim issued to a
+follower; a lost reply applied once and never retried; the leader killed mid-forwarding).
 
 ### Exclusive `data_dir` lock
 
@@ -120,9 +155,9 @@ This lock is process-scoped and cannot be shared across nodes. Each node in a cl
 The Wave 5 roadmap items covering clustering are:
 - **HEA-2177 (W5-1)** — RBAC/claims cache invalidation on followers (C-5; partially addressed — RBAC, audit, revoked-token and control-epoch rows are now forwarded, see C-5)
 - **HEA-2178 (W5-2)** — Online membership changes via `add_learner` / `change_membership` (C-6)
-- **HEA-2173 (W3-3)** — Follower-write 307 redirect to leader instead of HTTP 500 (H-3)
+- ~~**HEA-2173 (W3-3)** — Follower-write 307 redirect to leader instead of HTTP 500 (H-3)~~ — superseded: followers forward writes to the leader inside the cluster (H-3, fixed)
 
-All three are post-GA. Because Hearth 1.x ships **no supported multi-node path**, none of
+The remaining two are post-GA. Because Hearth 1.x ships **no supported multi-node path**, none of
 them gate the 1.0 release.
 
 Until these ship, the production deployment model is single-node with external backups and a planned failover procedure. If your reliability requirements exceed what a single node provides, contact us to understand the timeline.
@@ -268,16 +303,17 @@ cluster:
 `00000000-0000-0000-0000-000000000000`) that carries `hearth.admin`, sent with that UUID as
 `X-Realm-ID`.
 
-**On a running cluster, mint it in the admin console** of the **leader**: sign in at
+**On a running cluster, mint it in the admin console** of any node: sign in at
 `/ui/admin/login` with an operator-console account holding `realm.admin`, open **API Tokens**
 (`/ui/admin/api-tokens`), pick a lifetime (1 to 60 minutes, default 15) and confirm with your
 password and your second factor (see the [realm admin API](./admin-api.md#realms)). The token's
 session and its audit record are ordinary writes, proposed through Raft: once they commit, the
 token validates on **every** node, and revoking its session on the leader revokes it everywhere
 (`tests/cluster_three_node_control_coherence.rs::an_operator_token_minted_on_the_leader_validates_and_revokes_on_both_followers`).
-A follower cannot accept the write and there is no leader redirect, so on a follower the page
-answers with an error and mints nothing: sign in on another node. Signing in is a write too, so
-the console login fails on a follower the same way.
+On a follower both the console login and the mint are writes that the follower forwards to the
+leader ([H-3](#h-3--writes-to-a-follower-forwarded-to-the-leader-fixed)), so they work there too.
+Keep the whole console session on one node, though: the session-cookie secret is per node unless
+you configure it (see the per-node state note at the top).
 
 **For a stopped node, use `hearth admin token`.** It mints on the host from a **stopped** node's
 data directory, and on a cluster node it is limited:
@@ -342,9 +378,15 @@ curl -s -X POST http://10.0.0.1:8420/admin/cluster/bootstrap \
 
 ### Write Routing
 
-**All writes must go to the leader.** Due to H-3, writes to a follower return HTTP 500. Your load balancer must route write traffic exclusively to the leader node. There is no automatic redirect.
+**Any node accepts writes.** A follower forwards each write to the leader over the peer mTLS
+channel and answers once the write is committed and applied on the follower itself
+([H-3](#h-3--writes-to-a-follower-forwarded-to-the-leader-fixed)), so a load balancer needs no
+leader awareness and a client reads its own write on the node it wrote to. A forwarded write
+costs one extra peer round trip; routing writes to the leader avoids it.
 
-Reads from followers may be stale: follower cache invalidation covers only the row types listed under C-5. For consistent reads, route all traffic to the leader.
+Reads from followers may be stale: follower cache invalidation covers only the row types listed
+under C-5. For consistent reads, route all traffic to the leader. A write whose forwarded outcome
+is unknown (the leader died mid-call) fails rather than being retried — re-read before retrying it.
 
 ---
 
@@ -385,12 +427,12 @@ recorded as **owed**. What happens next depends on why it failed:
 - **The node is still the leader** (a write timeout, a storage fault): a background thread on that
   node retries the owed bump with backoff (100 ms doubling to 5 s) until it succeeds, and every
   other node then reloads.
-- **Leadership moved** (the node is now a follower, or no leader was known): followers cannot write
-  — Hearth does not forward a follower's writes to the leader — so the bump could never succeed
-  there. Instead, **every node that becomes the Raft leader bumps the control epoch once**. The
-  control's row was committed before that bump in the new leader's log, so every node, the new
-  leader included, reloads and enforces it. The old leader drops what it owed (logged once at
-  `INFO`), and the gauge returns to 0.
+- **Leadership moved** (the node is now a follower): the retry is forwarded to the new leader like
+  any follower write and succeeds there. In addition, **every node that becomes the Raft leader
+  bumps the control epoch once**. The control's row was committed before that bump in the new
+  leader's log, so every node, the new leader included, reloads and enforces it — which also
+  covers a bump owed while **no leader could be reached**: that one is refused as
+  `raft: not the leader` and dropped (logged once at `INFO`), and the gauge returns to 0.
 
 `hearth_control_epoch_bumps_owed` is the number of controls still waiting, summed over the
 process. **Alert when it stays above 0 for more than a minute**: the node that owes the bump still

@@ -2243,6 +2243,11 @@ impl EmbeddedIdentityEngine {
     /// node died with `raft: not the leader; redirect to unknown` before
     /// `POST /admin/cluster/bootstrap` could ever be called.
     ///
+    /// Follower write forwarding does not make the wait unnecessary: a
+    /// follower could now forward the set, but the set is read-then-write
+    /// (each node would generate its own signing key), so it must still run
+    /// on exactly one node — the leader.
+    ///
     /// Two outcomes end the wait, and between them they cover every node:
     ///
     /// * [`StorageEngine::accepts_writes`] is true — this node is the Raft

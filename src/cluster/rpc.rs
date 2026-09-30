@@ -1,8 +1,11 @@
 //! Generated gRPC types for the cluster peer transport.
 //!
-//! The proto source lives at `proto/hearth/cluster/v1/raft.proto`.
-//! Files are generated into `src/cluster/generated/` by `build.rs` on
-//! every `cargo build` (gitignored; not committed).
+//! The proto source lives at `proto/hearth/cluster/v1/raft.proto`. Unlike
+//! the API protos, `build.rs` does not compile it: the generated file under
+//! `src/cluster/generated/` is committed. Regenerate it after editing the
+//! proto with `tonic_prost_build::configure().build_server(true)
+//! .build_client(true)` (the workspace's pinned `tonic-prost-build`), which
+//! reproduces the committed file byte for byte.
 
 #![allow(
     clippy::all,

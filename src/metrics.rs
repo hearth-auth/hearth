@@ -341,7 +341,8 @@ pub struct Metrics {
     /// Controls whose epoch bump failed and is still owed, summed over every
     /// identity engine in the process: a background thread retries the bump
     /// (with bounded backoff) until it succeeds, and a node refused as
-    /// `NotLeader` drops it (the new leader's election bump covers it); then
+    /// `NotLeader` — no leader reachable to forward it to — drops it (the new
+    /// leader's election bump covers it); then
     /// this returns to 0. Non-zero for long means a node that believes it
     /// leads cannot commit, and other nodes are enforcing stale controls —
     /// alert on it staying above 0.

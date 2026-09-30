@@ -74,9 +74,10 @@
 //!
 //! # Leader changes
 //!
-//! Cluster storage does not forward a follower's write to the leader, so a
-//! bump lost because leadership moved can never be made by the node that owes
-//! it. Two rules cover that case:
+//! A follower forwards its writes to the leader, so a node that owes a bump
+//! after leadership moved normally just makes it through the new leader. The
+//! bump is refused as `NotLeader` only when no leader can be reached at all
+//! (none elected within the write bound), and two rules cover that case:
 //!
 //! * a node that becomes the Raft leader bumps the epoch once
 //!   ([`ControlPlane::on_leadership_acquired`]). Every control row committed
@@ -525,8 +526,7 @@ impl ControlPlane {
                 Ok(())
             }
             Err(err) if crate::cluster::is_not_leader(&err) => {
-                // This node no longer leads, and cluster storage does not
-                // forward its writes: the bump can never succeed here. The
+                // No leader could be reached to forward the bump to. The
                 // node that is (or will be) elected bumps the epoch when it
                 // takes over, after every row this node committed.
                 self.settle_owed(owed);

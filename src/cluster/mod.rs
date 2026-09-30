@@ -11,6 +11,8 @@
 //!  │  ClusterEngine (public-facing wrapper)               │
 //!  │    • single-node bypass (zero Raft overhead)         │
 //!  │    • leader write routing via client_write           │
+//!  │    • follower writes forwarded to the leader, then   │
+//!  │      awaited locally (read-your-writes)              │
 //!  │    • follower read staleness via reads_allowed flag  │
 //!  └──────────────────────────────────────────────────────┘
 //!  ┌──────────────────────────────────────────────────────┐
@@ -23,6 +25,7 @@
 //!  │  RaftRpcHandler / serve() (incoming RPCs)            │
 //!  │    • tonic Server with ServerTlsConfig (mTLS)        │
 //!  │    • delegates to IncomingRpcDispatch                │
+//!  │      (Raft RPCs + ForwardWrite from followers)       │
 //!  └──────────────────────────────────────────────────────┘
 //! ```
 
@@ -73,4 +76,7 @@ pub use log_store::{HearthLogReader, HearthLogStore};
 pub use network::{HearthNetworkFactory, PeerFaults};
 pub use server::{serve, serve_with_shutdown, IncomingRpcDispatch, NoopDispatch, RaftRpcHandler};
 pub use state_machine::HearthStateMachine;
-pub use types::{HearthLogData, HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand};
+pub use types::{
+    ForwardedWriteOutcome, HearthLogData, HearthLogResponse, HearthNode, HearthRaftConfig,
+    RaftCommand,
+};
