@@ -25,6 +25,23 @@ import (
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
+// writeJSON encodes v as a stub server's response body. A failed write would
+// otherwise surface only as a confusing decode error on the client side.
+func writeJSON(t *testing.T, w http.ResponseWriter, v any) {
+	t.Helper()
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		t.Errorf("stub server: encode response: %v", err)
+	}
+}
+
+// writeBody writes b as a stub server's response body, reporting a failed write.
+func writeBody(t *testing.T, w http.ResponseWriter, b []byte) {
+	t.Helper()
+	if _, err := w.Write(b); err != nil {
+		t.Errorf("stub server: write response: %v", err)
+	}
+}
+
 // makeEd25519Key returns a fresh key pair plus the base64url-encoded public key x coordinate.
 func makeEd25519Key(t *testing.T) (ed25519.PrivateKey, ed25519.PublicKey, string) {
 	t.Helper()
@@ -87,7 +104,7 @@ func TestJwksCache_CachesEd25519KeyByKid(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(makeJWKS(x, kid))
+		writeBody(t, w, makeJWKS(x, kid))
 	}))
 	defer srv.Close()
 
@@ -128,9 +145,9 @@ func TestJwksCache_ReFetchesOnKidCacheMiss(t *testing.T) {
 		callCount++
 		if callCount == 1 {
 			// First fetch returns no keys
-			json.NewEncoder(w).Encode(map[string]any{"keys": []any{}})
+			writeJSON(t, w, map[string]any{"keys": []any{}})
 		} else {
-			w.Write(makeJWKS(x, kid))
+			writeBody(t, w, makeJWKS(x, kid))
 		}
 	}))
 	defer srv.Close()
@@ -151,7 +168,7 @@ func TestJwksCache_ReFetchesOnKidCacheMiss(t *testing.T) {
 func TestJwksCache_RaisesOnKidNotFoundAfterRefetch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"keys": []any{}})
+		writeJSON(t, w, map[string]any{"keys": []any{}})
 	}))
 	defer srv.Close()
 
@@ -176,7 +193,7 @@ func TestJwksCache_SkipsNonOKPKeysWithoutError(t *testing.T) {
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(jwks)
+		writeJSON(t, w, jwks)
 	}))
 	defer srv.Close()
 
@@ -197,7 +214,7 @@ func TestJwksCache_RespectsMaxAgeCacheControl(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "max-age=120")
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(makeJWKS(x, kid))
+		writeBody(t, w, makeJWKS(x, kid))
 	}))
 	defer srv.Close()
 
@@ -218,7 +235,7 @@ func TestJwksCache_MaxAgeCappedAt24Hours(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "max-age=999999")
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(makeJWKS(x, kid))
+		writeBody(t, w, makeJWKS(x, kid))
 	}))
 	defer srv.Close()
 
@@ -243,7 +260,7 @@ func verifyTestClient(
 
 	jwksSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(makeJWKS(x, kid))
+		writeBody(t, w, makeJWKS(x, kid))
 	}))
 
 	discJSON, _ := json.Marshal(map[string]any{
@@ -254,7 +271,7 @@ func verifyTestClient(
 	mainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.well-known/openid-configuration" {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(discJSON)
+			writeBody(t, w, discJSON)
 			return
 		}
 		http.NotFound(w, r)
@@ -478,7 +495,7 @@ func TestVerifyToken_DoesNotFallBackToIntrospection(t *testing.T) {
 func TestClientCredentials_ReturnsTokenResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(t, w, map[string]any{
 			"access_token": "eyJ...",
 			"token_type":   "Bearer",
 			"expires_in":   3600,
@@ -516,7 +533,7 @@ func TestClientCredentials_SendsCredentialsInJSONBody(t *testing.T) {
 			t.Errorf("request body was not valid JSON (form-encoded regression?): %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(t, w, map[string]any{
 			"access_token": "t", "token_type": "Bearer", "expires_in": 3600,
 		})
 	}))
@@ -550,7 +567,7 @@ func TestClientCredentials_SendsOptionalScope(t *testing.T) {
 			t.Errorf("request body was not valid JSON: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(t, w, map[string]any{
 			"access_token": "t", "token_type": "Bearer", "expires_in": 3600,
 		})
 	}))
@@ -597,7 +614,7 @@ func TestClientCredentials_RaisesConfigurationErrorWhenNoClientSecret(t *testing
 func TestStartDeviceFlow_ReturnsResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(t, w, map[string]any{
 			"device_code":      "DEV123",
 			"user_code":        "ABCD-1234",
 			"verification_uri": "https://auth.example.com/activate",
@@ -634,7 +651,7 @@ func TestStartDeviceFlow_SendsClientID(t *testing.T) {
 			t.Errorf("request body was not valid JSON (form-encoded regression?): %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(t, w, map[string]any{
 			"device_code": "d", "user_code": "u",
 			"verification_uri": "v", "expires_in": 300, "interval": 5,
 		})
@@ -670,7 +687,7 @@ func TestStartDeviceFlow_RaisesConfigurationErrorWhenNoClientID(t *testing.T) {
 func TestPollDeviceToken_ReturnTokensOnSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(t, w, map[string]any{
 			"access_token": "eyJ...",
 			"token_type":   "Bearer",
 			"expires_in":   3600,
@@ -696,7 +713,7 @@ func TestPollDeviceToken_ReturnTokensOnSuccess(t *testing.T) {
 func TestPollDeviceToken_ReturnsNilOnAuthorizationPending(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]any{"error": "authorization_pending"})
+		writeJSON(t, w, map[string]any{"error": "authorization_pending"})
 	}))
 	defer srv.Close()
 
@@ -715,7 +732,7 @@ func TestPollDeviceToken_ReturnsNilOnAuthorizationPending(t *testing.T) {
 func TestPollDeviceToken_ReturnsNilOnSlowDown(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]any{"error": "slow_down"})
+		writeJSON(t, w, map[string]any{"error": "slow_down"})
 	}))
 	defer srv.Close()
 
@@ -734,7 +751,7 @@ func TestPollDeviceToken_ReturnsNilOnSlowDown(t *testing.T) {
 func TestPollDeviceToken_RaisesTokenExpiredErrorOnExpiredToken(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]any{"error": "expired_token"})
+		writeJSON(t, w, map[string]any{"error": "expired_token"})
 	}))
 	defer srv.Close()
 
@@ -753,7 +770,7 @@ func TestPollDeviceToken_RaisesTokenExpiredErrorOnExpiredToken(t *testing.T) {
 func TestPollDeviceToken_RaisesAPIErrorOnOtherErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]any{"error": "access_denied"})
+		writeJSON(t, w, map[string]any{"error": "access_denied"})
 	}))
 	defer srv.Close()
 
@@ -773,7 +790,7 @@ func TestRequestMagicLink_PostsToCorrectEndpoint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedPath = r.URL.Path
 		w.WriteHeader(202)
-		json.NewEncoder(w).Encode(map[string]any{"message": "ok"})
+		writeJSON(t, w, map[string]any{"message": "ok"})
 	}))
 	defer srv.Close()
 
@@ -792,10 +809,12 @@ func TestRequestMagicLink_SendsEmailInJSONBody(t *testing.T) {
 	var capturedEmail string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]string
-		json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("magic-link request body was not valid JSON: %v", err)
+		}
 		capturedEmail = body["email"]
 		w.WriteHeader(202)
-		json.NewEncoder(w).Encode(map[string]any{"message": "ok"})
+		writeJSON(t, w, map[string]any{"message": "ok"})
 	}))
 	defer srv.Close()
 
@@ -812,7 +831,7 @@ func TestRequestMagicLink_SendsEmailInJSONBody(t *testing.T) {
 func TestRequestMagicLink_DoesNotRaiseOn202(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(202)
-		json.NewEncoder(w).Encode(map[string]any{"message": "If an account exists, a magic link has been sent"})
+		writeJSON(t, w, map[string]any{"message": "If an account exists, a magic link has been sent"})
 	}))
 	defer srv.Close()
 
@@ -825,7 +844,7 @@ func TestRequestMagicLink_DoesNotRaiseOn202(t *testing.T) {
 func TestRequestMagicLink_RaisesAPIErrorOn429(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(429)
-		w.Write([]byte("too many requests"))
+		writeBody(t, w, []byte("too many requests"))
 	}))
 	defer srv.Close()
 
@@ -856,7 +875,7 @@ func TestExchangeMagicLink_PostsMagicLinkGrantWithTokenInBody(t *testing.T) {
 			t.Errorf("request body was not valid JSON (form-encoded regression?): %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(t, w, map[string]any{
 			"access_token": "eyJ...", "token_type": "Bearer", "expires_in": 3600,
 		})
 	}))
@@ -884,7 +903,7 @@ func TestExchangeMagicLink_PostsMagicLinkGrantWithTokenInBody(t *testing.T) {
 func TestExchangeMagicLink_RaisesAPIErrorOnInvalidToken(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
-		w.Write([]byte(`{"error":"invalid_grant"}`))
+		writeBody(t, w, []byte(`{"error":"invalid_grant"}`))
 	}))
 	defer srv.Close()
 
@@ -902,7 +921,7 @@ func TestStartWebAuthnRegistration_ReturnsOptions(t *testing.T) {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(t, w, map[string]any{
 			"challenge":         "abc123",
 			"rp_id":             "example.com",
 			"rp_name":           "Example",
@@ -938,7 +957,7 @@ func TestFinishWebAuthnRegistration_ReturnsCredential(t *testing.T) {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(t, w, map[string]any{
 			"credential_id": "cred-abc",
 			"algorithm":     int64(-7),
 			"discoverable":  true,
@@ -968,7 +987,7 @@ func TestStartWebAuthnAuthentication_ReturnsOptions(t *testing.T) {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(t, w, map[string]any{
 			"challenge":         "xyz789",
 			"rp_id":             "example.com",
 			"allow_credentials": []map[string]any{},
@@ -994,7 +1013,7 @@ func TestFinishWebAuthnAuthentication_ReturnsTokens(t *testing.T) {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(t, w, map[string]any{
 			"access_token":  "eyJ...",
 			"token_type":    "Bearer",
 			"expires_in":    3600,

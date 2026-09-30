@@ -16,7 +16,6 @@ import asyncio
 import base64
 import json
 import time
-from typing import Optional
 
 import httpx
 import pytest
@@ -35,6 +34,7 @@ JWKS_URL = f"{BASE_URL}/.well-known/jwks.json"
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_key() -> tuple:
     private_key = Ed25519PrivateKey.generate()
     raw = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
@@ -43,10 +43,21 @@ def _make_key() -> tuple:
 
 
 def _jwks(x_b64: str, kid: str) -> dict:
-    return {"keys": [{"kty": "OKP", "crv": "Ed25519", "x": x_b64, "kid": kid, "use": "sig", "alg": "EdDSA"}]}
+    return {
+        "keys": [
+            {
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "x": x_b64,
+                "kid": kid,
+                "use": "sig",
+                "alg": "EdDSA",
+            }
+        ]
+    }
 
 
-def _payload(permissions: Optional[list] = None, **extra) -> dict:
+def _payload(permissions: list | None = None, **extra) -> dict:
     now = int(time.time())
     body = {"sub": "user-abc", "iss": BASE_URL, "exp": now + 3600, "iat": now}
     if permissions is not None:
@@ -57,6 +68,7 @@ def _payload(permissions: Optional[list] = None, **extra) -> dict:
 
 def _sign(private_key, payload: dict, kid: str) -> str:
     import jwt as pyjwt
+
     return pyjwt.encode(payload, private_key, algorithm="EdDSA", headers={"kid": kid})
 
 
@@ -66,14 +78,15 @@ def _b64(obj: dict) -> str:
 
 def unsigned_admin_token() -> str:
     """An ``alg: none`` forgery claiming ``admin.write``. Costs the attacker nothing."""
-    return f'{_b64({"alg": "none", "typ": "JWT"})}.{_b64(_payload(permissions=["admin.write"]))}.'
+    return f"{_b64({'alg': 'none', 'typ': 'JWT'})}.{_b64(_payload(permissions=['admin.write']))}."
 
 
 # ---------------------------------------------------------------------------
 # ASGI middleware
 # ---------------------------------------------------------------------------
 
-async def _call_asgi(mw, token: Optional[str]) -> int:
+
+async def _call_asgi(mw, token: str | None) -> int:
     """Drive an ASGI middleware once and return the response status."""
     headers = [(b"authorization", f"Bearer {token}".encode())] if token else []
     scope = {"type": "http", "method": "GET", "path": "/", "headers": headers}
@@ -111,8 +124,8 @@ def test_asgi_embedded_rejects_unsigned_token():
 
 @respx.mock
 def test_asgi_embedded_rejects_wrong_key_token():
-    signing_key, _, kid = _make_key()          # the attacker's key
-    _, x_b64, _ = _make_key()                  # the realm's published key
+    signing_key, _, kid = _make_key()  # the attacker's key
+    _, x_b64, _ = _make_key()  # the realm's published key
     respx.get(JWKS_URL).mock(return_value=httpx.Response(200, json=_jwks(x_b64, kid)))
     client = HearthClient(BASE_URL, realm_id="r1")
 
@@ -153,7 +166,8 @@ def test_asgi_embedded_denies_signed_token_without_the_permission():
 # WSGI middleware
 # ---------------------------------------------------------------------------
 
-def _call_wsgi(mw, token: Optional[str]) -> str:
+
+def _call_wsgi(mw, token: str | None) -> str:
     captured = {}
 
     def start_response(status, headers, exc_info=None):
@@ -200,6 +214,7 @@ def test_wsgi_embedded_accepts_signed_token():
 # Django middleware and @require_permission
 # ---------------------------------------------------------------------------
 
+
 @respx.mock
 def test_django_sync_check_rejects_unsigned_token():
     from hearth.django import _sync_check
@@ -208,7 +223,9 @@ def test_django_sync_check_rejects_unsigned_token():
     respx.get(JWKS_URL).mock(return_value=httpx.Response(200, json=_jwks(x_b64, kid)))
     client = HearthClient(BASE_URL, realm_id="r1")
 
-    assert _sync_check(client, unsigned_admin_token(), "admin.write", "embedded") is False
+    assert (
+        _sync_check(client, unsigned_admin_token(), "admin.write", "embedded") is False
+    )
 
 
 @respx.mock
@@ -233,6 +250,7 @@ def test_django_sync_check_without_a_client_is_fail_closed():
 # ---------------------------------------------------------------------------
 # 25.2 — nbf on the verify path
 # ---------------------------------------------------------------------------
+
 
 @respx.mock
 def test_verify_token_rejects_not_yet_valid_token():

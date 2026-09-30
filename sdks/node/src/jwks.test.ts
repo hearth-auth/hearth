@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as jose from "jose";
 import { JwksVerifier } from "./jwks.js";
 import { DiscoveryClient } from "./discovery.js";
-import { TokenExpiredError, TokenVerificationError, JWKSFetchError } from "./errors.js";
+import { TokenExpiredError, JWKSFetchError } from "./errors.js";
 import type { ResolvedConfig } from "./config.js";
 import { JWKS_TTL_DEFAULT_MS, HTTP_TIMEOUT_DEFAULT_MS, CLOCK_SKEW_DEFAULT_S } from "./config.js";
 import type { JwkSetFactory } from "./jwks.js";
@@ -40,9 +40,7 @@ interface KeyPairResult {
   jwk: jose.JWK;
 }
 
-async function generateKeyPair(
-  alg: "EdDSA" | "RS256" | "ES256" = "EdDSA",
-): Promise<KeyPairResult> {
+async function generateKeyPair(alg: "EdDSA" | "RS256" | "ES256" = "EdDSA"): Promise<KeyPairResult> {
   const { privateKey, publicKey } =
     alg === "EdDSA"
       ? await jose.generateKeyPair("EdDSA", { crv: "Ed25519" })
@@ -62,9 +60,7 @@ async function signToken(
   alg: string,
   kid: string,
 ): Promise<string> {
-  return new jose.SignJWT(payload)
-    .setProtectedHeader({ alg, kid })
-    .sign(privateKey);
+  return new jose.SignJWT(payload).setProtectedHeader({ alg, kid }).sign(privateKey);
 }
 
 /** Build a JwkSetFactory that serves a local (in-memory) JWKS, no network needed. */
@@ -105,7 +101,9 @@ describe("JwksVerifier — clock skew boundary (§9)", () => {
     const exp = NOW + CLOCK_SKEW_DEFAULT_S;
     const token = await signToken(
       { sub: "u1", iss: ISSUER, exp, iat: NOW - 10 },
-      kp.privateKey, "EdDSA", kp.kid,
+      kp.privateKey,
+      "EdDSA",
+      kp.kid,
     );
 
     const verifier = new JwksVerifier(
@@ -122,7 +120,9 @@ describe("JwksVerifier — clock skew boundary (§9)", () => {
     const exp = NOW - CLOCK_SKEW_DEFAULT_S - 1;
     const token = await signToken(
       { sub: "u1", iss: ISSUER, exp, iat: NOW - 200 },
-      kp.privateKey, "EdDSA", kp.kid,
+      kp.privateKey,
+      "EdDSA",
+      kp.kid,
     );
 
     const verifier = new JwksVerifier(
@@ -139,7 +139,9 @@ describe("JwksVerifier — clock skew boundary (§9)", () => {
     const exp = NOW + 3600;
     const token = await signToken(
       { sub: "u1", iss: ISSUER, exp, iat },
-      kp.privateKey, "EdDSA", kp.kid,
+      kp.privateKey,
+      "EdDSA",
+      kp.kid,
     );
 
     const verifier = new JwksVerifier(
@@ -166,7 +168,9 @@ describe("JwksVerifier — JWKS key rotation integration (§9)", () => {
     const NOW_REAL = Math.floor(Date.now() / 1000);
     const token = await signToken(
       { sub: "u1", iss: ISSUER, exp: NOW_REAL + 3600, iat: NOW_REAL },
-      newKey.privateKey, "EdDSA", newKey.kid,
+      newKey.privateKey,
+      "EdDSA",
+      newKey.kid,
     );
 
     // First factory call: stale JWKS with only old key; second: rotated JWKS
@@ -191,9 +195,7 @@ describe("JwksVerifier — JWKS key rotation integration (§9)", () => {
 
     const verifier = new JwksVerifier(makeConfig(), discovery);
     // JWKSFetchError is thrown when discovery/JWKS cannot be reached; it's a HearthError subtype
-    await expect(verifier.verifyToken("dummy.token.here")).rejects.toBeInstanceOf(
-      JWKSFetchError,
-    );
+    await expect(verifier.verifyToken("dummy.token.here")).rejects.toBeInstanceOf(JWKSFetchError);
   });
 
   it("invalidateCache forces new factory call on next verifyToken", async () => {
@@ -201,7 +203,9 @@ describe("JwksVerifier — JWKS key rotation integration (§9)", () => {
     const NOW_REAL = Math.floor(Date.now() / 1000);
     const token = await signToken(
       { sub: "u2", iss: ISSUER, exp: NOW_REAL + 3600, iat: NOW_REAL },
-      kp.privateKey, "EdDSA", kp.kid,
+      kp.privateKey,
+      "EdDSA",
+      kp.kid,
     );
 
     let factoryCallCount = 0;
@@ -232,7 +236,9 @@ describe("JwksVerifier — algorithm support", () => {
     const NOW_REAL = Math.floor(Date.now() / 1000);
     const token = await signToken(
       { sub: "user-EdDSA", iss: ISSUER, exp: NOW_REAL + 3600, iat: NOW_REAL },
-      kp.privateKey, "EdDSA", kp.kid,
+      kp.privateKey,
+      "EdDSA",
+      kp.kid,
     );
 
     const verifier = new JwksVerifier(
@@ -254,7 +260,9 @@ describe("JwksVerifier — algorithm support", () => {
     const NOW_REAL = Math.floor(Date.now() / 1000);
     const token = await signToken(
       { sub: `user-${alg}`, iss: ISSUER, exp: NOW_REAL + 3600, iat: NOW_REAL },
-      kp.privateKey, alg, kp.kid,
+      kp.privateKey,
+      alg,
+      kp.kid,
     );
 
     const verifier = new JwksVerifier(

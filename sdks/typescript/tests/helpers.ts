@@ -3,10 +3,7 @@ import { existsSync } from "node:fs";
 import { HearthApiClient } from "../src/client.js";
 import type { BootstrapResponse } from "../src/types.js";
 
-const PROJECT_ROOT = new URL("../../..", import.meta.url).pathname.replace(
-  /\/$/,
-  "",
-);
+const PROJECT_ROOT = new URL("../../..", import.meta.url).pathname.replace(/\/$/, "");
 
 /** Resolve the hearth binary path, respecting CARGO_TARGET_DIR. */
 function hearthBinPath(): string {

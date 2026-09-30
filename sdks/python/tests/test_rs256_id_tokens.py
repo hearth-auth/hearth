@@ -33,9 +33,13 @@ def _b64u_int(value: int) -> str:
 
 
 def _mixed_jwks(ed_private: Ed25519PrivateKey, rsa_private) -> dict:
-    x = base64.urlsafe_b64encode(
-        ed_private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    ).rstrip(b"=").decode()
+    x = (
+        base64.urlsafe_b64encode(
+            ed_private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        )
+        .rstrip(b"=")
+        .decode()
+    )
     numbers = rsa_private.public_key().public_numbers()
     return {
         "keys": [
@@ -79,12 +83,16 @@ def keys():
     )
 
 
-def test_eddsa_access_token_still_verifies_against_a_jwks_with_an_rsa_key(respx_mock, keys):
+def test_eddsa_access_token_still_verifies_against_a_jwks_with_an_rsa_key(
+    respx_mock, keys
+):
     ed_private, rsa_private = keys
     respx_mock.get(f"{ISSUER}/.well-known/jwks.json").mock(
         return_value=httpx.Response(200, json=_mixed_jwks(ed_private, rsa_private))
     )
-    token = pyjwt.encode(_payload(), ed_private, algorithm="EdDSA", headers={"kid": ED_KID})
+    token = pyjwt.encode(
+        _payload(), ed_private, algorithm="EdDSA", headers={"kid": ED_KID}
+    )
 
     claims = _client().verify_token(token)
     assert claims.subject() == "user-abc"

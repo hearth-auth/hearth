@@ -36,9 +36,9 @@ export class IntrospectionClient {
     private readonly config: ResolvedConfig,
     private readonly getDiscovery: () => Promise<OidcDiscovery>,
   ) {
-    this.credentials = Buffer.from(
-      `${config.client_id}:${config.client_secret}`,
-    ).toString("base64");
+    this.credentials = Buffer.from(`${config.client_id}:${config.client_secret}`).toString(
+      "base64",
+    );
   }
 
   private async getIntrospectionEndpoint(): Promise<string> {
@@ -53,7 +53,10 @@ export class IntrospectionClient {
   }
 
   /** Introspect a token per RFC 7662. */
-  async introspect(token: string, tokenTypeHint?: "access_token" | "refresh_token"): Promise<IntrospectionResult> {
+  async introspect(
+    token: string,
+    tokenTypeHint?: "access_token" | "refresh_token",
+  ): Promise<IntrospectionResult> {
     const endpoint = await this.getIntrospectionEndpoint();
 
     const body = new URLSearchParams({ token });
@@ -83,24 +86,31 @@ export class IntrospectionClient {
 
     let raw: Record<string, unknown>;
     try {
-      raw = await res.json() as Record<string, unknown>;
+      raw = (await res.json()) as Record<string, unknown>;
     } catch (err) {
       throw new IntrospectionError("Introspection response is not valid JSON", { cause: err });
     }
 
-    const { active, sub, iss, aud, exp, iat, scope, mode, permissions, roles, groups, ...rest } = raw;
+    const { active, sub, iss, aud, exp, iat, scope, mode, permissions, roles, groups, ...rest } =
+      raw;
     return {
       active: Boolean(active),
       sub: typeof sub === "string" ? sub : undefined,
       iss: typeof iss === "string" ? iss : undefined,
-      aud: typeof aud === "string" || Array.isArray(aud) ? aud as string | string[] : undefined,
+      aud: typeof aud === "string" || Array.isArray(aud) ? (aud as string | string[]) : undefined,
       exp: typeof exp === "number" ? exp : undefined,
       iat: typeof iat === "number" ? iat : undefined,
       scope: typeof scope === "string" ? scope : undefined,
-      mode: typeof mode === "string" ? mode as AccessTokenAuthorizationMode : undefined,
-      permissions: Array.isArray(permissions) ? permissions.filter((p): p is string => typeof p === "string") : undefined,
-      roles: Array.isArray(roles) ? roles.filter((r): r is string => typeof r === "string") : undefined,
-      groups: Array.isArray(groups) ? groups.filter((g): g is string => typeof g === "string") : undefined,
+      mode: typeof mode === "string" ? (mode as AccessTokenAuthorizationMode) : undefined,
+      permissions: Array.isArray(permissions)
+        ? permissions.filter((p): p is string => typeof p === "string")
+        : undefined,
+      roles: Array.isArray(roles)
+        ? roles.filter((r): r is string => typeof r === "string")
+        : undefined,
+      groups: Array.isArray(groups)
+        ? groups.filter((g): g is string => typeof g === "string")
+        : undefined,
       extra: rest,
     };
   }

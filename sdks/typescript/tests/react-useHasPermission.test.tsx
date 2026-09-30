@@ -12,10 +12,9 @@ import {
 } from "../src/react.js";
 
 function forgeJwt(claims: Record<string, unknown>): string {
-  const header = Buffer.from(
-    JSON.stringify({ alg: "EdDSA", typ: "JWT" }),
-    "utf8",
-  ).toString("base64url");
+  const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" }), "utf8").toString(
+    "base64url",
+  );
   const body = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
   const sig = Buffer.from("not-a-real-signature").toString("base64url");
   return `${header}.${body}.${sig}`;

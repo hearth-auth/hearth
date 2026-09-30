@@ -103,15 +103,23 @@ impl JwksCache {
     pub async fn fetch_and_update(&self) -> Result<(), HearthError> {
         let url = {
             let inner = self.inner.lock().await;
-            inner.jwks_url.clone().ok_or_else(|| HearthError::ConfigurationError {
-                message: "JwksCache: set_url() must be called before fetching".into(),
-            })?
+            inner
+                .jwks_url
+                .clone()
+                .ok_or_else(|| HearthError::ConfigurationError {
+                    message: "JwksCache: set_url() must be called before fetching".into(),
+                })?
         };
 
-        let resp = self.http.get(&url).send().await.map_err(|e| HearthError::JWKSFetchError {
-            url: url.clone(),
-            message: e.to_string(),
-        })?;
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| HearthError::JWKSFetchError {
+                url: url.clone(),
+                message: e.to_string(),
+            })?;
 
         let ttl = self.override_ttl.unwrap_or_else(|| {
             parse_cache_control_max_age(resp.headers())
@@ -130,7 +138,14 @@ impl JwksCache {
 
         for jwk in jwks.keys {
             if let Some(kid) = jwk.common.key_id.clone() {
-                inner.keys.insert(kid, CachedEntry { jwk, fetched_at: now, ttl });
+                inner.keys.insert(
+                    kid,
+                    CachedEntry {
+                        jwk,
+                        fetched_at: now,
+                        ttl,
+                    },
+                );
             }
             // Keys without a kid are skipped (no way to look them up by kid).
         }

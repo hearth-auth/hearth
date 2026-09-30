@@ -37,7 +37,9 @@ describe("HearthClient", () => {
 
   it("delegates introspect to IntrospectionClient", async () => {
     const introspectResult = { active: true, sub: "user123", extra: {} };
-    const spy = vi.spyOn(IntrospectionClient.prototype, "introspect").mockResolvedValue(introspectResult);
+    const spy = vi
+      .spyOn(IntrospectionClient.prototype, "introspect")
+      .mockResolvedValue(introspectResult);
     const client = new HearthClient(CONFIG);
     const result = await client.introspect("tok");
     expect(spy).toHaveBeenCalledWith("tok", undefined);
@@ -45,7 +47,9 @@ describe("HearthClient", () => {
   });
 
   it("delegates introspect with tokenTypeHint", async () => {
-    const spy = vi.spyOn(IntrospectionClient.prototype, "introspect").mockResolvedValue({ active: false, extra: {} });
+    const spy = vi
+      .spyOn(IntrospectionClient.prototype, "introspect")
+      .mockResolvedValue({ active: false, extra: {} });
     const client = new HearthClient(CONFIG);
     await client.introspect("tok", "refresh_token");
     expect(spy).toHaveBeenCalledWith("tok", "refresh_token");
@@ -61,7 +65,9 @@ describe("HearthClient", () => {
   });
 
   it("invalidateCache clears JWKS and discovery caches", () => {
-    const spy = vi.spyOn(JwksVerifier.prototype, "invalidateCache").mockImplementation(() => undefined);
+    const spy = vi
+      .spyOn(JwksVerifier.prototype, "invalidateCache")
+      .mockImplementation(() => undefined);
     const client = new HearthClient(CONFIG);
     client.invalidateCache();
     expect(spy).toHaveBeenCalledOnce();
@@ -88,15 +94,21 @@ describe("HearthClient — OAuth flow delegation", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("delegates exchangeCode to OAuthFlowsClient", async () => {
-    const spy = vi.spyOn(OAuthFlowsClient.prototype, "exchangeCode").mockResolvedValue(TOKEN_RESPONSE);
+    const spy = vi
+      .spyOn(OAuthFlowsClient.prototype, "exchangeCode")
+      .mockResolvedValue(TOKEN_RESPONSE);
     const client = new HearthClient(CONFIG);
-    const result = await client.exchangeCode("code-abc", "https://app.local/cb", { codeVerifier: "v3r" });
+    const result = await client.exchangeCode("code-abc", "https://app.local/cb", {
+      codeVerifier: "v3r",
+    });
     expect(spy).toHaveBeenCalledWith("code-abc", "https://app.local/cb", { codeVerifier: "v3r" });
     expect(result).toBe(TOKEN_RESPONSE);
   });
 
   it("delegates clientCredentials to OAuthFlowsClient", async () => {
-    const spy = vi.spyOn(OAuthFlowsClient.prototype, "clientCredentials").mockResolvedValue(TOKEN_RESPONSE);
+    const spy = vi
+      .spyOn(OAuthFlowsClient.prototype, "clientCredentials")
+      .mockResolvedValue(TOKEN_RESPONSE);
     const client = new HearthClient(CONFIG);
     const result = await client.clientCredentials("openid profile");
     expect(spy).toHaveBeenCalledWith("openid profile");
@@ -104,7 +116,9 @@ describe("HearthClient — OAuth flow delegation", () => {
   });
 
   it("delegates startDeviceFlow to OAuthFlowsClient", async () => {
-    const spy = vi.spyOn(OAuthFlowsClient.prototype, "startDeviceFlow").mockResolvedValue(DEVICE_RESPONSE);
+    const spy = vi
+      .spyOn(OAuthFlowsClient.prototype, "startDeviceFlow")
+      .mockResolvedValue(DEVICE_RESPONSE);
     const client = new HearthClient(CONFIG);
     const result = await client.startDeviceFlow("openid");
     expect(spy).toHaveBeenCalledWith("openid");
@@ -112,7 +126,9 @@ describe("HearthClient — OAuth flow delegation", () => {
   });
 
   it("delegates pollDeviceToken to OAuthFlowsClient", async () => {
-    const spy = vi.spyOn(OAuthFlowsClient.prototype, "pollDeviceToken").mockResolvedValue(TOKEN_RESPONSE);
+    const spy = vi
+      .spyOn(OAuthFlowsClient.prototype, "pollDeviceToken")
+      .mockResolvedValue(TOKEN_RESPONSE);
     const client = new HearthClient(CONFIG);
     const result = await client.pollDeviceToken("dev-code", 5);
     expect(spy).toHaveBeenCalledWith("dev-code", 5);
@@ -120,7 +136,9 @@ describe("HearthClient — OAuth flow delegation", () => {
   });
 
   it("delegates requestMagicLink to OAuthFlowsClient", async () => {
-    const spy = vi.spyOn(OAuthFlowsClient.prototype, "requestMagicLink").mockResolvedValue(undefined);
+    const spy = vi
+      .spyOn(OAuthFlowsClient.prototype, "requestMagicLink")
+      .mockResolvedValue(undefined);
     const client = new HearthClient({ ...CONFIG, realm_id: "realm1" });
     await client.requestMagicLink("user@example.com");
     expect(spy).toHaveBeenCalledWith("user@example.com");

@@ -81,10 +81,7 @@ describe("TypeScript SDK: Auth Code Flow", () => {
     expect(userinfo.sub).toContain(bootstrap.user_id);
 
     // 6. Refresh — exchange the refresh token for new tokens
-    const refreshed = await client.refreshTokens(
-      oauthClient.client_id,
-      tokens.refresh_token,
-    );
+    const refreshed = await client.refreshTokens(oauthClient.client_id, tokens.refresh_token);
     expect(refreshed.access_token).toBeTruthy();
     expect(refreshed.refresh_token).toBeTruthy();
     // New access token should be different from original

@@ -183,4 +183,39 @@ final class TokenVerifierTest extends TestCase
         $this->expectException(TokenInvalidException::class);
         $this->verifier->verify($token);
     }
+
+    /**
+     * A signature of the wrong length used to escape as libsodium's
+     * SodiumException, which is not a HearthException: HearthMiddleware only
+     * catches HearthException, so the request died with a 500 instead of a 401.
+     *
+     * @return array<string, array{string}>
+     */
+    public static function wrongLengthSignatures(): array
+    {
+        return [
+            'empty'     => [''],
+            'truncated' => ['AAAA'],
+            'too long'  => [strtr(rtrim(base64_encode(str_repeat("\x01", 65)), '='), '+/', '-_')],
+        ];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('wrongLengthSignatures')]
+    public function testVerifyRejectsWrongLengthSignatureAsInvalidToken(string $sig): void
+    {
+        $this->setUpJwksForKey();
+        [$header, $payload] = explode('.', $this->makeToken($this->validClaims()));
+
+        $this->expectException(TokenInvalidException::class);
+        $this->verifier->verify("{$header}.{$payload}.{$sig}");
+    }
+
+    public function testVerifyRejectsWrongLengthPublicKeyAsInvalidToken(): void
+    {
+        // A custom JwksClientInterface is free to return any string.
+        $this->jwksClient->method('getKey')->willReturn('short-key');
+
+        $this->expectException(TokenInvalidException::class);
+        $this->verifier->verify($this->makeToken($this->validClaims()));
+    }
 }

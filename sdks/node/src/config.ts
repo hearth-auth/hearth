@@ -31,8 +31,8 @@ export interface HearthConfig {
   authorize_endpoint?: string;
 }
 
-export const JWKS_TTL_DEFAULT_MS = 5 * 60 * 1000;    // 5 min
-export const JWKS_TTL_MAX_MS = 24 * 60 * 60 * 1000;  // 24 h
+export const JWKS_TTL_DEFAULT_MS = 5 * 60 * 1000; // 5 min
+export const JWKS_TTL_MAX_MS = 24 * 60 * 60 * 1000; // 24 h
 export const HTTP_TIMEOUT_DEFAULT_MS = 10_000;
 export const CLOCK_SKEW_DEFAULT_S = 60;
 
@@ -58,7 +58,9 @@ export function resolveConfig(config: HearthConfig): ResolvedConfig {
   if (jwks_ttl > JWKS_TTL_MAX_MS) jwks_ttl = JWKS_TTL_MAX_MS;
 
   const audience = config.audience
-    ? Array.isArray(config.audience) ? config.audience : [config.audience]
+    ? Array.isArray(config.audience)
+      ? config.audience
+      : [config.audience]
     : [];
 
   return {

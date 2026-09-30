@@ -13,9 +13,15 @@ let _accessToken: string | null = null;
 let _expiresAt: number | null = null;
 let _refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
-export function getAccessToken(): string | null { return _accessToken; }
-export function getRefreshToken(): string | null { return localStorage.getItem(REFRESH_KEY); }
-export function getIdToken(): string | null { return localStorage.getItem(ID_KEY); }
+export function getAccessToken(): string | null {
+  return _accessToken;
+}
+export function getRefreshToken(): string | null {
+  return localStorage.getItem(REFRESH_KEY);
+}
+export function getIdToken(): string | null {
+  return localStorage.getItem(ID_KEY);
+}
 
 /** True iff an access token is present and not yet expired. */
 export function isAuthenticated(): boolean {
@@ -27,7 +33,10 @@ export function clearTokens(): void {
   _expiresAt = null;
   localStorage.removeItem(REFRESH_KEY);
   localStorage.removeItem(ID_KEY);
-  if (_refreshTimer !== null) { clearTimeout(_refreshTimer); _refreshTimer = null; }
+  if (_refreshTimer !== null) {
+    clearTimeout(_refreshTimer);
+    _refreshTimer = null;
+  }
 }
 
 function storeTokens(tokens: TokenResponse, fallbackRefresh?: string): void {
@@ -41,7 +50,11 @@ function storeTokens(tokens: TokenResponse, fallbackRefresh?: string): void {
 function scheduleRefresh(expiresIn: number, doRefresh: () => Promise<void>): void {
   if (_refreshTimer !== null) clearTimeout(_refreshTimer);
   const delayMs = Math.max(expiresIn * 0.8, expiresIn - 60) * 1000;
-  _refreshTimer = setTimeout(() => { void doRefresh().catch(() => { /* re-auth on next action */ }); }, delayMs);
+  _refreshTimer = setTimeout(() => {
+    void doRefresh().catch(() => {
+      /* re-auth on next action */
+    });
+  }, delayMs);
 }
 
 // ── Auth config ──────────────────────────────────────────────────────────────
@@ -75,10 +88,7 @@ const STATE_KEY = "hearth_oauth_state";
  * Handles the full PKCE login flow, token storage, silent refresh, and
  * RP-initiated logout. No custom crypto or OIDC endpoint logic required.
  */
-export function createHearthAuth(
-  client: HearthApiClient,
-  config: AuthConfig,
-): HearthBrowserAuth {
+export function createHearthAuth(client: HearthApiClient, config: AuthConfig): HearthBrowserAuth {
   async function refreshAccessToken(): Promise<void> {
     const rt = getRefreshToken();
     if (!rt) throw new Error("No refresh token stored");
@@ -120,8 +130,9 @@ export function createHearthAuth(
       const idToken = getIdToken();
       clearTokens();
       const doc = await client.discovery().catch(() => null);
-      const end = (doc?.["end_session_endpoint"] as string | undefined)
-        ?? `${config.hearthUrl}/realms/${config.realmSlug}/end_session`;
+      const end =
+        (doc?.["end_session_endpoint"] as string | undefined) ??
+        `${config.hearthUrl}/realms/${config.realmSlug}/end_session`;
       const params = new URLSearchParams({ post_logout_redirect_uri: window.location.origin });
       if (idToken) params.set("id_token_hint", idToken);
       window.location.href = `${end}?${params}`;

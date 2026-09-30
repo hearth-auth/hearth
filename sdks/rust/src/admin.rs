@@ -8,7 +8,6 @@ use crate::types::*;
 /// Requires an admin access token obtained via `/admin/bootstrap`.
 pub struct AdminClient {
     base_url: String,
-    realm_id: String,
     http: reqwest::Client,
 }
 
@@ -37,11 +36,7 @@ impl AdminClient {
             })
             .build()
             .expect("reqwest client");
-        Self {
-            base_url,
-            realm_id,
-            http,
-        }
+        Self { base_url, http }
     }
 
     // ------------------------------------------------------------------
@@ -134,7 +129,9 @@ impl AdminClient {
         Self::check(&resp)?;
         let val: serde_json::Value = resp.json().await?;
         if let Some(items) = val.get("items").and_then(|i| i.as_array()) {
-            Ok(serde_json::from_value(serde_json::Value::Array(items.clone()))?)
+            Ok(serde_json::from_value(serde_json::Value::Array(
+                items.clone(),
+            ))?)
         } else {
             Ok(serde_json::from_value(val)?)
         }

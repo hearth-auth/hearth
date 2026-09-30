@@ -1,6 +1,6 @@
 """Hearth API request and response types."""
 
-from typing import Literal, Optional, List, Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_serializer
 
@@ -23,50 +23,50 @@ class BootstrapResponse(BaseModel):
 class User(BaseModel):
     id: str
     username: str
-    email: Optional[str] = None
+    email: str | None = None
     status: str
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 class CreateUserRequest(BaseModel):
     username: str
-    email: Optional[str] = None
-    password: Optional[str] = None
-    attributes: Optional[dict] = None
+    email: str | None = None
+    password: str | None = None
+    attributes: dict | None = None
 
 
 class UpdateUserRequest(BaseModel):
-    username: Optional[str] = None
-    email: Optional[str] = None
-    status: Optional[str] = None
-    attributes: Optional[dict] = None
+    username: str | None = None
+    email: str | None = None
+    status: str | None = None
+    attributes: dict | None = None
 
 
 class PageResponse(BaseModel, Generic[T]):
-    items: List[T]
-    next_cursor: Optional[str] = None
-    total: Optional[int] = None
+    items: list[T]
+    next_cursor: str | None = None
+    total: int | None = None
 
 
 class Realm(BaseModel):
     id: str
     name: str
     status: str
-    config: Optional[dict] = None
-    created_at: Optional[str] = None
+    config: dict | None = None
+    created_at: str | None = None
 
 
 class UpdateRealmRequest(BaseModel):
-    name: Optional[str] = None
-    config: Optional[dict] = None
-    status: Optional[str] = None
+    name: str | None = None
+    config: dict | None = None
+    status: str | None = None
 
 
 class AuthorizeResponse(BaseModel):
     code: str
     state: str
-    redirect_uri: Optional[str] = None
+    redirect_uri: str | None = None
 
 
 class LoginBeginResult(BaseModel):
@@ -89,26 +89,26 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str
     expires_in: int
-    refresh_token: Optional[str] = None
-    scope: Optional[str] = None
-    id_token: Optional[str] = None
+    refresh_token: str | None = None
+    scope: str | None = None
+    id_token: str | None = None
 
 
 class UserInfoResponse(BaseModel):
     sub: str
-    email: Optional[str] = None
-    email_verified: Optional[bool] = None
-    name: Optional[str] = None
-    preferred_username: Optional[str] = None
-    permissions: Optional[List[str]] = None
-    roles: Optional[List[str]] = None
-    groups: Optional[List[str]] = None
+    email: str | None = None
+    email_verified: bool | None = None
+    name: str | None = None
+    preferred_username: str | None = None
+    permissions: list[str] | None = None
+    roles: list[str] | None = None
+    groups: list[str] | None = None
 
 
 class MePermissionsResponse(BaseModel):
-    permissions: List[str]
-    roles: List[str]
-    groups: List[str]
+    permissions: list[str]
+    roles: list[str]
+    groups: list[str]
 
 
 # Proto ``ClientTrustLevel`` names for the SDK's snake_case trust levels.
@@ -123,7 +123,7 @@ _PROTO_TRUST_LEVEL = {
 }
 
 
-def _proto_trust_level(value: Optional[str]) -> Optional[str]:
+def _proto_trust_level(value: str | None) -> str | None:
     """Map ``first_party`` / ``third_party`` to the proto enum name.
 
     Any other value is sent unchanged, so the server rejects a typo instead of
@@ -147,12 +147,12 @@ class OAuthClient(BaseModel):
 
     id: str = Field(validation_alias="client_id")
     name: str = Field(validation_alias="client_name")
-    redirect_uris: List[str] = []
-    trust_level: Optional[str] = None
+    redirect_uris: list[str] = []
+    trust_level: str | None = None
     #: The generated secret (wire key ``client_secret``) — present only on the
     #: response that created a ``client_secret_basic`` / ``client_secret_post``
     #: client or regenerated its secret, never again. Store it on receipt.
-    secret: Optional[str] = Field(
+    secret: str | None = Field(
         default=None, validation_alias=AliasChoices("client_secret", "secret")
     )
 
@@ -168,15 +168,15 @@ class RegisterClientRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     name: str = Field(validation_alias="client_name", serialization_alias="client_name")
-    redirect_uris: List[str] = []
-    trust_level: Optional[str] = None
+    redirect_uris: list[str] = []
+    trust_level: str | None = None
     #: RFC 7591 §2: ``client_secret_basic`` / ``client_secret_post`` make the
     #: server generate the secret and return it once (``OAuthClient.secret``);
     #: ``private_key_jwt`` or ``none``. Omitted registers a public client.
-    token_endpoint_auth_method: Optional[str] = None
+    token_endpoint_auth_method: str | None = None
 
     @field_serializer("trust_level")
-    def _serialize_trust_level(self, value: Optional[str]) -> Optional[str]:
+    def _serialize_trust_level(self, value: str | None) -> str | None:
         return _proto_trust_level(value)
 
 
@@ -190,15 +190,15 @@ class CreateClientRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     name: str = Field(validation_alias="client_name", serialization_alias="client_name")
-    redirect_uris: List[str] = []
-    trust_level: Optional[str] = None
+    redirect_uris: list[str] = []
+    trust_level: str | None = None
     #: RFC 7591 §2: ``client_secret_basic`` / ``client_secret_post`` make the
     #: server generate the secret and return it once (``OAuthClient.secret``);
     #: ``private_key_jwt`` or ``none``. Omitted registers a public client.
-    token_endpoint_auth_method: Optional[str] = None
+    token_endpoint_auth_method: str | None = None
 
     @field_serializer("trust_level")
-    def _serialize_trust_level(self, value: Optional[str]) -> Optional[str]:
+    def _serialize_trust_level(self, value: str | None) -> str | None:
         return _proto_trust_level(value)
 
 
@@ -213,11 +213,11 @@ class UpdateClientRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    name: Optional[str] = Field(
+    name: str | None = Field(
         default=None, validation_alias="client_name", serialization_alias="client_name"
     )
-    redirect_uris: Optional[List[str]] = None
-    trust_level: Optional[str] = None
+    redirect_uris: list[str] | None = None
+    trust_level: str | None = None
 
 
 class Role(BaseModel):
@@ -225,21 +225,21 @@ class Role(BaseModel):
 
     id: str
     name: str
-    description: Optional[str] = None
+    description: str | None = None
 
 
 class CreateRoleRequest(BaseModel):
     """Request body for POST /admin/roles."""
 
     name: str
-    description: Optional[str] = None
+    description: str | None = None
 
 
 class UpdateRoleRequest(BaseModel):
     """Request body for PUT /admin/roles/{id}."""
 
-    name: Optional[str] = None
-    description: Optional[str] = None
+    name: str | None = None
+    description: str | None = None
 
 
 class Group(BaseModel):
@@ -247,21 +247,21 @@ class Group(BaseModel):
 
     id: str
     name: str
-    description: Optional[str] = None
+    description: str | None = None
 
 
 class CreateGroupRequest(BaseModel):
     """Request body for POST /admin/groups."""
 
     name: str
-    description: Optional[str] = None
+    description: str | None = None
 
 
 class UpdateGroupRequest(BaseModel):
     """Request body for PUT /admin/groups/{id}."""
 
-    name: Optional[str] = None
-    description: Optional[str] = None
+    name: str | None = None
+    description: str | None = None
 
 
 # OrgMember and AddOrgMemberRequest were removed with the org-membership
@@ -279,7 +279,7 @@ class Jwk(BaseModel):
 
 
 class JwksDocument(BaseModel):
-    keys: List[Jwk]
+    keys: list[Jwk]
 
 
 class IntrospectRequest(BaseModel):
@@ -287,8 +287,8 @@ class IntrospectRequest(BaseModel):
 
     token: str
     client_id: str
-    client_secret: Optional[str] = None
-    token_type_hint: Optional[str] = None
+    client_secret: str | None = None
+    token_type_hint: str | None = None
 
 
 class IntrospectResponse(BaseModel):
@@ -300,40 +300,41 @@ class IntrospectResponse(BaseModel):
     """
 
     active: bool
-    sub: Optional[str] = None
-    client_id: Optional[str] = None
-    scope: Optional[str] = None
-    exp: Optional[int] = None
-    iat: Optional[int] = None
-    token_type: Optional[str] = None
-    iss: Optional[str] = None
+    sub: str | None = None
+    client_id: str | None = None
+    scope: str | None = None
+    exp: int | None = None
+    iat: int | None = None
+    token_type: str | None = None
+    iss: str | None = None
     #: Access-token authorization mode echoed from the issuing client.
-    mode: Optional[str] = None
+    mode: str | None = None
     #: Live-resolved permission set (introspection/decision modes only).
-    permissions: Optional[List[str]] = None
-    roles: Optional[List[str]] = None
-    groups: Optional[List[str]] = None
+    permissions: list[str] | None = None
+    roles: list[str] | None = None
+    groups: list[str] | None = None
 
 
 class CheckPermissionRequest(BaseModel):
     """Parameters for POST /oauth/authorize (decision endpoint)."""
 
     permission: str
-    organization_id: Optional[str] = None
-    resource: Optional[str] = None
+    organization_id: str | None = None
+    resource: str | None = None
 
 
 class CheckPermissionResponse(BaseModel):
     """Response from POST /oauth/authorize."""
 
     allowed: bool
-    sub: Optional[str] = None
-    permission: Optional[str] = None
+    sub: str | None = None
+    permission: str | None = None
 
 
 # ---------------------------------------------------------------------------
 # PKCE (§7)
 # ---------------------------------------------------------------------------
+
 
 class PkcePair(BaseModel):
     """RFC 7636 S256 PKCE pair — verifier is secret, challenge is sent to server."""
@@ -346,6 +347,7 @@ class PkcePair(BaseModel):
 # Device Authorization Flow (§4.5.2)
 # ---------------------------------------------------------------------------
 
+
 class DeviceAuthorizationResponse(BaseModel):
     """Response from the device authorization endpoint (RFC 8628)."""
 
@@ -354,12 +356,13 @@ class DeviceAuthorizationResponse(BaseModel):
     verification_uri: str
     expires_in: int
     interval: int = 5
-    verification_uri_complete: Optional[str] = None
+    verification_uri_complete: str | None = None
 
 
 # ---------------------------------------------------------------------------
 # Session-version feed (HEA-930)
 # ---------------------------------------------------------------------------
+
 
 class SvDeltaEntry(BaseModel):
     """A single session-version bump event."""
@@ -367,7 +370,7 @@ class SvDeltaEntry(BaseModel):
     seq: int
     session_id: str
     min_sv: int
-    bumped_at: Optional[int] = None
+    bumped_at: int | None = None
 
 
 class SvDeltaResponse(BaseModel):
@@ -375,7 +378,7 @@ class SvDeltaResponse(BaseModel):
 
     realm: str
     next_seq: int
-    deltas: List[SvDeltaEntry]
+    deltas: list[SvDeltaEntry]
 
 
 class SvSnapshotResponse(BaseModel):

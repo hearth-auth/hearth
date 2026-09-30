@@ -136,11 +136,11 @@ type WebAuthnRegistrationCompleteResponse struct {
 
 // WebAuthnAuthenticationBeginResponse holds PublicKeyCredentialRequestOptions from the server.
 type WebAuthnAuthenticationBeginResponse struct {
-	Challenge          string                    `json:"challenge"`
-	RPID               string                    `json:"rp_id"`
-	AllowCredentials   []WebAuthnAllowCredential `json:"allow_credentials"`
-	UserVerification   string                    `json:"user_verification"`
-	Timeout            uint64                    `json:"timeout"`
+	Challenge        string                    `json:"challenge"`
+	RPID             string                    `json:"rp_id"`
+	AllowCredentials []WebAuthnAllowCredential `json:"allow_credentials"`
+	UserVerification string                    `json:"user_verification"`
+	Timeout          uint64                    `json:"timeout"`
 }
 
 // WebAuthnAuthenticationCompleteRequest carries the browser-signed assertion to the server.

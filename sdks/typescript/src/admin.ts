@@ -1,11 +1,5 @@
 import { HearthError } from "./client.js";
-import type {
-  CreateUserParams,
-  PageResponse,
-  Realm,
-  UpdateUserParams,
-  User,
-} from "./types.js";
+import type { CreateUserParams, PageResponse, Realm, UpdateUserParams, User } from "./types.js";
 
 /**
  * Admin API client for Hearth.
@@ -31,10 +25,7 @@ export class AdminClient {
   }
 
   /** GET /admin/users — list users with pagination. */
-  async listUsers(options?: {
-    limit?: number;
-    cursor?: string;
-  }): Promise<PageResponse<User>> {
+  async listUsers(options?: { limit?: number; cursor?: string }): Promise<PageResponse<User>> {
     const q = new URLSearchParams();
     if (options?.limit) q.set("limit", String(options.limit));
     if (options?.cursor) q.set("cursor", options.cursor);
@@ -75,10 +66,7 @@ export class AdminClient {
   // paths and deletion are exposed.
 
   /** GET /admin/realms — list realms with pagination. */
-  async listRealms(options?: {
-    limit?: number;
-    cursor?: string;
-  }): Promise<PageResponse<Realm>> {
+  async listRealms(options?: { limit?: number; cursor?: string }): Promise<PageResponse<Realm>> {
     const q = new URLSearchParams();
     if (options?.limit) q.set("limit", String(options.limit));
     if (options?.cursor) q.set("cursor", options.cursor);
@@ -114,7 +102,10 @@ export class AdminClient {
   }
 
   /** PATCH /admin/applications/:id — update a client. */
-  async updateClient(clientId: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async updateClient(
+    clientId: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
     return this.request("PATCH", `/admin/applications/${clientId}`, params);
   }
 
@@ -139,7 +130,10 @@ export class AdminClient {
   }
 
   /** GET /admin/applications — list clients with optional pagination. */
-  async listClients(options?: { limit?: number; cursor?: string }): Promise<{ items: Record<string, unknown>[]; next_cursor: string | null }> {
+  async listClients(options?: {
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ items: Record<string, unknown>[]; next_cursor: string | null }> {
     const q = new URLSearchParams();
     if (options?.limit) q.set("limit", String(options.limit));
     if (options?.cursor) q.set("cursor", options.cursor);
@@ -160,7 +154,10 @@ export class AdminClient {
   }
 
   /** PATCH /admin/roles/:id — update a role. */
-  async updateRole(roleId: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async updateRole(
+    roleId: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
     return this.request("PATCH", `/admin/roles/${roleId}`, params);
   }
 
@@ -176,7 +173,10 @@ export class AdminClient {
   }
 
   /** GET /admin/roles — list roles with optional pagination. */
-  async listRoles(options?: { limit?: number; cursor?: string }): Promise<{ items: Record<string, unknown>[]; next_cursor: string | null }> {
+  async listRoles(options?: {
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ items: Record<string, unknown>[]; next_cursor: string | null }> {
     const q = new URLSearchParams();
     if (options?.limit) q.set("limit", String(options.limit));
     if (options?.cursor) q.set("cursor", options.cursor);
@@ -197,7 +197,10 @@ export class AdminClient {
   }
 
   /** PATCH /admin/groups/:id — update a group. */
-  async updateGroup(groupId: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async updateGroup(
+    groupId: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
     return this.request("PATCH", `/admin/groups/${groupId}`, params);
   }
 
@@ -213,7 +216,10 @@ export class AdminClient {
   }
 
   /** GET /admin/groups — list groups with optional pagination. */
-  async listGroups(options?: { limit?: number; cursor?: string }): Promise<{ items: Record<string, unknown>[]; next_cursor: string | null }> {
+  async listGroups(options?: {
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ items: Record<string, unknown>[]; next_cursor: string | null }> {
     const q = new URLSearchParams();
     if (options?.limit) q.set("limit", String(options.limit));
     if (options?.cursor) q.set("cursor", options.cursor);
@@ -251,11 +257,7 @@ export class AdminClient {
     return this.request("POST", path, body);
   }
 
-  private async request<T>(
-    method: string,
-    path: string,
-    body: unknown,
-  ): Promise<T> {
+  private async request<T>(method: string, path: string, body: unknown): Promise<T> {
     const resp = await fetch(`${this.baseUrl}${path}`, {
       method,
       headers: this.headers(),

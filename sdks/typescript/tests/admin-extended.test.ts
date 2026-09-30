@@ -34,7 +34,10 @@ describe("AdminClient — OAuth Clients CRUD", () => {
   it("createClient POSTs to /admin/applications", async () => {
     vi.mocked(fetch).mockResolvedValue(mockOk({ client_id: "cli1", client_name: "My App" }, 201));
     const admin = makeAdmin();
-    const result = await admin.createClient({ client_name: "My App", redirect_uris: ["https://app.example.com/cb"] });
+    const result = await admin.createClient({
+      client_name: "My App",
+      redirect_uris: ["https://app.example.com/cb"],
+    });
     const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
     expect(url).toBe(`${BASE}/admin/applications`);
     expect(init.method).toBe("POST");
@@ -181,7 +184,13 @@ describe("AdminClient — Groups CRUD", () => {
 describe("AdminClient — Org Members are removed", () => {
   it("exposes no /admin/orgs method", () => {
     const admin = makeAdmin() as unknown as Record<string, unknown>;
-    const dead = ["addOrgMember", "listOrgMembers", "removeOrgMember", "getOrgMember", "updateOrgMember"];
+    const dead = [
+      "addOrgMember",
+      "listOrgMembers",
+      "removeOrgMember",
+      "getOrgMember",
+      "updateOrgMember",
+    ];
     const present = dead.filter((name) => typeof admin[name] === "function");
     expect(present).toEqual([]);
   });

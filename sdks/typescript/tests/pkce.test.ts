@@ -115,9 +115,7 @@ describe("buildAuthorizationUrl", () => {
   it("uses the authorization endpoint as the URL base", () => {
     const { url } = buildAuthorizationUrl(BASE_OPTS);
     const parsed = new URL(url);
-    expect(`${parsed.origin}${parsed.pathname}`).toBe(
-      "https://auth.example.com/oauth/authorize",
-    );
+    expect(`${parsed.origin}${parsed.pathname}`).toBe("https://auth.example.com/oauth/authorize");
   });
 });
 

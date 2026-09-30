@@ -1,9 +1,20 @@
 /** §2 — JWKS-backed token verification with cache-control, background refresh, and 401 re-fetch. */
 
 import { createRemoteJWKSet, jwtVerify, errors as joseErrors } from "jose";
-import type { JWTVerifyOptions, RemoteJWKSetOptions, JWSHeaderParameters, FlattenedJWSInput, GetKeyFunction } from "jose";
+import type {
+  JWTVerifyOptions,
+  RemoteJWKSetOptions,
+  JWSHeaderParameters,
+  FlattenedJWSInput,
+  GetKeyFunction,
+} from "jose";
 import { DiscoveryClient } from "./discovery.js";
-import { JWKSFetchError, TokenVerificationError, TokenExpiredError, TokenClaimsError } from "./errors.js";
+import {
+  JWKSFetchError,
+  TokenVerificationError,
+  TokenExpiredError,
+  TokenClaimsError,
+} from "./errors.js";
 import { VerifiedToken } from "./token.js";
 import type { ResolvedConfig } from "./config.js";
 
@@ -23,9 +34,13 @@ export class JwksVerifier {
   constructor(config: ResolvedConfig, discovery?: DiscoveryClient, jwkSetFactory?: JwkSetFactory) {
     this.config = config;
     this.discovery = discovery ?? new DiscoveryClient(config.issuer_url, config.http_timeout);
-    this.jwkSetFactory = jwkSetFactory ?? ((uri, ttl) =>
-      createRemoteJWKSet(new URL(uri), { cacheMaxAge: ttl, cooldownDuration: 30_000 } as RemoteJWKSetOptions) as unknown as JwkKeyArg
-    );
+    this.jwkSetFactory =
+      jwkSetFactory ??
+      ((uri, ttl) =>
+        createRemoteJWKSet(new URL(uri), {
+          cacheMaxAge: ttl,
+          cooldownDuration: 30_000,
+        } as RemoteJWKSetOptions) as unknown as JwkKeyArg);
   }
 
   private async buildJwkSet(): Promise<JwkKeyArg> {
@@ -105,9 +120,14 @@ export class JwksVerifier {
         });
         try {
           const result = await jwtVerify(token, freshSet, verifyOptions);
-          return new VerifiedToken(result.payload, result.protectedHeader as Record<string, unknown>);
+          return new VerifiedToken(
+            result.payload,
+            result.protectedHeader as Record<string, unknown>,
+          );
         } catch (retryErr) {
-          throw new TokenVerificationError("Token verification failed after JWKS refresh", { cause: retryErr });
+          throw new TokenVerificationError("Token verification failed after JWKS refresh", {
+            cause: retryErr,
+          });
         }
       }
       if (

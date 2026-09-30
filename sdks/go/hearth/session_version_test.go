@@ -157,9 +157,9 @@ func TestSvCacheBadRequestRefetches(t *testing.T) {
 		case "/oauth/session-versions/snapshot":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(svSnapshotResponse{
-				Realm:    "r1",
+				Realm:      "r1",
 				CurrentSeq: 20,
-				Versions: map[string]uint64{"sess_B": 5},
+				Versions:   map[string]uint64{"sess_B": 5},
 			})
 		case "/oauth/session-versions":
 			pollCount++

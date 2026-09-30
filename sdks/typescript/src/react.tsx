@@ -21,11 +21,7 @@ export interface HearthProviderProps {
  * Wrap your React tree once with this after calling `createHearth(...)`.
  */
 export function HearthProvider(props: HearthProviderProps): React.ReactElement {
-  return React.createElement(
-    HearthContext.Provider,
-    { value: props.client },
-    props.children,
-  );
+  return React.createElement(HearthContext.Provider, { value: props.client }, props.children);
 }
 
 /**

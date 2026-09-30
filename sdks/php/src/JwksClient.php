@@ -29,15 +29,12 @@ final class JwksClient implements JwksClientInterface
     /**
      * Per-kid cache entries: [publicKeyBytes => string, expiresAt => int (unix timestamp)].
      *
-     * @var array<string, array{publicKeyBytes: string, expiresAt: int}>
+     * @var array<string, array{publicKeyBytes: non-empty-string, expiresAt: int}>
      */
     private array $cache = [];
 
     /** Unix timestamp of the last full JWKS fetch (used to track max-age globally). */
     private int $lastFetchedAt = 0;
-
-    /** TTL in seconds derived from the last JWKS response Cache-Control header. */
-    private int $currentTtl;
 
     /**
      * @param string                  $jwksUri        URL of the JWKS endpoint
@@ -50,9 +47,7 @@ final class JwksClient implements JwksClientInterface
         private readonly ClientInterface $httpClient,
         private readonly RequestFactoryInterface $requestFactory,
         private readonly ?int $overrideTtl = null,
-    ) {
-        $this->currentTtl = $overrideTtl ?? self::DEFAULT_TTL_SECONDS;
-    }
+    ) {}
 
     /**
      * Returns the 32-byte raw Ed25519 public key for the given `kid`.
@@ -131,7 +126,6 @@ final class JwksClient implements JwksClientInterface
         }
 
         $this->lastFetchedAt = time();
-        $this->currentTtl    = $ttl;
         $expiresAt           = $this->lastFetchedAt + $ttl;
 
         foreach ($data['keys'] as $jwk) {

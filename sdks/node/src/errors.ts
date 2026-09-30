@@ -4,11 +4,13 @@ const REDACTED = "[redacted]";
 
 // Charcode ranges for base64url alphabet — used by sanitize() to avoid a backtracking regex.
 function isB64UrlCode(code: number): boolean {
-  return (code >= 65 && code <= 90)   // A-Z
-    || (code >= 97 && code <= 122)    // a-z
-    || (code >= 48 && code <= 57)     // 0-9
-    || code === 95                    // _
-    || code === 45;                   // -
+  return (
+    (code >= 65 && code <= 90) || // A-Z
+    (code >= 97 && code <= 122) || // a-z
+    (code >= 48 && code <= 57) || // 0-9
+    code === 95 || // _
+    code === 45
+  ); // -
 }
 
 function sanitize(value: string): string {

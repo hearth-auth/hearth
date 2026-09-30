@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import base64
 import time
-from typing import Dict, Optional
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -34,13 +33,13 @@ class JwksCache:
     def __init__(
         self,
         jwks_url: str,
-        ttl: Optional[float] = None,
+        ttl: float | None = None,
         timeout: float = 10.0,
     ) -> None:
         self._url = jwks_url
         self._configured_ttl: float = ttl if ttl is not None else _DEFAULT_TTL
         self._ttl: float = self._configured_ttl
-        self._keys: Dict[str, Ed25519PublicKey] = {}
+        self._keys: dict[str, Ed25519PublicKey] = {}
         self._fetched_at: float = 0.0
         self._http = httpx.Client(timeout=timeout)
 
@@ -64,9 +63,7 @@ class JwksCache:
             self._fetch()
 
         if kid not in self._keys:
-            raise JWKSFetchError(
-                f"Key not found in JWKS: kid={kid!r}", url=self._url
-            )
+            raise JWKSFetchError(f"Key not found in JWKS: kid={kid!r}", url=self._url)
         return self._keys[kid]
 
     # ------------------------------------------------------------------
@@ -122,7 +119,7 @@ class JwksCache:
                 x_bytes = base64.urlsafe_b64decode(x_b64 + "==")
                 pub_key = Ed25519PublicKey.from_public_bytes(x_bytes)
                 self._keys[kid] = pub_key
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 -- a malformed key entry is skipped, not fatal
                 # Malformed key entry — skip silently.
                 continue
 

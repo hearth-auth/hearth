@@ -2,10 +2,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vite
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import type { KeyLike } from "jose";
 import { HearthClient } from "../src/hearth-client.js";
-import {
-  ConfigurationError,
-  AuthorizationModeMismatchError,
-} from "../src/errors.js";
+import { ConfigurationError, AuthorizationModeMismatchError } from "../src/errors.js";
 import { requirePermission } from "../src/middleware.js";
 
 // ---------------------------------------------------------------------------
@@ -18,10 +15,9 @@ import { requirePermission } from "../src/middleware.js";
  * should accept.
  */
 function forgeJwt(claims: Record<string, unknown>): string {
-  const header = Buffer.from(
-    JSON.stringify({ alg: "EdDSA", typ: "JWT" }),
-    "utf8",
-  ).toString("base64url");
+  const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" }), "utf8").toString(
+    "base64url",
+  );
   const body = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
   const sig = Buffer.from("not-a-real-signature").toString("base64url");
   return `${header}.${body}.${sig}`;
@@ -56,9 +52,7 @@ describe("HearthClient.authorize()", () => {
 
   it("throws ConfigurationError when realmId is absent", async () => {
     const client = new HearthClient({ issuerUrl: "https://auth.example.com" });
-    await expect(
-      client.authorize("tok", "docs.read"),
-    ).rejects.toThrow(ConfigurationError);
+    await expect(client.authorize("tok", "docs.read")).rejects.toThrow(ConfigurationError);
   });
 
   it("calls POST /oauth/authorize with correct headers and body", async () => {
@@ -198,9 +192,7 @@ describe("HearthClient.introspect()", () => {
       clientSecret: "csec",
       expectedMode: "introspection",
     });
-    await expect(client.introspect("tok")).rejects.toThrow(
-      AuthorizationModeMismatchError,
-    );
+    await expect(client.introspect("tok")).rejects.toThrow(AuthorizationModeMismatchError);
   });
 
   it("skips mode validation when the response has no mode field", async () => {

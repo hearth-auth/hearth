@@ -20,7 +20,7 @@
   },
   "require-dev": {
     "orchestra/testbench": "^10.0",
-    "phpstan/phpstan": "^1.10",
+    "phpstan/phpstan": "^2.1",
     "phpunit/phpunit": "^11.5"
   },
   "suggest": {
@@ -40,7 +40,8 @@
   "scripts": {
     "test": "vendor/bin/phpunit --testsuite unit",
     "test-integration": "vendor/bin/phpunit --testsuite integration",
-    "test-all": "vendor/bin/phpunit"
+    "test-all": "vendor/bin/phpunit",
+    "analyse": "vendor/bin/phpstan analyse --no-progress --memory-limit=1G"
   },
   "extra": {
     "laravel": {

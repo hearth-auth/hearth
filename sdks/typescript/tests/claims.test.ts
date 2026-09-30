@@ -8,13 +8,10 @@ import { Claims } from "../src/claims.js";
 
 /** Build a fake JWT string with the given payload (no signature verification). */
 function forgeJwt(payload: Record<string, unknown>): string {
-  const header = Buffer.from(
-    JSON.stringify({ alg: "EdDSA", typ: "JWT" }),
-    "utf8",
-  ).toString("base64url");
-  const body = Buffer.from(JSON.stringify(payload), "utf8").toString(
+  const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" }), "utf8").toString(
     "base64url",
   );
+  const body = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
   const sig = Buffer.from("fake-sig").toString("base64url");
   return `${header}.${body}.${sig}`;
 }

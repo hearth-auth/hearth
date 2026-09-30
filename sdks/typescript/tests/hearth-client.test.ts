@@ -10,15 +10,11 @@ const DISCOVERY_DOC = {
 
 describe("HearthClient — construction", () => {
   it("throws ConfigurationError when issuerUrl is absent", () => {
-    expect(
-      () => new HearthClient({ issuerUrl: "" }),
-    ).toThrow(ConfigurationError);
+    expect(() => new HearthClient({ issuerUrl: "" })).toThrow(ConfigurationError);
   });
 
   it("throws ConfigurationError when issuerUrl is not a valid URL", () => {
-    expect(
-      () => new HearthClient({ issuerUrl: "not-a-url" }),
-    ).toThrow(ConfigurationError);
+    expect(() => new HearthClient({ issuerUrl: "not-a-url" })).toThrow(ConfigurationError);
   });
 
   it("normalises a trailing slash on issuerUrl", () => {
@@ -168,9 +164,7 @@ describe("HearthClient — introspectionClient()", () => {
       issuerUrl: "https://auth.example.com",
       clientSecret: "secret",
     });
-    await expect(client.introspectionClient()).rejects.toThrow(
-      ConfigurationError,
-    );
+    await expect(client.introspectionClient()).rejects.toThrow(ConfigurationError);
   });
 
   it("throws ConfigurationError when clientSecret is absent", async () => {
@@ -178,9 +172,7 @@ describe("HearthClient — introspectionClient()", () => {
       issuerUrl: "https://auth.example.com",
       clientId: "my-client",
     });
-    await expect(client.introspectionClient()).rejects.toThrow(
-      ConfigurationError,
-    );
+    await expect(client.introspectionClient()).rejects.toThrow(ConfigurationError);
   });
 
   it("uses the introspection_endpoint from the discovery document", async () => {
@@ -236,8 +228,6 @@ describe("HearthClient — introspectionClient()", () => {
       clientId: "my-client",
       clientSecret: "secret",
     });
-    await expect(client.introspectionClient()).rejects.toThrow(
-      ConfigurationError,
-    );
+    await expect(client.introspectionClient()).rejects.toThrow(ConfigurationError);
   });
 });
