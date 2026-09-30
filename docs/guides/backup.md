@@ -66,7 +66,7 @@ A `.hearth-backup` file is a zstd-compressed archive. Inside, each realm is stor
 | `realms/<slug>/saml_signing_key.json` | The realm's SAML RSA key and certificate (AES-256-GCM encrypted with the DEK; re-sealed under the destination's KEK on import) |
 | `realms/<slug>/scim_mappings.ndjson` | SCIM `externalId` mappings for users and groups |
 | `realms/<slug>/invitations.ndjson` | Organization invitations, with the token, dedup and listing indexes rebuilt on import |
-| `realms/<slug>/revocations.ndjson` | Token revocations: revoked access-token JTIs (with their expiry), blocked DPoP key thumbprints and revoked AAT JTIs. Re-applied to the restored node's blocklists, so a sessionless (`client_credentials` or agent) token revoked before the backup stays revoked. Expired JTIs are omitted |
+| `realms/<slug>/revocations.ndjson` | Token revocations: revoked access-token JTIs (with their expiry), blocked DPoP key thumbprints and revoked AAT JTIs. Re-applied to the restored node's blocklists, so a sessionless (`client_credentials` or agent) token revoked before the backup stays revoked. Expired JTIs are omitted. Also each user's required-action generation, so a required-action link ended by a session revocation before the backup stays ended; a restore only ever raises a generation |
 | `realms/<slug>/retiring_signing_keys.json` | Signing keys still inside a rotation grace window (AES-256-GCM encrypted with the DEK; re-sealed under the destination's KEK on import) |
 | `realms/<slug>/signing_key.json` | Realm signing key (AES-256-GCM encrypted with the DEK) |
 | `realms/<slug>/audit.ndjson` | Audit events (**only when `--include-audit` is passed**) |

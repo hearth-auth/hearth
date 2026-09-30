@@ -369,6 +369,18 @@ paths:
             `forbidden` — the token was issued to a third-party client; or
             `step_up_required` — no step-up proof was supplied, or it did not
             verify.
+        "429":
+          description: >
+            `too_many_attempts` (`error_code` `HEARTH_RATE_LIMITED`) — the
+            account is locked out: too many wrong passwords (the login
+            lockout) or TOTP codes (the TOTP guess budget). No proof is
+            checked until the lockout ends; retry after the `Retry-After`
+            hint (seconds).
+          headers:
+            Retry-After:
+              description: Seconds until the lockout ends.
+              schema:
+                type: integer
         "503":
           description: >
             `temporarily_unavailable` — the KDF admission gate shed the
@@ -483,6 +495,22 @@ paths:
           description: Credential deleted
         "403":
           description: Missing or wrong step-up proof (step_up_required), or a third-party client's token
+        "429":
+          description: >
+            `too_many_attempts` (`error_code` `HEARTH_RATE_LIMITED`) — the
+            account is locked out: too many wrong passwords (the login
+            lockout) or TOTP codes (the TOTP guess budget). No proof is
+            checked until the lockout ends; retry after the `Retry-After`
+            hint (seconds).
+          headers:
+            Retry-After:
+              description: Seconds until the lockout ends.
+              schema:
+                type: integer
+        "503":
+          description: >
+            `temporarily_unavailable` — the KDF admission gate shed the
+            password verification. Retry after the `Retry-After` hint.
 
   # ── Admin — bootstrap (dev only) ─────────────────────────────────────────
   /admin/bootstrap:

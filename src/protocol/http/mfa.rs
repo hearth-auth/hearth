@@ -61,7 +61,9 @@ fn b64_encode(data: &[u8]) -> String {
 ///
 /// `403 step_up_required` when the proof is absent or wrong. `503` with
 /// `Retry-After` when the KDF admission gate shed the password verification —
-/// the caller may retry, so it MUST NOT read as a credential failure.
+/// the caller may retry, so it MUST NOT read as a credential failure. `429`
+/// with `Retry-After` when the account is locked out
+/// ([`crate::protocol::step_up::locked_json_response`], GA sweep 4).
 fn step_up_error_response(error: &StepUpError) -> impl IntoResponse {
     match error {
         StepUpError::Overloaded { retry_after } => (
@@ -76,6 +78,9 @@ fn step_up_error_response(error: &StepUpError) -> impl IntoResponse {
             })),
         )
             .into_response(),
+        StepUpError::Locked { retry_after } => {
+            crate::protocol::step_up::locked_json_response(*retry_after)
+        }
         _ => (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({

@@ -702,14 +702,18 @@ pub async fn sms_challenge_post(
             // Clear the SMS challenge cookie.
             let clear = clear_sms_mfa_cookie(state.is_secure_request(&headers));
 
+            // The OTP just verified is a proved second factor, recorded the
+            // way every other second-factor challenge records it: the
+            // approval and the code carry the session's proof raised by it
+            // (GA sweep 4). They used to carry the session's own proof, so a
+            // session that proved nothing at sign-in handed out a code whose
+            // token session proved nothing, right after the factor was proved.
+            let proof = session.mfa_proof.with_proved_second_factor();
+
             // A device approval: the factor is proved, approve the code.
             if let Some(user_code) = sms_state.device_user_code.as_deref() {
                 let mut response = super::handlers::finish_device_approval(
-                    &state,
-                    &realm,
-                    &user_id,
-                    user_code,
-                    session.mfa_proof,
+                    &state, &realm, &user_id, user_code, proof,
                 );
                 append_cookie(&mut response, &clear);
                 return response;
@@ -723,9 +727,9 @@ pub async fn sms_challenge_post(
                 tracing::warn!("sms_challenge_post: challenge state carries unparseable params");
                 return handlers_common::server_error();
             };
-            // The code carries what this session proved (GA audit round 3,
-            // D-7).
-            params.mfa_proof = session.mfa_proof;
+            // The code carries what this session proved, raised by the SMS
+            // factor (GA audit round 3, D-7; GA sweep 4).
+            params.mfa_proof = proof;
             let now = Timestamp::from_micros(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

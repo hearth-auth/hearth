@@ -304,6 +304,7 @@ struct Page {
     status: StatusCode,
     cache_control: Option<String>,
     location: Option<String>,
+    retry_after: Option<String>,
     body: String,
 }
 
@@ -318,6 +319,7 @@ async fn send_web(rig: &Rig, req: Request<Body>) -> Page {
     };
     let cache_control = header_value(header::CACHE_CONTROL);
     let location = header_value(header::LOCATION);
+    let retry_after = header_value(header::RETRY_AFTER);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("body");
@@ -325,6 +327,7 @@ async fn send_web(rig: &Rig, req: Request<Body>) -> Page {
         status,
         cache_control,
         location,
+        retry_after,
         body: String::from_utf8_lossy(&bytes).into_owned(),
     }
 }
@@ -843,6 +846,12 @@ async fn wrong_step_up_passwords_lock_the_account_until_the_window_passes() {
         "the page says why: {}",
         page.body
     );
+    // The clock stands still: the whole lockout window is still to run.
+    assert_eq!(
+        page.retry_after.as_deref(),
+        Some((LOCKOUT_MICROS / 1_000_000).to_string().as_str()),
+        "the 429 says how long the lockout still runs"
+    );
     assert!(!carries_a_jwt(&page.body));
     assert!(issued_events(&rig).is_empty());
 
@@ -864,7 +873,7 @@ async fn wrong_step_up_passwords_lock_the_account_until_the_window_passes() {
             StepUpProof::Password(CleartextPassword::from_string(PASSWORD.to_string())),
         )
         .await,
-        Err(StepUpError::Locked)
+        Err(StepUpError::Locked { .. })
     ));
 
     rig.clock.advance(LOCKOUT_MICROS + 1_000_000);
@@ -905,6 +914,16 @@ async fn wrong_step_up_totp_codes_spend_the_totp_guess_budget() {
         StatusCode::TOO_MANY_REQUESTS,
         "a spent TOTP budget refuses the right code: {}",
         page.body
+    );
+    let retry_after: i64 = page
+        .retry_after
+        .as_deref()
+        .expect("the 429 carries Retry-After")
+        .parse()
+        .expect("delta-seconds");
+    assert!(
+        (1..=LOCKOUT_MICROS / 1_000_000).contains(&retry_after),
+        "Retry-After {retry_after}s falls inside the TOTP lockout window"
     );
     assert!(!carries_a_jwt(&page.body));
     assert!(matches!(
