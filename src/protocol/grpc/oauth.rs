@@ -348,13 +348,24 @@ impl OAuthService for OAuthSvc {
         // the `ApplicationAdminService::create_application` gate.
         let auth = authenticate_admin(req.metadata(), &self.state)?;
         grpc_require_permission(&auth, "hearth.clients.admin")?;
-        let body: domain::RegisterClientRequest = req.into_inner().into();
+        let wire = req.into_inner();
+        let method = wire.token_endpoint_auth_method.clone();
+        let mut body: domain::RegisterClientRequest = wire.into();
+        // `client_secret_basic` / `client_secret_post`: Hearth generates the
+        // secret, stores its hash and returns it here, once.
+        body.apply_token_endpoint_auth_method(method.as_deref())
+            .map_err(identity_to_status)?;
         let client = self
             .state
             .identity
             .register_client(&auth.realm_id, &body)
             .map_err(identity_to_status)?;
-        Ok(Response::new(pb::OAuthClient::from(&client)))
+        let mut record = pb::OAuthClient::from(&client);
+        record.client_secret = body
+            .generated_client_secret
+            .as_ref()
+            .map(|g| g.expose().to_string());
+        Ok(Response::new(record))
     }
 
     async fn decide(

@@ -227,7 +227,7 @@ async fn device_authorization_full_flow() {
     // 4. Polling after approval should return tokens
     let token_resp = harness
         .identity()
-        .poll_device_token(&realm, &device_resp.device_code, client.client_id())
+        .poll_device_token(&realm, &device_resp.device_code, client.client_id(), None)
         .expect("poll device token after approval");
 
     assert!(!token_resp.access_token().is_empty());
@@ -798,10 +798,12 @@ async fn conformance_rfc8628_device_authorization() {
 
     // --- §3.3: Authorization Pending ---
     // First poll before approval should return authorization_pending
-    let pending =
-        harness
-            .identity()
-            .poll_device_token(&realm, &device_resp.device_code, client.client_id());
+    let pending = harness.identity().poll_device_token(
+        &realm,
+        &device_resp.device_code,
+        client.client_id(),
+        None,
+    );
     assert!(
         pending.is_err(),
         "RFC 8628 §3.3: unapproved device should return error"
@@ -833,7 +835,7 @@ async fn conformance_rfc8628_device_authorization() {
 
     let token_resp = harness
         .identity()
-        .poll_device_token(&realm, &device_resp2.device_code, client.client_id())
+        .poll_device_token(&realm, &device_resp2.device_code, client.client_id(), None)
         .expect("poll approved device");
 
     // RFC 8628 §3.5: response follows RFC 6749 §5.1
@@ -1349,7 +1351,7 @@ async fn device_grant_refresh_token_carries_fid() {
 
     let tokens = harness
         .identity()
-        .poll_device_token(&realm, &device_resp.device_code, client.client_id())
+        .poll_device_token(&realm, &device_resp.device_code, client.client_id(), None)
         .expect("poll after approval must return tokens");
     let claims =
         decode_claims_unverified(tokens.refresh_token()).expect("decode device refresh token");

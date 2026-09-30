@@ -1675,3 +1675,142 @@ async fn toggling_require_consent_via_update_client_reinstates_prompt() {
         "now that require_consent=true, prompt should appear"
     );
 }
+
+// ==========================================================================
+// RFC 9207 — `iss` on authorization ERROR responses
+// ==========================================================================
+
+/// Returns the value of `name` in the query or fragment of `location`,
+/// percent-decoded.
+fn response_param(location: &str, name: &str) -> Option<String> {
+    let params = location.split_once(['?', '#']).map(|(_, p)| p)?;
+    params.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == name).then(|| {
+            let bytes = v.as_bytes();
+            let mut out = Vec::with_capacity(bytes.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'%' && i + 2 < bytes.len() {
+                    let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).expect("utf8");
+                    out.push(u8::from_str_radix(hex, 16).expect("hex"));
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            String::from_utf8(out).expect("utf8")
+        })
+    })
+}
+
+/// The issuer the realm's discovery document names — what RFC 9207 §2
+/// requires the `iss` response parameter to equal.
+fn realm_issuer(rig: &Rig) -> String {
+    let doc = rig
+        .identity
+        .realm_oidc_discovery(&rig.realm_id)
+        .expect("realm discovery");
+    assert!(
+        doc.authorization_response_iss_parameter_supported,
+        "the realm advertises RFC 9207 support"
+    );
+    doc.issuer
+}
+
+/// RFC 9207 §2: when the AS advertises
+/// `authorization_response_iss_parameter_supported`, it MUST send `iss` in
+/// every authorization response — error responses included (§2, "both
+/// successful and error responses"). A consent denial redirected
+/// `error=access_denied` without it, so a mix-up-defending client could not
+/// tell which AS sent the error.
+#[tokio::test]
+async fn access_denied_error_redirect_carries_iss() {
+    let rig = build_rig();
+    let csrf = "csrf-deny-iss";
+    let cookie = auth_cookie(&rig.realm_id, &rig.alice_session, csrf);
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(authorize_url(&rig.untrusted_client, "profile", &[]))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("oneshot");
+    let ticket = ticket_from_response(&resp).expect("ticket");
+    let cookie2 = with_ticket_cookie(&cookie, &rig.alice_id, &ticket);
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/oauth/consent")
+                .header(header::COOKIE, &cookie2)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "_csrf={csrf}&ticket={ticket}&decision=deny"
+                )))
+                .expect("req"),
+        )
+        .await
+        .expect("oneshot");
+    let loc = location_header(&resp).expect("location");
+    assert_eq!(
+        response_param(&loc, "error").as_deref(),
+        Some("access_denied"),
+        "{loc}"
+    );
+    assert_eq!(
+        response_param(&loc, "iss"),
+        Some(realm_issuer(&rig)),
+        "RFC 9207: the error redirect must carry the realm issuer: {loc}"
+    );
+}
+
+/// The same holds for a `prompt=none` error, in the query and in the
+/// fragment (`response_mode=fragment`), where the code would have gone.
+#[tokio::test]
+async fn prompt_none_error_redirect_carries_iss_in_query_and_fragment() {
+    let rig = build_rig();
+    let cookie = auth_cookie(&rig.realm_id, &rig.alice_session, "x");
+    for (extra, sep) in [
+        (&[("prompt", "none")][..], '?'),
+        (
+            &[("prompt", "none"), ("response_mode", "fragment")][..],
+            '#',
+        ),
+    ] {
+        let resp = rig
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(authorize_url(&rig.untrusted_client, "profile", extra))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("oneshot");
+        let loc = location_header(&resp).expect("location");
+        let params = loc.split_once(sep).map(|(_, p)| p).unwrap_or_default();
+        assert!(
+            params.contains("error=consent_required"),
+            "error in the {sep} part: {loc}"
+        );
+        assert!(params.contains("iss="), "iss in the {sep} part: {loc}");
+        assert_eq!(
+            response_param(&loc, "iss"),
+            Some(realm_issuer(&rig)),
+            "{loc}"
+        );
+    }
+}

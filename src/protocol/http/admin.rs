@@ -2570,7 +2570,7 @@ async fn admin_register_client(
             );
             (
                 StatusCode::CREATED,
-                Json(proto_to_rest_json(&pb::OAuthClient::from(&client))),
+                Json(super::oauth::admin_created_client_json(&client, &request)),
             )
                 .into_response()
         }

@@ -162,6 +162,7 @@ async fn org_context_token_emits_org_groups_paths() {
                 granted_scopes: BTreeSet::new(),
                 client_id: None,
                 resource: None,
+                dpop_jkt: None,
             },
         )
         .expect("issue tokens with org");

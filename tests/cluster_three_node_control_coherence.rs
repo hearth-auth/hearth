@@ -2124,7 +2124,7 @@ async fn a_device_code_is_redeemed_once_across_a_leader_change() {
     let device_code = issued.device_code.clone();
     let redeem: Redeem = Arc::new(move |identity: &EmbeddedIdentityEngine| {
         identity
-            .poll_device_token(&realm, &device_code, &client)
+            .poll_device_token(&realm, &device_code, &client, None)
             .is_ok()
     });
     let wins =
