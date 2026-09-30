@@ -7,19 +7,17 @@ Run with:
 from __future__ import annotations
 
 import base64
-import json
 import time
-from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-
 # ---------------------------------------------------------------------------
 # Shared test helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_ed25519_key() -> tuple:
     private_key = Ed25519PrivateKey.generate()
@@ -30,21 +28,39 @@ def _make_ed25519_key() -> tuple:
 
 
 def _make_jwks(x_b64: str, kid: str) -> dict:
-    return {"keys": [{"kty": "OKP", "crv": "Ed25519", "x": x_b64, "kid": kid, "use": "sig", "alg": "EdDSA"}]}
+    return {
+        "keys": [
+            {
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "x": x_b64,
+                "kid": kid,
+                "use": "sig",
+                "alg": "EdDSA",
+            }
+        ]
+    }
 
 
 def _sign_jwt(private_key, payload: dict, kid: str) -> str:
     import jwt as pyjwt
+
     return pyjwt.encode(payload, private_key, algorithm="EdDSA", headers={"kid": kid})
 
 
 def _valid_payload(
     issuer: str = "http://localhost:8420",
-    permissions: Optional[list] = None,
-    roles: Optional[list] = None,
+    permissions: list | None = None,
+    roles: list | None = None,
 ) -> dict:
     now = int(time.time())
-    payload = {"sub": "user-abc", "iss": issuer, "aud": "client-1", "exp": now + 3600, "iat": now}
+    payload = {
+        "sub": "user-abc",
+        "iss": issuer,
+        "aud": "client-1",
+        "exp": now + 3600,
+        "iat": now,
+    }
     if permissions is not None:
         payload["permissions"] = permissions
     if roles is not None:
@@ -52,7 +68,7 @@ def _valid_payload(
     return payload
 
 
-def _make_request(token: Optional[str]) -> MagicMock:
+def _make_request(token: str | None) -> MagicMock:
     """Build a fake Starlette-shaped Request with an Authorization header."""
     request = MagicMock()
     if token:
@@ -66,13 +82,16 @@ def _make_request(token: Optional[str]) -> MagicMock:
 # VerifiedClaims model
 # ---------------------------------------------------------------------------
 
+
 class TestVerifiedClaims:
     def test_importable_from_hearth_fastapi(self):
         from hearth.fastapi import VerifiedClaims
+
         assert VerifiedClaims is not None
 
     def test_has_standard_claims(self):
         from hearth.fastapi import VerifiedClaims
+
         vc = VerifiedClaims(
             sub="user-1",
             iss="https://auth.example.com",
@@ -86,6 +105,7 @@ class TestVerifiedClaims:
 
     def test_permissions_roles_groups_default_to_empty(self):
         from hearth.fastapi import VerifiedClaims
+
         vc = VerifiedClaims(sub="u", iss="i", exp=1)
         assert vc.permissions == []
         assert vc.roles == []
@@ -93,12 +113,16 @@ class TestVerifiedClaims:
 
     def test_has_permission_helper(self):
         from hearth.fastapi import VerifiedClaims
-        vc = VerifiedClaims(sub="u", iss="i", exp=1, permissions=["docs.read", "docs.write"])
+
+        vc = VerifiedClaims(
+            sub="u", iss="i", exp=1, permissions=["docs.read", "docs.write"]
+        )
         assert vc.has_permission("docs.read") is True
         assert vc.has_permission("docs.delete") is False
 
     def test_has_role_helper(self):
         from hearth.fastapi import VerifiedClaims
+
         vc = VerifiedClaims(sub="u", iss="i", exp=1, roles=["admin"])
         assert vc.has_role("admin") is True
         assert vc.has_role("user") is False
@@ -106,8 +130,18 @@ class TestVerifiedClaims:
     def test_from_claims_roundtrip(self):
         from hearth.claims import Claims
         from hearth.fastapi import VerifiedClaims
+
         now = int(time.time())
-        c = Claims({"sub": "u", "iss": "i", "exp": now + 3600, "permissions": ["x"], "roles": ["r"], "groups": ["g"]})
+        c = Claims(
+            {
+                "sub": "u",
+                "iss": "i",
+                "exp": now + 3600,
+                "permissions": ["x"],
+                "roles": ["r"],
+                "groups": ["g"],
+            }
+        )
         vc = VerifiedClaims.from_claims(c)
         assert vc.sub == "u"
         assert "x" in vc.permissions
@@ -118,6 +152,7 @@ class TestVerifiedClaims:
 # ---------------------------------------------------------------------------
 # HearthFastAPIDep — basic dependency injection
 # ---------------------------------------------------------------------------
+
 
 class TestHearthFastAPIDepBasic:
     """Unit tests for HearthFastAPIDep.__call__ with mocked verify_token."""
@@ -130,6 +165,7 @@ class TestHearthFastAPIDepBasic:
         client = HearthClient("http://localhost:8420", realm_id="realm-1")
         if respx_mock is not None:
             import httpx
+
             jwks = _make_jwks(x_b64, kid)
             respx_mock.get("http://localhost:8420/.well-known/jwks.json").mock(
                 return_value=httpx.Response(200, json=jwks)
@@ -137,7 +173,6 @@ class TestHearthFastAPIDepBasic:
         return HearthFastAPIDep(client=client, mode="embedded")
 
     def test_callable_returns_verified_claims_for_valid_token(self, respx_mock):
-        import httpx
         private_key, x_b64, kid = _make_ed25519_key()
         dep = self._dep(private_key, x_b64, kid, respx_mock)
         token = _sign_jwt(private_key, _valid_payload(permissions=["docs.read"]), kid)
@@ -147,9 +182,10 @@ class TestHearthFastAPIDepBasic:
         assert claims.sub == "user-abc"
 
     def test_raises_401_when_no_authorization_header(self):
+        from fastapi import HTTPException
+
         from hearth.client import HearthClient
         from hearth.fastapi import HearthFastAPIDep
-        from fastapi import HTTPException
 
         client = HearthClient("http://localhost:8420", realm_id="realm-1")
         dep = HearthFastAPIDep(client=client, mode="embedded")
@@ -160,7 +196,6 @@ class TestHearthFastAPIDepBasic:
         assert exc_info.value.status_code == 401
 
     def test_raises_401_for_invalid_token(self, respx_mock):
-        import httpx
         from fastapi import HTTPException
 
         private_key, x_b64, kid = _make_ed25519_key()
@@ -172,7 +207,6 @@ class TestHearthFastAPIDepBasic:
         assert exc_info.value.status_code == 401
 
     def test_raises_401_for_expired_token(self, respx_mock):
-        import httpx
         from fastapi import HTTPException
 
         private_key, x_b64, kid = _make_ed25519_key()
@@ -188,7 +222,6 @@ class TestHearthFastAPIDepBasic:
 
     def test_raises_401_for_required_action_token(self, respx_mock):
         """required_action tokens must never be accepted (spec §6 rule 6)."""
-        import httpx
         from fastapi import HTTPException
 
         private_key, x_b64, kid = _make_ed25519_key()
@@ -203,9 +236,10 @@ class TestHearthFastAPIDepBasic:
         assert exc_info.value.status_code == 401
 
     def test_www_authenticate_header_present_on_401(self):
+        from fastapi import HTTPException
+
         from hearth.client import HearthClient
         from hearth.fastapi import HearthFastAPIDep
-        from fastapi import HTTPException
 
         client = HearthClient("http://localhost:8420", realm_id="realm-1")
         dep = HearthFastAPIDep(client=client, mode="embedded")
@@ -220,9 +254,13 @@ class TestHearthFastAPIDepBasic:
 # HearthFastAPIDep — permission gating
 # ---------------------------------------------------------------------------
 
+
 class TestHearthFastAPIDepPermissions:
-    def _dep_with_permission(self, permission: str, private_key, x_b64, kid, respx_mock):
+    def _dep_with_permission(
+        self, permission: str, private_key, x_b64, kid, respx_mock
+    ):
         import httpx
+
         from hearth.client import HearthClient
         from hearth.fastapi import HearthFastAPIDep
 
@@ -235,8 +273,12 @@ class TestHearthFastAPIDepPermissions:
 
     def test_allows_when_token_has_required_permission(self, respx_mock):
         private_key, x_b64, kid = _make_ed25519_key()
-        dep = self._dep_with_permission("docs.write", private_key, x_b64, kid, respx_mock)
-        token = _sign_jwt(private_key, _valid_payload(permissions=["docs.read", "docs.write"]), kid)
+        dep = self._dep_with_permission(
+            "docs.write", private_key, x_b64, kid, respx_mock
+        )
+        token = _sign_jwt(
+            private_key, _valid_payload(permissions=["docs.read", "docs.write"]), kid
+        )
         request = _make_request(token)
 
         claims = dep(request=request)
@@ -246,7 +288,9 @@ class TestHearthFastAPIDepPermissions:
         from fastapi import HTTPException
 
         private_key, x_b64, kid = _make_ed25519_key()
-        dep = self._dep_with_permission("docs.write", private_key, x_b64, kid, respx_mock)
+        dep = self._dep_with_permission(
+            "docs.write", private_key, x_b64, kid, respx_mock
+        )
         token = _sign_jwt(private_key, _valid_payload(permissions=["docs.read"]), kid)
         request = _make_request(token)
 
@@ -256,6 +300,7 @@ class TestHearthFastAPIDepPermissions:
 
     def test_no_permission_check_when_permission_not_set(self, respx_mock):
         import httpx
+
         from hearth.client import HearthClient
         from hearth.fastapi import HearthFastAPIDep
 
@@ -278,11 +323,13 @@ class TestHearthFastAPIDepPermissions:
 # require_permission() shorthand
 # ---------------------------------------------------------------------------
 
+
 class TestRequirePermission:
     def test_returns_annotated_type(self):
-        from hearth.client import HearthClient
-        from hearth.fastapi import HearthFastAPIDep, require_permission, VerifiedClaims
         import typing
+
+        from hearth.client import HearthClient
+        from hearth.fastapi import HearthFastAPIDep, VerifiedClaims, require_permission
 
         client = HearthClient("http://localhost:8420", realm_id="realm-1")
         dep = HearthFastAPIDep(client=client, mode="embedded")
@@ -297,8 +344,9 @@ class TestRequirePermission:
         """require_permission enforces the permission when the dep is called."""
         import httpx
         from fastapi import HTTPException
+
         from hearth.client import HearthClient
-        from hearth.fastapi import HearthFastAPIDep, require_permission
+        from hearth.fastapi import HearthFastAPIDep
 
         private_key, x_b64, kid = _make_ed25519_key()
         jwks = _make_jwks(x_b64, kid)
@@ -320,9 +368,11 @@ class TestRequirePermission:
 # HearthSettings (pydantic-settings integration)
 # ---------------------------------------------------------------------------
 
+
 class TestHearthSettings:
     def test_importable(self):
         from hearth.fastapi import HearthSettings
+
         assert HearthSettings is not None
 
     def test_reads_fields_from_env(self, monkeypatch):
@@ -331,6 +381,7 @@ class TestHearthSettings:
         monkeypatch.setenv("HEARTH_CLIENT_ID", "my-client")
 
         from hearth.fastapi import HearthSettings
+
         # Force re-read from env by creating a fresh instance
         settings = HearthSettings()
         assert settings.base_url == "https://auth.example.com"
@@ -354,6 +405,7 @@ class TestHearthSettings:
         monkeypatch.setenv("BASE_URL", "https://wrong.example.com")
 
         from hearth.fastapi import HearthSettings
+
         settings = HearthSettings()
         # Without HEARTH_ prefix, it should not be picked up
         assert settings.base_url != "https://wrong.example.com"
@@ -363,13 +415,15 @@ class TestHearthSettings:
 # Integration: per-route vs global auth in a real FastAPI app
 # ---------------------------------------------------------------------------
 
+
 class TestFastAPIIntegration:
     """Use TestClient to verify per-route auth and global middleware coexist."""
 
     def _app(self, private_key, x_b64, kid, respx_mock):
         """Build a small FastAPI app with one per-route dep and one open route."""
         import httpx
-        from fastapi import FastAPI, Depends
+        from fastapi import Depends, FastAPI
+
         from hearth.client import HearthClient
         from hearth.fastapi import HearthFastAPIDep, VerifiedClaims
 
@@ -379,7 +433,9 @@ class TestFastAPIIntegration:
         )
 
         client = HearthClient("http://localhost:8420", realm_id="realm-1")
-        auth_dep = HearthFastAPIDep(client=client, mode="embedded", permission="docs.read")
+        auth_dep = HearthFastAPIDep(
+            client=client, mode="embedded", permission="docs.read"
+        )
 
         app = FastAPI()
 

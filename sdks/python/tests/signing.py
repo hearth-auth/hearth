@@ -14,7 +14,7 @@ from __future__ import annotations
 import base64
 import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -32,7 +32,7 @@ class _SeededJwksCache:
     def __init__(self, public_key) -> None:
         self._public_key = public_key
 
-    def get_key(self, kid: str):  # noqa: ARG002 — one key, kid is irrelevant
+    def get_key(self, kid: str):
         return self._public_key
 
 
@@ -43,9 +43,9 @@ def install_test_key(client):
 
 
 def sign_jwt(
-    payload: Dict[str, Any],
+    payload: dict[str, Any],
     *,
-    issuer: Optional[str] = "http://localhost:8420",
+    issuer: str | None = "http://localhost:8420",
     kid: str = TEST_KID,
 ) -> str:
     """Sign *payload* with the suite's Ed25519 key, filling in iss/exp/iat."""
@@ -60,7 +60,7 @@ def sign_jwt(
     return pyjwt.encode(body, _PRIVATE_KEY, algorithm="EdDSA", headers={"kid": kid})
 
 
-def unsigned_jwt(payload: Dict[str, Any]) -> str:
+def unsigned_jwt(payload: dict[str, Any]) -> str:
     """Build an ``alg: none`` token — an attacker's forgery, never acceptable."""
     header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()

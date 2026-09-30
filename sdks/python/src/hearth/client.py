@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import time
-from typing import Optional, Dict, Any, List
+from typing import Any
 
 import httpx
 
@@ -13,7 +13,6 @@ from .claims import Claims
 from .errors import (
     ConfigurationError,
     HearthError,
-    JWKSFetchError,
     TokenAudienceError,
     TokenExpiredError,
     TokenInvalidError,
@@ -21,20 +20,20 @@ from .errors import (
     TokenNotYetValidError,
 )
 from .types import (
-    BootstrapResponse,
     AuthorizeResponse,
+    BootstrapResponse,
+    CheckPermissionResponse,
     DeviceAuthorizationResponse,
+    IntrospectResponse,
+    JwksDocument,
     LoginBeginResult,
+    MePermissionsResponse,
+    OAuthClient,
+    RegisterClientRequest,
     SvDeltaResponse,
     SvSnapshotResponse,
     TokenResponse,
     UserInfoResponse,
-    MePermissionsResponse,
-    JwksDocument,
-    OAuthClient,
-    RegisterClientRequest,
-    CheckPermissionResponse,
-    IntrospectResponse,
 )
 
 
@@ -53,10 +52,10 @@ class HearthClient:
         self,
         base_url: str,
         realm_id: str,
-        access_token: Optional[str] = None,
-        client_id: Optional[str] = None,
-        client_secret: Optional[str] = None,
-        jwks_ttl: Optional[float] = None,
+        access_token: str | None = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        jwks_ttl: float | None = None,
         timeout: float = 30.0,
     ):
         self._base = base_url.rstrip("/")
@@ -65,7 +64,7 @@ class HearthClient:
         self._client_id = client_id
         self._client_secret = client_secret
         self._jwks_ttl = jwks_ttl
-        self._jwks_cache: Optional[Any] = None  # JwksCache, lazily initialised
+        self._jwks_cache: Any | None = None  # JwksCache, lazily initialised
         self._http = httpx.Client(
             headers={"X-Realm-ID": realm_id},
             timeout=timeout,
@@ -90,7 +89,7 @@ class HearthClient:
     def begin_login(
         self,
         redirect_uri: str,
-        scopes: Optional[str] = None,
+        scopes: str | None = None,
     ) -> LoginBeginResult:
         """Begin an authorization-code login: generate PKCE, build the authorization URL.
 
@@ -107,6 +106,7 @@ class HearthClient:
         """
         import secrets
         import urllib.parse
+
         from .pkce import generate_pkce_pair
 
         if not self._client_id:
@@ -159,7 +159,7 @@ class HearthClient:
         redirect_uri: str,
         scope: str = "openid",
         state: str = "",
-        resource: Optional[str] = None,
+        resource: str | None = None,
     ) -> AuthorizeResponse:
         """Initiate an OAuth 2.0 authorization code request."""
         params = {
@@ -183,7 +183,7 @@ class HearthClient:
         client_id: str,
         client_secret: str,
         redirect_uri: str,
-        code_verifier: Optional[str] = None,
+        code_verifier: str | None = None,
     ) -> TokenResponse:
         """Exchange an authorization code for tokens."""
         body = {
@@ -222,7 +222,7 @@ class HearthClient:
         return TokenResponse(**resp.json())
 
     def register_client(
-        self, req: RegisterClientRequest, access_token: Optional[str] = None
+        self, req: RegisterClientRequest, access_token: str | None = None
     ) -> OAuthClient:
         """Register a new OAuth client via the admin ``POST /clients`` endpoint.
 
@@ -250,7 +250,7 @@ class HearthClient:
     # Protected endpoints
     # ------------------------------------------------------------------
 
-    def userinfo(self, access_token: Optional[str] = None) -> UserInfoResponse:
+    def userinfo(self, access_token: str | None = None) -> UserInfoResponse:
         """Retrieve OpenID Connect userinfo."""
         token = access_token or self._token
         if not token:
@@ -263,7 +263,7 @@ class HearthClient:
             raise HearthError(resp.status_code, resp.text)
         return UserInfoResponse(**resp.json())
 
-    def permissions(self, access_token: Optional[str] = None) -> MePermissionsResponse:
+    def permissions(self, access_token: str | None = None) -> MePermissionsResponse:
         """Retrieve the current user's effective permissions."""
         token = access_token or self._token
         if not token:
@@ -283,7 +283,7 @@ class HearthClient:
             raise HearthError(resp.status_code, resp.text)
         return JwksDocument(**resp.json())
 
-    def discovery(self) -> Dict[str, Any]:
+    def discovery(self) -> dict[str, Any]:
         """Fetch the OIDC discovery document."""
         resp = self._http.get(f"{self._base}/.well-known/openid-configuration")
         if resp.status_code != 200:
@@ -299,7 +299,7 @@ class HearthClient:
         """Check whether the JWT contains a specific permission."""
         try:
             return Claims.decode(token).hasPermission(permission)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- fail closed: an undecodable token has no permission
             return False
 
     @staticmethod
@@ -307,7 +307,7 @@ class HearthClient:
         """Check whether the JWT contains a specific role."""
         try:
             return Claims.decode(token).hasRole(role)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- fail closed: an undecodable token has no role
             return False
 
     @staticmethod
@@ -315,7 +315,7 @@ class HearthClient:
         """Check whether the JWT indicates membership in a group."""
         try:
             return Claims.decode(token).in_group(group_slug)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- fail closed: an undecodable token is in no group
             return False
 
     @staticmethod
@@ -323,7 +323,7 @@ class HearthClient:
         """Check whether the JWT is scoped to a specific organization."""
         try:
             return Claims.decode(token).in_org(org_id)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- fail closed: an undecodable token is in no org
             return False
 
     # ------------------------------------------------------------------
@@ -334,8 +334,8 @@ class HearthClient:
         self,
         access_token: str,
         permission: str,
-        organization_id: Optional[str] = None,
-        resource: Optional[str] = None,
+        organization_id: str | None = None,
+        resource: str | None = None,
     ) -> CheckPermissionResponse:
         """Call POST /oauth/authorize to check a permission (decision mode).
 
@@ -352,7 +352,7 @@ class HearthClient:
         :param resource: Optional RFC 8707 resource indicator.
         """
         try:
-            body: Dict[str, Any] = {"permission": permission}
+            body: dict[str, Any] = {"permission": permission}
             if organization_id is not None:
                 body["organization_id"] = organization_id
             if resource is not None:
@@ -365,15 +365,15 @@ class HearthClient:
             if resp.status_code != 200:
                 return CheckPermissionResponse(allowed=False)
             return CheckPermissionResponse(**resp.json())
-        except Exception:
+        except Exception:  # noqa: BLE001 -- fail closed: any error is a deny
             return CheckPermissionResponse(allowed=False)
 
     def introspect(
         self,
         access_token: str,
         client_id: str,
-        client_secret: Optional[str] = None,
-        token_type_hint: Optional[str] = None,
+        client_secret: str | None = None,
+        token_type_hint: str | None = None,
     ) -> IntrospectResponse:
         """Call POST /realms/{realm_id}/introspect (RFC 7662) to inspect a token.
 
@@ -394,7 +394,7 @@ class HearthClient:
                 "introspection requires a confidential client's client_id and client_secret",
                 field="client_secret",
             )
-        body: Dict[str, Any] = {
+        body: dict[str, Any] = {
             "token": access_token,
             "client_id": client_id,
             "client_secret": client_secret,
@@ -418,9 +418,9 @@ class HearthClient:
         rp_id: str = "",
         discoverable: bool = True,
         *,
-        password: Optional[str] = None,
-        totp_code: Optional[str] = None,
-        assertion: Optional[Dict[str, Any]] = None,
+        password: str | None = None,
+        totp_code: str | None = None,
+        assertion: dict[str, Any] | None = None,
     ) -> dict:
         """Start a WebAuthn registration ceremony.
 
@@ -432,7 +432,7 @@ class HearthClient:
         The server answers ``403 step_up_required`` without one: an access
         token alone is one factor and does not enrol a credential.
         """
-        body: Dict[str, Any] = {"rp_id": rp_id, "discoverable": discoverable}
+        body: dict[str, Any] = {"rp_id": rp_id, "discoverable": discoverable}
         if password is not None:
             body["password"] = password
         if totp_code is not None:
@@ -463,9 +463,7 @@ class HearthClient:
             raise HearthError(resp.status_code, resp.text)
         return resp.json()
 
-    def webauthn_auth_begin(
-        self, rp_id: str = "", user_id: Optional[str] = None
-    ) -> dict:
+    def webauthn_auth_begin(self, rp_id: str = "", user_id: str | None = None) -> dict:
         """Start a WebAuthn authentication ceremony."""
         body: dict = {"rp_id": rp_id}
         if user_id:
@@ -482,7 +480,7 @@ class HearthClient:
         authenticator_data: str,
         signature: str,
         origin: str,
-        user_handle: Optional[str] = None,
+        user_handle: str | None = None,
     ) -> dict:
         """Complete a WebAuthn authentication ceremony."""
         body = {
@@ -506,8 +504,8 @@ class HearthClient:
     def verify_token(
         self,
         token: str,
-        audience: Optional[str] = None,
-        issuer_url: Optional[str] = None,
+        audience: str | None = None,
+        issuer_url: str | None = None,
     ) -> Claims:
         """Verify a JWT locally using JWKS-based Ed25519 signature verification.
 
@@ -539,7 +537,7 @@ class HearthClient:
 
         try:
             header_bytes = base64.urlsafe_b64decode(parts[0] + "==")
-            header: Dict[str, Any] = json.loads(header_bytes)
+            header: dict[str, Any] = json.loads(header_bytes)
         except Exception as exc:
             raise TokenInvalidError(f"failed to decode JWT header: {exc}") from exc
 
@@ -552,6 +550,7 @@ class HearthClient:
         # Lazy-init JWKS cache.
         if self._jwks_cache is None:
             from .jwks import JwksCache
+
             self._jwks_cache = JwksCache(
                 f"{self._base}/.well-known/jwks.json",
                 ttl=self._jwks_ttl,
@@ -574,7 +573,7 @@ class HearthClient:
         # Decode payload claims.
         try:
             payload_bytes = base64.urlsafe_b64decode(parts[1] + "==")
-            payload: Dict[str, Any] = json.loads(payload_bytes)
+            payload: dict[str, Any] = json.loads(payload_bytes)
         except Exception as exc:
             raise TokenInvalidError(f"failed to decode JWT payload: {exc}") from exc
 
@@ -616,7 +615,7 @@ class HearthClient:
     # §4.5.1 — client_credentials (M2M)
     # ------------------------------------------------------------------
 
-    def client_credentials(self, scope: Optional[str] = None) -> TokenResponse:
+    def client_credentials(self, scope: str | None = None) -> TokenResponse:
         """Obtain a token using the Client Credentials grant (RFC 6749 §4.4).
 
         :param scope: Optional space-delimited scope string.
@@ -624,11 +623,15 @@ class HearthClient:
         :raises HearthError: on non-200 responses.
         """
         if not self._client_id:
-            raise ConfigurationError("client_id is required for client_credentials flow")
+            raise ConfigurationError(
+                "client_id is required for client_credentials flow"
+            )
         if not self._client_secret:
-            raise ConfigurationError("client_secret is required for client_credentials flow")
+            raise ConfigurationError(
+                "client_secret is required for client_credentials flow"
+            )
 
-        body: Dict[str, str] = {
+        body: dict[str, str] = {
             "grant_type": "client_credentials",
             "client_id": self._client_id,
             "client_secret": self._client_secret,
@@ -649,7 +652,7 @@ class HearthClient:
     # ------------------------------------------------------------------
 
     def start_device_flow(
-        self, scope: Optional[str] = None
+        self, scope: str | None = None
     ) -> DeviceAuthorizationResponse:
         """Initiate the Device Authorization Flow (RFC 8628).
 
@@ -658,9 +661,11 @@ class HearthClient:
         :raises HearthError: on non-200 responses.
         """
         if not self._client_id:
-            raise ConfigurationError("client_id is required for device authorization flow")
+            raise ConfigurationError(
+                "client_id is required for device authorization flow"
+            )
 
-        body: Dict[str, str] = {"client_id": self._client_id}
+        body: dict[str, str] = {"client_id": self._client_id}
         if scope is not None:
             body["scope"] = scope
 
@@ -675,8 +680,8 @@ class HearthClient:
     def poll_device_token(
         self,
         device_code: str,
-        client_id: Optional[str] = None,
-    ) -> Optional[TokenResponse]:
+        client_id: str | None = None,
+    ) -> TokenResponse | None:
         """Poll the token endpoint for Device Flow completion (RFC 8628 §3.4).
 
         Returns ``None`` when authorization is still pending (``authorization_pending``
@@ -691,7 +696,7 @@ class HearthClient:
         if not cid:
             raise ConfigurationError("client_id is required for device flow polling")
 
-        body: Dict[str, str] = {
+        body: dict[str, str] = {
             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             "device_code": device_code,
             "client_id": cid,
@@ -711,7 +716,7 @@ class HearthClient:
         try:
             error_body = resp.json()
             error = error_body.get("error", "")
-        except Exception:
+        except Exception:  # noqa: BLE001 -- any unparseable error body is "no error code"
             error = ""
 
         if error in ("authorization_pending", "slow_down"):
@@ -753,7 +758,7 @@ class HearthClient:
         :param token: The opaque magic-link token from the email/redirect URL.
         :raises HearthError: on a non-200 response (e.g. expired/used token).
         """
-        body: Dict[str, str] = {
+        body: dict[str, str] = {
             "grant_type": "urn:hearth:grant-type:magic-link",
             "token": token,
         }
@@ -789,8 +794,8 @@ class HearthClient:
         return SvSnapshotResponse(**resp.json())
 
     def sv_delta(
-        self, access_token: str, since: int, limit: Optional[int] = None
-    ) -> Optional[SvDeltaResponse]:
+        self, access_token: str, since: int, limit: int | None = None
+    ) -> SvDeltaResponse | None:
         """Fetch session-version deltas since sequence number *since*.
 
         Returns ``None`` when there are no new deltas (HTTP 204).
@@ -801,7 +806,7 @@ class HearthClient:
         :raises HearthError: on error responses (including 400 when *since* is
             older than the retention window).
         """
-        params: Dict[str, Any] = {"since": since}
+        params: dict[str, Any] = {"since": since}
         if limit is not None:
             params["limit"] = limit
 

@@ -4,13 +4,19 @@ Provides HearthClient (auth flows, RBAC predicates), AdminClient
 (user/realm CRUD), mode-aware middleware, and all request/response types.
 """
 
-from .client import HearthClient
 from .admin import AdminClient
+from .client import HearthClient
 
 # FastAPI adapter — only importable when fastapi/starlette are installed.
 # Access via: from hearth.fastapi import HearthFastAPIDep, require_permission, ...
 try:
-    from .fastapi import HearthFastAPIDep, HearthSettings, VerifiedClaims, require_permission
+    # `X as X` marks these as deliberate re-exports (they stay out of __all__
+    # because the optional extra may be missing).
+    from .fastapi import HearthFastAPIDep as HearthFastAPIDep
+    from .fastapi import HearthSettings as HearthSettings
+    from .fastapi import VerifiedClaims as VerifiedClaims
+    from .fastapi import require_permission as require_permission
+
     _FASTAPI_AVAILABLE = True
 except ImportError:
     _FASTAPI_AVAILABLE = False
@@ -18,65 +24,67 @@ except ImportError:
 # Django adapter — only importable when django is installed.
 # Access via: from hearth.django import HearthDjangoMiddleware, require_permission
 try:
-    from .django import HearthDjangoMiddleware
+    from .django import HearthDjangoMiddleware as HearthDjangoMiddleware
+
     _DJANGO_AVAILABLE = True
 except ImportError:
     _DJANGO_AVAILABLE = False
+from .claims import Claims
 from .errors import (
-    HearthError,
-    HearthSdkError,
+    AuthorizationModeMismatchError,
     ConfigurationError,
     DiscoveryError,
+    HearthError,
+    HearthSdkError,
+    IntrospectionError,
     JWKSFetchError,
+    RequiredActionError,
+    TokenAudienceError,
     TokenExpiredError,
-    TokenNotYetValidError,
     TokenInvalidError,
     TokenIssuerError,
-    TokenAudienceError,
-    IntrospectionError,
-    RequiredActionError,
-    AuthorizationModeMismatchError,
+    TokenNotYetValidError,
 )
-from .claims import Claims
+from .jwks import JwksCache
 from .middleware import RequirePermissionMiddleware, WsgiPermissionMiddleware
 from .pkce import PkcePair, generate_pkce_pair
-from .jwks import JwksCache
 from .types import (
     AccessTokenAuthorizationMode,
-    BootstrapResponse,
-    LoginBeginResult,
-    User,
-    CreateUserRequest,
-    UpdateUserRequest,
-    Realm,
-    UpdateRealmRequest,
-    PageResponse,
     AuthorizeResponse,
-    TokenResponse,
-    UserInfoResponse,
-    MePermissionsResponse,
-    OAuthClient,
-    RegisterClientRequest,
-    CreateClientRequest,
-    UpdateClientRequest,
-    Role,
-    CreateRoleRequest,
-    UpdateRoleRequest,
-    Group,
-    CreateGroupRequest,
-    UpdateGroupRequest,
-    JwksDocument,
-    IntrospectRequest,
-    IntrospectResponse,
+    BootstrapResponse,
     CheckPermissionRequest,
     CheckPermissionResponse,
+    CreateClientRequest,
+    CreateGroupRequest,
+    CreateRoleRequest,
+    CreateUserRequest,
     DeviceAuthorizationResponse,
+    Group,
+    IntrospectRequest,
+    IntrospectResponse,
+    JwksDocument,
+    LoginBeginResult,
+    MePermissionsResponse,
+    OAuthClient,
+    PageResponse,
+    Realm,
+    RegisterClientRequest,
+    Role,
     SvDeltaEntry,
     SvDeltaResponse,
     SvSnapshotResponse,
+    TokenResponse,
+    UpdateClientRequest,
+    UpdateGroupRequest,
+    UpdateRealmRequest,
+    UpdateRoleRequest,
+    UpdateUserRequest,
+    User,
+    UserInfoResponse,
 )
 
-__all__ = [
+# Grouped by category (the comments below), not alphabetically.
+__all__ = [  # noqa: RUF022
     # Clients
     "HearthClient",
     "AdminClient",

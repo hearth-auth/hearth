@@ -11,19 +11,16 @@ import base64
 import hashlib
 import json
 import time
-from typing import Optional
-from unittest.mock import patch
 
 import httpx
 import pytest
-
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_ed25519_key() -> tuple:
     """Return (private_key, x_b64url, kid) for test JWT signing."""
@@ -53,6 +50,7 @@ def _make_jwks(x_b64: str, kid: str) -> dict:
 def _sign_jwt(private_key, payload: dict, kid: str) -> str:
     """Sign a JWT with an Ed25519 private key via PyJWT."""
     import jwt as pyjwt
+
     return pyjwt.encode(payload, private_key, algorithm="EdDSA", headers={"kid": kid})
 
 
@@ -71,30 +69,36 @@ def _valid_payload(issuer: str = "http://localhost:8420") -> dict:
 # §7 — PKCE generation helper
 # ---------------------------------------------------------------------------
 
+
 class TestPkce:
     """Tests for generate_pkce_pair() (RFC 7636)."""
 
     def test_returns_pair_with_verifier_and_challenge(self):
         from hearth.pkce import generate_pkce_pair
+
         pair = generate_pkce_pair()
         assert pair.code_verifier
         assert pair.code_challenge
 
     def test_verifier_length_within_rfc_bounds(self):
         from hearth.pkce import generate_pkce_pair
+
         pair = generate_pkce_pair()
         # RFC 7636 §4.1: 43–128 characters
         assert 43 <= len(pair.code_verifier) <= 128
 
     def test_verifier_contains_only_unreserved_chars(self):
-        from hearth.pkce import generate_pkce_pair
         import re
+
+        from hearth.pkce import generate_pkce_pair
+
         pair = generate_pkce_pair()
         # RFC 7636 §4.1: ALPHA / DIGIT / "-" / "." / "_" / "~"
         assert re.fullmatch(r"[A-Za-z0-9\-._~]+", pair.code_verifier)
 
     def test_challenge_is_s256_of_verifier(self):
         from hearth.pkce import generate_pkce_pair
+
         pair = generate_pkce_pair()
         digest = hashlib.sha256(pair.code_verifier.encode("ascii")).digest()
         expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
@@ -102,12 +106,14 @@ class TestPkce:
 
     def test_each_call_produces_different_pair(self):
         from hearth.pkce import generate_pkce_pair
+
         a = generate_pkce_pair()
         b = generate_pkce_pair()
         assert a.code_verifier != b.code_verifier
 
     def test_challenge_has_no_padding(self):
         from hearth.pkce import generate_pkce_pair
+
         pair = generate_pkce_pair()
         assert "=" not in pair.code_challenge
 
@@ -116,12 +122,14 @@ class TestPkce:
 # §2 — JWKS cache with TTL
 # ---------------------------------------------------------------------------
 
+
 class TestJwksCache:
     """Tests for JwksCache: TTL, cache miss re-fetch, skip unknown kty."""
 
     def test_caches_ed25519_key_by_kid(self, respx_mock):
         from hearth.jwks import JwksCache
-        private_key, x_b64, kid = _make_ed25519_key()
+
+        _private_key, x_b64, kid = _make_ed25519_key()
         jwks = _make_jwks(x_b64, kid)
         respx_mock.get("http://localhost:8420/.well-known/jwks.json").mock(
             return_value=httpx.Response(200, json=jwks)
@@ -131,8 +139,9 @@ class TestJwksCache:
         assert key is not None
 
     def test_raises_jwks_fetch_error_on_http_failure(self, respx_mock):
-        from hearth.jwks import JwksCache
         from hearth.errors import JWKSFetchError
+        from hearth.jwks import JwksCache
+
         respx_mock.get("http://localhost:8420/.well-known/jwks.json").mock(
             return_value=httpx.Response(503, text="down")
         )
@@ -142,25 +151,30 @@ class TestJwksCache:
 
     def test_refetches_on_kid_cache_miss(self, respx_mock):
         from hearth.jwks import JwksCache
-        private_key, x_b64, kid = _make_ed25519_key()
+
+        _private_key, x_b64, kid = _make_ed25519_key()
         jwks = _make_jwks(x_b64, kid)
         # First call returns empty JWKS, second returns the real one
         call_count = [0]
+
         def handler(request):
             call_count[0] += 1
             if call_count[0] == 1:
                 return httpx.Response(200, json={"keys": []})
             return httpx.Response(200, json=jwks)
 
-        respx_mock.get("http://localhost:8420/.well-known/jwks.json").mock(side_effect=handler)
+        respx_mock.get("http://localhost:8420/.well-known/jwks.json").mock(
+            side_effect=handler
+        )
         cache = JwksCache("http://localhost:8420/.well-known/jwks.json")
         key = cache.get_key(kid)
         assert key is not None
         assert call_count[0] == 2  # fetched twice (initial miss + retry)
 
     def test_raises_on_kid_not_found_after_refetch(self, respx_mock):
-        from hearth.jwks import JwksCache
         from hearth.errors import JWKSFetchError
+        from hearth.jwks import JwksCache
+
         respx_mock.get("http://localhost:8420/.well-known/jwks.json").mock(
             return_value=httpx.Response(200, json={"keys": []})
         )
@@ -170,13 +184,21 @@ class TestJwksCache:
 
     def test_skips_non_okp_keys_without_error(self, respx_mock):
         from hearth.jwks import JwksCache
-        private_key, x_b64, kid = _make_ed25519_key()
+
+        _private_key, x_b64, kid = _make_ed25519_key()
         jwks = {
             "keys": [
                 # RSA key (should be skipped)
                 {"kty": "RSA", "n": "abc", "e": "AQAB", "kid": "rsa-1"},
                 # Valid OKP key
-                {"kty": "OKP", "crv": "Ed25519", "x": x_b64, "kid": kid, "use": "sig", "alg": "EdDSA"},
+                {
+                    "kty": "OKP",
+                    "crv": "Ed25519",
+                    "x": x_b64,
+                    "kid": kid,
+                    "use": "sig",
+                    "alg": "EdDSA",
+                },
             ]
         }
         respx_mock.get("http://localhost:8420/.well-known/jwks.json").mock(
@@ -189,7 +211,8 @@ class TestJwksCache:
 
     def test_respects_cache_control_max_age(self, respx_mock):
         from hearth.jwks import JwksCache
-        private_key, x_b64, kid = _make_ed25519_key()
+
+        _private_key, x_b64, kid = _make_ed25519_key()
         jwks = _make_jwks(x_b64, kid)
         respx_mock.get("http://localhost:8420/.well-known/jwks.json").mock(
             return_value=httpx.Response(
@@ -202,7 +225,8 @@ class TestJwksCache:
 
     def test_max_age_capped_at_24h(self, respx_mock):
         from hearth.jwks import JwksCache
-        private_key, x_b64, kid = _make_ed25519_key()
+
+        _private_key, x_b64, kid = _make_ed25519_key()
         jwks = _make_jwks(x_b64, kid)
         respx_mock.get("http://localhost:8420/.well-known/jwks.json").mock(
             return_value=httpx.Response(
@@ -218,11 +242,13 @@ class TestJwksCache:
 # §2 — verify_token() with full EdDSA signature verification
 # ---------------------------------------------------------------------------
 
+
 class TestVerifyToken:
     """verify_token must do full Ed25519 signature verification and claim checks."""
 
     def _client(self, **kw):
         from hearth.client import HearthClient
+
         return HearthClient("http://localhost:8420", realm_id="realm-1", **kw)
 
     def _setup_jwks_mock(self, respx_mock, x_b64: str, kid: str):
@@ -241,12 +267,22 @@ class TestVerifyToken:
 
     def test_raises_token_invalid_on_bad_signature(self, respx_mock):
         from hearth.errors import TokenInvalidError
-        private_key, x_b64, kid = _make_ed25519_key()
+
+        private_key, _x_b64, kid = _make_ed25519_key()
         # Publish a different key than was used to sign
         _, x_b64_wrong, _ = _make_ed25519_key()
-        jwks = {"keys": [
-            {"kty": "OKP", "crv": "Ed25519", "x": x_b64_wrong, "kid": kid, "use": "sig", "alg": "EdDSA"}
-        ]}
+        jwks = {
+            "keys": [
+                {
+                    "kty": "OKP",
+                    "crv": "Ed25519",
+                    "x": x_b64_wrong,
+                    "kid": kid,
+                    "use": "sig",
+                    "alg": "EdDSA",
+                }
+            ]
+        }
         respx_mock.get("http://localhost:8420/.well-known/jwks.json").mock(
             return_value=httpx.Response(200, json=jwks)
         )
@@ -256,6 +292,7 @@ class TestVerifyToken:
 
     def test_raises_token_expired(self, respx_mock):
         from hearth.errors import TokenExpiredError
+
         private_key, x_b64, kid = _make_ed25519_key()
         self._setup_jwks_mock(respx_mock, x_b64, kid)
         payload = _valid_payload()
@@ -266,6 +303,7 @@ class TestVerifyToken:
 
     def test_raises_token_issuer_error(self, respx_mock):
         from hearth.errors import TokenIssuerError
+
         private_key, x_b64, kid = _make_ed25519_key()
         self._setup_jwks_mock(respx_mock, x_b64, kid)
         payload = _valid_payload(issuer="https://wrong.example.com")
@@ -275,6 +313,7 @@ class TestVerifyToken:
 
     def test_raises_token_audience_error(self, respx_mock):
         from hearth.errors import TokenAudienceError
+
         private_key, x_b64, kid = _make_ed25519_key()
         self._setup_jwks_mock(respx_mock, x_b64, kid)
         token = _sign_jwt(private_key, _valid_payload(), kid)
@@ -283,22 +322,28 @@ class TestVerifyToken:
 
     def test_raises_token_invalid_for_malformed_jwt(self, respx_mock):
         from hearth.errors import TokenInvalidError
-        private_key, x_b64, kid = _make_ed25519_key()
+
+        _private_key, x_b64, kid = _make_ed25519_key()
         self._setup_jwks_mock(respx_mock, x_b64, kid)
         with pytest.raises(TokenInvalidError):
             self._client().verify_token("not.a.valid.jwt.at.all")
 
     def test_raises_token_invalid_for_wrong_algorithm(self, respx_mock):
         from hearth.errors import TokenInvalidError
-        private_key, x_b64, kid = _make_ed25519_key()
+
+        _private_key, x_b64, kid = _make_ed25519_key()
         self._setup_jwks_mock(respx_mock, x_b64, kid)
         # Craft JWT with alg=HS256
-        header = base64.urlsafe_b64encode(
-            json.dumps({"alg": "HS256", "kid": kid}).encode()
-        ).rstrip(b"=").decode()
-        payload = base64.urlsafe_b64encode(
-            json.dumps(_valid_payload()).encode()
-        ).rstrip(b"=").decode()
+        header = (
+            base64.urlsafe_b64encode(json.dumps({"alg": "HS256", "kid": kid}).encode())
+            .rstrip(b"=")
+            .decode()
+        )
+        payload = (
+            base64.urlsafe_b64encode(json.dumps(_valid_payload()).encode())
+            .rstrip(b"=")
+            .decode()
+        )
         token = f"{header}.{payload}.fake_signature"
         with pytest.raises(TokenInvalidError):
             self._client().verify_token(token)
@@ -331,7 +376,9 @@ class TestVerifyToken:
             call_count[0] += 1
             return httpx.Response(200, json=jwks)
 
-        respx_mock.get("http://localhost:8420/.well-known/jwks.json").mock(side_effect=handler)
+        respx_mock.get("http://localhost:8420/.well-known/jwks.json").mock(
+            side_effect=handler
+        )
         client = self._client()
         token = _sign_jwt(private_key, _valid_payload(), kid)
         client.verify_token(token)
@@ -343,9 +390,11 @@ class TestVerifyToken:
 # §4.5.1 — client_credentials()
 # ---------------------------------------------------------------------------
 
+
 class TestClientCredentials:
     def _client(self):
         from hearth.client import HearthClient
+
         return HearthClient(
             "http://localhost:8420",
             realm_id="realm-1",
@@ -355,12 +404,15 @@ class TestClientCredentials:
 
     def test_returns_token_response(self, respx_mock):
         respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(
-            return_value=httpx.Response(200, json={
-                "access_token": "eyJ...",
-                "token_type": "Bearer",
-                "expires_in": 3600,
-                "scope": "read:users",
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "eyJ...",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                    "scope": "read:users",
+                },
+            )
         )
         resp = self._client().client_credentials()
         assert resp.access_token == "eyJ..."
@@ -373,27 +425,35 @@ class TestClientCredentials:
         def handler(request):
             captured["content_type"] = request.headers.get("content-type", "")
             captured["body"] = request.content.decode()
-            return httpx.Response(200, json={
-                "access_token": "t", "token_type": "Bearer", "expires_in": 3600
-            })
+            return httpx.Response(
+                200,
+                json={"access_token": "t", "token_type": "Bearer", "expires_in": 3600},
+            )
 
-        respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(side_effect=handler)
+        respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(
+            side_effect=handler
+        )
         self._client().client_credentials()
         assert "application/x-www-form-urlencoded" in captured["content_type"]
         assert "client_id=svc-client" in captured["body"]
         assert "client_secret=super-secret" in captured["body"]
-        assert "client_secret" not in str(respx_mock.calls[-1].request.url)  # not in query string
+        assert "client_secret" not in str(
+            respx_mock.calls[-1].request.url
+        )  # not in query string
 
     def test_sends_grant_type_client_credentials(self, respx_mock):
         captured = {}
 
         def handler(request):
             captured["body"] = request.content.decode()
-            return httpx.Response(200, json={
-                "access_token": "t", "token_type": "Bearer", "expires_in": 3600
-            })
+            return httpx.Response(
+                200,
+                json={"access_token": "t", "token_type": "Bearer", "expires_in": 3600},
+            )
 
-        respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(side_effect=handler)
+        respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(
+            side_effect=handler
+        )
         self._client().client_credentials()
         assert "grant_type=client_credentials" in captured["body"]
 
@@ -402,17 +462,24 @@ class TestClientCredentials:
 
         def handler(request):
             captured["body"] = request.content.decode()
-            return httpx.Response(200, json={
-                "access_token": "t", "token_type": "Bearer", "expires_in": 3600
-            })
+            return httpx.Response(
+                200,
+                json={"access_token": "t", "token_type": "Bearer", "expires_in": 3600},
+            )
 
-        respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(side_effect=handler)
+        respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(
+            side_effect=handler
+        )
         self._client().client_credentials(scope="read:users write:users")
-        assert "scope=read%3Ausers+write%3Ausers" in captured["body"] or "scope=read" in captured["body"]
+        assert (
+            "scope=read%3Ausers+write%3Ausers" in captured["body"]
+            or "scope=read" in captured["body"]
+        )
 
     def test_raises_configuration_error_when_no_client_id(self):
         from hearth.client import HearthClient
         from hearth.errors import ConfigurationError
+
         client = HearthClient("http://localhost:8420", realm_id="realm-1")
         with pytest.raises(ConfigurationError):
             client.client_credentials()
@@ -420,7 +487,10 @@ class TestClientCredentials:
     def test_raises_configuration_error_when_no_client_secret(self):
         from hearth.client import HearthClient
         from hearth.errors import ConfigurationError
-        client = HearthClient("http://localhost:8420", realm_id="realm-1", client_id="id")
+
+        client = HearthClient(
+            "http://localhost:8420", realm_id="realm-1", client_id="id"
+        )
         with pytest.raises(ConfigurationError):
             client.client_credentials()
 
@@ -429,9 +499,11 @@ class TestClientCredentials:
 # §4.5.2 — device_authorization() + poll_device_token()
 # ---------------------------------------------------------------------------
 
+
 class TestDeviceFlow:
     def _client(self, **kw):
         from hearth.client import HearthClient
+
         return HearthClient(
             "http://localhost:8420",
             realm_id="realm-1",
@@ -441,13 +513,16 @@ class TestDeviceFlow:
 
     def test_start_device_flow_returns_response(self, respx_mock):
         respx_mock.post("http://localhost:8420/realms/realm-1/device/authorize").mock(
-            return_value=httpx.Response(200, json={
-                "device_code": "DEV123",
-                "user_code": "ABCD-1234",
-                "verification_uri": "https://auth.example.com/activate",
-                "expires_in": 300,
-                "interval": 5,
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "device_code": "DEV123",
+                    "user_code": "ABCD-1234",
+                    "verification_uri": "https://auth.example.com/activate",
+                    "expires_in": 300,
+                    "interval": 5,
+                },
+            )
         )
         resp = self._client().start_device_flow()
         assert resp.device_code == "DEV123"
@@ -459,22 +534,33 @@ class TestDeviceFlow:
 
         def handler(request):
             captured["body"] = request.content.decode()
-            return httpx.Response(200, json={
-                "device_code": "d", "user_code": "u",
-                "verification_uri": "v", "expires_in": 300, "interval": 5
-            })
+            return httpx.Response(
+                200,
+                json={
+                    "device_code": "d",
+                    "user_code": "u",
+                    "verification_uri": "v",
+                    "expires_in": 300,
+                    "interval": 5,
+                },
+            )
 
-        respx_mock.post("http://localhost:8420/realms/realm-1/device/authorize").mock(side_effect=handler)
+        respx_mock.post("http://localhost:8420/realms/realm-1/device/authorize").mock(
+            side_effect=handler
+        )
         self._client().start_device_flow()
         assert "client_id=cli-app" in captured["body"]
 
     def test_poll_device_token_returns_token_on_success(self, respx_mock):
         respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(
-            return_value=httpx.Response(200, json={
-                "access_token": "eyJ...",
-                "token_type": "Bearer",
-                "expires_in": 3600,
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "eyJ...",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                },
+            )
         )
         resp = self._client().poll_device_token("DEV123")
         assert resp is not None
@@ -496,6 +582,7 @@ class TestDeviceFlow:
 
     def test_poll_device_token_raises_token_expired_on_expired_token(self, respx_mock):
         from hearth.errors import TokenExpiredError
+
         respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(
             return_value=httpx.Response(400, json={"error": "expired_token"})
         )
@@ -504,6 +591,7 @@ class TestDeviceFlow:
 
     def test_poll_device_token_raises_on_other_errors(self, respx_mock):
         from hearth.errors import HearthError
+
         respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(
             return_value=httpx.Response(400, json={"error": "access_denied"})
         )
@@ -513,6 +601,7 @@ class TestDeviceFlow:
     def test_start_device_flow_raises_configuration_error_when_no_client_id(self):
         from hearth.client import HearthClient
         from hearth.errors import ConfigurationError
+
         client = HearthClient("http://localhost:8420", realm_id="realm-1")
         with pytest.raises(ConfigurationError):
             client.start_device_flow()
@@ -522,14 +611,19 @@ class TestDeviceFlow:
 # §4.5.3 — request_magic_link()
 # ---------------------------------------------------------------------------
 
+
 class TestMagicLink:
     def _client(self):
         from hearth.client import HearthClient
+
         return HearthClient("http://localhost:8420", realm_id="realm-1")
 
     def test_posts_to_correct_endpoint(self, respx_mock):
         respx_mock.post("http://localhost:8420/v1/realm-1/auth/magic-link").mock(
-            return_value=httpx.Response(202, json={"message": "If an account exists, a magic link has been sent"})
+            return_value=httpx.Response(
+                202,
+                json={"message": "If an account exists, a magic link has been sent"},
+            )
         )
         self._client().request_magic_link("user@example.com")
 
@@ -540,7 +634,9 @@ class TestMagicLink:
             captured["json"] = json.loads(request.content)
             return httpx.Response(202, json={"message": "ok"})
 
-        respx_mock.post("http://localhost:8420/v1/realm-1/auth/magic-link").mock(side_effect=handler)
+        respx_mock.post("http://localhost:8420/v1/realm-1/auth/magic-link").mock(
+            side_effect=handler
+        )
         self._client().request_magic_link("user@example.com")
         assert captured["json"]["email"] == "user@example.com"
 
@@ -553,6 +649,7 @@ class TestMagicLink:
 
     def test_raises_hearth_error_on_429(self, respx_mock):
         from hearth.errors import HearthError
+
         respx_mock.post("http://localhost:8420/v1/realm-1/auth/magic-link").mock(
             return_value=httpx.Response(429, text="too many requests")
         )
@@ -562,9 +659,14 @@ class TestMagicLink:
 
     def test_exchange_returns_token_response(self, respx_mock):
         respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(
-            return_value=httpx.Response(200, json={
-                "access_token": "at", "token_type": "Bearer", "expires_in": 3600,
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "at",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                },
+            )
         )
         result = self._client().exchange_magic_link("magic-token-xyz")
         assert result.access_token == "at"
@@ -575,19 +677,30 @@ class TestMagicLink:
 
         def handler(request):
             captured["body"] = request.content.decode()
-            return httpx.Response(200, json={
-                "access_token": "at", "token_type": "Bearer", "expires_in": 3600,
-            })
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "at",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                },
+            )
 
-        respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(side_effect=handler)
+        respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(
+            side_effect=handler
+        )
         from hearth.client import HearthClient
-        HearthClient("http://localhost:8420", realm_id="realm-1", client_id="cid").exchange_magic_link("magic-token-xyz")
+
+        HearthClient(
+            "http://localhost:8420", realm_id="realm-1", client_id="cid"
+        ).exchange_magic_link("magic-token-xyz")
         assert "grant_type=urn%3Ahearth%3Agrant-type%3Amagic-link" in captured["body"]
         assert "token=magic-token-xyz" in captured["body"]
         assert "client_id=cid" in captured["body"]
 
     def test_exchange_raises_hearth_error_on_invalid_token(self, respx_mock):
         from hearth.errors import HearthError
+
         respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(
             return_value=httpx.Response(400, json={"error": "invalid_grant"})
         )
@@ -599,20 +712,25 @@ class TestMagicLink:
 # Session-version endpoints
 # ---------------------------------------------------------------------------
 
+
 class TestSessionVersionEndpoints:
     """Tests for sv_snapshot() and sv_delta() methods."""
 
     def _client(self):
         from hearth.client import HearthClient
+
         return HearthClient("http://localhost:8420", realm_id="realm-1")
 
     def test_sv_snapshot_returns_response(self, respx_mock):
         respx_mock.get("http://localhost:8420/oauth/session-versions/snapshot").mock(
-            return_value=httpx.Response(200, json={
-                "realm": "realm-1",
-                "current_seq": 42,
-                "versions": {"session-abc": 3, "session-def": 1},
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "realm": "realm-1",
+                    "current_seq": 42,
+                    "versions": {"session-abc": 3, "session-def": 1},
+                },
+            )
         )
         resp = self._client().sv_snapshot("tok")
         assert resp.current_seq == 42
@@ -623,23 +741,33 @@ class TestSessionVersionEndpoints:
 
         def handler(request):
             captured["auth"] = request.headers.get("authorization", "")
-            return httpx.Response(200, json={
-                "realm": "realm-1", "current_seq": 0, "versions": {}
-            })
+            return httpx.Response(
+                200, json={"realm": "realm-1", "current_seq": 0, "versions": {}}
+            )
 
-        respx_mock.get("http://localhost:8420/oauth/session-versions/snapshot").mock(side_effect=handler)
+        respx_mock.get("http://localhost:8420/oauth/session-versions/snapshot").mock(
+            side_effect=handler
+        )
         self._client().sv_snapshot("my-service-token")
         assert captured["auth"] == "Bearer my-service-token"
 
     def test_sv_delta_returns_response_with_deltas(self, respx_mock):
         respx_mock.get("http://localhost:8420/oauth/session-versions").mock(
-            return_value=httpx.Response(200, json={
-                "realm": "realm-1",
-                "next_seq": 10,
-                "deltas": [
-                    {"seq": 5, "session_id": "sess-1", "min_sv": 2, "bumped_at": 1700000000},
-                ],
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "realm": "realm-1",
+                    "next_seq": 10,
+                    "deltas": [
+                        {
+                            "seq": 5,
+                            "session_id": "sess-1",
+                            "min_sv": 2,
+                            "bumped_at": 1700000000,
+                        },
+                    ],
+                },
+            )
         )
         resp = self._client().sv_delta("tok", since=4)
         assert resp is not None
@@ -661,14 +789,19 @@ class TestSessionVersionEndpoints:
             captured["params"] = dict(request.url.params)
             return httpx.Response(204)
 
-        respx_mock.get("http://localhost:8420/oauth/session-versions").mock(side_effect=handler)
+        respx_mock.get("http://localhost:8420/oauth/session-versions").mock(
+            side_effect=handler
+        )
         self._client().sv_delta("tok", since=17)
         assert captured["params"].get("since") == "17"
 
     def test_sv_delta_raises_on_400(self, respx_mock):
         from hearth.errors import HearthError
+
         respx_mock.get("http://localhost:8420/oauth/session-versions").mock(
-            return_value=httpx.Response(400, json={"error": "since is older than retention window"})
+            return_value=httpx.Response(
+                400, json={"error": "since is older than retention window"}
+            )
         )
         with pytest.raises(HearthError) as exc_info:
             self._client().sv_delta("tok", since=0)
@@ -679,15 +812,18 @@ class TestSessionVersionEndpoints:
 # New types exposed via hearth package
 # ---------------------------------------------------------------------------
 
+
 class TestNewPublicTypes:
     """Smoke-test that new types are importable from the top-level package."""
 
     def test_pkce_pair_importable(self):
         from hearth import PkcePair
+
         assert PkcePair
 
     def test_device_authorization_response_importable(self):
         from hearth import DeviceAuthorizationResponse
+
         p = DeviceAuthorizationResponse(
             device_code="d",
             user_code="u",
@@ -699,10 +835,12 @@ class TestNewPublicTypes:
 
     def test_sv_snapshot_response_importable(self):
         from hearth import SvSnapshotResponse
+
         r = SvSnapshotResponse(realm="r", current_seq=0, versions={})
         assert r.current_seq == 0
 
     def test_sv_delta_response_importable(self):
         from hearth import SvDeltaResponse
+
         r = SvDeltaResponse(realm="r", next_seq=1, deltas=[])
         assert r.next_seq == 1

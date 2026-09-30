@@ -5,9 +5,6 @@ TDD: written before implementation. Run with `pytest sdks/python/tests/`.
 
 from __future__ import annotations
 
-import base64
-import json
-from typing import Optional
 from unittest.mock import MagicMock
 
 import httpx
@@ -15,12 +12,10 @@ import pytest
 
 from hearth.claims import Claims
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-from .signing import install_test_key, sign_jwt, unsigned_jwt
+from .signing import install_test_key, sign_jwt
 
 
 def _make_jwt(payload: dict) -> str:
@@ -36,6 +31,7 @@ def _make_jwt(payload: dict) -> str:
 # ---------------------------------------------------------------------------
 # §4 Claims — new methods
 # ---------------------------------------------------------------------------
+
 
 class TestClaimsNewMethods:
     """Tests for spec §4 methods added in this conformance pass."""
@@ -118,14 +114,17 @@ class TestClaimsNewMethods:
 # §5 Errors — RequiredActionError
 # ---------------------------------------------------------------------------
 
+
 class TestRequiredActionError:
     def test_is_hearth_sdk_error(self):
-        from hearth.errors import RequiredActionError, HearthSdkError
+        from hearth.errors import HearthSdkError, RequiredActionError
+
         err = RequiredActionError(required_actions=["VERIFY_EMAIL"])
         assert isinstance(err, HearthSdkError)
 
     def test_required_actions_field(self):
         from hearth.errors import RequiredActionError
+
         err = RequiredActionError(required_actions=["VERIFY_EMAIL", "UPDATE_PASSWORD"])
         assert err.required_actions == ["VERIFY_EMAIL", "UPDATE_PASSWORD"]
 
@@ -133,16 +132,19 @@ class TestRequiredActionError:
         # The server never supplies an interstitial URL: pending actions are
         # run by Hearth itself during /authorize.
         from hearth.errors import RequiredActionError
+
         err = RequiredActionError(required_actions=["VERIFY_EMAIL"])
         assert not hasattr(err, "redirect_uri")
 
     def test_has_human_readable_message(self):
         from hearth.errors import RequiredActionError
+
         err = RequiredActionError(required_actions=["VERIFY_EMAIL"])
         assert "VERIFY_EMAIL" in str(err)
 
     def test_empty_required_actions(self):
         from hearth.errors import RequiredActionError
+
         err = RequiredActionError(required_actions=[])
         assert err.required_actions == []
 
@@ -151,14 +153,18 @@ class TestRequiredActionError:
 # §6 Middleware — required_action token_type → 401
 # ---------------------------------------------------------------------------
 
+
 class TestWsgiRequiredAction:
     """WSGI middleware must return 401 (not 403) on required_action tokens."""
 
     def _client(self):
         from hearth.client import HearthClient
-        return install_test_key(HearthClient("http://localhost:8420", realm_id="realm-1"))
 
-    def _environ(self, token: Optional[str] = None) -> dict:
+        return install_test_key(
+            HearthClient("http://localhost:8420", realm_id="realm-1")
+        )
+
+    def _environ(self, token: str | None = None) -> dict:
         environ = {"REQUEST_METHOD": "GET", "PATH_INFO": "/api/data"}
         if token:
             environ["HTTP_AUTHORIZATION"] = f"Bearer {token}"
@@ -166,20 +172,23 @@ class TestWsgiRequiredAction:
 
     def _start_response(self):
         calls = []
+
         def sr(status, headers):
             calls.append((status, headers))
+
         sr.calls = calls
         return sr
 
     def test_required_action_token_returns_401(self):
         from hearth.middleware import WsgiPermissionMiddleware
-        from hearth.errors import RequiredActionError
 
-        token = _make_jwt({
-            "token_type": "required_action",
-            "required_actions": ["VERIFY_EMAIL"],
-            "permissions": ["docs.write"],
-        })
+        token = _make_jwt(
+            {
+                "token_type": "required_action",
+                "required_actions": ["VERIFY_EMAIL"],
+                "permissions": ["docs.write"],
+            }
+        )
         inner = MagicMock(return_value=[b"ok"])
         mw = WsgiPermissionMiddleware(
             inner, client=self._client(), permission="docs.write", mode="embedded"
@@ -191,10 +200,13 @@ class TestWsgiRequiredAction:
 
     def test_regular_access_token_not_affected(self):
         from hearth.middleware import WsgiPermissionMiddleware
-        token = _make_jwt({
-            "token_type": "access",
-            "permissions": ["docs.write"],
-        })
+
+        token = _make_jwt(
+            {
+                "token_type": "access",
+                "permissions": ["docs.write"],
+            }
+        )
         inner = MagicMock(return_value=[b"ok"])
         mw = WsgiPermissionMiddleware(
             inner, client=self._client(), permission="docs.write", mode="embedded"
@@ -210,9 +222,12 @@ class TestAsgiRequiredAction:
 
     def _client(self):
         from hearth.client import HearthClient
-        return install_test_key(HearthClient("http://localhost:8420", realm_id="realm-1"))
 
-    def _scope(self, token: Optional[str] = None) -> dict:
+        return install_test_key(
+            HearthClient("http://localhost:8420", realm_id="realm-1")
+        )
+
+    def _scope(self, token: str | None = None) -> dict:
         headers = []
         if token:
             headers.append((b"authorization", f"Bearer {token}".encode()))
@@ -236,11 +251,14 @@ class TestAsgiRequiredAction:
     @pytest.mark.asyncio
     async def test_required_action_token_returns_401(self):
         from hearth.middleware import RequirePermissionMiddleware
-        token = _make_jwt({
-            "token_type": "required_action",
-            "required_actions": ["VERIFY_EMAIL"],
-            "permissions": ["docs.write"],
-        })
+
+        token = _make_jwt(
+            {
+                "token_type": "required_action",
+                "required_actions": ["VERIFY_EMAIL"],
+                "permissions": ["docs.write"],
+            }
+        )
 
         async def inner(scope, receive, send):
             await send({"type": "http.response.start", "status": 200, "headers": []})
@@ -255,12 +273,13 @@ class TestAsgiRequiredAction:
     @pytest.mark.asyncio
     async def test_regular_access_token_not_affected(self):
         from hearth.middleware import RequirePermissionMiddleware
-        token = _make_jwt({
-            "token_type": "access",
-            "permissions": ["docs.write"],
-        })
 
-        responses = []
+        token = _make_jwt(
+            {
+                "token_type": "access",
+                "permissions": ["docs.write"],
+            }
+        )
 
         async def inner(scope, receive, send):
             await send({"type": "http.response.start", "status": 200, "headers": []})
@@ -277,16 +296,28 @@ class TestAsgiRequiredAction:
 # §12 Admin — clients, roles, groups, org memberships
 # ---------------------------------------------------------------------------
 
+
 class TestAdminClients:
     def _admin(self):
         from hearth.admin import AdminClient
+
         return AdminClient("http://localhost:8420", "tok", "realm-1")
 
     def test_list_clients(self, respx_mock):
         respx_mock.get("http://localhost:8420/admin/applications").mock(
-            return_value=httpx.Response(200, json={"items": [
-                {"client_id": "c1", "client_name": "My App", "redirect_uris": []}
-            ], "next_cursor": None})
+            return_value=httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "client_id": "c1",
+                            "client_name": "My App",
+                            "redirect_uris": [],
+                        }
+                    ],
+                    "next_cursor": None,
+                },
+            )
         )
         result = self._admin().list_clients()
         assert len(result.items) == 1
@@ -294,19 +325,26 @@ class TestAdminClients:
 
     def test_get_client(self, respx_mock):
         respx_mock.get("http://localhost:8420/admin/applications/c1").mock(
-            return_value=httpx.Response(200, json={
-                "client_id": "c1", "client_name": "My App", "redirect_uris": []
-            })
+            return_value=httpx.Response(
+                200,
+                json={"client_id": "c1", "client_name": "My App", "redirect_uris": []},
+            )
         )
         result = self._admin().get_client("c1")
         assert result.id == "c1"
 
     def test_create_client(self, respx_mock):
         from hearth.types import CreateClientRequest
+
         respx_mock.post("http://localhost:8420/admin/applications").mock(
-            return_value=httpx.Response(201, json={
-                "client_id": "c2", "client_name": "New App", "redirect_uris": ["https://app/cb"],
-            })
+            return_value=httpx.Response(
+                201,
+                json={
+                    "client_id": "c2",
+                    "client_name": "New App",
+                    "redirect_uris": ["https://app/cb"],
+                },
+            )
         )
         req = CreateClientRequest(
             name="New App", redirect_uris=["https://app/cb"], trust_level="third_party"
@@ -316,10 +354,16 @@ class TestAdminClients:
 
     def test_update_client(self, respx_mock):
         from hearth.types import UpdateClientRequest
+
         respx_mock.patch("http://localhost:8420/admin/applications/c1").mock(
-            return_value=httpx.Response(200, json={
-                "client_id": "c1", "client_name": "Updated App", "redirect_uris": []
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "client_id": "c1",
+                    "client_name": "Updated App",
+                    "redirect_uris": [],
+                },
+            )
         )
         req = UpdateClientRequest(name="Updated App")
         result = self._admin().update_client("c1", req)
@@ -335,13 +379,18 @@ class TestAdminClients:
 class TestAdminRoles:
     def _admin(self):
         from hearth.admin import AdminClient
+
         return AdminClient("http://localhost:8420", "tok", "realm-1")
 
     def test_list_roles(self, respx_mock):
         respx_mock.get("http://localhost:8420/admin/roles").mock(
-            return_value=httpx.Response(200, json={"items": [
-                {"id": "r1", "name": "admin", "description": None}
-            ], "next_cursor": None})
+            return_value=httpx.Response(
+                200,
+                json={
+                    "items": [{"id": "r1", "name": "admin", "description": None}],
+                    "next_cursor": None,
+                },
+            )
         )
         result = self._admin().list_roles()
         assert len(result.items) == 1
@@ -349,15 +398,20 @@ class TestAdminRoles:
 
     def test_get_role(self, respx_mock):
         respx_mock.get("http://localhost:8420/admin/roles/r1").mock(
-            return_value=httpx.Response(200, json={"id": "r1", "name": "admin", "description": None})
+            return_value=httpx.Response(
+                200, json={"id": "r1", "name": "admin", "description": None}
+            )
         )
         result = self._admin().get_role("r1")
         assert result.id == "r1"
 
     def test_create_role(self, respx_mock):
         from hearth.types import CreateRoleRequest
+
         respx_mock.post("http://localhost:8420/admin/roles").mock(
-            return_value=httpx.Response(201, json={"id": "r2", "name": "editor", "description": "Can edit"})
+            return_value=httpx.Response(
+                201, json={"id": "r2", "name": "editor", "description": "Can edit"}
+            )
         )
         req = CreateRoleRequest(name="editor", description="Can edit")
         result = self._admin().create_role(req)
@@ -365,8 +419,11 @@ class TestAdminRoles:
 
     def test_update_role(self, respx_mock):
         from hearth.types import UpdateRoleRequest
+
         respx_mock.patch("http://localhost:8420/admin/roles/r1").mock(
-            return_value=httpx.Response(200, json={"id": "r1", "name": "superadmin", "description": None})
+            return_value=httpx.Response(
+                200, json={"id": "r1", "name": "superadmin", "description": None}
+            )
         )
         req = UpdateRoleRequest(name="superadmin")
         result = self._admin().update_role("r1", req)
@@ -382,13 +439,18 @@ class TestAdminRoles:
 class TestAdminGroups:
     def _admin(self):
         from hearth.admin import AdminClient
+
         return AdminClient("http://localhost:8420", "tok", "realm-1")
 
     def test_list_groups(self, respx_mock):
         respx_mock.get("http://localhost:8420/admin/groups").mock(
-            return_value=httpx.Response(200, json={"items": [
-                {"id": "g1", "name": "engineering", "description": None}
-            ], "next_cursor": None})
+            return_value=httpx.Response(
+                200,
+                json={
+                    "items": [{"id": "g1", "name": "engineering", "description": None}],
+                    "next_cursor": None,
+                },
+            )
         )
         result = self._admin().list_groups()
         assert len(result.items) == 1
@@ -396,15 +458,20 @@ class TestAdminGroups:
 
     def test_get_group(self, respx_mock):
         respx_mock.get("http://localhost:8420/admin/groups/g1").mock(
-            return_value=httpx.Response(200, json={"id": "g1", "name": "engineering", "description": None})
+            return_value=httpx.Response(
+                200, json={"id": "g1", "name": "engineering", "description": None}
+            )
         )
         result = self._admin().get_group("g1")
         assert result.id == "g1"
 
     def test_create_group(self, respx_mock):
         from hearth.types import CreateGroupRequest
+
         respx_mock.post("http://localhost:8420/admin/groups").mock(
-            return_value=httpx.Response(201, json={"id": "g2", "name": "design", "description": None})
+            return_value=httpx.Response(
+                201, json={"id": "g2", "name": "design", "description": None}
+            )
         )
         req = CreateGroupRequest(name="design")
         result = self._admin().create_group(req)
@@ -412,8 +479,11 @@ class TestAdminGroups:
 
     def test_update_group(self, respx_mock):
         from hearth.types import UpdateGroupRequest
+
         respx_mock.patch("http://localhost:8420/admin/groups/g1").mock(
-            return_value=httpx.Response(200, json={"id": "g1", "name": "infra", "description": "Infrastructure"})
+            return_value=httpx.Response(
+                200, json={"id": "g1", "name": "infra", "description": "Infrastructure"}
+            )
         )
         req = UpdateGroupRequest(name="infra", description="Infrastructure")
         result = self._admin().update_group("g1", req)
@@ -438,8 +508,13 @@ class TestAdminOrgMembersRemoved:
     def test_admin_client_exposes_no_org_member_methods(self):
         from hearth.admin import AdminClient
 
-        dead = ["list_org_members", "add_org_member", "remove_org_member",
-                "get_org_member", "update_org_member"]
+        dead = [
+            "list_org_members",
+            "add_org_member",
+            "remove_org_member",
+            "get_org_member",
+            "update_org_member",
+        ]
         present = [name for name in dead if hasattr(AdminClient, name)]
         assert present == [], (
             f"AdminClient still exposes dead /admin/orgs methods: {present}"
@@ -459,6 +534,7 @@ class TestAdminOrgMembersRemoved:
 # §12 Admin — HTTP verb contract (audit 2026-08-28 §25.4)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.respx(base_url="http://localhost:8420")
 class TestAdminMutationVerbs:
     """Every Hearth admin mutation is a ``PATCH``.
@@ -470,14 +546,22 @@ class TestAdminMutationVerbs:
 
     def _admin(self):
         from hearth.admin import AdminClient
+
         return AdminClient("http://localhost:8420", "tok", "realm-1")
 
     def test_update_user_sends_patch(self, respx_mock):
         from hearth.types import UpdateUserRequest
+
         route = respx_mock.patch("http://localhost:8420/admin/users/u1").mock(
-            return_value=httpx.Response(200, json={
-                "id": "u1", "email": "a@b.c", "username": "alice", "status": "active",
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "u1",
+                    "email": "a@b.c",
+                    "username": "alice",
+                    "status": "active",
+                },
+            )
         )
         self._admin().update_user("u1", UpdateUserRequest(display_name="New"))
         assert route.called
@@ -485,12 +569,16 @@ class TestAdminMutationVerbs:
 
     def test_update_client_sends_patch_to_applications(self, respx_mock):
         from hearth.types import UpdateClientRequest
-        route = respx_mock.patch(
-            "http://localhost:8420/admin/applications/c1"
-        ).mock(
-            return_value=httpx.Response(200, json={
-                "client_id": "c1", "client_name": "Updated", "redirect_uris": [],
-            })
+
+        route = respx_mock.patch("http://localhost:8420/admin/applications/c1").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "client_id": "c1",
+                    "client_name": "Updated",
+                    "redirect_uris": [],
+                },
+            )
         )
         self._admin().update_client("c1", UpdateClientRequest(name="Updated"))
         assert route.called
@@ -498,10 +586,16 @@ class TestAdminMutationVerbs:
 
     def test_update_role_sends_patch(self, respx_mock):
         from hearth.types import UpdateRoleRequest
+
         route = respx_mock.patch("http://localhost:8420/admin/roles/r1").mock(
-            return_value=httpx.Response(200, json={
-                "id": "r1", "name": "admin", "permissions": [],
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "r1",
+                    "name": "admin",
+                    "permissions": [],
+                },
+            )
         )
         self._admin().update_role("r1", UpdateRoleRequest(description="New"))
         assert route.called
@@ -509,6 +603,7 @@ class TestAdminMutationVerbs:
 
     def test_update_group_sends_patch(self, respx_mock):
         from hearth.types import UpdateGroupRequest
+
         route = respx_mock.patch("http://localhost:8420/admin/groups/g1").mock(
             return_value=httpx.Response(200, json={"id": "g1", "name": "eng"})
         )
@@ -524,5 +619,6 @@ class TestAdminMutationVerbs:
         ``update_realm`` work and the SDK must not offer it at all.
         """
         from hearth.admin import AdminClient
+
         assert not hasattr(AdminClient, "update_realm")
         assert not hasattr(AdminClient, "create_realm")

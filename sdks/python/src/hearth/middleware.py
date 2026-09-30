@@ -33,10 +33,11 @@ Usage (WSGI / Flask / Django)::
 from __future__ import annotations
 
 import asyncio
-from typing import Awaitable, Callable, Optional, TYPE_CHECKING
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from .claims import Claims
-from .errors import AuthorizationModeMismatchError, RequiredActionError
+from .errors import AuthorizationModeMismatchError
 
 if TYPE_CHECKING:
     from .client import HearthClient
@@ -50,7 +51,8 @@ WSGIApp = Callable[..., object]
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _extract_bearer_asgi(scope: dict) -> Optional[str]:
+
+def _extract_bearer_asgi(scope: dict) -> str | None:
     """Return the Bearer token from an ASGI HTTP scope, or None."""
     for name, value in scope.get("headers", []):
         if name.lower() == b"authorization":
@@ -60,7 +62,7 @@ def _extract_bearer_asgi(scope: dict) -> Optional[str]:
     return None
 
 
-def _extract_bearer_environ(environ: dict) -> Optional[str]:
+def _extract_bearer_environ(environ: dict) -> str | None:
     """Return the Bearer token from a WSGI environ dict, or None."""
     auth = environ.get("HTTP_AUTHORIZATION", "")
     if auth.startswith("Bearer "):
@@ -68,9 +70,7 @@ def _extract_bearer_environ(environ: dict) -> Optional[str]:
     return None
 
 
-def _check_embedded(
-    client: Optional["HearthClient"], token: str, permission: str
-) -> bool:
+def _check_embedded(client: HearthClient | None, token: str, permission: str) -> bool:
     """Verify the JWT, then check its ``permissions`` claim.
 
     *client* verifies the token end-to-end — Ed25519 signature against the
@@ -88,16 +88,16 @@ def _check_embedded(
         claims = client.verify_token(token)
         perms = claims.get("permissions") or []
         return permission in perms
-    except Exception:
+    except Exception:  # noqa: BLE001 -- fail closed on any error
         return False
 
 
 def _check_introspection_sync(
-    client: "HearthClient",
+    client: HearthClient,
     token: str,
     permission: str,
     client_id: str,
-    client_secret: Optional[str],
+    client_secret: str | None,
     expected_mode: str,
 ) -> bool:
     """Call POST /introspect, validate the echoed mode, then check the permission.
@@ -119,30 +119,37 @@ def _is_required_action_token(token: str) -> bool:
     """Return True when the token's token_type claim is 'required_action'."""
     try:
         return Claims.decode(token).token_type() == "required_action"
-    except Exception:
+    except Exception:  # noqa: BLE001 -- an undecodable token is not a required-action token
         return False
 
 
 async def _send_401_required_action(send: Callable) -> None:
     """Emit a minimal HTTP 401 ASGI response for required-action tokens (spec §6 rule 6)."""
-    await send({
-        "type": "http.response.start",
-        "status": 401,
-        "headers": [
-            [b"content-type", b"text/plain; charset=utf-8"],
-            [b"www-authenticate", b'Bearer realm="hearth", error="required_action"'],
-        ],
-    })
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                [b"content-type", b"text/plain; charset=utf-8"],
+                [
+                    b"www-authenticate",
+                    b'Bearer realm="hearth", error="required_action"',
+                ],
+            ],
+        }
+    )
     await send({"type": "http.response.body", "body": b"Required actions pending"})
 
 
 async def _send_403(send: Callable) -> None:
     """Emit a minimal HTTP 403 ASGI response."""
-    await send({
-        "type": "http.response.start",
-        "status": 403,
-        "headers": [[b"content-type", b"text/plain; charset=utf-8"]],
-    })
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 403,
+            "headers": [[b"content-type", b"text/plain; charset=utf-8"]],
+        }
+    )
     await send({"type": "http.response.body", "body": b"Forbidden"})
 
 
@@ -168,6 +175,7 @@ def _wsgi_403(start_response: Callable) -> list:
 # ASGI middleware
 # ---------------------------------------------------------------------------
 
+
 class RequirePermissionMiddleware:
     """ASGI middleware that enforces a Hearth permission check on every HTTP request.
 
@@ -188,13 +196,13 @@ class RequirePermissionMiddleware:
         self,
         app: ASGIApp,
         *,
-        client: "HearthClient",
+        client: HearthClient,
         permission: str,
         mode: str,
         client_id: str = "",
         client_secret: str = "",
-        organization_id: Optional[str] = None,
-        resource: Optional[str] = None,
+        organization_id: str | None = None,
+        resource: str | None = None,
     ) -> None:
         self._app = app
         self._client = client
@@ -223,7 +231,7 @@ class RequirePermissionMiddleware:
 
         try:
             allowed = await self._check(token)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- fail closed on any error
             # Fail-closed on any error (mode mismatch, network, etc.)
             allowed = False
 
@@ -273,6 +281,7 @@ class RequirePermissionMiddleware:
 # WSGI middleware
 # ---------------------------------------------------------------------------
 
+
 class WsgiPermissionMiddleware:
     """WSGI middleware that enforces a Hearth permission check on every request.
 
@@ -291,13 +300,13 @@ class WsgiPermissionMiddleware:
         self,
         app: WSGIApp,
         *,
-        client: "HearthClient",
+        client: HearthClient,
         permission: str,
         mode: str,
         client_id: str = "",
         client_secret: str = "",
-        organization_id: Optional[str] = None,
-        resource: Optional[str] = None,
+        organization_id: str | None = None,
+        resource: str | None = None,
     ) -> None:
         self._app = app
         self._client = client
@@ -320,7 +329,7 @@ class WsgiPermissionMiddleware:
 
         try:
             allowed = self._check(token)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- fail closed on any error
             # Fail-closed on any error (mode mismatch, network, etc.)
             allowed = False
 

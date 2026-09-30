@@ -6,13 +6,7 @@ Run with:
 
 from __future__ import annotations
 
-import base64
-import json
-from typing import Optional
 from unittest.mock import MagicMock, patch
-
-import httpx
-import pytest
 
 # Configure minimal Django settings before importing Django or hearth.django.
 from django.conf import settings as _django_settings
@@ -28,12 +22,10 @@ from django.http import HttpRequest, HttpResponse
 
 from hearth.django import HearthDjangoMiddleware, require_permission
 
-
 # ---------------------------------------------------------------------------
 # Helpers shared across tests
 # ---------------------------------------------------------------------------
-
-from .signing import install_test_key, sign_jwt, unsigned_jwt
+from .signing import install_test_key, sign_jwt
 
 
 def _make_jwt(payload: dict) -> str:
@@ -51,7 +43,7 @@ def _make_required_action_jwt() -> str:
     return _make_jwt({"sub": "u", "token_type": "required_action"})
 
 
-def _make_request(token: Optional[str] = None) -> HttpRequest:
+def _make_request(token: str | None = None) -> HttpRequest:
     """Build a Django HttpRequest with an optional Authorization header."""
     req = HttpRequest()
     req.META["REQUEST_METHOD"] = "GET"
@@ -76,7 +68,7 @@ def _mock_settings(
     *,
     client=None,
     mode: str = "embedded",
-    permission: Optional[str] = None,
+    permission: str | None = None,
     client_id: str = "",
     client_secret: str = "",
 ):
@@ -103,6 +95,7 @@ def _mock_settings(
 # ---------------------------------------------------------------------------
 # HearthDjangoMiddleware — token propagation
 # ---------------------------------------------------------------------------
+
 
 class TestHearthDjangoMiddlewareTokenPropagation:
     """Middleware correctly sets request.hearth_token."""
@@ -155,6 +148,7 @@ class TestHearthDjangoMiddlewareTokenPropagation:
 # HearthDjangoMiddleware — required-action tokens
 # ---------------------------------------------------------------------------
 
+
 class TestHearthDjangoMiddlewareRequiredAction:
     def test_required_action_token_returns_401(self):
         token = _make_required_action_jwt()
@@ -183,6 +177,7 @@ class TestHearthDjangoMiddlewareRequiredAction:
 # ---------------------------------------------------------------------------
 # HearthDjangoMiddleware — global permission gate (embedded mode)
 # ---------------------------------------------------------------------------
+
 
 class TestHearthDjangoMiddlewareGlobalPermission:
     def _make_client(self):
@@ -256,6 +251,7 @@ class TestHearthDjangoMiddlewareGlobalPermission:
 # HearthDjangoMiddleware — decision mode via network (global gate)
 # ---------------------------------------------------------------------------
 
+
 class TestHearthDjangoMiddlewareDecisionMode:
     def test_decision_mode_allows_when_server_returns_allowed(self):
         token = _make_jwt({"sub": "user-1"})
@@ -290,12 +286,14 @@ class TestHearthDjangoMiddlewareDecisionMode:
 # @require_permission decorator — embedded mode
 # ---------------------------------------------------------------------------
 
+
 class TestRequirePermissionEmbedded:
     def test_allows_valid_permission(self):
         token = _make_jwt({"permissions": ["docs.write"]})
         req = _make_request(token)
 
         with _mock_settings():
+
             @require_permission("docs.write", client=_verifying_client())
             def view(request):
                 return HttpResponse("view response")
@@ -308,6 +306,7 @@ class TestRequirePermissionEmbedded:
         req = _make_request(token)
 
         with _mock_settings():
+
             @require_permission("docs.write")
             def view(request):
                 return HttpResponse("view response")
@@ -319,6 +318,7 @@ class TestRequirePermissionEmbedded:
         req = _make_request()  # no Authorization header
 
         with _mock_settings():
+
             @require_permission("docs.write")
             def view(request):
                 return HttpResponse("view response")
@@ -331,6 +331,7 @@ class TestRequirePermissionEmbedded:
         req = _make_request(token)
 
         with _mock_settings():
+
             @require_permission("docs.write")
             def view(request):
                 return HttpResponse("view response")
@@ -345,6 +346,7 @@ class TestRequirePermissionEmbedded:
         req.hearth_token = token  # but middleware already extracted it
 
         with _mock_settings():
+
             @require_permission("docs.write", client=_verifying_client())
             def view(request):
                 return HttpResponse("ok")
@@ -358,6 +360,7 @@ class TestRequirePermissionEmbedded:
         captured = {}
 
         with _mock_settings():
+
             @require_permission("docs.write", client=_verifying_client())
             def view(request, pk, extra=None):
                 captured["pk"] = pk
@@ -374,6 +377,7 @@ class TestRequirePermissionEmbedded:
         req = _make_request(token)
 
         with _mock_settings():
+
             @require_permission("docs.write")
             def view(request):
                 return HttpResponse("ok")
@@ -386,6 +390,7 @@ class TestRequirePermissionEmbedded:
 # @require_permission decorator — decision mode via network
 # ---------------------------------------------------------------------------
 
+
 class TestRequirePermissionDecisionMode:
     def test_decision_mode_allows_when_server_returns_allowed(self):
         token = _make_jwt({"sub": "user-1"})
@@ -394,6 +399,7 @@ class TestRequirePermissionDecisionMode:
         client.check_permission.return_value = MagicMock(allowed=True)
 
         with _mock_settings(client=client):
+
             @require_permission("docs.write", client=client, mode="decision")
             def view(request):
                 return HttpResponse("ok")
@@ -408,6 +414,7 @@ class TestRequirePermissionDecisionMode:
         client.check_permission.side_effect = RuntimeError("network down")
 
         with _mock_settings(client=client):
+
             @require_permission("docs.write", client=client, mode="decision")
             def view(request):
                 return HttpResponse("ok")
@@ -422,6 +429,7 @@ class TestRequirePermissionDecisionMode:
         client.check_permission.return_value = MagicMock(allowed=False)
 
         with _mock_settings(client=client):
+
             @require_permission("docs.write", client=client, mode="decision")
             def view(request):
                 return HttpResponse("ok")
@@ -433,6 +441,7 @@ class TestRequirePermissionDecisionMode:
 # ---------------------------------------------------------------------------
 # Integration: middleware + decorator together
 # ---------------------------------------------------------------------------
+
 
 class TestMiddlewareAndDecoratorIntegration:
     """Show that middleware sets hearth_token and the decorator uses it."""

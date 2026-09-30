@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -27,6 +27,7 @@ def make_client(**kwargs) -> HearthClient:
 
 # ── begin_login ───────────────────────────────────────────────────────────────
 
+
 class TestBeginLogin:
     def test_returns_login_begin_result(self):
         client = make_client()
@@ -42,7 +43,9 @@ class TestBeginLogin:
         # Recompute challenge from verifier
         digest = hashlib.sha256(result.code_verifier.encode("ascii")).digest()
         expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-        assert challenge == expected, "code_challenge must be BASE64URL(SHA256(code_verifier))"
+        assert challenge == expected, (
+            "code_challenge must be BASE64URL(SHA256(code_verifier))"
+        )
 
     def test_state_is_non_empty_and_present_in_url(self):
         client = make_client()
@@ -53,7 +56,9 @@ class TestBeginLogin:
 
     def test_required_query_params_are_present(self):
         client = make_client()
-        result = client.begin_login("https://app.example.com/callback", "openid profile")
+        result = client.begin_login(
+            "https://app.example.com/callback", "openid profile"
+        )
         params = parse_qs(urlparse(result.authorization_url).query)
         assert params["response_type"][0] == "code"
         assert params["client_id"][0] == "test-client"
@@ -75,6 +80,7 @@ class TestBeginLogin:
 
 # ── complete_login ────────────────────────────────────────────────────────────
 
+
 class TestCompleteLogin:
     def test_calls_exchange_code_with_verifier(self):
         client = make_client()
@@ -83,7 +89,9 @@ class TestCompleteLogin:
             token_type="Bearer",
             expires_in=3600,
         )
-        with patch.object(client, "exchange_code", return_value=mock_response) as mock_ec:
+        with patch.object(
+            client, "exchange_code", return_value=mock_response
+        ) as mock_ec:
             result = client.complete_login(
                 "auth-code-xyz",
                 "my-verifier-abc",
@@ -101,4 +109,6 @@ class TestCompleteLogin:
     def test_raises_configuration_error_when_no_client_credentials(self):
         client = make_client(client_id=None, client_secret=None)
         with pytest.raises(ConfigurationError):
-            client.complete_login("code", "verifier", "https://app.example.com/callback")
+            client.complete_login(
+                "code", "verifier", "https://app.example.com/callback"
+            )
