@@ -513,6 +513,14 @@ padding:
 **Response `403 Forbidden`:** `{"error": "step_up_required"}` — no proof was
 supplied, or the proof did not verify.
 
+**Response `429 Too Many Requests`:**
+`{"error": "too_many_attempts", "error_code": "HEARTH_RATE_LIMITED"}` with a
+`Retry-After` header (seconds) — the account is locked out: too many wrong
+passwords (the login lockout) or TOTP codes (the TOTP guess budget). No proof
+is checked until the lockout ends. Every step-up surface answers a locked
+account this way: passkey enrolment and removal here and on the account page,
+and the console's step-up forms.
+
 **Response `503 Service Unavailable`:** `{"error": "temporarily_unavailable"}`
 with a `Retry-After` header — the KDF admission gate shed the password
 verification. Retry; this is not a credential failure.

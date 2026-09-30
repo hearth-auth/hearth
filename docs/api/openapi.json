@@ -3556,6 +3556,20 @@
           },
           "403": {
             "description": "Missing or wrong step-up proof (step_up_required), or a third-party client's token"
+          },
+          "429": {
+            "description": "`too_many_attempts` (`error_code` `HEARTH_RATE_LIMITED`) \u2014 the account is locked out: too many wrong passwords (the login lockout) or TOTP codes (the TOTP guess budget). No proof is checked until the lockout ends; retry after the `Retry-After` hint (seconds).\n",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the lockout ends.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`temporarily_unavailable` \u2014 the KDF admission gate shed the password verification. Retry after the `Retry-After` hint.\n"
           }
         }
       }
@@ -3633,6 +3647,17 @@
           },
           "403": {
             "description": "`forbidden` \u2014 the token was issued to a third-party client; or `step_up_required` \u2014 no step-up proof was supplied, or it did not verify.\n"
+          },
+          "429": {
+            "description": "`too_many_attempts` (`error_code` `HEARTH_RATE_LIMITED`) \u2014 the account is locked out: too many wrong passwords (the login lockout) or TOTP codes (the TOTP guess budget). No proof is checked until the lockout ends; retry after the `Retry-After` hint (seconds).\n",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the lockout ends.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           },
           "503": {
             "description": "`temporarily_unavailable` \u2014 the KDF admission gate shed the password verification. Retry after the `Retry-After` hint.\n"

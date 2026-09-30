@@ -4138,19 +4138,28 @@ async fn admin_update_role(
     ) {
         return resp;
     }
-    match state.rbac.update_role(
+    let update = UpdateRoleRequest {
+        name: body.name,
+        description: body.description,
+        permissions,
+        parent_roles,
+        scope_kind: None,
+        status: None,
+        allow_reserved_permissions: false,
+    };
+    // Removing an admin permission from the role demotes its holders
+    // (GA sweep 4).
+    if let Err(e) = crate::protocol::admin_auth::check_role_change_admin_ceiling(
+        state.identity.as_ref(),
+        state.rbac.as_ref(),
         &auth.realm_id,
         &role_id,
-        &UpdateRoleRequest {
-            name: body.name,
-            description: body.description,
-            permissions,
-            parent_roles,
-            scope_kind: None,
-            status: None,
-            allow_reserved_permissions: false,
-        },
+        crate::protocol::admin_auth::RoleChange::Update(&update),
+        &auth.permissions,
     ) {
+        return ceiling_refusal(e).into_response();
+    }
+    match state.rbac.update_role(&auth.realm_id, &role_id, &update) {
         Ok(role) => (StatusCode::OK, Json(role)).into_response(),
         Err(e) => rbac_error_to_response(&e).into_response(),
     }
@@ -4175,6 +4184,16 @@ async fn admin_delete_role(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = crate::protocol::admin_auth::check_role_change_admin_ceiling(
+        state.identity.as_ref(),
+        state.rbac.as_ref(),
+        &auth.realm_id,
+        &role_id,
+        crate::protocol::admin_auth::RoleChange::Delete,
+        &auth.permissions,
+    ) {
+        return ceiling_refusal(e).into_response();
+    }
     match state.rbac.delete_role(&auth.realm_id, &role_id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => rbac_error_to_response(&e).into_response(),

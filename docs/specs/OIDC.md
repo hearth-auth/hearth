@@ -385,7 +385,9 @@ means a first-party session token) — the gate the admin API applies (GA audit 
 - `DELETE /webauthn/credentials/{credential_id}` additionally requires a **step-up proof** in its JSON
   body — `password`, `totp_code` or `assertion`, the same proof enrolment takes — and answers
   `403 step_up_required` without one (GA audit 3 D-6). The browser console's passkey removal
-  (`POST /ui/account/passkeys/{id}/delete`) requires the same proof.
+  (`POST /ui/account/passkeys/{id}/delete`) requires the same proof. A locked-out account (too
+  many wrong passwords or TOTP codes) gets `429 too_many_attempts` (`HEARTH_RATE_LIMITED`) with
+  `Retry-After` on every step-up surface instead.
 
 #### Proof requirements at resource endpoints
 

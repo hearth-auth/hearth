@@ -156,6 +156,20 @@ impl EmbeddedRbacEngine {
         user.is_some_and(|u| u == user_id.as_uuid().to_string())
     }
 
+    /// The `{user}` of an `rba:org_role:{realm}:{org}:{user}:{role}` row when
+    /// its `{role}` is `role_name`; `None` for another role or a row that
+    /// does not parse.
+    fn org_role_key_holder(key: &[u8], role_name: &str) -> Option<UserId> {
+        let text = std::str::from_utf8(key).ok()?;
+        let rest = text.strip_prefix(keys::ORG_ROLE_PREFIX)?;
+        let mut parts = rest.splitn(4, ':');
+        let (_realm, _org, user, role) = (parts.next(), parts.next(), parts.next()?, parts.next()?);
+        if role != role_name {
+            return None;
+        }
+        uuid::Uuid::parse_str(user).ok().map(UserId::new)
+    }
+
     /// Injects the [`SvBumper`] implementation. Called once at startup after
     /// the identity engine is fully constructed. Subsequent calls are silently
     /// ignored (OnceLock semantics).
@@ -854,6 +868,31 @@ impl RbacEngine for EmbeddedRbacEngine {
         for entry in self.storage.scan(realm_id, &prefix, &end)? {
             let name: String = Self::de(&entry.value)?;
             out.push(name);
+        }
+        Ok(out)
+    }
+
+    fn list_additional_role_holders(
+        &self,
+        realm_id: &RealmId,
+        role_name: &str,
+        limit: usize,
+    ) -> Result<Vec<UserId>, RbacError> {
+        // The key layout is org-major, so a role cannot be a prefix: scan the
+        // realm's extra-role keys (no values) and filter on the last segment.
+        let prefix = keys::org_extra_role_realm_scan_prefix(realm_id);
+        let end = keys::prefix_end(&prefix);
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for key in self.storage.scan_keys(realm_id, &prefix, &end)? {
+            if out.len() >= limit {
+                break;
+            }
+            if let Some(user) = Self::org_role_key_holder(&key, role_name) {
+                if seen.insert(user.clone()) {
+                    out.push(user);
+                }
+            }
         }
         Ok(out)
     }
@@ -2984,5 +3023,52 @@ mod tests {
             .list_group_assignments(&realm, &g.id)
             .expect("list asgn")
             .is_empty());
+    }
+
+    /// `list_additional_role_holders` finds a role's extra-role holders in
+    /// every organization, once each, matches the role name exactly, and
+    /// honours its limit (GA sweep 4: the role-change ceiling reads it).
+    #[test]
+    fn list_additional_role_holders_spans_orgs_and_dedups() {
+        let (e, realm) = mk_engine();
+        e.seed_realm(&realm).expect("seed");
+        let (org1, org2) = (
+            OrganizationId::new(uuid::Uuid::new_v4()),
+            OrganizationId::new(uuid::Uuid::new_v4()),
+        );
+        let (a, b, c) = (UserId::generate(), UserId::generate(), UserId::generate());
+        for (org, user, role) in [
+            (&org1, &a, "realm.admin"),
+            (&org2, &a, "realm.admin"),
+            (&org2, &b, "realm.admin"),
+            (&org1, &c, "realm.member"),
+        ] {
+            e.add_additional_role(&realm, org, user, role, None)
+                .expect("extra role");
+        }
+
+        let mut admins = e
+            .list_additional_role_holders(&realm, "realm.admin", 10)
+            .expect("list");
+        admins.sort_by_key(|u| *u.as_uuid());
+        let mut expected = vec![a.clone(), b.clone()];
+        expected.sort_by_key(|u| *u.as_uuid());
+        assert_eq!(admins, expected, "each holder once, across orgs");
+        assert_eq!(
+            e.list_additional_role_holders(&realm, "realm.member", 10)
+                .expect("list"),
+            vec![c],
+        );
+        assert!(e
+            .list_additional_role_holders(&realm, "realm", 10)
+            .expect("list")
+            .is_empty());
+        assert_eq!(
+            e.list_additional_role_holders(&realm, "realm.admin", 1)
+                .expect("list")
+                .len(),
+            1,
+            "the limit caps the result"
+        );
     }
 }

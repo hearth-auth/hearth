@@ -81,7 +81,8 @@ pub struct RecordCounts {
     #[serde(default)]
     pub retiring_signing_keys: u64,
     /// Number of live token revocations — revoked access-token JTIs, blocked
-    /// DPoP keys, revoked AAT JTIs (audit GA 2026-09-28 M3).
+    /// DPoP keys, revoked AAT JTIs (audit GA 2026-09-28 M3) and non-zero
+    /// required-action generations (GA sweep 4).
     #[serde(default)]
     pub revocations: u64,
     /// Number of retiring RS256 ID-token signing keys still inside their

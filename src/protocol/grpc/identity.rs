@@ -487,6 +487,16 @@ impl IdentityAdminService for IdentityAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let body = req.into_inner();
         let org_id = parse_org_id(&body.id)?;
+        // Deleting the organization strips every admin permission its
+        // members hold only in it (GA sweep 4).
+        crate::protocol::admin_auth::check_org_admin_ceiling(
+            self.state.identity.as_ref(),
+            self.state.rbac.as_ref(),
+            &auth.realm_id,
+            &org_id,
+            &auth.permissions,
+        )
+        .map_err(super::auth::ceiling_status)?;
         self.state
             .identity
             .delete_organization(&auth.realm_id, &org_id)

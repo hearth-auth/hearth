@@ -35,7 +35,7 @@ impl EmbeddedIdentityEngine {
 
     /// The slot prefix of `user_id`'s guess budget for the current window,
     /// and when that window ends.
-    fn mfa_guess_window(&self, user_id: &UserId) -> (Vec<u8>, Timestamp) {
+    pub(super) fn mfa_guess_window(&self, user_id: &UserId) -> (Vec<u8>, Timestamp) {
         let now_secs = self.clock.now().as_micros() / 1_000_000;
         let window = now_secs.div_euclid(Self::MFA_GUESS_WINDOW_SECS);
         let prefix =
