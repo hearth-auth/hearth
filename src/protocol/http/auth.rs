@@ -1025,6 +1025,7 @@ pub(crate) fn rbac_error_to_response(err: &RbacError) -> (StatusCode, Json<serde
             (StatusCode::PAYLOAD_TOO_LARGE, "resource_exhausted")
         }
         RbacError::RoleArchived => (StatusCode::CONFLICT, "role_archived"),
+        RbacError::RoleInUse { .. } => (StatusCode::CONFLICT, "role_in_use"),
         RbacError::ReservedNamespace { .. } => (StatusCode::FORBIDDEN, "reserved_namespace"),
         RbacError::InvalidScope { .. } => (StatusCode::BAD_REQUEST, "invalid_scope"),
         RbacError::Storage(_) | RbacError::Serialization { .. } => {

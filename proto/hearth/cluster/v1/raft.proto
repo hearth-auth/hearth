@@ -24,6 +24,13 @@ service RaftService {
   // Leader sends one snapshot chunk to a follower.
   // Called once per chunk by openraft's Chunked snapshot transport.
   rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+
+  // A follower forwards one application write to the leader, which proposes
+  // it and answers once it has committed and applied it (or refuses it
+  // without proposing). The follower then waits for its own state machine to
+  // apply the returned log index, so the caller reads its own write.
+  // Authenticated by the peer mTLS handshake like every other RPC here.
+  rpc ForwardWrite(ForwardWriteRequest) returns (ForwardWriteResponse);
 }
 
 // AppendEntries RPC request.
@@ -59,5 +66,17 @@ message InstallSnapshotRequest {
 // InstallSnapshot RPC response.
 // Payload is serde_json-encoded openraft::InstallSnapshotResponse<u64>.
 message InstallSnapshotResponse {
+  bytes payload = 1;
+}
+
+// ForwardWrite RPC request.
+// Payload is serde_json-encoded hearth::cluster::RaftCommand.
+message ForwardWriteRequest {
+  bytes payload = 1;
+}
+
+// ForwardWrite RPC response.
+// Payload is serde_json-encoded hearth::cluster::ForwardedWriteOutcome.
+message ForwardWriteResponse {
   bytes payload = 1;
 }

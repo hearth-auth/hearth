@@ -420,6 +420,13 @@ pub struct TokenIssuanceContext {
     ///
     /// `None` means no resource audience restriction.
     pub resource: Option<crate::core::Uri>,
+    /// RFC 7638 thumbprint of a DPoP key (RFC 9449) the caller validated on
+    /// the token request.
+    ///
+    /// When present, the access and refresh tokens carry `cnf.jkt` and the
+    /// grant family is bound to the key, so the refresh token rotates only
+    /// with a proof by the same key. `None` mints Bearer tokens.
+    pub dpop_jkt: Option<String>,
 }
 
 /// Configuration for credential rate limiting.
@@ -2264,6 +2271,11 @@ impl EmbeddedIdentityEngine {
     /// node died with `raft: not the leader; redirect to unknown` before
     /// `POST /admin/cluster/bootstrap` could ever be called.
     ///
+    /// Follower write forwarding does not make the wait unnecessary: a
+    /// follower could now forward the set, but the set is read-then-write
+    /// (each node would generate its own signing key), so it must still run
+    /// on exactly one node — the leader.
+    ///
     /// Two outcomes end the wait, and between them they cover every node:
     ///
     /// * [`StorageEngine::accepts_writes`] is true — this node is the Raft
@@ -4004,19 +4016,7 @@ impl EmbeddedIdentityEngine {
             if !client.allows_refresh_token() {
                 return Err(IdentityError::UnsupportedGrantType);
             }
-            let realm_fapi = self
-                .get_realm(realm_id)?
-                .ok_or(IdentityError::RealmNotFound)?
-                .config()
-                .fapi_profile;
-            let fapi_enforced = client.profile().is_fapi2() || realm_fapi.is_some();
-            if fapi_enforced && dpop_jkt.is_none() {
-                return Err(IdentityError::FapiViolation {
-                    reason: "FAPI 2.0 requires sender-constrained tokens; \
-                             include a DPoP proof and dpop_jkt in the token request"
-                        .to_string(),
-                });
-            }
+            self.require_fapi_sender_constraint(realm_id, &client, dpop_jkt)?;
 
             // O1 (HEA-1755): confidential-client refresh binding.
             //
@@ -9536,7 +9536,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             permissions: effective_perms,
             custom,
             resource: ctx.resource.as_ref(),
-            dpop_jkt: None,
+            dpop_jkt: ctx.dpop_jkt.clone(),
             sv: sv_claim,
             scope: if scope_str.is_empty() {
                 None
@@ -9561,7 +9561,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             amr_values: Vec::new(),
             ua_hash: None,
             bound_asn: None,
-            bound_jkt: None,
+            // RFC 9449 §5: the refresh path refuses a proof by any other key.
+            bound_jkt: ctx.dpop_jkt.clone(),
         };
         let family_bytes =
             serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
@@ -10160,8 +10161,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         device_code: &str,
         client_id: &ClientId,
+        dpop_jkt: Option<&str>,
     ) -> Result<OidcTokenResponse, IdentityError> {
-        self.poll_device_token_inner(realm_id, device_code, client_id)
+        self.poll_device_token_inner(realm_id, device_code, client_id, dpop_jkt)
     }
 
     fn push_authorization_request(
@@ -28285,6 +28287,7 @@ mod tests {
                     granted_scopes: granted,
                     oid: None,
                     resource: None,
+                    dpop_jkt: None,
                 },
             )
             .expect("issue subject token");

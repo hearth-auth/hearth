@@ -211,7 +211,7 @@ fn device_grant(
         .approve_device(realm, &started.user_code, user)
         .expect("approve device");
     h.identity()
-        .poll_device_token(realm, &started.device_code, client)
+        .poll_device_token(realm, &started.device_code, client, None)
         .expect("poll device token")
         .access_token()
         .to_string()

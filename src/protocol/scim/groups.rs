@@ -113,23 +113,48 @@ fn group_to_scim(
     }
 }
 
+/// Page size for reading an organization's membership.
+const MEMBER_PAGE: usize = 1000;
+
+/// Every membership of the organization, read page by page. A group's SCIM
+/// representation and its membership reconciliation must see all of it: a
+/// reconciliation that saw only the first page could not remove the members
+/// beyond it, and a `PATCH` built on a truncated representation would drop
+/// them.
+fn all_members(
+    state: &AppState,
+    realm_id: &RealmId,
+    org_id: &OrganizationId,
+) -> Result<Vec<crate::identity::OrganizationMembership>, ScimError> {
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = state
+            .identity
+            .list_members(realm_id, org_id, cursor.as_deref(), MEMBER_PAGE)
+            .map_err(|e| from_identity_error(&e))?;
+        out.extend(page.items);
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(out),
+        }
+    }
+}
+
+/// The organization's members as SCIM `members`.
 fn load_members(
     state: &AppState,
-    realm_id: &crate::core::RealmId,
+    realm_id: &RealmId,
     org_id: &OrganizationId,
-) -> Vec<ScimMember> {
-    match state.identity.list_members(realm_id, org_id, None, 1000) {
-        Ok(p) => p
-            .items
-            .iter()
-            .map(|m| ScimMember {
-                value: m.user_id().as_uuid().to_string(),
-                display: None,
-                r#type: Some("User".to_string()),
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    }
+) -> Result<Vec<ScimMember>, ScimError> {
+    Ok(all_members(state, realm_id, org_id)?
+        .iter()
+        .map(|m| ScimMember {
+            value: m.user_id().as_uuid().to_string(),
+            display: None,
+            r#type: Some("User".to_string()),
+        })
+        .collect())
 }
 
 fn audit(
@@ -177,21 +202,40 @@ fn stale_members(
         .collect()
 }
 
-/// Refuses, before any write, a membership change that would drop a member
-/// who out-ranks the caller: leaving the organization strips every admin
-/// permission the user holds only in it (GA sweep 4). The provisioning token
-/// acts with no admin permission, so it may drop no admin principal.
-fn check_member_removal(
+/// Refuses, before any write, a membership change that cannot be applied
+/// whole: one that names a user who does not exist in the realm (`400`), or
+/// one that would drop a member who out-ranks the caller (`403`) — leaving
+/// the organization strips every admin permission the user holds only in it
+/// (GA sweep 4). The provisioning token acts with no admin permission, so it
+/// may drop no admin principal. Reads the full membership.
+fn check_member_change(
     state: &AppState,
     auth: &ScimAuth,
     org_id: &OrganizationId,
     desired: &[ScimMember],
 ) -> Result<(), ScimError> {
-    let current = state
-        .identity
-        .list_members(&auth.realm_id, org_id, None, 1000)
-        .map_err(|e| from_identity_error(&e))?;
-    let removed = stale_members(&current.items, &desired_member_ids(desired));
+    let current = all_members(state, &auth.realm_id, org_id)?;
+    let current_ids: std::collections::HashSet<&UserId> = current
+        .iter()
+        .map(crate::identity::OrganizationMembership::user_id)
+        .collect();
+    let desired_ids = desired_member_ids(desired);
+    for id in desired_ids.iter().filter(|id| !current_ids.contains(id)) {
+        match state.identity.get_user(&auth.realm_id, id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(ScimError::bad_request(
+                    "invalidValue",
+                    format!(
+                        "member {} is not a user of this realm; nothing was changed",
+                        id.as_uuid()
+                    ),
+                ))
+            }
+            Err(e) => return Err(from_identity_error(&e)),
+        }
+    }
+    let removed = stale_members(&current, &desired_ids);
     check_users_admin_ceiling(
         state.identity.as_ref(),
         state.rbac.as_ref(),
@@ -207,39 +251,117 @@ fn check_member_removal(
     })
 }
 
+/// Brings the organization's membership to `desired`, against its full
+/// current membership. The caller ran [`check_member_change`] first; a write
+/// that still fails fails the request, and the error says how much was
+/// applied.
 fn reconcile_members(
     state: &AppState,
     auth: &ScimAuth,
     org_id: &OrganizationId,
     desired: &[ScimMember],
 ) -> Result<(), ScimError> {
-    let current = state
-        .identity
-        .list_members(&auth.realm_id, org_id, None, 1000)
-        .map_err(|e| from_identity_error(&e))?;
+    let current = all_members(state, &auth.realm_id, org_id)?;
     let current_ids: std::collections::HashSet<UserId> =
-        current.items.iter().map(|m| m.user_id().clone()).collect();
+        current.iter().map(|m| m.user_id().clone()).collect();
     let desired_ids = desired_member_ids(desired);
-
-    // Add missing.
-    for id in desired_ids.difference(&current_ids) {
-        if let Err(e) =
+    let to_add: Vec<UserId> = desired_ids.difference(&current_ids).cloned().collect();
+    let to_remove = stale_members(&current, &desired_ids);
+    apply_membership_diff(
+        &to_add,
+        &to_remove,
+        |id| {
             state
                 .identity
                 .add_member(&auth.realm_id, org_id, id, OrganizationRole::Member)
-        {
-            // AlreadyMember is benign here; surface anything else.
-            if !matches!(e, crate::identity::IdentityError::AlreadyMember) {
-                return Err(from_identity_error(&e));
-            }
+                .map(|_| ())
+        },
+        |id| state.identity.remove_member(&auth.realm_id, org_id, id),
+    )
+}
+
+/// Applies a membership diff: every add, then every removal. An add of a
+/// current member or a removal of a former one is benign (a concurrent
+/// change got there first). Any other failure stops the diff and fails the
+/// request with an error naming the failed step and how much was applied —
+/// never a silent partial success.
+fn apply_membership_diff(
+    to_add: &[UserId],
+    to_remove: &[UserId],
+    mut add: impl FnMut(&UserId) -> Result<(), crate::identity::IdentityError>,
+    mut remove: impl FnMut(&UserId) -> Result<(), crate::identity::IdentityError>,
+) -> Result<(), ScimError> {
+    use crate::identity::IdentityError;
+
+    let failed = |step: &str, id: &UserId, e: &IdentityError, added: usize, removed: usize| {
+        let cause = from_identity_error(e);
+        let status = if cause.status.is_success() {
+            StatusCode::INTERNAL_SERVER_ERROR
+        } else {
+            cause.status
+        };
+        tracing::warn!(
+            error = %e,
+            step,
+            added,
+            removed,
+            "SCIM group membership update failed part-way"
+        );
+        ScimError::new(
+            status,
+            format!(
+                "membership update failed to {step} member {}: {}; applied {added} of {} \
+                 additions and {removed} of {} removals before the failure",
+                id.as_uuid(),
+                cause.detail,
+                to_add.len(),
+                to_remove.len(),
+            ),
+        )
+    };
+    let mut added = 0usize;
+    for id in to_add {
+        match add(id) {
+            Ok(()) | Err(IdentityError::AlreadyMember) => added += 1,
+            Err(e) => return Err(failed("add", id, &e, added, 0)),
         }
     }
-
-    // Remove stale. The caller ran `check_member_removal` first.
-    for id in stale_members(&current.items, &desired_ids) {
-        let _ = state.identity.remove_member(&auth.realm_id, org_id, &id);
+    let mut removed = 0usize;
+    for id in to_remove {
+        match remove(id) {
+            Ok(()) | Err(IdentityError::NotAMember) => removed += 1,
+            Err(e) => return Err(failed("remove", id, &e, added, removed)),
+        }
     }
     Ok(())
+}
+
+/// The response to a successful `PUT` / `PATCH`: the group as stored now
+/// (`fallback` if it can no longer be read), with its full membership.
+fn updated_group_response(
+    state: &AppState,
+    realm_id: &RealmId,
+    org_id: &OrganizationId,
+    fallback: Organization,
+) -> Response {
+    let refreshed = state
+        .identity
+        .get_organization(realm_id, org_id)
+        .ok()
+        .flatten()
+        .unwrap_or(fallback);
+    let ext = state
+        .identity
+        .get_scim_group_external_id(realm_id, org_id)
+        .ok()
+        .flatten();
+    let members = match load_members(state, realm_id, org_id) {
+        Ok(m) => m,
+        Err(e) => return e.into_response(),
+    };
+    let version = group_version(&refreshed);
+    let scim = group_to_scim(&refreshed, &members, ext);
+    resource_response(&scim, &version)
 }
 
 // ================== Handlers ==================
@@ -318,7 +440,10 @@ pub async fn create_group(
         body.external_id.as_deref(),
     );
 
-    let members = load_members(&state, &auth.realm_id, org.id());
+    let members = match load_members(&state, &auth.realm_id, org.id()) {
+        Ok(m) => m,
+        Err(e) => return e.into_response(),
+    };
     let scim = group_to_scim(&org, &members, body.external_id.clone());
     let mut resp = (StatusCode::CREATED, Json(scim.clone())).into_response();
     resp.headers_mut().insert(
@@ -359,7 +484,10 @@ pub async fn get_group(
                 .get_scim_group_external_id(&auth.realm_id, &org_id)
                 .ok()
                 .flatten();
-            let members = load_members(&state, &auth.realm_id, &org_id);
+            let members = match load_members(&state, &auth.realm_id, &org_id) {
+                Ok(m) => m,
+                Err(e) => return e.into_response(),
+            };
             let version = group_version(&org);
             let scim = group_to_scim(&org, &members, ext);
             resource_response(&scim, &version)
@@ -420,27 +548,35 @@ pub async fn list_groups(
         scim_off += n;
     }
     let page = crate::core::PagedResult::new(all_orgs, 0, 0, crate::core::MAX_PAGE_LIMIT);
-    let mut resources: Vec<ScimGroup> = Vec::with_capacity(page.items.len());
+    // Filters never read `members`, so match on the member-less
+    // representation and read the full membership only for the page returned.
+    let mut matching: Vec<(&Organization, ScimGroup)> = Vec::with_capacity(page.items.len());
     for org in &page.items {
         let ext = state
             .identity
             .get_scim_group_external_id(&auth.realm_id, org.id())
             .ok()
             .flatten();
-        let members = load_members(&state, &auth.realm_id, org.id());
-        let scim = group_to_scim(org, &members, ext);
+        let scim = group_to_scim(org, &[], ext);
         if filter_expr
             .as_ref()
             .map_or(true, |e| filter::matches_group(e, &scim))
         {
-            resources.push(scim);
+            matching.push((org, scim));
         }
     }
-    let total = resources.len();
+    let total = matching.len();
     let start = q.start_index.unwrap_or(1).max(1);
     let count = q.count.unwrap_or(100).min(200);
     let start_idx0 = start.saturating_sub(1);
-    let slice: Vec<ScimGroup> = resources.into_iter().skip(start_idx0).take(count).collect();
+    let mut slice: Vec<ScimGroup> = Vec::new();
+    for (org, scim) in matching.into_iter().skip(start_idx0).take(count) {
+        let members = match load_members(&state, &auth.realm_id, org.id()) {
+            Ok(m) => m,
+            Err(e) => return e.into_response(),
+        };
+        slice.push(group_to_scim(org, &members, scim.external_id));
+    }
     Json(ListResponse::new(total, start, slice)).into_response()
 }
 
@@ -474,7 +610,7 @@ pub async fn replace_group(
     if let Err(resp) = provisioning_token_may_write(&auth, &existing) {
         return resp;
     }
-    if let Err(e) = check_member_removal(&state, &auth, &org_id, &body.members) {
+    if let Err(e) = check_member_change(&state, &auth, &org_id, &body.members) {
         return e.into_response();
     }
 
@@ -521,21 +657,7 @@ pub async fn replace_group(
         body.external_id.as_deref(),
     );
 
-    let refreshed = state
-        .identity
-        .get_organization(&auth.realm_id, &org_id)
-        .ok()
-        .flatten()
-        .unwrap_or(existing);
-    let ext = state
-        .identity
-        .get_scim_group_external_id(&auth.realm_id, &org_id)
-        .ok()
-        .flatten();
-    let members = load_members(&state, &auth.realm_id, &org_id);
-    let version = group_version(&refreshed);
-    let scim = group_to_scim(&refreshed, &members, ext);
-    resource_response(&scim, &version)
+    updated_group_response(&state, &auth.realm_id, &org_id, existing)
 }
 
 /// `PATCH /scim/v2/Groups/{id}`
@@ -582,12 +704,15 @@ pub async fn patch_group(
         .get_scim_group_external_id(&auth.realm_id, &org_id)
         .ok()
         .flatten();
-    let members = load_members(&state, &auth.realm_id, &org_id);
+    let members = match load_members(&state, &auth.realm_id, &org_id) {
+        Ok(m) => m,
+        Err(e) => return e.into_response(),
+    };
     let mut scim = group_to_scim(&existing, &members, current_ext.clone());
     if let Err(e) = apply_group_patch(&mut scim, &body.operations) {
         return e.into_response();
     }
-    if let Err(e) = check_member_removal(&state, &auth, &org_id, &scim.members) {
+    if let Err(e) = check_member_change(&state, &auth, &org_id, &scim.members) {
         return e.into_response();
     }
 
@@ -642,21 +767,7 @@ pub async fn patch_group(
         scim.external_id.as_deref(),
     );
 
-    let refreshed = state
-        .identity
-        .get_organization(&auth.realm_id, &org_id)
-        .ok()
-        .flatten()
-        .unwrap_or(existing);
-    let ext = state
-        .identity
-        .get_scim_group_external_id(&auth.realm_id, &org_id)
-        .ok()
-        .flatten();
-    let members = load_members(&state, &auth.realm_id, &org_id);
-    let version = group_version(&refreshed);
-    let scim = group_to_scim(&refreshed, &members, ext);
-    resource_response(&scim, &version)
+    updated_group_response(&state, &auth.realm_id, &org_id, existing)
 }
 
 /// `DELETE /scim/v2/Groups/{id}`
@@ -721,5 +832,108 @@ pub async fn delete_group(
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => from_identity_error(&e).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::IdentityError;
+
+    fn ids(n: usize) -> Vec<UserId> {
+        (0..n).map(|_| UserId::generate()).collect()
+    }
+
+    /// A removal that fails fails the whole request, stops the diff there,
+    /// and says how much was applied; it is never swallowed.
+    #[test]
+    fn a_failed_removal_fails_the_request_and_reports_progress() {
+        let (add, remove) = (ids(1), ids(3));
+        let mut attempted = Vec::new();
+
+        let err = apply_membership_diff(
+            &add,
+            &remove,
+            |_| Ok(()),
+            |id| {
+                attempted.push(id.clone());
+                if *id == remove[1] {
+                    Err(IdentityError::Internal {
+                        reason: "disk full".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("a failed removal must fail the request");
+
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            err.detail.contains("failed to remove member")
+                && err.detail.contains(&remove[1].as_uuid().to_string())
+                && err
+                    .detail
+                    .contains("applied 1 of 1 additions and 1 of 3 removals"),
+            "{}",
+            err.detail
+        );
+        assert_eq!(
+            attempted,
+            remove[..2].to_vec(),
+            "the diff stops at the failure"
+        );
+    }
+
+    /// A failed addition stops before any removal.
+    #[test]
+    fn a_failed_addition_stops_before_removals() {
+        let (add, remove) = (ids(2), ids(2));
+        let mut removals = 0usize;
+
+        let err = apply_membership_diff(
+            &add,
+            &remove,
+            |id| {
+                if *id == add[0] {
+                    Err(IdentityError::UserNotFound)
+                } else {
+                    Ok(())
+                }
+            },
+            |_| {
+                removals += 1;
+                Ok(())
+            },
+        )
+        .expect_err("a failed addition must fail the request");
+
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert!(
+            err.detail.contains("failed to add member"),
+            "{}",
+            err.detail
+        );
+        assert_eq!(removals, 0);
+    }
+
+    /// A concurrent change that got there first is not a failure.
+    #[test]
+    fn already_applied_steps_are_benign() {
+        let (add, remove) = (ids(1), ids(1));
+
+        let mut calls = 0usize;
+        apply_membership_diff(
+            &add,
+            &remove,
+            |_| {
+                calls += 1;
+                Err(IdentityError::AlreadyMember)
+            },
+            |_| Err(IdentityError::NotAMember),
+        )
+        .expect("steps a concurrent change already applied are benign");
+
+        assert_eq!(calls, 1, "the addition was attempted");
     }
 }

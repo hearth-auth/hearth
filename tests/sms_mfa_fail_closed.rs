@@ -2374,7 +2374,7 @@ async fn post_device(rig: &LoginRig, cookies: &str, user_code: &str) -> Response
 fn device_approved(rig: &LoginRig, client: &hearth::core::ClientId, device_code: &str) -> bool {
     rig.state
         .identity
-        .poll_device_token(&rig.realm_id, device_code, client)
+        .poll_device_token(&rig.realm_id, device_code, client, None)
         .is_ok()
 }
 

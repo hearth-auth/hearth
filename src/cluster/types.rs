@@ -98,6 +98,78 @@ pub enum RaftCommand {
     },
 }
 
+impl RaftCommand {
+    /// Replaces the command's `leader_timestamp` with `now` (microseconds
+    /// since the UNIX epoch).
+    ///
+    /// A follower that forwards a write stamped it with its own clock; the
+    /// leader restamps it on receipt, so every command in the log carries the
+    /// clock of the node that proposed it, as the field's contract requires.
+    #[must_use]
+    pub fn restamped(mut self, now: i64) -> Self {
+        match &mut self {
+            Self::Put {
+                leader_timestamp, ..
+            }
+            | Self::Delete {
+                leader_timestamp, ..
+            }
+            | Self::Batch {
+                leader_timestamp, ..
+            }
+            | Self::WriteBatch {
+                leader_timestamp, ..
+            }
+            | Self::PutIfAbsent {
+                leader_timestamp, ..
+            }
+            | Self::IncrementU64 {
+                leader_timestamp, ..
+            } => *leader_timestamp = now,
+        }
+        self
+    }
+}
+
+/// The leader's answer to a write a follower forwarded to it (the
+/// `ForwardWrite` peer RPC).
+///
+/// Each variant says whether the command can have entered the Raft log,
+/// because that decides whether the follower may retry it: a conditional
+/// command (`PutIfAbsent`, `IncrementU64`) applied twice is a different
+/// result, not a repeated one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ForwardedWriteOutcome {
+    /// Committed and applied on the leader at `log_index`. The follower waits
+    /// until its own state machine has applied that index before it answers.
+    Committed {
+        /// Index of the log entry that carried the command.
+        log_index: u64,
+        /// The state machine's response (the `PutIfAbsent` / `IncrementU64`
+        /// outcome).
+        response: HearthLogResponse,
+    },
+    /// Refused **without proposing**: the receiving node is not the leader.
+    /// `leader_id` is the leader it knows of, if any. Safe to retry.
+    NotLeader {
+        /// The leader the refusing node knows of, if any.
+        leader_id: Option<u64>,
+    },
+    /// Refused **without proposing** for a reason a retry does not cure (the
+    /// payload is too large, undecodable, or the leader is at its forwarding
+    /// concurrency limit).
+    Rejected {
+        /// Operator-facing reason; carries no key or value bytes.
+        reason: String,
+    },
+    /// Proposed, but the leader cannot say whether it committed (its commit
+    /// wait timed out, or Raft stopped under it). MUST NOT be retried.
+    Unknown {
+        /// Operator-facing reason; carries no key or value bytes.
+        reason: String,
+    },
+}
+
 /// Openraft `D` type alias — keeps the `declare_raft_types!` binding stable.
 pub type HearthLogData = RaftCommand;
 

@@ -1087,6 +1087,11 @@ pub(super) struct ErrorReturn<'a> {
 ///
 /// If signing a JARM error fails, the error is sent unsigned, in the same
 /// place (it carries no code).
+///
+/// RFC 9207 §2: a plain error carries the realm issuer as `iss`, exactly as a
+/// successful response does, whenever the realm's discovery document
+/// advertises `authorization_response_iss_parameter_supported`. A JARM error
+/// carries it as the JWT's `iss` claim (RFC 9207 §2.4).
 pub(super) fn authorization_error_redirect(
     state: &Arc<WebState>,
     realm: &RealmId,
@@ -1117,12 +1122,25 @@ pub(super) fn authorization_error_redirect(
             }
         }
     }
+    // The issuer the realm's discovery document names — the value the
+    // success path sends. A realm whose document cannot be built gets no
+    // `iss` rather than a wrong one.
+    let iss = match state.identity.realm_oidc_discovery(realm) {
+        Ok(doc) if doc.authorization_response_iss_parameter_supported => doc.issuer,
+        Ok(_) => String::new(),
+        Err(e) => {
+            tracing::warn!(error = %e, "authorization error: realm issuer unavailable");
+            String::new()
+        }
+    };
     let location = place(
         to.redirect_uri,
         &[
             ("error", error),
             ("error_description", description),
             ("state", to.state),
+            // Empty values are skipped by `append_query`/`append_fragment`.
+            ("iss", &iss),
         ],
     );
     Redirect::to(&location).into_response()

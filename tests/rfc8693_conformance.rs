@@ -92,6 +92,7 @@ fn make_subject_token(
                 granted_scopes,
                 oid: None,
                 resource: None,
+                dpop_jkt: None,
             },
         )
         .expect("issue subject token")

@@ -281,6 +281,61 @@ impl Default for RegisterClientRequest {
     }
 }
 
+impl RegisterClientRequest {
+    /// Applies an administrative registration's `token_endpoint_auth_method`
+    /// (RFC 7591 §2).
+    ///
+    /// `client_secret_basic` and `client_secret_post` make Hearth generate the
+    /// secret ([`GeneratedClientSecret`], stored only as a hash): the caller
+    /// reads it back from [`Self::generated_client_secret`] and returns it once
+    /// in its create response. `private_key_jwt` requires [`Self::jwks`].
+    /// `none` registers a public client. `None` leaves the request as it is.
+    ///
+    /// # Errors
+    /// [`crate::identity::IdentityError::InvalidInput`] for an unknown method,
+    /// a caller-chosen [`Self::client_secret`] next to any method (Hearth
+    /// generates secrets; `none` and `private_key_jwt` carry none), or
+    /// `private_key_jwt` without `jwks`.
+    pub fn apply_token_endpoint_auth_method(
+        &mut self,
+        method: Option<&str>,
+    ) -> Result<(), crate::identity::IdentityError> {
+        let refuse = |reason: &str| {
+            Err(crate::identity::IdentityError::InvalidInput {
+                reason: reason.to_string(),
+            })
+        };
+        let Some(method) = method else {
+            return Ok(());
+        };
+        if !matches!(
+            method,
+            "client_secret_basic" | "client_secret_post" | "private_key_jwt" | "none"
+        ) {
+            return refuse(
+                "token_endpoint_auth_method must be client_secret_basic, client_secret_post, \
+                 private_key_jwt or none",
+            );
+        }
+        if self.client_secret.is_some() {
+            return refuse(
+                "client_secret must not be supplied: Hearth generates the secret of a \
+                 client_secret_basic or client_secret_post client and returns it once",
+            );
+        }
+        match method {
+            "client_secret_basic" | "client_secret_post" => {
+                self.generated_client_secret = Some(GeneratedClientSecret::generate());
+            }
+            "private_key_jwt" if self.jwks.is_none() => {
+                return refuse("private_key_jwt requires the client's public keys in jwks");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 /// A client secret minted by Hearth itself: 32 bytes (256 bits) drawn from the
 /// operating-system CSPRNG, rendered as 43 characters of unpadded base64url.
 ///

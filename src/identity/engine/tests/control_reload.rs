@@ -892,10 +892,10 @@ fn a_failed_epoch_bump_is_retried_until_other_nodes_bind() {
     );
 }
 
-/// Cluster storage has no follower-to-leader write forwarding: once
-/// leadership moved, every bump a node owes is refused as `NotLeader`, forever.
-/// It used to be retried every 5 s for as long as the node lived. The node
-/// now drops those bumps — the new leader bumps the epoch when it is elected,
+/// A bump refused as `NotLeader` means no leader could be reached (a
+/// follower forwards its writes to the leader, so this is the no-leader
+/// case). It used to be retried every 5 s for as long as the node lived. The
+/// node now drops those bumps — the new leader bumps the epoch when it is elected,
 /// and that bump orders after every control row the old leader committed —
 /// and stops retrying.
 #[test]

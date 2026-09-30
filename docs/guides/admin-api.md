@@ -37,6 +37,11 @@ include those it holds only through an organization-scoped role or grant. The ru
   inherits from it, members of groups assigned one, and users holding one as an extra
   organization role. An edit that removes no admin permission is not checked.
 
+`DELETE /admin/roles/{id}` answers `409 role_in_use` while the role is referenced (assignments,
+child roles, extra organization roles); `?cascade=true` removes those references atomically with
+the role. A user's organization-scoped admin permissions include those granted in an organization
+it is not a member of, since permission resolution honours them.
+
 A check that affects many users visits at most 10 000 of them (and at most 50 000 permission
 resolutions, one per user plus one per organization it belongs to); past that bound the call is
 refused with `503` rather than half-checked, so a sub-admin cannot delete a larger organization or
@@ -600,8 +605,8 @@ sessions page, `/ui/account/sessions`, or with `DELETE /admin/sessions/{id}` and
 `X-Realm-ID`) to end the token early. The result page names the session. The issuance is recorded in the system
 realm's audit trail (`token_issued`, actor = the operator, `issued_via: "admin console"`, the
 lifetime and the token's `jti` — never the token). The session and the audit record are written
-through the normal write path, so in cluster mode they replicate: mint on the **leader** (a
-follower cannot accept the write) and the token then works against every node.
+through the normal write path, so in cluster mode they replicate: mint on any node (a follower
+forwards the writes to the leader) and the token then works against every node.
 
 For a **stopped** store — the server is down, or the data directory is being rebuilt — mint one on
 the host with `hearth admin token` instead. The command opens the data directory itself, so it

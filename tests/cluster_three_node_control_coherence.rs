@@ -294,9 +294,10 @@ impl LeaderOnly {
         let leader_id = wait_for_leader(&engines, Duration::from_secs(20)).await;
 
         // Build the leader's app stack FIRST. `EmbeddedIdentityEngine`'s
-        // constructor persists the global signing key on first start, and on a
-        // follower that write is `NotLeader`. See the report finding O-1 —
-        // this ordering is a property of the test fixture, not of `serve`.
+        // constructor persists the global signing key on first start; run on
+        // two nodes at once it would race (each generates its own key). See
+        // the report finding O-1 — this ordering is a property of the test
+        // fixture; `serve` gets it from `await_cold_start_window`.
         let leader_idx = engines
             .iter()
             .position(|e| e.raft_metrics().map(|m| m.id) == Some(leader_id))
@@ -1355,15 +1356,16 @@ fn owed_gauge() -> f64 {
 /// A control whose epoch bump failed on the leader must still bind on every
 /// other node after leadership moves.
 ///
-/// Cluster storage does not forward a follower's write to the leader, so once
-/// the leader stepped down the bump it owed could never succeed: it retried
-/// every 5 s for as long as it lived, and nothing else bumped the epoch, so
-/// the other two nodes enforced the stale control (here: kept validating a
-/// suspended realm's token) until an unrelated control was asserted somewhere.
+/// Before follower write forwarding, once the leader stepped down the bump it
+/// owed could never succeed: it retried every 5 s for as long as it lived, and
+/// nothing else bumped the epoch, so the other two nodes enforced the stale
+/// control (here: kept validating a suspended realm's token) until an
+/// unrelated control was asserted somewhere.
 ///
 /// Now the node that wins the election bumps the epoch once, which orders
 /// after every row the old leader committed, so every node reloads; and the
-/// old leader, refused as `NotLeader`, drops what it owed.
+/// old leader either makes its owed bump through the new leader (forwarded)
+/// or, refused as `NotLeader` while none is elected, drops it.
 ///
 /// Real sockets, a real step-down (`transfer_leadership`), no shortcut: the
 /// injected fault is only the loss of the one bump.
@@ -1458,7 +1460,8 @@ async fn a_control_whose_bump_failed_binds_everywhere_after_a_leader_change() {
     }
 
     // Leadership moves. The fault clears, so the old leader's retries reach
-    // real cluster storage — which, on a follower, refuses them as NotLeader.
+    // real cluster storage — which, on a follower, forwards them to the new
+    // leader, or refuses them as NotLeader (dropped) while none is elected.
     let new_leader_id = cluster
         .leader()
         .cluster
@@ -2121,7 +2124,7 @@ async fn a_device_code_is_redeemed_once_across_a_leader_change() {
     let device_code = issued.device_code.clone();
     let redeem: Redeem = Arc::new(move |identity: &EmbeddedIdentityEngine| {
         identity
-            .poll_device_token(&realm, &device_code, &client)
+            .poll_device_token(&realm, &device_code, &client, None)
             .is_ok()
     });
     let wins =
