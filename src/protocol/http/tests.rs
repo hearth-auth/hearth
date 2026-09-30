@@ -3666,3 +3666,197 @@ fn method_label_is_a_closed_set() {
         assert_eq!(method_label(&method), "OTHER", "{m} must fold into OTHER");
     }
 }
+
+// ── Cluster unavailability → 503 + Retry-After ───────────────────────────────
+
+/// A storage handle whose writes fail the way cluster storage fails when no
+/// leader is reachable (`mode` 1) or a forwarded write's outcome is unknown
+/// (`mode` 2). Reads, and writes in mode 0, pass through.
+struct ClusterOutage {
+    inner: Arc<EmbeddedStorageEngine>,
+    mode: std::sync::atomic::AtomicU8,
+}
+
+impl ClusterOutage {
+    fn fail(&self) -> Result<(), crate::storage::StorageError> {
+        match self.mode.load(std::sync::atomic::Ordering::SeqCst) {
+            1 => Err(crate::storage::StorageError::ClusterUnavailable {
+                cause: crate::storage::ClusterUnavailableCause::NoLeader,
+                reason: "no leader reachable at 10.9.9.9:8421".to_string(),
+            }),
+            2 => Err(crate::storage::StorageError::ClusterWriteOutcomeUnknown {
+                reason: "lost the leader at 10.9.9.9:8421 mid-call".to_string(),
+            }),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl StorageEngine for ClusterOutage {
+    fn get(
+        &self,
+        r: &crate::core::RealmId,
+        k: &[u8],
+    ) -> Result<Option<Vec<u8>>, crate::storage::StorageError> {
+        self.inner.get(r, k)
+    }
+    fn put(
+        &self,
+        r: &crate::core::RealmId,
+        k: &[u8],
+        v: &[u8],
+    ) -> Result<(), crate::storage::StorageError> {
+        self.fail()?;
+        self.inner.put(r, k, v)
+    }
+    fn delete(
+        &self,
+        r: &crate::core::RealmId,
+        k: &[u8],
+    ) -> Result<(), crate::storage::StorageError> {
+        self.fail()?;
+        self.inner.delete(r, k)
+    }
+    fn scan(
+        &self,
+        r: &crate::core::RealmId,
+        a: &[u8],
+        b: &[u8],
+    ) -> Result<Vec<crate::storage::ScanEntry>, crate::storage::StorageError> {
+        self.inner.scan(r, a, b)
+    }
+    fn put_batch(
+        &self,
+        r: &crate::core::RealmId,
+        e: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<(), crate::storage::StorageError> {
+        self.fail()?;
+        self.inner.put_batch(r, e)
+    }
+    fn write_batch(
+        &self,
+        r: &crate::core::RealmId,
+        puts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> Result<(), crate::storage::StorageError> {
+        self.fail()?;
+        self.inner.write_batch(r, puts, deletes)
+    }
+    fn put_if_absent(
+        &self,
+        r: &crate::core::RealmId,
+        k: &[u8],
+        v: &[u8],
+    ) -> Result<bool, crate::storage::StorageError> {
+        self.fail()?;
+        self.inner.put_if_absent(r, k, v)
+    }
+    fn increment_u64(
+        &self,
+        r: &crate::core::RealmId,
+        k: &[u8],
+    ) -> Result<u64, crate::storage::StorageError> {
+        self.fail()?;
+        self.inner.increment_u64(r, k)
+    }
+    fn list_realms(&self) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
+        self.inner.list_realms()
+    }
+    fn begin_snapshot_restore(&self, id: &str) -> Result<(), crate::storage::StorageError> {
+        self.inner.begin_snapshot_restore(id)
+    }
+    fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
+        self.inner.complete_snapshot_restore()
+    }
+}
+
+/// A write refused by an unavailable cluster answers `503` with a
+/// `Retry-After` and a stable `error_code` — one for "nothing was written,
+/// retry" and one for "outcome unknown, re-read first" — and never the
+/// internal detail (peer addresses) behind it. It used to be a generic 500.
+#[cfg(feature = "dev-endpoints")]
+#[tokio::test]
+async fn a_cluster_outage_answers_503_with_retry_after_and_a_stable_code() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+    let storage = Arc::new(ClusterOutage {
+        inner: Arc::new(EmbeddedStorageEngine::open(config).expect("open storage")),
+        mode: std::sync::atomic::AtomicU8::new(0),
+    });
+    let clock = Arc::new(SystemClock) as Arc<dyn crate::core::Clock>;
+    let rbac: Arc<dyn RbacEngine> = Arc::new(EmbeddedRbacEngine::new(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    ));
+    let audit = Arc::new(EmbeddedAuditEngine::new(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    ));
+    let identity = EmbeddedIdentityEngine::with_rbac(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+        IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        },
+        Arc::clone(&rbac),
+        Arc::clone(&audit) as Arc<dyn AuditEngine>,
+    )
+    .expect("identity engine");
+    let state = Arc::new(AppState::new_dev(
+        Arc::new(identity),
+        rbac,
+        audit as Arc<dyn AuditEngine>,
+    ));
+    let (realm_id, token) = bootstrap_dev(&state).await;
+
+    for (mode, code) in [
+        (1, crate::protocol::error_codes::CLUSTER_UNAVAILABLE),
+        (
+            2,
+            crate::protocol::error_codes::CLUSTER_WRITE_OUTCOME_UNKNOWN,
+        ),
+    ] {
+        storage
+            .mode
+            .store(mode, std::sync::atomic::Ordering::SeqCst);
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/admin/applications")
+                    .header("X-Realm-ID", &realm_id)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"client_name":"outage-app","redirect_uris":["https://example.com/cb"]}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mode {mode}"
+        );
+        let retry_after = resp
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        assert!(
+            retry_after.is_some_and(|s| s >= 1),
+            "mode {mode}: a 503 must carry Retry-After, got {retry_after:?}"
+        );
+        let b = axum::body::to_bytes(resp.into_body(), 8_000)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&b).expect("json");
+        assert_eq!(body["error_code"], code, "mode {mode}: {body}");
+        assert!(
+            !body.to_string().contains("10.9.9.9"),
+            "mode {mode}: internal detail leaked: {body}"
+        );
+    }
+}

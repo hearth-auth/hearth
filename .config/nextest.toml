@@ -29,5 +29,13 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 three-node-cluster = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary(cluster_three_node_control_coherence) | binary(cluster_grpc_loopback) | binary(cluster_follower_write_forwarding)'
+filter = 'binary(cluster_three_node_control_coherence) | binary(cluster_grpc_loopback) | binary(cluster_follower_write_forwarding) | binary(cluster_peer_message_size)'
 test-group = 'three-node-cluster'
+
+# The peer message-size tests write several MiB and, for the snapshot case,
+# 5,200 Raft entries (openraft snapshots every 5,000) before a lagging
+# follower catches up by snapshot. That takes 40-90 s in a debug build, over
+# the default 60 s kill; they get 150 s (30 s x 5).
+[[profile.default.overrides]]
+filter = 'binary(cluster_peer_message_size)'
+slow-timeout = { period = "30s", terminate-after = 5 }

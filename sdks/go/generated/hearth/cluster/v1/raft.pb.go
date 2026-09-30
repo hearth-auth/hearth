@@ -22,7 +22,7 @@ const (
 )
 
 // AppendEntries RPC request.
-// Payload is serde_json-encoded openraft::AppendEntriesRequest<HearthRaftConfig>.
+// Payload is CBOR-encoded openraft::AppendEntriesRequest<HearthRaftConfig>.
 type AppendEntriesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -68,7 +68,7 @@ func (x *AppendEntriesRequest) GetPayload() []byte {
 }
 
 // AppendEntries RPC response.
-// Payload is serde_json-encoded openraft::AppendEntriesResponse<u64>.
+// Payload is CBOR-encoded openraft::AppendEntriesResponse<u64>.
 type AppendEntriesResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -114,7 +114,7 @@ func (x *AppendEntriesResponse) GetPayload() []byte {
 }
 
 // Vote RPC request.
-// Payload is serde_json-encoded openraft::VoteRequest<u64>.
+// Payload is CBOR-encoded openraft::VoteRequest<u64>.
 type VoteRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -160,7 +160,7 @@ func (x *VoteRequest) GetPayload() []byte {
 }
 
 // Vote RPC response.
-// Payload is serde_json-encoded openraft::VoteResponse<u64>.
+// Payload is CBOR-encoded openraft::VoteResponse<u64>.
 type VoteResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -206,7 +206,7 @@ func (x *VoteResponse) GetPayload() []byte {
 }
 
 // InstallSnapshot RPC request (one chunk per call).
-// Payload is serde_json-encoded openraft::InstallSnapshotRequest<HearthRaftConfig>.
+// Payload is CBOR-encoded openraft::InstallSnapshotRequest<HearthRaftConfig>.
 type InstallSnapshotRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -252,7 +252,7 @@ func (x *InstallSnapshotRequest) GetPayload() []byte {
 }
 
 // InstallSnapshot RPC response.
-// Payload is serde_json-encoded openraft::InstallSnapshotResponse<u64>.
+// Payload is CBOR-encoded openraft::InstallSnapshotResponse<u64>.
 type InstallSnapshotResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -298,7 +298,7 @@ func (x *InstallSnapshotResponse) GetPayload() []byte {
 }
 
 // ForwardWrite RPC request.
-// Payload is serde_json-encoded hearth::cluster::RaftCommand.
+// Payload is CBOR-encoded hearth::cluster::RaftCommand.
 type ForwardWriteRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
@@ -344,7 +344,7 @@ func (x *ForwardWriteRequest) GetPayload() []byte {
 }
 
 // ForwardWrite RPC response.
-// Payload is serde_json-encoded hearth::cluster::ForwardedWriteOutcome.
+// Payload is CBOR-encoded hearth::cluster::ForwardedWriteOutcome.
 type ForwardWriteResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`

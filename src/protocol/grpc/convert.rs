@@ -23,6 +23,11 @@ pub const REALM_ID_META_KEY: &str = "x-realm-id";
 #[must_use]
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub fn identity_to_status(err: IdentityError) -> Status {
+    if let IdentityError::Storage(e) = &err {
+        if let Some(status) = cluster_unavailable_status(&**e) {
+            return status;
+        }
+    }
     let (code, msg) = match &err {
         IdentityError::RealmNotFound
         | IdentityError::UserNotFound
@@ -263,6 +268,11 @@ pub fn identity_to_status(err: IdentityError) -> Status {
 /// Maps an [`RbacError`] to a [`tonic::Status`].
 #[must_use]
 pub fn rbac_to_status(err: RbacError) -> Status {
+    if let RbacError::Storage(e) = &err {
+        if let Some(status) = cluster_unavailable_status(&**e) {
+            return status;
+        }
+    }
     match err {
         RbacError::RoleNotFound | RbacError::GroupNotFound | RbacError::AssignmentNotFound => {
             Status::new(Code::NotFound, err.to_string())
@@ -301,6 +311,21 @@ pub fn rbac_to_status(err: RbacError) -> Status {
 /// operators can correlate logs to the opaque caller-facing message; no
 /// internal detail is forwarded to the caller.
 #[must_use]
+/// `UNAVAILABLE` for a transient cluster failure, with a fixed message per
+/// [`RetryClass`](crate::storage::RetryClass) (never the operator-facing
+/// detail); `None` for any other storage error.
+fn cluster_unavailable_status(err: &(dyn std::error::Error + 'static)) -> Option<Status> {
+    let class = crate::storage::StorageError::retry_class_of(err)?;
+    tracing::warn!(error = %err, "request refused: cluster unavailable");
+    Some(Status::unavailable(match class {
+        crate::storage::RetryClass::OutcomeUnknown => {
+            "cluster write outcome unknown: the write may or may not have been applied; \
+             re-read before retrying"
+        }
+        _ => "cluster unavailable: nothing was written; retry shortly",
+    }))
+}
+
 pub fn audit_error_to_status(err: AuditError) -> Status {
     match err {
         AuditError::IntegrityViolation { .. } => {
@@ -528,5 +553,57 @@ mod internal_error_logging_tests {
                 "the log must not carry {leaked:?}: {logs:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cluster_unavailable_tests {
+    //! A transient cluster failure is `UNAVAILABLE`, not `INTERNAL`, so a
+    //! gRPC client's standard retry policy applies.
+    use super::{identity_to_status, rbac_to_status};
+    use crate::identity::IdentityError;
+    use crate::rbac::RbacError;
+    use crate::storage::{ClusterUnavailableCause, StorageError};
+    use tonic::Code;
+
+    fn unavailable() -> StorageError {
+        StorageError::ClusterUnavailable {
+            cause: ClusterUnavailableCause::NoLeader,
+            reason: "no leader at 10.0.0.9:8421".to_string(),
+        }
+    }
+
+    fn unknown() -> StorageError {
+        StorageError::ClusterWriteOutcomeUnknown {
+            reason: "lost the leader at 10.0.0.9:8421".to_string(),
+        }
+    }
+
+    #[test]
+    fn cluster_unavailability_maps_to_unavailable_without_internal_detail() {
+        for (err, marker) in [
+            (unavailable(), "cluster unavailable"),
+            (unknown(), "outcome unknown"),
+        ] {
+            let status = identity_to_status(IdentityError::Storage(Box::new(err)));
+            assert_eq!(status.code(), Code::Unavailable, "{}", status.message());
+            assert!(status.message().contains(marker), "{}", status.message());
+            assert!(
+                !status.message().contains("10.0.0.9"),
+                "{}",
+                status.message()
+            );
+        }
+        let status = rbac_to_status(RbacError::Storage(Box::new(unknown())));
+        assert_eq!(status.code(), Code::Unavailable);
+        assert!(!status.message().contains("10.0.0.9"));
+    }
+
+    #[test]
+    fn other_storage_errors_stay_internal() {
+        let status = identity_to_status(IdentityError::Storage(Box::new(std::io::Error::other(
+            "disk gone",
+        ))));
+        assert_eq!(status.code(), Code::Internal);
     }
 }

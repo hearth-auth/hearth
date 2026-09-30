@@ -194,9 +194,17 @@ impl IdentityError {
             Self::SpiffeCertInvalid { .. } => Some("HEARTH_SPIFFE_CERT_INVALID"),
             Self::SpiffeCertExpired => Some("HEARTH_SPIFFE_CERT_EXPIRED"),
 
+            // 503 — a transient cluster failure has a stable code of its own.
+            Self::Storage(e) => match crate::storage::StorageError::retry_class_of(&**e) {
+                Some(crate::storage::RetryClass::Unavailable) => Some("HEARTH_CLUSTER_UNAVAILABLE"),
+                Some(crate::storage::RetryClass::OutcomeUnknown) => {
+                    Some("HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN")
+                }
+                _ => None,
+            },
+
             // 5xx — do not leak internal detail
             Self::SigningError { .. }
-            | Self::Storage(_)
             | Self::Serialization { .. }
             | Self::Internal { .. }
             | Self::ConfigInvalid { .. }

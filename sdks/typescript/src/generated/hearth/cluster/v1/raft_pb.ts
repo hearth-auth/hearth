@@ -14,7 +14,7 @@ export const file_hearth_cluster_v1_raft: GenFile = /*@__PURE__*/
 
 /**
  * AppendEntries RPC request.
- * Payload is serde_json-encoded openraft::AppendEntriesRequest<HearthRaftConfig>.
+ * Payload is CBOR-encoded openraft::AppendEntriesRequest<HearthRaftConfig>.
  *
  * @generated from message hearth.cluster.v1.AppendEntriesRequest
  */
@@ -34,7 +34,7 @@ export const AppendEntriesRequestSchema: GenMessage<AppendEntriesRequest> = /*@_
 
 /**
  * AppendEntries RPC response.
- * Payload is serde_json-encoded openraft::AppendEntriesResponse<u64>.
+ * Payload is CBOR-encoded openraft::AppendEntriesResponse<u64>.
  *
  * @generated from message hearth.cluster.v1.AppendEntriesResponse
  */
@@ -54,7 +54,7 @@ export const AppendEntriesResponseSchema: GenMessage<AppendEntriesResponse> = /*
 
 /**
  * Vote RPC request.
- * Payload is serde_json-encoded openraft::VoteRequest<u64>.
+ * Payload is CBOR-encoded openraft::VoteRequest<u64>.
  *
  * @generated from message hearth.cluster.v1.VoteRequest
  */
@@ -74,7 +74,7 @@ export const VoteRequestSchema: GenMessage<VoteRequest> = /*@__PURE__*/
 
 /**
  * Vote RPC response.
- * Payload is serde_json-encoded openraft::VoteResponse<u64>.
+ * Payload is CBOR-encoded openraft::VoteResponse<u64>.
  *
  * @generated from message hearth.cluster.v1.VoteResponse
  */
@@ -94,7 +94,7 @@ export const VoteResponseSchema: GenMessage<VoteResponse> = /*@__PURE__*/
 
 /**
  * InstallSnapshot RPC request (one chunk per call).
- * Payload is serde_json-encoded openraft::InstallSnapshotRequest<HearthRaftConfig>.
+ * Payload is CBOR-encoded openraft::InstallSnapshotRequest<HearthRaftConfig>.
  *
  * @generated from message hearth.cluster.v1.InstallSnapshotRequest
  */
@@ -114,7 +114,7 @@ export const InstallSnapshotRequestSchema: GenMessage<InstallSnapshotRequest> = 
 
 /**
  * InstallSnapshot RPC response.
- * Payload is serde_json-encoded openraft::InstallSnapshotResponse<u64>.
+ * Payload is CBOR-encoded openraft::InstallSnapshotResponse<u64>.
  *
  * @generated from message hearth.cluster.v1.InstallSnapshotResponse
  */
@@ -134,7 +134,7 @@ export const InstallSnapshotResponseSchema: GenMessage<InstallSnapshotResponse> 
 
 /**
  * ForwardWrite RPC request.
- * Payload is serde_json-encoded hearth::cluster::RaftCommand.
+ * Payload is CBOR-encoded hearth::cluster::RaftCommand.
  *
  * @generated from message hearth.cluster.v1.ForwardWriteRequest
  */
@@ -154,7 +154,7 @@ export const ForwardWriteRequestSchema: GenMessage<ForwardWriteRequest> = /*@__P
 
 /**
  * ForwardWrite RPC response.
- * Payload is serde_json-encoded hearth::cluster::ForwardedWriteOutcome.
+ * Payload is CBOR-encoded hearth::cluster::ForwardedWriteOutcome.
  *
  * @generated from message hearth.cluster.v1.ForwardWriteResponse
  */
@@ -175,9 +175,9 @@ export const ForwardWriteResponseSchema: GenMessage<ForwardWriteResponse> = /*@_
 /**
  * Raft consensus peer-to-peer RPC service.
  *
- * All messages carry opaque JSON-encoded payloads to decouple the transport
- * schema from openraft's internal types. This keeps the wire format stable
- * across openraft version upgrades.
+ * All messages carry opaque CBOR-encoded payloads (byte strings written as
+ * CBOR byte strings) to decouple the transport schema from openraft's
+ * internal types. Size limits: see src/cluster/wire.rs (16 MiB per message).
  *
  * InstallSnapshot is a unary RPC: openraft's default full_snapshot
  * implementation already chunks the snapshot and calls install_snapshot once

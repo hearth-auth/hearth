@@ -174,6 +174,29 @@ pub(crate) fn kdf_shed_json_response(retry_after: std::time::Duration) -> Respon
     resp
 }
 
+/// `Retry-After` (seconds) given to a `503` whose handler set none. A cluster
+/// that lost its leader elects a new one in roughly 5 s; two seconds keeps a
+/// well-behaved client from hammering it and from waiting needlessly long.
+pub(crate) const DEFAULT_RETRY_AFTER_SECS: u64 = 2;
+
+/// Adds `Retry-After: DEFAULT_RETRY_AFTER_SECS` to any `503` response that
+/// does not carry one (a handler that knows better — the KDF gate — sets its
+/// own). Most handlers return an `(StatusCode, Json)` tuple, which cannot
+/// carry a header, so this is the one place a cluster-unavailable `503` gets
+/// its hint.
+async fn retry_after_on_503(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let mut resp = next.run(req).await;
+    if resp.status() == StatusCode::SERVICE_UNAVAILABLE
+        && !resp.headers().contains_key(axum::http::header::RETRY_AFTER)
+    {
+        resp.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from(DEFAULT_RETRY_AFTER_SECS),
+        );
+    }
+    resp
+}
+
 // ── Observability middleware ──────────────────────────────────────────────────
 
 /// Tower middleware that records HTTP request latency into the Prometheus
@@ -782,6 +805,8 @@ pub fn router_with(state: Arc<AppState>, extra: Router) -> Router {
                 .on_response(DefaultOnResponse::new().level(Level::DEBUG)),
         )
         .layer(DefaultBodyLimit::max(BODY_LIMIT_DEFAULT))
+        // Every 503 says when to retry (cluster unavailability, readiness).
+        .layer(axum::middleware::from_fn(retry_after_on_503))
         // A-26: strip Server: header so the runtime identity is not disclosed.
         .layer(axum::middleware::from_fn(strip_server_header))
         // HEA-SEC-33: minimal security headers on every REST API response.

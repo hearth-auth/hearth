@@ -513,7 +513,10 @@ Check the `CHANGELOG.md` `## [Unreleased]` section for in-flight breaking change
 <a id="cluster-full-restart"></a>
 
 > **The release after v1.6.11 needs a full-cluster restart, not a rolling upgrade.** It adds a Raft
-> log command (`IncrementU64`, the atomic control-epoch bump) that older builds cannot decode:
+> log command (`IncrementU64`, the atomic control-epoch bump) that older builds cannot decode, and
+> it changes the peer transport from JSON to CBOR (and adds the `ForwardWrite` RPC followers use
+> to send writes to the leader), so an older and a newer node cannot exchange any Raft message at
+> all:
 >
 > - an older follower refuses every `AppendEntries` that carries the new command, so replication to
 >   it stalls for good (not just for that entry);
