@@ -939,16 +939,24 @@ fn adversarial_device_polling_rate_limit() {
         .expect("device authorize");
 
     // First poll — should return AuthorizationPending (not SlowDown)
-    let first_poll =
-        engine.poll_device_token(&realm_id, &device_resp.device_code, client.client_id());
+    let first_poll = engine.poll_device_token(
+        &realm_id,
+        &device_resp.device_code,
+        client.client_id(),
+        None,
+    );
     assert!(
         matches!(first_poll, Err(IdentityError::AuthorizationPending)),
         "first poll should return AuthorizationPending, got: {first_poll:?}"
     );
 
     // Immediate second poll — should return SlowDown
-    let second_poll =
-        engine.poll_device_token(&realm_id, &device_resp.device_code, client.client_id());
+    let second_poll = engine.poll_device_token(
+        &realm_id,
+        &device_resp.device_code,
+        client.client_id(),
+        None,
+    );
     assert!(
         matches!(second_poll, Err(IdentityError::SlowDown)),
         "rapid second poll should return SlowDown, got: {second_poll:?}"

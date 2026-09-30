@@ -1639,30 +1639,67 @@ fn split_registration_body(
 /// /admin/applications`) into the domain request, including `jwks`,
 /// `jwks_uri`, `profile` and `authorization_signed_response_alg` — without
 /// which an operator could not register a FAPI 2.0 (`private_key_jwt`) client
-/// over REST. A secret in the body is dropped (Hearth mints secrets itself).
+/// over REST.
+///
+/// `token_endpoint_auth_method` `client_secret_basic` / `client_secret_post`
+/// makes Hearth generate the client's secret: it is in the returned request's
+/// `generated_client_secret`, for the handler to return once
+/// ([`admin_created_client_json`]). A caller-chosen `client_secret` is
+/// refused — it used to be dropped silently, which registered a PUBLIC
+/// client the operator believed confidential.
 ///
 /// # Errors
 ///
-/// `422` with a description when the body does not decode.
+/// `422` with a description when the body does not decode, carries a
+/// `client_secret`, or names a method it cannot honour.
 pub(super) fn admin_registration_request(
     raw: serde_json::Value,
 ) -> Result<crate::identity::RegisterClientRequest, Response> {
-    let (body, extras) = split_registration_body(raw).map_err(|description| {
+    let unprocessable = |description: &str| {
         (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({"error": description})),
         )
             .into_response()
-    })?;
+    };
+    let (body, extras) =
+        split_registration_body(raw).map_err(|description| unprocessable(&description))?;
+    if body.client_secret.is_some() {
+        return Err(unprocessable(
+            "client_secret must not be supplied: set token_endpoint_auth_method to \
+             client_secret_basic or client_secret_post and Hearth returns a generated \
+             secret once",
+        ));
+    }
     let mut request = crate::identity::RegisterClientRequest::from(body);
-    request.client_secret = None;
     request.jwks = extras.jwks;
     request.jwks_uri = extras.jwks_uri;
     if let Some(profile) = extras.profile {
         request.profile = profile;
     }
     request.authorization_signed_response_alg = extras.authorization_signed_response_alg;
+    request
+        .apply_token_endpoint_auth_method(extras.token_endpoint_auth_method.as_deref())
+        .map_err(|e| match e {
+            crate::identity::IdentityError::InvalidInput { reason } => unprocessable(&reason),
+            e => identity_error_to_response(&e).into_response(),
+        })?;
     Ok(request)
+}
+
+/// The admin create response for `client`: the client record, plus — for a
+/// confidential client whose secret Hearth generated from `request` — that
+/// secret, the one time it is ever returned. Only its hash is stored.
+pub(super) fn admin_created_client_json(
+    client: &crate::identity::OAuthClient,
+    request: &crate::identity::RegisterClientRequest,
+) -> serde_json::Value {
+    let mut record = pb::OAuthClient::from(client);
+    record.client_secret = request
+        .generated_client_secret
+        .as_ref()
+        .map(|g| g.expose().to_string());
+    proto_to_rest_json(&record)
 }
 
 /// How a dynamically registered client authenticates at the token endpoint
@@ -1803,7 +1840,7 @@ async fn register_client(
             );
             (
                 StatusCode::CREATED,
-                Json(proto_to_rest_json(&pb::OAuthClient::from(&client))),
+                Json(admin_created_client_json(&client, &request)),
             )
                 .into_response()
         }
@@ -2974,10 +3011,12 @@ async fn token_exchange_impl(
                 }
             };
 
-            match state
-                .identity
-                .poll_device_token(&realm_id, &device_code, &oauth_client_id)
-            {
+            match state.identity.poll_device_token(
+                &realm_id,
+                &device_code,
+                &oauth_client_id,
+                dpop_jkt.as_deref(),
+            ) {
                 Ok(response) => {
                     crate::metrics::metrics()
                         .tokens_issued_total
@@ -4201,10 +4240,12 @@ async fn realm_token_exchange(
                         .into_response()
                 }
             };
-            match state
-                .identity
-                .poll_device_token(&realm_id, &device_code, &oauth_client_id)
-            {
+            match state.identity.poll_device_token(
+                &realm_id,
+                &device_code,
+                &oauth_client_id,
+                dpop_jkt.as_deref(),
+            ) {
                 Ok(response) => (
                     StatusCode::OK,
                     Json(proto_to_rest_json(&pb::OidcTokenResponse::from(&response))),

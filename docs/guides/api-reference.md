@@ -252,6 +252,40 @@ curl -s -X POST http://127.0.0.1:8420/clients \
 
 A token without `hearth.clients.admin` receives `403 Forbidden`.
 
+#### Confidential clients: a generated secret, returned once
+
+To create a client that authenticates with a secret, set `token_endpoint_auth_method` to
+`client_secret_basic` or `client_secret_post` on `POST /admin/applications` or `POST /clients`
+(gRPC `CreateApplication` / `RegisterClient` take the same field). Hearth generates the secret —
+256 bits from the operating system's CSPRNG — stores only a hash of it, and returns it **once**,
+as `client_secret` in the `201` response:
+
+```bash
+curl -s -X POST http://127.0.0.1:8420/admin/applications \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "X-Realm-ID: $REALM_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "Billing backend",
+    "redirect_uris": ["https://billing.example.com/cb"],
+    "grant_types": ["client_credentials"],
+    "trust_level": "CLIENT_TRUST_LEVEL_FIRST_PARTY",
+    "token_endpoint_auth_method": "client_secret_basic"
+  }'
+# → 201 {"client_id":"…","is_confidential":true,"client_secret":"<43 characters>", …}
+```
+
+Store the secret when you receive it: no later read (`GET /admin/applications/{id}`, the list, the
+console) returns it. To replace a lost or leaked secret, regenerate it from the admin console
+(**Applications → the client → Regenerate secret**); the old one stops working at once.
+
+- `private_key_jwt` requires the client's public keys in `jwks`; `none` (or omitting the field)
+  registers a public client, or a `private_key_jwt` client when `jwks` is given.
+- The REST routes refuse a caller-chosen `client_secret` with `422` — they used to drop it
+  silently and register a **public** client. gRPC still accepts a caller-chosen `client_secret`
+  (stored as an Argon2id hash) when `token_endpoint_auth_method` is omitted.
+- Any other `token_endpoint_auth_method` value is a `422` (gRPC: `INVALID_ARGUMENT`).
+
 ### gRPC (`OAuthService.register_client`)
 
 The gRPC RPC applies the same gate. Pass the admin token as `Authorization: Bearer

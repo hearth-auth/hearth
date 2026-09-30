@@ -209,7 +209,21 @@ export interface RegisterClientParams {
   redirectUris: string[];
   /** Optional; when omitted the server default (`third_party`) applies. */
   trustLevel?: ClientTrustLevel;
+  /**
+   * Optional (RFC 7591 §2). `client_secret_basic` or `client_secret_post`
+   * creates a confidential client: the server generates its secret and
+   * returns it once, as `client_secret` on the created record. Omitted
+   * registers a public client.
+   */
+  tokenEndpointAuthMethod?: TokenEndpointAuthMethod;
 }
+
+/** How a client authenticates at the token endpoint (RFC 7591 §2). */
+export type TokenEndpointAuthMethod =
+  | "client_secret_basic"
+  | "client_secret_post"
+  | "private_key_jwt"
+  | "none";
 
 /** OAuth client record from the API. */
 export interface OAuthClient {
@@ -218,6 +232,11 @@ export interface OAuthClient {
   redirect_uris: string[];
   grant_types: string[];
   created_at?: number;
+  /**
+   * The generated secret — present only on the response that created a
+   * confidential client, and never returned again. Store it on receipt.
+   */
+  client_secret?: string;
 }
 
 /** JWKS document containing public keys. */
