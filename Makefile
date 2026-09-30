@@ -13,7 +13,7 @@ BUF := buf
 ## with `--workspace`.
 DEV_FEATURES ?= --features hearth/dev-endpoints
 
-.PHONY: setup build test test-detached test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
+.PHONY: setup build test test-detached test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -526,6 +526,17 @@ notice-check:
 sdk-test:
 	cd sdks/typescript && PROTOC=$(PROTOC) npm test
 	cd sdks/go && PROTOC=$(PROTOC) go test ./...
+
+## Run every SDK's linter and formatter check — the lint steps of CI's sdk-* jobs.
+## Needs each SDK's dev dependencies installed (npm ci, composer install,
+## pip install -e '.[dev]') and golangci-lint v2.12.2 on PATH. Kotlin has none.
+sdk-lint:
+	cd sdks/rust && cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings
+	cd sdks/go && golangci-lint run ./...
+	cd sdks/python && ruff check . && ruff format --check .
+	cd sdks/php && composer analyse
+	cd sdks/typescript && npm run lint && npm run format:check
+	cd sdks/node && npm run lint && npm run format:check
 
 # ── CI Tiers ──────────────────────────────────────────
 
