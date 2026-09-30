@@ -3998,6 +3998,13 @@ impl EmbeddedIdentityEngine {
         // Check both per-client profile AND realm-level fapi_profile so that
         // standard-profile clients in a Baseline/Advanced realm cannot bypass
         // the sender-constraint requirement on refresh (mirrors HEA-1022 fix).
+        // A clientless family (step-up-MFA grant, first-party session
+        // tokens) is governed by the realm profile alone. Only a family with
+        // a client was checked, so such refresh tokens rotated without a
+        // proof in a FAPI realm.
+        if family.client_id.is_none() {
+            self.require_fapi_sender_constraint(realm_id, None, dpop_jkt)?;
+        }
         if let Some(ref client_id) = family.client_id {
             // Fail closed when the owning client no longer exists. Skipping
             // this arm on a missing client stripped the confidential-client
@@ -4016,7 +4023,7 @@ impl EmbeddedIdentityEngine {
             if !client.allows_refresh_token() {
                 return Err(IdentityError::UnsupportedGrantType);
             }
-            self.require_fapi_sender_constraint(realm_id, &client, dpop_jkt)?;
+            self.require_fapi_sender_constraint(realm_id, Some(&client), dpop_jkt)?;
 
             // O1 (HEA-1755): confidential-client refresh binding.
             //
@@ -27507,6 +27514,7 @@ mod tests {
             scope: None,
             client_ip: Some(test_ip.to_string()),
             user_agent: None,
+            dpop_jkt: None,
         };
         let err = engine
             .step_up_mfa_grant_token(&realm, &request)

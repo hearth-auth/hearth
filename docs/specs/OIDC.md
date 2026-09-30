@@ -142,8 +142,9 @@ Enforced for every authorization request in the realm:
    (a JARM response carries it as the JWT's `iss` claim). Hearth sends it in every realm, FAPI or not.
 
 Both profiles also require **sender-constrained tokens**: every token request in the realm — the
-`authorization_code`, `refresh_token`, `client_credentials`, `device_code` and `jwt-bearer`
-grants — MUST carry a valid `DPoP` proof (§3), whatever the client's own profile. A request without
+`authorization_code`, `refresh_token`, `client_credentials`, `device_code`, `jwt-bearer` and the
+clientless `urn:hearth:params:grant-type:step-up-mfa` grants, and the refresh of a clientless grant
+family — MUST carry a valid `DPoP` proof (§3), whatever the client's own profile. A request without
 one is refused with `400 invalid_request` before anything is consumed: an approved device code or
 a jwt-bearer assertion stays redeemable with a proof.
 
@@ -314,7 +315,7 @@ DPoP is required for FAPI 2.0 clients (§2.2) and RECOMMENDED for all public cli
 
 ### 3.1 Access Token Binding
 
-When a token request includes a `DPoP` proof header, the issued access token carries a `cnf.jkt` claim containing the SHA-256 JWK thumbprint of the DPoP public key, and the response's `token_type` is `DPoP`. This holds for every grant that issues a token to a client: `authorization_code`, `device_code`, `refresh_token`, `client_credentials` and `jwt-bearer`:
+When a token request includes a `DPoP` proof header, the issued access token carries a `cnf.jkt` claim containing the SHA-256 JWK thumbprint of the DPoP public key, and the response's `token_type` is `DPoP`. This holds for every grant: `authorization_code`, `device_code`, `refresh_token`, `client_credentials`, `jwt-bearer` and `urn:hearth:params:grant-type:step-up-mfa`:
 
 ```json
 {
@@ -326,7 +327,7 @@ Resource servers MUST verify that incoming DPoP proofs are signed by the key who
 
 ### 3.2 Refresh Token Binding (RFC 9449 §5)
 
-When the initial token request (`authorization_code` or `device_code` grant) includes a DPoP proof, Hearth binds the entire grant family to the JWK thumbprint of the proving key. This binding is enforced on every subsequent use of the grant family:
+When the initial token request (`authorization_code`, `device_code` or step-up-MFA grant) includes a DPoP proof, Hearth binds the entire grant family to the JWK thumbprint of the proving key. This binding is enforced on every subsequent use of the grant family:
 
 - The issued refresh token is stored against the same `cnf.jkt`. Subsequent `refresh_token` grant requests MUST include a `DPoP` proof signed by the **same key pair** used at grant issuance.
 - A mismatch between the stored thumbprint and the presented proof is rejected with `invalid_dpop_proof`.

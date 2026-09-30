@@ -2585,7 +2585,7 @@ pub struct PasswordGrantResponse {
     pub access_token: String,
     /// Long-lived refresh token (JWT).
     pub refresh_token: String,
-    /// Always `"Bearer"`.
+    /// `"Bearer"`, or `"DPoP"` when the pair is bound to a DPoP key.
     pub token_type: String,
     /// Access token lifetime in seconds.
     pub expires_in: i64,
@@ -2621,6 +2621,10 @@ pub struct StepUpMfaGrantRequest {
     pub client_ip: Option<String>,
     /// Raw `User-Agent` header value — used to record the trusted device fingerprint.
     pub user_agent: Option<String>,
+    /// RFC 7638 thumbprint of a DPoP proof (RFC 9449) the caller validated on
+    /// the token request. Binds the issued pair and its grant family to that
+    /// key; required in a realm with a `fapi_profile`.
+    pub dpop_jkt: Option<String>,
 }
 
 /// Redacts the password and the MFA code (GA audit L20).
@@ -2633,6 +2637,7 @@ impl std::fmt::Debug for StepUpMfaGrantRequest {
             .field("scope", &self.scope)
             .field("client_ip", &self.client_ip)
             .field("user_agent", &self.user_agent)
+            .field("dpop_jkt", &self.dpop_jkt)
             .finish()
     }
 }

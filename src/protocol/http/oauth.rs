@@ -3055,6 +3055,7 @@ async fn token_exchange_impl(
                     .get(axum::http::header::USER_AGENT)
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string),
+                dpop_jkt: dpop_jkt.clone(),
             };
             let realm_str = realm_id.as_uuid().to_string();
             let realm_id_clone = realm_id.clone();
@@ -4274,6 +4275,7 @@ async fn realm_token_exchange(
                     .get(axum::http::header::USER_AGENT)
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string),
+                dpop_jkt: dpop_jkt.clone(),
             };
             let realm_id_clone = realm_id.clone();
             let identity = Arc::clone(&state.identity);

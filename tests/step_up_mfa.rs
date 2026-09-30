@@ -565,6 +565,7 @@ async fn step_up_completion_issues_token_and_records_device() {
                 scope: None,
                 client_ip: Some("10.20.30.40".to_string()),
                 user_agent: Some("Chrome/125.0".to_string()),
+                dpop_jkt: None,
             },
         )
         .expect("step-up completion must succeed with correct MFA code");
@@ -657,6 +658,7 @@ async fn step_up_completion_rejects_wrong_mfa_code() {
                 scope: None,
                 client_ip: Some("10.20.30.40".to_string()),
                 user_agent: Some("Firefox/109.0".to_string()),
+                dpop_jkt: None,
             },
         )
         .expect_err("wrong MFA code must be rejected");
@@ -733,6 +735,7 @@ async fn minor_ua_update_does_not_retrigger_step_up() {
                 scope: None,
                 client_ip: Some("10.0.0.1".to_string()),
                 user_agent: Some("Mozilla/5.0 Chrome/125.0.6422.112".to_string()),
+                dpop_jkt: None,
             },
         )
         .expect("step-up completion must record Chrome/125 fingerprint");
@@ -820,6 +823,7 @@ async fn major_ua_update_triggers_step_up() {
                 scope: None,
                 client_ip: Some("10.0.0.5".to_string()),
                 user_agent: Some("Mozilla/5.0 Chrome/125.0.0.0".to_string()),
+                dpop_jkt: None,
             },
         )
         .expect("step-up completion with Chrome/125 must succeed");
@@ -920,6 +924,7 @@ async fn step_up_completion_emits_audit_event() {
                 scope: None,
                 client_ip: Some("10.30.40.50".to_string()),
                 user_agent: Some("Firefox/127.0".to_string()),
+                dpop_jkt: None,
             },
         )
         .expect("step-up completion must succeed");
