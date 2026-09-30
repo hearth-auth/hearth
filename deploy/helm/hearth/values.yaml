@@ -299,10 +299,10 @@ podDisruptionBudget:
 # only one replica may be running at a time.
 #
 # IMPORTANT — Multi-node clustering is EXPERIMENTAL and NOT production-supported
-# in Hearth 1.x. Known defects include: follower RBAC cache staleness (C-5),
-# immutable cluster membership (C-6, no online node add/remove), and HTTP 500
-# on writes to follower nodes (H-3). The supported production topology is
-# replicaCount=1 with a ReadWriteOnce PVC.
+# in Hearth 1.x. Known defects include follower RBAC cache staleness (C-5) and
+# immutable cluster membership (C-6, no online node add/remove); writes to
+# follower nodes are forwarded to the leader (H-3 is fixed). The supported
+# production topology is replicaCount=1 with a ReadWriteOnce PVC.
 #
 # Rollouts use strategy.type=Recreate (set in deployment.yaml): the old pod
 # stops before the new one starts, so every upgrade or config change has a

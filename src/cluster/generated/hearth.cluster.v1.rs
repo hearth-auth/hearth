@@ -41,6 +41,20 @@ pub struct InstallSnapshotResponse {
     #[prost(bytes = "vec", tag = "1")]
     pub payload: ::prost::alloc::vec::Vec<u8>,
 }
+/// ForwardWrite RPC request.
+/// Payload is serde_json-encoded hearth::cluster::RaftCommand.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ForwardWriteRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    pub payload: ::prost::alloc::vec::Vec<u8>,
+}
+/// ForwardWrite RPC response.
+/// Payload is serde_json-encoded hearth::cluster::ForwardedWriteOutcome.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ForwardWriteResponse {
+    #[prost(bytes = "vec", tag = "1")]
+    pub payload: ::prost::alloc::vec::Vec<u8>,
+}
 /// Generated client implementations.
 pub mod raft_service_client {
     #![allow(
@@ -219,6 +233,37 @@ pub mod raft_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// A follower forwards one application write to the leader, which proposes
+        /// it and answers once it has committed and applied it (or refuses it
+        /// without proposing). The follower then waits for its own state machine to
+        /// apply the returned log index, so the caller reads its own write.
+        /// Authenticated by the peer mTLS handshake like every other RPC here.
+        pub async fn forward_write(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ForwardWriteRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ForwardWriteResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/hearth.cluster.v1.RaftService/ForwardWrite",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("hearth.cluster.v1.RaftService", "ForwardWrite"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -254,6 +299,18 @@ pub mod raft_service_server {
             request: tonic::Request<super::InstallSnapshotRequest>,
         ) -> std::result::Result<
             tonic::Response<super::InstallSnapshotResponse>,
+            tonic::Status,
+        >;
+        /// A follower forwards one application write to the leader, which proposes
+        /// it and answers once it has committed and applied it (or refuses it
+        /// without proposing). The follower then waits for its own state machine to
+        /// apply the returned log index, so the caller reads its own write.
+        /// Authenticated by the peer mTLS handshake like every other RPC here.
+        async fn forward_write(
+            &self,
+            request: tonic::Request<super::ForwardWriteRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ForwardWriteResponse>,
             tonic::Status,
         >;
     }
@@ -461,6 +518,51 @@ pub mod raft_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = InstallSnapshotSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/hearth.cluster.v1.RaftService/ForwardWrite" => {
+                    #[allow(non_camel_case_types)]
+                    struct ForwardWriteSvc<T: RaftService>(pub Arc<T>);
+                    impl<
+                        T: RaftService,
+                    > tonic::server::UnaryService<super::ForwardWriteRequest>
+                    for ForwardWriteSvc<T> {
+                        type Response = super::ForwardWriteResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ForwardWriteRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RaftService>::forward_write(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ForwardWriteSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

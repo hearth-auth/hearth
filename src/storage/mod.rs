@@ -106,13 +106,12 @@ pub trait StorageEngine: Send + Sync {
     /// Deletes a key for the given realm.
     fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError>;
 
-    /// Whether a write proposed on this handle right now would be accepted.
-    ///
-    /// Local storage always accepts one, hence the `true` default. In cluster
-    /// mode every write is a Raft proposal, so only the current leader accepts
-    /// one — a follower, or any node before a leader has been elected, answers
-    /// `NotLeader`. Start-up paths that would otherwise write on a cold data
-    /// directory consult this before attempting the write; see
+    /// Whether this handle proposes writes itself right now: always for
+    /// local storage, hence the `true` default; in cluster mode only on the
+    /// current Raft leader. A follower's writes still succeed — they are
+    /// forwarded to the leader — but start-up paths that would otherwise
+    /// write on a cold data directory consult this so the write set runs on
+    /// exactly one node; see
     /// [`crate::identity::EmbeddedIdentityEngine::await_cold_start_window`].
     ///
     /// This is advisory, not a lock: the leader can change between the check
@@ -131,11 +130,11 @@ pub trait StorageEngine: Send + Sync {
     ///
     /// Use it only for state that is per-node *by design* — the rehydration
     /// rows behind the in-memory rate-limit trackers are the case this exists
-    /// for. Proposing those through Raft makes them fail with `NotLeader` on
-    /// every follower, which silently breaks both directions: a failure a
-    /// follower counted is never persisted, and a lockout row the leader
-    /// replicated can never be cleared by the follower that later sees the
-    /// successful attempt.
+    /// for. Proposing those through Raft would replicate one node's counts to
+    /// every node (and, before follower write forwarding, failed with
+    /// `NotLeader` on every follower): a failure a follower counted was never
+    /// persisted, and a lockout row the leader replicated could never be
+    /// cleared by the follower that later saw the successful attempt.
     fn put_node_local(
         &self,
         realm_id: &RealmId,

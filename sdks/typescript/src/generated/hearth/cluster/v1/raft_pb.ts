@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file hearth/cluster/v1/raft.proto.
  */
 export const file_hearth_cluster_v1_raft: GenFile = /*@__PURE__*/
-  fileDesc("ChxoZWFydGgvY2x1c3Rlci92MS9yYWZ0LnByb3RvEhFoZWFydGguY2x1c3Rlci52MSInChRBcHBlbmRFbnRyaWVzUmVxdWVzdBIPCgdwYXlsb2FkGAEgASgMIigKFUFwcGVuZEVudHJpZXNSZXNwb25zZRIPCgdwYXlsb2FkGAEgASgMIh4KC1ZvdGVSZXF1ZXN0Eg8KB3BheWxvYWQYASABKAwiHwoMVm90ZVJlc3BvbnNlEg8KB3BheWxvYWQYASABKAwiKQoWSW5zdGFsbFNuYXBzaG90UmVxdWVzdBIPCgdwYXlsb2FkGAEgASgMIioKF0luc3RhbGxTbmFwc2hvdFJlc3BvbnNlEg8KB3BheWxvYWQYASABKAwypAIKC1JhZnRTZXJ2aWNlEmIKDUFwcGVuZEVudHJpZXMSJy5oZWFydGguY2x1c3Rlci52MS5BcHBlbmRFbnRyaWVzUmVxdWVzdBooLmhlYXJ0aC5jbHVzdGVyLnYxLkFwcGVuZEVudHJpZXNSZXNwb25zZRJHCgRWb3RlEh4uaGVhcnRoLmNsdXN0ZXIudjEuVm90ZVJlcXVlc3QaHy5oZWFydGguY2x1c3Rlci52MS5Wb3RlUmVzcG9uc2USaAoPSW5zdGFsbFNuYXBzaG90EikuaGVhcnRoLmNsdXN0ZXIudjEuSW5zdGFsbFNuYXBzaG90UmVxdWVzdBoqLmhlYXJ0aC5jbHVzdGVyLnYxLkluc3RhbGxTbmFwc2hvdFJlc3BvbnNlQkNaQWdpdGh1Yi5jb20vaGVhcnRoZGIvaGVhcnRoL3Nka3MvZ28vZ2VuZXJhdGVkL2NsdXN0ZXIvdjE7Y2x1c3RlcnYxYgZwcm90bzM");
+  fileDesc("ChxoZWFydGgvY2x1c3Rlci92MS9yYWZ0LnByb3RvEhFoZWFydGguY2x1c3Rlci52MSInChRBcHBlbmRFbnRyaWVzUmVxdWVzdBIPCgdwYXlsb2FkGAEgASgMIigKFUFwcGVuZEVudHJpZXNSZXNwb25zZRIPCgdwYXlsb2FkGAEgASgMIh4KC1ZvdGVSZXF1ZXN0Eg8KB3BheWxvYWQYASABKAwiHwoMVm90ZVJlc3BvbnNlEg8KB3BheWxvYWQYASABKAwiKQoWSW5zdGFsbFNuYXBzaG90UmVxdWVzdBIPCgdwYXlsb2FkGAEgASgMIioKF0luc3RhbGxTbmFwc2hvdFJlc3BvbnNlEg8KB3BheWxvYWQYASABKAwiJgoTRm9yd2FyZFdyaXRlUmVxdWVzdBIPCgdwYXlsb2FkGAEgASgMIicKFEZvcndhcmRXcml0ZVJlc3BvbnNlEg8KB3BheWxvYWQYASABKAwyhQMKC1JhZnRTZXJ2aWNlEmIKDUFwcGVuZEVudHJpZXMSJy5oZWFydGguY2x1c3Rlci52MS5BcHBlbmRFbnRyaWVzUmVxdWVzdBooLmhlYXJ0aC5jbHVzdGVyLnYxLkFwcGVuZEVudHJpZXNSZXNwb25zZRJHCgRWb3RlEh4uaGVhcnRoLmNsdXN0ZXIudjEuVm90ZVJlcXVlc3QaHy5oZWFydGguY2x1c3Rlci52MS5Wb3RlUmVzcG9uc2USaAoPSW5zdGFsbFNuYXBzaG90EikuaGVhcnRoLmNsdXN0ZXIudjEuSW5zdGFsbFNuYXBzaG90UmVxdWVzdBoqLmhlYXJ0aC5jbHVzdGVyLnYxLkluc3RhbGxTbmFwc2hvdFJlc3BvbnNlEl8KDEZvcndhcmRXcml0ZRImLmhlYXJ0aC5jbHVzdGVyLnYxLkZvcndhcmRXcml0ZVJlcXVlc3QaJy5oZWFydGguY2x1c3Rlci52MS5Gb3J3YXJkV3JpdGVSZXNwb25zZUJDWkFnaXRodWIuY29tL2hlYXJ0aGRiL2hlYXJ0aC9zZGtzL2dvL2dlbmVyYXRlZC9jbHVzdGVyL3YxO2NsdXN0ZXJ2MWIGcHJvdG8z");
 
 /**
  * AppendEntries RPC request.
@@ -133,6 +133,46 @@ export const InstallSnapshotResponseSchema: GenMessage<InstallSnapshotResponse> 
   messageDesc(file_hearth_cluster_v1_raft, 5);
 
 /**
+ * ForwardWrite RPC request.
+ * Payload is serde_json-encoded hearth::cluster::RaftCommand.
+ *
+ * @generated from message hearth.cluster.v1.ForwardWriteRequest
+ */
+export type ForwardWriteRequest = Message<"hearth.cluster.v1.ForwardWriteRequest"> & {
+  /**
+   * @generated from field: bytes payload = 1;
+   */
+  payload: Uint8Array;
+};
+
+/**
+ * Describes the message hearth.cluster.v1.ForwardWriteRequest.
+ * Use `create(ForwardWriteRequestSchema)` to create a new message.
+ */
+export const ForwardWriteRequestSchema: GenMessage<ForwardWriteRequest> = /*@__PURE__*/
+  messageDesc(file_hearth_cluster_v1_raft, 6);
+
+/**
+ * ForwardWrite RPC response.
+ * Payload is serde_json-encoded hearth::cluster::ForwardedWriteOutcome.
+ *
+ * @generated from message hearth.cluster.v1.ForwardWriteResponse
+ */
+export type ForwardWriteResponse = Message<"hearth.cluster.v1.ForwardWriteResponse"> & {
+  /**
+   * @generated from field: bytes payload = 1;
+   */
+  payload: Uint8Array;
+};
+
+/**
+ * Describes the message hearth.cluster.v1.ForwardWriteResponse.
+ * Use `create(ForwardWriteResponseSchema)` to create a new message.
+ */
+export const ForwardWriteResponseSchema: GenMessage<ForwardWriteResponse> = /*@__PURE__*/
+  messageDesc(file_hearth_cluster_v1_raft, 7);
+
+/**
  * Raft consensus peer-to-peer RPC service.
  *
  * All messages carry opaque JSON-encoded payloads to decouple the transport
@@ -177,6 +217,20 @@ export const RaftService: GenService<{
     methodKind: "unary";
     input: typeof InstallSnapshotRequestSchema;
     output: typeof InstallSnapshotResponseSchema;
+  },
+  /**
+   * A follower forwards one application write to the leader, which proposes
+   * it and answers once it has committed and applied it (or refuses it
+   * without proposing). The follower then waits for its own state machine to
+   * apply the returned log index, so the caller reads its own write.
+   * Authenticated by the peer mTLS handshake like every other RPC here.
+   *
+   * @generated from rpc hearth.cluster.v1.RaftService.ForwardWrite
+   */
+  forwardWrite: {
+    methodKind: "unary";
+    input: typeof ForwardWriteRequestSchema;
+    output: typeof ForwardWriteResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_hearth_cluster_v1_raft, 0);
