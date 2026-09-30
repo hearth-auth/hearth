@@ -26,7 +26,23 @@ include those it holds only through an organization-scoped role or grant. The ru
   `DELETE /admin/groups/{id}`, gRPC `UnassignUserRole`, `UnassignGroupRole`,
   `RevokeUserPermission`, `RemoveAdditionalRole`, `RemoveGroupMember`, `DeleteGroup`;
 - sign-out and consents: `DELETE /admin/sessions/{id}`, `POST /admin/sessions/{id}/sv-bump`,
-  `DELETE /admin/users/{id}/consents/{client_id}`, gRPC `RevokeConsent`.
+  `DELETE /admin/users/{id}/consents/{client_id}`, gRPC `RevokeConsent`;
+- organizations: gRPC `DeleteOrganization` and SCIM `DELETE /scim/v2/Groups/{id}` (every member
+  of the organization), and SCIM `PUT`/`PATCH /scim/v2/Groups/{id}` (every member the change
+  removes). Leaving an organization strips the admin permissions a user holds only in it;
+- role definitions: `PATCH /admin/roles/{id}`, `DELETE /admin/roles/{id}`, gRPC `UpdateRole` /
+  `DeleteRole`, when the change removes an admin permission from the role's effective set — by
+  replacing its permissions or parents, by deleting it, or by renaming it (an extra organization
+  role is stored by name). Every holder is checked: users assigned the role or a role that
+  inherits from it, members of groups assigned one, and users holding one as an extra
+  organization role. An edit that removes no admin permission is not checked.
+
+A check that affects many users visits at most 10 000 of them (and at most 50 000 permission
+resolutions, one per user plus one per organization it belongs to); past that bound the call is
+refused with `503` rather than half-checked, so a sub-admin cannot delete a larger organization or
+strip an admin permission from a role with more holders — `hearth.admin` skips the walk. The web
+console admits only `hearth.admin`, so the rule holds there by construction. `hearth.yaml`
+reconciliation (`roles:`) is operator-authoritative and is not subject to it.
 
 ### List users
 

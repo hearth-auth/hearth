@@ -560,7 +560,9 @@ impl BackupExporter {
         // revoked AAT JTIs. A sessionless token (`client_credentials`, an
         // agent's) verifies against the restored signing key, so without these
         // a token revoked before the backup validates again after a restore
-        // (audit GA 2026-09-28 M3). Expired JTIs are omitted.
+        // (audit GA 2026-09-28 M3). Expired JTIs are omitted. Each user's
+        // required-action generation travels here too: a restore that reset it
+        // to 0 revived RA tokens a revocation had ended (GA sweep 4).
         let revocations = self
             .identity
             .export_revocations(realm_id)

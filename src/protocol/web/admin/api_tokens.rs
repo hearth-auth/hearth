@@ -241,8 +241,8 @@ async fn check_step_up(
             }
             return Err(resp);
         }
-        Err(StepUpError::Locked) => {
-            return Err(form_page(
+        Err(StepUpError::Locked { retry_after }) => {
+            let mut resp = form_page(
                 state,
                 session,
                 StatusCode::TOO_MANY_REQUESTS,
@@ -252,7 +252,9 @@ async fn check_step_up(
                         .to_string(),
                 ),
                 ttl,
-            ));
+            );
+            crate::protocol::step_up::set_retry_after(&mut resp, retry_after);
+            return Err(resp);
         }
         Err(StepUpError::SecondFactorNotEnrolled) => {
             "Your account has no second factor. Enrol an authenticator app or a passkey on \

@@ -213,6 +213,17 @@ pub enum RevocationExport {
         /// The revoked AAT's `jti`.
         jti: String,
     },
+    /// A user's required-action generation: the counter every revocation of
+    /// the user's sessions bumps. A required-action token minted under an
+    /// older generation is refused, so the counter must travel with the
+    /// archive: a restore that reset it to 0 revived every such token minted
+    /// before the user's first revocation (GA sweep 4).
+    RaGeneration {
+        /// The user's UUID.
+        user_id: String,
+        /// The user's generation at export time.
+        generation: u64,
+    },
 }
 
 /// One persisted consent record plus the exact storage key it was read from,

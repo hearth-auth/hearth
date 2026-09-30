@@ -145,6 +145,24 @@ impl IntoResponse for ScimError {
     }
 }
 
+/// Maps an admin privilege-ceiling refusal onto a SCIM error: `403` with
+/// `refusal` when an affected user out-ranks the caller, `503` when the
+/// ceiling could not be resolved.
+pub fn from_ceiling_error(
+    err: crate::protocol::admin_auth::UserCeilingError,
+    refusal: &str,
+) -> ScimError {
+    match err {
+        crate::protocol::admin_auth::UserCeilingError::Exceeded => {
+            ScimError::forbidden(refusal.to_string())
+        }
+        crate::protocol::admin_auth::UserCeilingError::Unresolved => ScimError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "could not determine whether the target is an admin principal; retry later",
+        ),
+    }
+}
+
 /// Maps a domain `IdentityError` to the closest SCIM error. Callers on
 /// the SCIM edge should use this instead of the generic HTTP mapping so
 /// the error envelope stays SCIM-shaped.

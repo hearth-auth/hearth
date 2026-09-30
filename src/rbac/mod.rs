@@ -211,6 +211,21 @@ pub trait RbacEngine: Send + Sync {
         user_id: &UserId,
     ) -> Result<Vec<String>, RbacError>;
 
+    /// Lists the users who hold the role named `role_name` as an extra
+    /// org-scoped role, in any organization of the realm, without duplicates.
+    ///
+    /// Returns at most `limit` users: a caller that must see every holder
+    /// passes one more than its bound and treats a full result as "over the
+    /// bound". Extra roles are stored by name, so renaming or deleting the
+    /// role strips it from these users; the admin privilege ceiling on role
+    /// edits reads this list (GA sweep 4).
+    fn list_additional_role_holders(
+        &self,
+        realm_id: &RealmId,
+        role_name: &str,
+        limit: usize,
+    ) -> Result<Vec<UserId>, RbacError>;
+
     /// Deletes every extra org-scoped role row for one user in one
     /// organization, returning how many rows were removed.
     ///

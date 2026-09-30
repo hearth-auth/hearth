@@ -15,6 +15,7 @@ use tonic::{Code, Request, Response, Status};
 use crate::core::{OrganizationId, RealmId, UserId};
 use crate::protocol::admin_auth::{
     check_assignment_admin_ceiling, check_group_admin_ceiling, check_member_admin_ceiling,
+    check_role_change_admin_ceiling, RoleChange,
 };
 use crate::protocol::grpc::auth::{
     ceiling_status, grpc_require_permission, grpc_require_user_ceiling, AdminAuth,
@@ -467,22 +468,30 @@ impl RbacAdminService for RbacAdminSvc {
         let permissions = Some(parsed_permissions);
         let parent_roles = Some(parsed_parents);
         let is_full_admin = auth.permissions.iter().any(|p| p == "hearth.admin");
+        let update = UpdateRoleRequest {
+            name,
+            description,
+            permissions,
+            parent_roles,
+            scope_kind: None,
+            status: None,
+            allow_reserved_permissions: is_full_admin,
+        };
+        // Removing an admin permission from the role demotes its holders
+        // (GA sweep 4).
+        check_role_change_admin_ceiling(
+            self.state.identity.as_ref(),
+            self.state.rbac.as_ref(),
+            &realm_id,
+            &role_id,
+            RoleChange::Update(&update),
+            &auth.permissions,
+        )
+        .map_err(ceiling_status)?;
         let updated = self
             .state
             .rbac
-            .update_role(
-                &realm_id,
-                &role_id,
-                &UpdateRoleRequest {
-                    name,
-                    description,
-                    permissions,
-                    parent_roles,
-                    scope_kind: None,
-                    status: None,
-                    allow_reserved_permissions: is_full_admin,
-                },
-            )
+            .update_role(&realm_id, &role_id, &update)
             .map_err(rbac_to_status)?;
         Ok(Response::new(role_to_proto(&updated)))
     }
@@ -498,6 +507,15 @@ impl RbacAdminService for RbacAdminSvc {
         reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let role_id = parse_role_id(&inner.role_id)?;
+        check_role_change_admin_ceiling(
+            self.state.identity.as_ref(),
+            self.state.rbac.as_ref(),
+            &realm_id,
+            &role_id,
+            RoleChange::Delete,
+            &auth.permissions,
+        )
+        .map_err(ceiling_status)?;
         self.state
             .rbac
             .delete_role(&realm_id, &role_id)
