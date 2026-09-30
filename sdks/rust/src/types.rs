@@ -285,7 +285,15 @@ pub struct OAuthClient {
     pub redirect_uris: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust_level: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The generated secret (wire key `client_secret`): present only on the
+    /// response that created a `client_secret_basic` / `client_secret_post`
+    /// client or regenerated its secret, never again. Store it on receipt.
+    #[serde(
+        default,
+        rename = "client_secret",
+        alias = "secret",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub secret: Option<String>,
     /// How access-token authorization data is delivered for tokens issued by this client.
     #[serde(default)]
@@ -309,6 +317,12 @@ pub struct RegisterClientRequest {
         serialize_with = "proto_wire::trust_level"
     )]
     pub trust_level: Option<String>,
+    /// RFC 7591 §2: `client_secret_basic` / `client_secret_post` make the
+    /// server generate the secret and return it once
+    /// ([`OAuthClient::secret`]); `private_key_jwt` or `none`. `None`
+    /// registers a public client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_endpoint_auth_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,6 +426,12 @@ pub struct CreateClientRequest {
     pub trust_level: Option<String>,
     #[serde(default, serialize_with = "proto_wire::access_token_authorization")]
     pub access_token_authorization: AccessTokenAuthorization,
+    /// RFC 7591 §2: `client_secret_basic` / `client_secret_post` make the
+    /// server generate the secret and return it once
+    /// ([`OAuthClient::secret`]); `private_key_jwt` or `none`. `None`
+    /// registers a public client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_endpoint_auth_method: Option<String>,
 }
 
 /// Body of `PATCH /admin/applications/{id}`.

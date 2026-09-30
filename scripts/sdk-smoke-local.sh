@@ -95,6 +95,11 @@ echo "    client_id=${HEARTH_CLIENT_ID}"
 
 # ── 5. TypeScript / Next.js smoke ────────────────────────────────────────────
 echo "==> SDK smoke — typescript-nextjs"
+# The example depends on the local SDK (`file:../../sdks/typescript`), whose
+# package entry points are the compiled `dist/`, which is not committed. Build
+# it here so the smoke passes from a clean checkout.
+echo "    Building the TypeScript SDK (sdks/typescript)"
+( cd "$REPO_ROOT/sdks/typescript" && npm ci --prefer-offline && npm run build )
 cd "$REPO_ROOT/examples/typescript-nextjs"
 npm ci --prefer-offline
 

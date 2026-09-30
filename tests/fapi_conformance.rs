@@ -68,20 +68,6 @@ async fn setup_with_profile(profile: FapiProfile) -> Env {
         .expect("create realm");
     let realm = realm_rec.id().clone();
 
-    // Apply FAPI profile to the realm config.
-    let mut config = realm_rec.config().clone();
-    config.fapi_profile = Some(profile);
-    harness
-        .identity()
-        .update_realm(
-            &realm,
-            &UpdateRealmRequest {
-                config: Some(config),
-                ..Default::default()
-            },
-        )
-        .expect("update realm config");
-
     let client = harness
         .identity()
         .register_client(
@@ -96,6 +82,21 @@ async fn setup_with_profile(profile: FapiProfile) -> Env {
             },
         )
         .expect("register client");
+
+    // Apply the FAPI profile AFTER the base client exists: an Advanced realm
+    // refuses to register a secret-based client (private_key_jwt only).
+    let mut config = realm_rec.config().clone();
+    config.fapi_profile = Some(profile);
+    harness
+        .identity()
+        .update_realm(
+            &realm,
+            &UpdateRealmRequest {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .expect("update realm config");
 
     let user_id = harness
         .identity()
@@ -711,7 +712,7 @@ async fn fapi_a07_realm_advanced_enforces_dpop_for_standard_profile_client() {
     let jwks = jwks_json(&pub_bytes);
 
     // Register a client with profile=Standard (not Fapi2) but fully Advanced-capable
-    // (JWKS + JARM + client_secret so it can authenticate at token exchange).
+    // (JWKS + JARM; the JWKS is its credential).
     let client = env
         .harness
         .identity()
@@ -720,7 +721,8 @@ async fn fapi_a07_realm_advanced_enforces_dpop_for_standard_profile_client() {
             &RegisterClientRequest {
                 client_name: "FAPI-A-07 Standard-profile client".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
-                client_secret: Some("a07-secret".to_string()),
+                // No secret: an Advanced realm refuses to register one
+                // (private_key_jwt only); the JWKS is the client's credential.
                 grant_types: vec!["authorization_code".to_string()],
                 require_consent: false,
                 jwks: Some(jwks),
@@ -778,8 +780,16 @@ async fn fapi_a07_realm_advanced_enforces_dpop_for_standard_profile_client() {
         redirect_uri: REDIRECT_URI.to_string(),
         code_verifier: Some(PKCE_VERIFIER.to_string()),
         dpop_jkt: None, // deliberately absent to trigger the realm-level gate
-        client_assertion_type: None,
-        client_assertion: None,
+        // The client authenticates with private_key_jwt (its JWKS), as an
+        // Advanced realm requires, so only the missing DPoP proof is wrong.
+        client_assertion_type: Some(
+            "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string(),
+        ),
+        client_assertion: Some(sign_client_assertion(
+            &pkcs8,
+            &client.client_id().as_uuid().to_string(),
+            &issuer,
+        )),
     };
 
     let err = env
@@ -1767,4 +1777,57 @@ async fn fapi_a09_http_direct_authorize_without_par_rejected() {
         Some("invalid_request"),
         "FAPI violation must produce error=invalid_request, got: {body}"
     );
+}
+
+/// FAPI-A-08: an Advanced realm accepts `private_key_jwt` only, and the token
+/// endpoint refuses every client secret there — so registering a
+/// secret-based client (caller-chosen or Hearth-generated) is refused up
+/// front, naming the required method. A JWKS client registers.
+#[tokio::test]
+async fn fapi_a08_advanced_realm_refuses_secret_client_registration() {
+    let env = setup_with_profile(FapiProfile::Advanced).await;
+    let base = || RegisterClientRequest {
+        client_name: "FAPI-A-08 client".to_string(),
+        redirect_uris: vec![REDIRECT_URI.to_string()],
+        grant_types: vec!["authorization_code".to_string()],
+        require_consent: false,
+        ..Default::default()
+    };
+    for (what, req) in [
+        (
+            "caller-chosen secret",
+            RegisterClientRequest {
+                client_secret: Some("a08-secret".to_string()),
+                ..base()
+            },
+        ),
+        (
+            "generated secret",
+            RegisterClientRequest {
+                generated_client_secret: Some(hearth::identity::GeneratedClientSecret::generate()),
+                ..base()
+            },
+        ),
+    ] {
+        let err = env
+            .harness
+            .identity()
+            .register_client(&env.realm, &req)
+            .expect_err(what);
+        assert!(
+            matches!(&err, IdentityError::FapiViolation { reason } if reason.contains("private_key_jwt")),
+            "{what}: {err:?}"
+        );
+    }
+    let (_, pub_bytes) = generate_ed25519();
+    env.harness
+        .identity()
+        .register_client(
+            &env.realm,
+            &RegisterClientRequest {
+                jwks: Some(jwks_json(&pub_bytes)),
+                ..base()
+            },
+        )
+        .expect("a JWKS client registers in an Advanced realm");
 }

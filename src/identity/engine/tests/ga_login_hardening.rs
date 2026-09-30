@@ -159,6 +159,7 @@ fn the_unknown_account_arm_pays_the_realms_kdf_cost() {
         scope: None,
         client_ip: None,
         user_agent: None,
+        dpop_jkt: None,
     };
 
     // Warm both paths once (the realm dummy hash is computed lazily).

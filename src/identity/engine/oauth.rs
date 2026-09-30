@@ -186,6 +186,12 @@ impl EmbeddedIdentityEngine {
             }
             validation::validate_redirect_uri(uri)?;
         }
+        // A FAPI 2.0 Advanced realm accepts private_key_jwt only, and the
+        // token endpoint refuses every secret there: a secret-based client
+        // could never authenticate. Refused before the secret is hashed.
+        if request.client_secret.is_some() || request.generated_client_secret.is_some() {
+            self.refuse_secret_client_in_fapi_advanced_realm(realm_id)?;
+        }
 
         let client_id = ClientId::generate();
         let now = self.clock.now();
@@ -993,7 +999,7 @@ impl EmbeddedIdentityEngine {
         // clients registered without `profile: fapi2` cannot bypass the realm gate.
         // Use `.is_some()` (not a variant match) so both Baseline and Advanced are
         // covered — FAPI 2.0 Baseline §5.3.3 requires sender-constrained tokens too.
-        self.require_fapi_sender_constraint(realm_id, &client, request.dpop_jkt.as_deref())?;
+        self.require_fapi_sender_constraint(realm_id, Some(&client), request.dpop_jkt.as_deref())?;
 
         let scope_value = stored_code.scope.trim().to_string();
         // Every permission-bearing scope of the grant narrows — the rule the
@@ -1523,6 +1529,11 @@ impl EmbeddedIdentityEngine {
             });
         }
 
+        // 3b. FAPI 2.0: in a realm with a `fapi_profile` this clientless grant
+        //     issues sender-constrained tokens only, as every other grant does.
+        //     Checked after both factors, like 3a.
+        self.require_fapi_sender_constraint(realm_id, None, request.dpop_jkt.as_deref())?;
+
         // 4. Create session and issue token pair. Step 3 verified a TOTP or a
         //    recovery code, so this ceremony proved a second factor. The
         //    client address feeds the realm's `cidr_policy` (GA audit M13).
@@ -1536,7 +1547,17 @@ impl EmbeddedIdentityEngine {
                 ..Default::default()
             },
         )?;
-        let token_pair = self.issue_tokens(realm_id, user.id(), session.id())?;
+        // RFC 9449: a proof binds the access token, the refresh token and the
+        // grant family to its key.
+        let token_pair = self.issue_tokens_with_context(
+            realm_id,
+            user.id(),
+            session.id(),
+            &super::TokenIssuanceContext {
+                dpop_jkt: request.dpop_jkt.clone(),
+                ..Default::default()
+            },
+        )?;
 
         // 5. Record device fingerprint — this device is now trusted.
         if let (Some(ip), Some(ua)) = (&request.client_ip, &request.user_agent) {
@@ -1563,7 +1584,12 @@ impl EmbeddedIdentityEngine {
         Ok(crate::identity::oidc::PasswordGrantResponse {
             access_token: token_pair.access_token().to_string(),
             refresh_token: token_pair.refresh_token().to_string(),
-            token_type: "Bearer".to_string(),
+            token_type: if request.dpop_jkt.is_some() {
+                "DPoP"
+            } else {
+                "Bearer"
+            }
+            .to_string(),
             expires_in: self.config.token.access_token_ttl_secs,
         })
     }
@@ -1648,7 +1674,7 @@ impl EmbeddedIdentityEngine {
         self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
 
         // 3b. FAPI enforcement: realm-level AND per-client profile both gate DPoP (A-38).
-        self.require_fapi_sender_constraint(realm_id, &client, request.dpop_jkt.as_deref())?;
+        self.require_fapi_sender_constraint(realm_id, Some(&client), request.dpop_jkt.as_deref())?;
 
         // 4. Issue access token (no session, no refresh token per RFC 6749 §4.4.3)
         let now = self.clock.now();
@@ -1801,7 +1827,7 @@ impl EmbeddedIdentityEngine {
         // 5b. FAPI 2.0: sender-constrained tokens, as on every other grant
         //     (GA audit 3 B-6). Before the jti is consumed, so a client that
         //     omitted the proof can retry with the same assertion.
-        self.require_fapi_sender_constraint(realm_id, &client, request.dpop_jkt.as_deref())?;
+        self.require_fapi_sender_constraint(realm_id, Some(&client), request.dpop_jkt.as_deref())?;
 
         // 6. jti is mandatory — without it any intercepted assertion is replayable
         // for its full validity window.
@@ -2646,7 +2672,7 @@ impl EmbeddedIdentityEngine {
                 // this grant as on the code and refresh grants (GA audit 3
                 // B-6). Checked BEFORE the code is consumed, so a device that
                 // polled without a proof can retry with one.
-                self.require_fapi_sender_constraint(realm_id, &polling_client, dpop_jkt)?;
+                self.require_fapi_sender_constraint(realm_id, Some(&polling_client), dpop_jkt)?;
 
                 // Consume as the FIRST write, exactly as the authorization-code
                 // exchange does, and still under the lock — a second concurrent
@@ -4006,6 +4032,30 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
+    /// Refuses to create a secret-based client — or to mint a new secret for
+    /// one — in a FAPI 2.0 Advanced realm, where the token endpoint accepts
+    /// `private_key_jwt` only ([`Self::refuse_secrets_in_fapi_advanced_realm`]).
+    ///
+    /// # Errors
+    /// [`IdentityError::FapiViolation`] naming the required method.
+    fn refuse_secret_client_in_fapi_advanced_realm(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<(), IdentityError> {
+        if self
+            .refuse_secrets_in_fapi_advanced_realm(realm_id)
+            .is_err()
+        {
+            return Err(IdentityError::FapiViolation {
+                reason: "this realm uses the FAPI 2.0 Advanced profile: clients authenticate \
+                         with private_key_jwt only, so a client secret could never \
+                         authenticate; register the client's public keys in jwks instead"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Refuses a FAPI 2.0 client that authenticated with a secret (it may hold
     /// none — registration refuses one — but a secret set by any other route
     /// must not authenticate it). Called only AFTER the secret verified, so
@@ -4174,11 +4224,13 @@ impl EmbeddedIdentityEngine {
 
     /// FAPI 2.0 sender-constraint gate for the token endpoint.
     ///
-    /// A FAPI 2.0 client, or any client of a realm with a `fapi_profile`
+    /// A FAPI 2.0 client, or anyone in a realm with a `fapi_profile`
     /// (Baseline or Advanced — FAPI 2.0 Security Profile §5.3.3 requires
     /// sender-constrained tokens in both), obtains tokens only against a DPoP
-    /// proof. Every grant that mints tokens for a client calls this, so a new
-    /// grant cannot forget the rule (GA audit 3 B-6: the device grant did).
+    /// proof. Every grant that mints tokens calls this, so a new grant cannot
+    /// forget the rule (GA audit 3 B-6: the device grant did; the step-up-MFA
+    /// grant did too). `client` is `None` for a clientless grant, which only
+    /// the realm profile governs.
     ///
     /// # Errors
     /// [`IdentityError::FapiViolation`] when FAPI applies and `dpop_jkt` is
@@ -4186,7 +4238,7 @@ impl EmbeddedIdentityEngine {
     pub(super) fn require_fapi_sender_constraint(
         &self,
         realm_id: &RealmId,
-        client: &OAuthClient,
+        client: Option<&OAuthClient>,
         dpop_jkt: Option<&str>,
     ) -> Result<(), IdentityError> {
         if dpop_jkt.is_some() {
@@ -4197,7 +4249,7 @@ impl EmbeddedIdentityEngine {
             .ok_or(IdentityError::RealmNotFound)?
             .config()
             .fapi_profile;
-        if client.profile().is_fapi2() || realm_fapi.is_some() {
+        if client.is_some_and(|c| c.profile().is_fapi2()) || realm_fapi.is_some() {
             return Err(IdentityError::FapiViolation {
                 reason: "FAPI 2.0 requires sender-constrained tokens; \
                          include a DPoP proof and dpop_jkt in the token request"
@@ -4725,6 +4777,7 @@ impl EmbeddedIdentityEngine {
                 reason: "cannot regenerate secret for a public client".to_string(),
             });
         }
+        self.refuse_secret_client_in_fapi_advanced_realm(realm_id)?;
 
         // A fresh 256-bit CSPRNG secret, stored in the fast format — rotation
         // is also how a client with a legacy Argon2id hash moves onto it.
