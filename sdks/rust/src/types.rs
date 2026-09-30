@@ -583,8 +583,7 @@ impl StepUpProof {
             Self::Assertion(assertion) => {
                 object.insert(
                     "assertion".to_string(),
-                    serde_json::to_value(assertion.as_ref())
-                        .unwrap_or(serde_json::Value::Null),
+                    serde_json::to_value(assertion.as_ref()).unwrap_or(serde_json::Value::Null),
                 );
             }
         }

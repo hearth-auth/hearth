@@ -118,10 +118,7 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 impl<S, ReqBody, ResBody> Service<http::Request<ReqBody>> for RequirePermissionService<S>
 where
-    S: Service<http::Request<ReqBody>, Response = http::Response<ResBody>>
-        + Clone
-        + Send
-        + 'static,
+    S: Service<http::Request<ReqBody>, Response = http::Response<ResBody>> + Clone + Send + 'static,
     S::Future: Send + 'static,
     S::Error: Into<Box<dyn std::error::Error + Send + Sync>> + Send,
     ReqBody: Send + 'static,
@@ -206,8 +203,7 @@ mod tests {
     /// Build a minimal unsigned JWT with the given payload JSON.
     fn fake_jwt(payload: &serde_json::Value) -> String {
         let header = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
-        let body =
-            URL_SAFE_NO_PAD.encode(serde_json::to_string(payload).unwrap().as_bytes());
+        let body = URL_SAFE_NO_PAD.encode(serde_json::to_string(payload).unwrap().as_bytes());
         format!("{header}.{body}.")
     }
 
