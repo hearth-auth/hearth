@@ -750,6 +750,16 @@ Callers holding `hearth.admin` bypass this check — `hearth.admin` implicitly c
 - gRPC `GrantUserPermission` — granted permission must be held by caller
 - gRPC `AddAdditionalRole` — role permissions must be ⊆ caller's permissions
 
+#### Demotion ceiling (GA audit rounds 3–4)
+
+The reverse direction is covered too: a sub-admin MUST NOT demote, modify or sign out a user who holds an admin-grade permission (`hearth.admin`, `hearth.users.admin`, `hearth.clients.admin`, `hearth.realm.admin`, `hearth.agents.admin`) the sub-admin lacks, counting permissions held at realm level and in each of the user's organizations. The rule is `protocol::admin_auth::check_user_admin_ceiling`; operations that affect several users apply it to each (`check_group_admin_ceiling`, `check_users_admin_ceiling`, `check_org_admin_ceiling`, `check_role_change_admin_ceiling`):
+
+- role unassignment, permission revocation, extra-role removal, group-member removal and group deletion;
+- organization member removal (SCIM `PUT`/`PATCH /Groups`) and organization deletion (gRPC `DeleteOrganization`, SCIM `DELETE /Groups`) — every affected member;
+- role update or deletion (`PATCH`/`DELETE /admin/roles/{id}`, gRPC `UpdateRole`/`DeleteRole`) that removes an admin permission from the role's transitive set, including a rename (extra org roles are stored by name) — every holder of the role or of a role inheriting from it, directly, through a group, or as an extra org role.
+
+A multi-user check visits at most 10 000 users and 50 000 permission resolutions and fails closed (`503` / `UNAVAILABLE`) past that. `hearth.admin` bypasses it. The console admits only `hearth.admin`; `hearth.yaml` reconciliation is operator-authoritative and exempt.
+
 ### 8.3 Error envelope
 
 All endpoints return errors in the shared envelope:
