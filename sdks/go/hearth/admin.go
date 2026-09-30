@@ -11,7 +11,7 @@ import (
 // AdminClient provides access to the Hearth admin API.
 type AdminClient struct {
 	baseURL     string
-	realmID    string
+	realmID     string
 	accessToken string
 	http        *http.Client
 }

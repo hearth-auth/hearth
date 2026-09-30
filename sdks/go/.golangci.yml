@@ -1,0 +1,18 @@
+# golangci-lint v2 configuration for the Go SDK. CI pins the binary version
+# (.github/workflows/ci.yml, sdk-go job); run the same version locally:
+#   golangci-lint run ./...
+version: "2"
+
+linters:
+  # errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  exclusions:
+    # golangci-lint's documented preset for the standard library's
+    # conventionally-ignored errors: `defer resp.Body.Close()`, fmt.Print*,
+    # os.Setenv and friends. Every other unchecked error is still reported.
+    presets:
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt

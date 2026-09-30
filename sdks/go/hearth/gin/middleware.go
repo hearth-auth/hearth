@@ -25,8 +25,8 @@ package hearthgin
 import (
 	"net/http"
 
-	hearth "github.com/hearth-auth/hearth/sdks/go/hearth"
 	"github.com/gin-gonic/gin"
+	hearth "github.com/hearth-auth/hearth/sdks/go/hearth"
 )
 
 const (
