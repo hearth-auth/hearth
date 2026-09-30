@@ -52,7 +52,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.0.0",
-    "@vitest/coverage-v8": "^4.1.9",
+    "@vitest/coverage-v8": "^5.0.2",
     "eslint": "^10.11.0",
     "prettier": "3.9.9",
     "typescript": "^5.5.0",
