@@ -45,7 +45,7 @@ fn default_feature_set_parser_reads_the_list() {
     let manifest = "[package]\nname = \"x\"\n\n[features]\ndefault = [\"a\", \"b\"]\nb = []\n";
     assert_eq!(default_features(manifest), vec!["a", "b"]);
     let empty = "[features]\ndefault = []\n";
-    assert!(default_features(empty).is_empty());
+    assert_eq!(default_features(empty), [] as [std::string::String; 0]);
 }
 
 #[test]

@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn page_default_is_empty_no_cursor() {
         let p: Page<u32> = Page::default();
-        assert!(p.items.is_empty());
+        assert_eq!(p.items, [] as [u32; 0]);
         assert!(p.next_cursor.is_none());
     }
 

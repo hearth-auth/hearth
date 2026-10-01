@@ -5020,10 +5020,12 @@ mod tests {
             "expected InvalidRange, got: {err:?}"
         );
 
-        assert!(engine
-            .scan(&realm, b"usr:a", b"usr:a")
-            .expect("equal bounds are legal")
-            .is_empty());
+        assert_eq!(
+            engine
+                .scan(&realm, b"usr:a", b"usr:a")
+                .expect("equal bounds are legal"),
+            [] as [crate::storage::ScanEntry; 0]
+        );
     }
 
     // ===== scan_keys tests (HEA-1622) =====
@@ -5078,7 +5080,7 @@ mod tests {
         engine.put(&realm, b"usr:x", b"v").expect("put");
         // Empty start==end means no range → empty
         let keys = engine.scan_keys(&realm, b"", b"").expect("scan_keys");
-        assert!(keys.is_empty());
+        assert_eq!(keys, [] as [std::vec::Vec<u8>; 0]);
     }
 
     // ===== count_prefix / scan_prefix_paged tests (HEA-1616) =====
@@ -5200,7 +5202,7 @@ mod tests {
             .scan_prefix_paged(&realm, b"usr:", 0, 10, 10_000)
             .expect("paged scan on empty store");
         assert_eq!(total, 0);
-        assert!(window.is_empty());
+        assert_eq!(window, [] as [crate::storage::ScanEntry; 0]);
     }
 
     #[test]

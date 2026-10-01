@@ -116,7 +116,7 @@ fn client_credentials_refuses_a_malformed_assertion_beside_a_valid_secret() {
     let issued = engine
         .client_credentials_token(&realm, &request(None, None))
         .expect("the secret alone must authenticate");
-    assert!(!issued.access_token().is_empty());
+    assert_ne!(issued.access_token(), "");
     for (assertion_type, assertion) in MALFORMED {
         let outcome = engine.client_credentials_token(&realm, &request(assertion_type, assertion));
         assert!(

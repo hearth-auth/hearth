@@ -80,7 +80,7 @@ async fn create_approval_request_returns_pending() {
     assert_eq!(result.status, ApprovalRequestStatus::Pending);
     assert_eq!(result.tool, "delete_file");
     assert_eq!(result.action, "invoke");
-    assert!(!result.request_id.is_empty());
+    assert_ne!(result.request_id, "");
 }
 
 #[tokio::test]
@@ -141,7 +141,7 @@ async fn approve_request_issues_capability_token() {
     let cap = response
         .capability_token
         .expect("capability token should be present");
-    assert!(!cap.token.is_empty());
+    assert_ne!(cap.token, "");
     // Default TTL is 5 minutes (300 seconds)
     assert!(cap.expires_in_secs <= 300);
     assert!(cap.expires_in_secs > 0);

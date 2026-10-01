@@ -2363,10 +2363,12 @@ mod tests {
         assert!(reader.overlaps_range(&realm, b"key5", b"key9"));
 
         // Disjoint scan returns no rows; overlapping scan returns them.
-        assert!(reader
-            .range_scan(&realm, b"key7", b"key9")
-            .expect("range_scan")
-            .is_empty());
+        assert_eq!(
+            reader
+                .range_scan(&realm, b"key7", b"key9")
+                .expect("range_scan"),
+            [] as [(std::vec::Vec<u8>, crate::storage::memtable::MemtableValue); 0]
+        );
         assert_eq!(
             reader
                 .range_scan(&realm, b"key0", b"zzz")
@@ -2390,7 +2392,13 @@ mod tests {
 
         let reader = SstReader::open(&sst_path, 1, &dek).expect("open");
         assert_eq!(reader.entry_count(), 0);
-        assert!(reader.iter_all().expect("iter_all").is_empty());
+        assert_eq!(
+            reader.iter_all().expect("iter_all"),
+            [] as [(
+                crate::storage::memtable::CompositeKey,
+                crate::storage::memtable::MemtableValue
+            ); 0]
+        );
     }
 
     #[test]
@@ -2509,7 +2517,10 @@ mod tests {
         assert_eq!(b_entries[0].0, b"b-key1".to_vec());
 
         let ghost = RealmId::generate();
-        assert!(reader.iter_realm(&ghost).expect("iter_realm").is_empty());
+        assert_eq!(
+            reader.iter_realm(&ghost).expect("iter_realm"),
+            [] as [(std::vec::Vec<u8>, crate::storage::memtable::MemtableValue); 0]
+        );
     }
 
     #[test]
@@ -2538,7 +2549,13 @@ mod tests {
 
         assert_eq!(metadata.entry_count, 0);
         let compacted = SstReader::open(&output_path, 2, &dek_out).expect("open compacted");
-        assert!(compacted.iter_all().expect("iter_all").is_empty());
+        assert_eq!(
+            compacted.iter_all().expect("iter_all"),
+            [] as [(
+                crate::storage::memtable::CompositeKey,
+                crate::storage::memtable::MemtableValue
+            ); 0]
+        );
     }
 
     // === Bloom filter tests (TDD for HEA-1626 Phase 2) ===
@@ -2612,7 +2629,7 @@ mod tests {
     #[test]
     fn bloom_filter_empty_entries_is_empty_and_permissive() {
         let filter = BloomFilter::build(&[]);
-        assert!(filter.bits.is_empty());
+        assert_eq!(filter.bits, [] as [u8; 0]);
         let realm = RealmId::generate();
         // Empty filter must never cause false negatives if entries were somehow
         // absent — it returns true for everything (permissive guard).
@@ -2799,10 +2816,10 @@ mod tests {
         assert_eq!(range[1].0, b"cherry".to_vec());
 
         let ghost = RealmId::generate();
-        assert!(reader
-            .range_scan(&ghost, b"a", b"z")
-            .expect("range")
-            .is_empty());
+        assert_eq!(
+            reader.range_scan(&ghost, b"a", b"z").expect("range"),
+            [] as [(std::vec::Vec<u8>, crate::storage::memtable::MemtableValue); 0]
+        );
         assert_eq!(reader.get(&ghost, b"apple").expect("get"), None);
 
         let realm_entries = reader.iter_realm(&realm).expect("iter_realm");
@@ -3243,10 +3260,12 @@ mod tests {
         );
 
         // An empty-but-ordered window is not reversed, and stays legal.
-        assert!(reader
-            .range_scan(&realm, b"k000050", b"k000050")
-            .expect("equal bounds are legal")
-            .is_empty());
+        assert_eq!(
+            reader
+                .range_scan(&realm, b"k000050", b"k000050")
+                .expect("equal bounds are legal"),
+            [] as [(std::vec::Vec<u8>, crate::storage::memtable::MemtableValue); 0]
+        );
     }
 
     #[test]

@@ -57,7 +57,7 @@ async fn list_users_empty_returns_zero_total() {
 
     let r = id.list_users(&rid, &PageRequest::default()).expect("list");
     assert_eq!(r.total, 0, "empty realm: total must be 0");
-    assert!(r.items.is_empty());
+    assert_eq!(r.items, [] as [hearth::identity::User; 0]);
 }
 
 #[tokio::test]
@@ -118,7 +118,7 @@ async fn list_users_beyond_last_page_returns_empty() {
         r.total, 3,
         "total must still be 3 even though window is empty"
     );
-    assert!(r.items.is_empty());
+    assert_eq!(r.items, [] as [hearth::identity::User; 0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +203,7 @@ async fn search_users_no_matches_returns_zero_total() {
         )
         .expect("no match");
     assert_eq!(r.total, 0);
-    assert!(r.items.is_empty());
+    assert_eq!(r.items, [] as [hearth::identity::User; 0]);
 }
 
 #[tokio::test]
@@ -223,7 +223,7 @@ async fn search_users_beyond_last_returns_empty_items_correct_total() {
         )
         .expect("beyond");
     assert_eq!(r.total, 3);
-    assert!(r.items.is_empty());
+    assert_eq!(r.items, [] as [hearth::identity::User; 0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +269,7 @@ async fn list_realms_beyond_last_returns_empty() {
         .list_realms(&PageRequest::new(total + 100, 10))
         .expect("beyond");
     assert_eq!(r.total, total);
-    assert!(r.items.is_empty());
+    assert_eq!(r.items, [] as [hearth::identity::Realm; 0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -313,7 +313,7 @@ async fn list_organizations_beyond_last_returns_empty() {
         .list_organizations(&rid, &PageRequest::new(100, 10))
         .expect("beyond");
     assert_eq!(r.total, 0);
-    assert!(r.items.is_empty());
+    assert_eq!(r.items, [] as [hearth::identity::Organization; 0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -363,5 +363,5 @@ async fn list_groups_empty_returns_zero_total() {
         .list_groups(&rid, &PageRequest::default())
         .expect("list");
     assert_eq!(r.total, 0);
-    assert!(r.items.is_empty());
+    assert_eq!(r.items, [] as [hearth::rbac::Group; 0]);
 }

@@ -2452,7 +2452,7 @@ mod tests {
         let wal_path = dir.path().join("test.wal");
         let wal = open_test_wal(&wal_path, WalConfig::default());
         let entries = wal.read_all().expect("read");
-        assert!(entries.is_empty());
+        assert_eq!(entries, [] as [crate::storage::wal::WalEntry; 0]);
     }
 
     #[test]

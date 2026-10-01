@@ -297,7 +297,7 @@ fn device_authorize_returns_valid_codes() {
         .expect("device_authorize should succeed");
 
     // Verify response
-    assert!(!response.device_code.is_empty());
+    assert_ne!(response.device_code, "");
     assert_eq!(response.user_code.len(), 8, "user code should be 8 chars");
     assert_eq!(response.interval, 5);
     assert!(response.expires_in > 0);
@@ -1436,10 +1436,10 @@ fn revoke_all_consents_drops_every_user_record() {
         .revoke_all_consents_for_user(&realm, &user)
         .expect("revoke all");
     assert_eq!(count, 2);
-    assert!(engine
-        .list_consents_by_user(&realm, &user)
-        .expect("list")
-        .is_empty());
+    assert_eq!(
+        engine.list_consents_by_user(&realm, &user).expect("list"),
+        [] as [hearth::identity::ConsentListEntry; 0]
+    );
 }
 
 #[test]

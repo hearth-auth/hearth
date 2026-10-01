@@ -329,7 +329,7 @@ async fn fapi_b03_valid_baseline_request_accepted() {
         .identity()
         .push_authorization_request(&env.realm, &par_req)
         .expect("PAR should succeed");
-    assert!(!par_resp.request_uri.is_empty());
+    assert_ne!(par_resp.request_uri, "");
 
     // Build the authorize request from the original PAR fields (via_par = true).
     let auth_req = auth_req_from_par(&par_req, env.user_id.clone());
@@ -770,7 +770,7 @@ async fn fapi_a07_realm_advanced_enforces_dpop_for_standard_profile_client() {
         .identity()
         .authorize(&env.realm, &auth_req)
         .expect("authorize should succeed");
-    assert!(!auth_resp.code().is_empty());
+    assert_ne!(auth_resp.code(), "");
 
     // Token exchange WITHOUT DPoP — realm Advanced gate must catch this even though
     // client.profile() == Standard (not Fapi2).
@@ -964,7 +964,7 @@ async fn fapi_b06_realm_baseline_enforces_dpop_for_standard_profile_client() {
         .identity()
         .authorize(&env.realm, &auth_req)
         .expect("authorize should succeed");
-    assert!(!auth_resp.code().is_empty());
+    assert_ne!(auth_resp.code(), "");
 
     // Token exchange WITHOUT DPoP — realm Baseline gate must catch this.
     let exchange_req = TokenExchangeRequest {

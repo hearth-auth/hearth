@@ -45,16 +45,16 @@ async fn assignment_in_realm_a_not_visible_in_realm_b() {
         .rbac()
         .resolve_permissions(&user, &realm_a, None, None)
         .expect("resolve A");
-    assert!(!in_a.permissions.is_empty());
+    assert_ne!(in_a.permissions, [] as [hearth::rbac::Permission; 0]);
 
     // Resolve in realm B: must see nothing.
     let in_b = h
         .rbac()
         .resolve_permissions(&user, &realm_b, None, None)
         .expect("resolve B");
-    assert!(in_b.permissions.is_empty());
-    assert!(in_b.roles.is_empty());
-    assert!(in_b.groups.is_empty());
+    assert_eq!(in_b.permissions, [] as [hearth::rbac::Permission; 0]);
+    assert_eq!(in_b.roles, [] as [std::string::String; 0]);
+    assert_eq!(in_b.groups, [] as [std::string::String; 0]);
 }
 
 #[tokio::test]

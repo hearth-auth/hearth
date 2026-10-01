@@ -107,7 +107,7 @@ async fn protected_resource_list_empty_initially() {
     let realm_id = make_realm(identity);
 
     let list = identity.list_protected_resources(&realm_id).expect("list");
-    assert!(list.is_empty());
+    assert_eq!(list, [] as [hearth::identity::ProtectedResource; 0]);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

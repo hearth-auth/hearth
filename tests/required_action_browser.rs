@@ -1320,7 +1320,10 @@ async fn a_passkey_realm_that_does_not_offer_passkeys_says_so() {
         html.contains("passkey"),
         "the page names what is required: {html}"
     );
-    assert!(auto_cleared_events(&rig).is_empty());
+    assert_eq!(
+        auto_cleared_events(&rig),
+        [] as [hearth::audit::AuditEvent; 0]
+    );
 }
 
 // ── ENROLL_EMAIL_OTP after a magic link (GA sweep 4 round 2) ────────────────

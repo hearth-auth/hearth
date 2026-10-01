@@ -373,11 +373,12 @@ async fn delete_idp_severs_all_links_but_leaves_users_intact() {
     assert!(h.identity().get_user(&realm, u1.id()).unwrap().is_some());
     assert!(h.identity().get_user(&realm, u2.id()).unwrap().is_some());
     // But no links remain.
-    assert!(h
-        .identity()
-        .list_external_identities_for_user(&realm, u1.id())
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        h.identity()
+            .list_external_identities_for_user(&realm, u1.id())
+            .unwrap(),
+        [] as [(hearth::core::IdpId, std::string::String); 0]
+    );
     assert!(h
         .identity()
         .find_user_by_external_identity(&realm, &idp, "sub-1")

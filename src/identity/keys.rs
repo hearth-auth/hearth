@@ -2921,7 +2921,7 @@ mod tests {
     #[test]
     fn prefix_end_empty() {
         let end = prefix_end(b"");
-        assert!(end.is_empty());
+        assert_eq!(end, [] as [u8; 0]);
     }
 
     #[test]

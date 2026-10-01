@@ -399,7 +399,7 @@ async fn scope_filtering_org_requires_matching_oid() {
         .rbac()
         .resolve_permissions(&user, &realm, None, None)
         .expect("resolve");
-    assert!(without_oid.permissions.is_empty());
+    assert_eq!(without_oid.permissions, [] as [hearth::rbac::Permission; 0]);
 
     // Matching oid — applies.
     let in_a = h
@@ -413,7 +413,7 @@ async fn scope_filtering_org_requires_matching_oid() {
         .rbac()
         .resolve_permissions(&user, &realm, Some(&org_b), None)
         .expect("resolve");
-    assert!(in_b.permissions.is_empty());
+    assert_eq!(in_b.permissions, [] as [hearth::rbac::Permission; 0]);
 }
 
 #[tokio::test]

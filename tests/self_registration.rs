@@ -182,7 +182,7 @@ async fn signup_duplicate_email_returns_generic_success() {
         .identity()
         .register_user(&realm, &default_request(&email))
         .expect("second register must not error");
-    assert!(!second.verification_token.is_empty());
+    assert_ne!(second.verification_token, "");
     // The real user's verification token MUST NOT be usable via the
     // duplicate-email response path (the fake token should fail verification).
     let verify_fake = harness

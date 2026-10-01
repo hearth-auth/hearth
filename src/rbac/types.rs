@@ -867,9 +867,9 @@ mod tests {
     #[test]
     fn resolved_permissions_default_is_empty() {
         let r = ResolvedPermissions::default();
-        assert!(r.roles.is_empty());
-        assert!(r.groups.is_empty());
-        assert!(r.permissions.is_empty());
+        assert_eq!(r.roles, [] as [std::string::String; 0]);
+        assert_eq!(r.groups, [] as [std::string::String; 0]);
+        assert_eq!(r.permissions, [] as [crate::rbac::types::Permission; 0]);
     }
 
     // ===== Page<T> =====
@@ -877,7 +877,7 @@ mod tests {
     #[test]
     fn page_default_is_empty() {
         let p: Page<Role> = Page::default();
-        assert!(p.items.is_empty());
+        assert_eq!(p.items, [] as [crate::rbac::types::Role; 0]);
         assert!(p.next_cursor.is_none());
     }
 }

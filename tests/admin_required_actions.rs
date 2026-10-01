@@ -673,7 +673,7 @@ async fn dcr_client_credentials_issuance_path_works_end_to_end() {
         .as_str()
         .expect("DCR must return a generated client_secret")
         .to_string();
-    assert!(!cc_secret.is_empty());
+    assert_ne!(cc_secret, "");
 
     // 3. Harness (run time): mint over the production POST /token grant. No
     //    /dev/* endpoint involved.

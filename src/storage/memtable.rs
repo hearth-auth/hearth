@@ -1271,8 +1271,17 @@ mod tests {
         assert_eq!(mt.get(&realm, b"key1"), None);
         assert_eq!(mt.get(&realm, b"key2"), None);
         assert_eq!(mt.approximate_size(), 0);
-        assert!(mt.iter_realm(&realm).is_empty());
-        assert!(mt.iter_all().is_empty());
+        assert_eq!(
+            mt.iter_realm(&realm),
+            [] as [(std::vec::Vec<u8>, crate::storage::memtable::MemtableValue); 0]
+        );
+        assert_eq!(
+            mt.iter_all(),
+            [] as [(
+                crate::storage::memtable::CompositeKey,
+                crate::storage::memtable::MemtableValue
+            ); 0]
+        );
     }
 
     #[test]

@@ -388,21 +388,21 @@ mod tests {
     fn parse_comment_line_skipped() {
         let mut out = Vec::new();
         parse_drop_line("; this is a comment", &mut out);
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [crate::core::IpRange; 0]);
     }
 
     #[test]
     fn parse_blank_line_skipped() {
         let mut out = Vec::new();
         parse_drop_line("   ", &mut out);
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [crate::core::IpRange; 0]);
     }
 
     #[test]
     fn parse_malformed_cidr_skipped() {
         let mut out = Vec::new();
         parse_drop_line("not-a-cidr ; SBL000001", &mut out);
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [crate::core::IpRange; 0]);
     }
 
     #[test]

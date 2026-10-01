@@ -142,7 +142,7 @@ async fn update_user_can_clear_required_actions() {
         .create_user(&realm, &make_user_request("clear"))
         .expect("create user");
 
-    assert!(!user.required_actions().is_empty());
+    assert_ne!(user.required_actions(), []);
 
     let updated = h
         .identity()

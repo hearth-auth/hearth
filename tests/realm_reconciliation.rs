@@ -30,8 +30,8 @@ async fn creates_default_realm_when_no_yaml_and_no_storage() {
     let report = reconcile_realms(identity, harness.authz(), &config).expect("reconcile");
 
     assert_eq!(report.created, vec!["default"]);
-    assert!(report.updated.is_empty());
-    assert!(report.archived.is_empty());
+    assert_eq!(report.updated, [] as [std::string::String; 0]);
+    assert_eq!(report.archived, [] as [std::string::String; 0]);
 
     // Verify realm exists
     let realm = identity
@@ -71,9 +71,9 @@ async fn skips_reconciliation_when_realms_exist_and_no_yaml_key() {
     let report = reconcile_realms(identity, harness.authz(), &config).expect("reconcile");
 
     // Should not create "default" or touch existing
-    assert!(report.created.is_empty());
-    assert!(report.updated.is_empty());
-    assert!(report.archived.is_empty());
+    assert_eq!(report.created, [] as [std::string::String; 0]);
+    assert_eq!(report.updated, [] as [std::string::String; 0]);
+    assert_eq!(report.archived, [] as [std::string::String; 0]);
 
     // Existing realm still there
     assert!(identity
@@ -138,7 +138,7 @@ async fn updates_realm_config_from_yaml() {
     let report = reconcile_realms(identity, harness.authz(), &config).expect("reconcile");
 
     assert_eq!(report.updated, vec!["portal"]);
-    assert!(report.created.is_empty());
+    assert_eq!(report.created, [] as [std::string::String; 0]);
 
     let realm = identity
         .get_realm_by_name("portal")

@@ -321,7 +321,7 @@ async fn webhook_fail_open_issues_token_despite_error() {
 
     // Token exchange must succeed despite webhook failure
     let token_response = authorize_and_exchange(&harness, &realm);
-    assert!(!token_response.access_token().is_empty());
+    assert_ne!(token_response.access_token(), "");
     assert_eq!(
         *call_count.lock().expect("lock"),
         1,
@@ -449,7 +449,7 @@ async fn webhook_not_called_when_not_configured() {
     let realm = harness.create_realm();
 
     let token_response = authorize_and_exchange(&harness, &realm);
-    assert!(!token_response.access_token().is_empty());
+    assert_ne!(token_response.access_token(), "");
     // Transport must not have been called
     assert_eq!(
         *call_count.lock().expect("lock"),

@@ -1392,7 +1392,7 @@ mod tests {
         };
 
         let compressed = compress_payload(&payload).unwrap();
-        assert!(!compressed.is_empty());
+        assert_ne!(compressed, [] as [u8; 0]);
 
         let decoded = decompress_payload(&compressed).unwrap();
         assert_eq!(decoded.realms.len(), 1);
