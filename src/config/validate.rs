@@ -2849,7 +2849,10 @@ mod tests {
             trusted_proxies: Vec::new(),
             ..ServerConfig::default()
         };
-        assert!(super::deferred_server_warnings(&loopback).is_empty());
+        assert_eq!(
+            super::deferred_server_warnings(&loopback),
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]

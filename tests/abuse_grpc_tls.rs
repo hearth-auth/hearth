@@ -310,5 +310,5 @@ fn a44_config_tls_crl_paths_deserializes() {
 
     let yaml_empty = "";
     let sec_empty: SecurityYaml = from_str(yaml_empty).expect("deser");
-    assert!(sec_empty.tls.crl_paths.is_empty());
+    assert_eq!(sec_empty.tls.crl_paths, [] as [std::path::PathBuf; 0]);
 }

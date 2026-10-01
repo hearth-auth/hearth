@@ -96,7 +96,7 @@ fn bench_audit_query_all(c: &mut Criterion) {
                 tool: None,
             };
             let events = engine.query(&query).expect("query");
-            assert!(!events.is_empty());
+            assert_ne!(events, [] as [hearth::audit::AuditEvent; 0]);
         });
     });
 }

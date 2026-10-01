@@ -146,13 +146,14 @@ impl StorageEngine for FaultStorage {
         while self.hold_increments.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(5));
         }
-        if self
+        // Rust 1.99 renamed `fetch_update` to `try_update`; the MSRV (1.88)
+        // has only the old name.
+        #[allow(deprecated)]
+        let inject_panic = self
             .panic_increments
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok()
-        {
-            panic!("injected panic in increment_u64");
-        }
+            .is_ok();
+        assert!(!inject_panic, "injected panic in increment_u64");
         if self.not_leader_increments.load(Ordering::SeqCst) {
             return Err(crate::cluster::engine::cluster_to_storage_err(
                 crate::cluster::ClusterError::NotLeader {

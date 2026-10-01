@@ -347,7 +347,7 @@ async fn grpc_device_authorize_verifies_the_assertion() {
         ))
         .await
         .expect("a verified assertion starts the flow");
-    assert!(!resp.into_inner().device_code.is_empty());
+    assert_ne!(resp.into_inner().device_code, "");
 
     for (assertion_type, assertion) in [
         (None, Some("junk".to_string())),

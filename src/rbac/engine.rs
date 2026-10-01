@@ -2946,7 +2946,7 @@ mod tests {
 
         engine.unassign_role(&realm, &a.id).expect("unassign");
         let list = engine.list_user_assignments(&realm, &user).expect("list");
-        assert!(list.is_empty());
+        assert_eq!(list, [] as [crate::rbac::types::RoleAssignment; 0]);
     }
 
     #[test]
@@ -3023,8 +3023,11 @@ mod tests {
         let resolved = engine
             .resolve_permissions(&user, &realm_b, None, None)
             .expect("resolve b");
-        assert!(resolved.permissions.is_empty());
-        assert!(resolved.roles.is_empty());
+        assert_eq!(
+            resolved.permissions,
+            [] as [crate::rbac::types::Permission; 0]
+        );
+        assert_eq!(resolved.roles, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -3179,15 +3182,19 @@ mod tests {
 
         engine.delete_group(&realm, &g.id).expect("delete");
         assert!(engine.get_group(&realm, &g.id).expect("get").is_none());
-        assert!(engine
-            .list_group_members(&realm, &g.id, None, 100)
-            .expect("list")
-            .items
-            .is_empty());
-        assert!(engine
-            .list_group_assignments(&realm, &g.id)
-            .expect("list asgn")
-            .is_empty());
+        assert_eq!(
+            engine
+                .list_group_members(&realm, &g.id, None, 100)
+                .expect("list")
+                .items,
+            [] as [crate::rbac::types::GroupMember; 0]
+        );
+        assert_eq!(
+            engine
+                .list_group_assignments(&realm, &g.id)
+                .expect("list asgn"),
+            [] as [crate::rbac::types::RoleAssignment; 0]
+        );
     }
 
     /// `list_additional_role_holders` finds a role's extra-role holders in
@@ -3224,10 +3231,11 @@ mod tests {
                 .expect("list"),
             vec![c],
         );
-        assert!(e
-            .list_additional_role_holders(&realm, &["realm"], 10)
-            .expect("list")
-            .is_empty());
+        assert_eq!(
+            e.list_additional_role_holders(&realm, &["realm"], 10)
+                .expect("list"),
+            [] as [crate::core::UserId; 0]
+        );
         assert_eq!(
             e.list_additional_role_holders(&realm, &["realm.admin"], 1)
                 .expect("list")
@@ -3283,9 +3291,10 @@ mod tests {
         let mut expected = vec![a, b];
         expected.sort_by_key(|u| *u.as_uuid());
         assert_eq!(found, expected);
-        assert!(e
-            .list_permission_grantees(&realm, &["hearth.clients.admin"], 10)
-            .expect("list")
-            .is_empty());
+        assert_eq!(
+            e.list_permission_grantees(&realm, &["hearth.clients.admin"], 10)
+                .expect("list"),
+            [] as [crate::core::UserId; 0]
+        );
     }
 }

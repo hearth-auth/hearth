@@ -246,7 +246,7 @@ async fn search_users_no_matches_returns_empty() {
             SortDir::default(),
         )
         .expect("no match query");
-    assert!(results.items.is_empty());
+    assert_eq!(results.items, [] as [hearth::identity::User; 0]);
 }
 
 // ===== get_realm_by_name tests =====

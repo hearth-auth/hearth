@@ -95,7 +95,7 @@ async fn oidc_authorization_code_flow_roundtrip() {
         )
         .expect("authorize");
 
-    assert!(!auth_response.code().is_empty());
+    assert_ne!(auth_response.code(), "");
     assert_eq!(auth_response.state(), "integration-test-state");
 
     // 3. Exchange: trade auth code for tokens
@@ -116,9 +116,9 @@ async fn oidc_authorization_code_flow_roundtrip() {
         .expect("exchange code");
 
     // 4. Verify tokens
-    assert!(!token_response.access_token().is_empty());
-    assert!(!token_response.id_token().is_empty());
-    assert!(!token_response.refresh_token().is_empty());
+    assert_ne!(token_response.access_token(), "");
+    assert_ne!(token_response.id_token(), "");
+    assert_ne!(token_response.refresh_token(), "");
     assert_eq!(token_response.token_type(), "Bearer");
     assert!(token_response.expires_in() > 0);
 
@@ -154,10 +154,10 @@ async fn oidc_authorization_code_flow_roundtrip() {
 
     // 8. Discovery document should have valid endpoints
     let doc = harness.identity().oidc_discovery();
-    assert!(!doc.issuer.is_empty());
-    assert!(!doc.authorization_endpoint.is_empty());
-    assert!(!doc.token_endpoint.is_empty());
-    assert!(!doc.jwks_uri.is_empty());
+    assert_ne!(doc.issuer, "");
+    assert_ne!(doc.authorization_endpoint, "");
+    assert_ne!(doc.token_endpoint, "");
+    assert_ne!(doc.jwks_uri, "");
 }
 
 // ===== Scenario: Full authorization code flow via HTTP endpoints =====
@@ -573,8 +573,8 @@ async fn oidc_pkce_s256_flow() {
         .expect("exchange with correct verifier");
 
     // Verify tokens are valid
-    assert!(!token_response.access_token().is_empty());
-    assert!(!token_response.id_token().is_empty());
+    assert_ne!(token_response.access_token(), "");
+    assert_ne!(token_response.id_token(), "");
     assert_eq!(token_response.token_type(), "Bearer");
 
     let claims = harness

@@ -22625,9 +22625,9 @@ mod tests {
             )
             .expect("exchange code");
 
-        assert!(!token_response.access_token().is_empty());
-        assert!(!token_response.id_token().is_empty());
-        assert!(!token_response.refresh_token().is_empty());
+        assert_ne!(token_response.access_token(), "");
+        assert_ne!(token_response.id_token(), "");
+        assert_ne!(token_response.refresh_token(), "");
         assert_eq!(token_response.token_type(), "Bearer");
         assert!(token_response.expires_in() > 0);
 

@@ -1190,7 +1190,7 @@ mod tests {
 
         // No org context — assignment should NOT apply.
         let none = resolve_permissions(&fake, &alice, &realm, None, None).expect("resolve");
-        assert!(none.permissions.is_empty());
+        assert_eq!(none.permissions, [] as [crate::rbac::types::Permission; 0]);
 
         // Matching org — applies.
         let r_a = resolve_permissions(&fake, &alice, &realm, Some(&org_a), None).expect("resolve");
@@ -1198,7 +1198,7 @@ mod tests {
 
         // Different org — does NOT apply.
         let r_b = resolve_permissions(&fake, &alice, &realm, Some(&org_b), None).expect("resolve");
-        assert!(r_b.permissions.is_empty());
+        assert_eq!(r_b.permissions, [] as [crate::rbac::types::Permission; 0]);
     }
 
     #[test]
@@ -1561,7 +1561,10 @@ mod tests {
 
         let resolved = resolve_permissions(&fake, &alice, &realm, None, Some("unknown_scope"))
             .expect("resolve");
-        assert!(resolved.permissions.is_empty());
+        assert_eq!(
+            resolved.permissions,
+            [] as [crate::rbac::types::Permission; 0]
+        );
     }
 
     /// A user holding `docs.view`, `docs.edit` and `hearth.admin`, with the
@@ -1711,8 +1714,11 @@ mod tests {
         );
 
         let resolved = resolve_permissions(&fake, &alice, &realm, None, None).expect("resolve");
-        assert!(resolved.permissions.is_empty());
-        assert!(resolved.roles.is_empty());
+        assert_eq!(
+            resolved.permissions,
+            [] as [crate::rbac::types::Permission; 0]
+        );
+        assert_eq!(resolved.roles, [] as [std::string::String; 0]);
     }
 
     mod proptests {
@@ -1891,7 +1897,10 @@ mod tests {
 
         let resolved =
             resolve_permissions(&fake, &alice, &realm, None, None).expect("must not error");
-        assert!(resolved.permissions.is_empty());
-        assert!(resolved.roles.is_empty());
+        assert_eq!(
+            resolved.permissions,
+            [] as [crate::rbac::types::Permission; 0]
+        );
+        assert_eq!(resolved.roles, [] as [std::string::String; 0]);
     }
 }

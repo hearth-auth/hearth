@@ -501,7 +501,10 @@ async fn dynamic_registration_refuses_unsupported_algorithms() {
         page.total, 0,
         "a refused registration must not leave a client"
     );
-    assert!(rsa_kids(&h.identity().realm_jwks(&realm.id).unwrap()).is_empty());
+    assert_eq!(
+        rsa_kids(&h.identity().realm_jwks(&realm.id).unwrap()),
+        [] as [std::string::String; 0]
+    );
 }
 
 /// Administrative surfaces keep Hearth's native algorithm when the parameter
@@ -1111,7 +1114,10 @@ fn rotation_does_not_create_an_rsa_key() {
     let (_dir, engine, _clock, storage) = engine_with_clock(None);
     let realm = plain_realm(&engine);
     engine.rotate_realm_signing_key(&realm, 3_600).unwrap();
-    assert!(rsa_kids(&engine.realm_jwks(&realm).unwrap()).is_empty());
+    assert_eq!(
+        rsa_kids(&engine.realm_jwks(&realm).unwrap()),
+        [] as [std::string::String; 0]
+    );
     assert!(storage
         .get(&system_realm(), &rsa_key_storage_key(&realm))
         .unwrap()
@@ -1331,7 +1337,10 @@ async fn dynamic_registration_in_a_fapi_realm_defaults_to_eddsa_and_refuses_rs25
         assert_eq!(status, StatusCode::BAD_REQUEST, "global={global}: {resp}");
         assert_eq!(resp["error"], "invalid_client_metadata", "global={global}");
     }
-    assert!(rsa_kids(&h.identity().realm_jwks(&realm.id).unwrap()).is_empty());
+    assert_eq!(
+        rsa_kids(&h.identity().realm_jwks(&realm.id).unwrap()),
+        [] as [std::string::String; 0]
+    );
 }
 
 /// An update may not produce an RS256 client under FAPI either way round:

@@ -2533,7 +2533,7 @@ mod tests {
             .expect("conformant registration");
 
         // Verify credential info
-        assert!(!info.credential_id().is_empty());
+        assert_ne!(info.credential_id(), [] as [u8; 0]);
         assert_eq!(info.algorithm(), COSE_ALG_ES256);
         assert_eq!(stored.rp_id, "example.com");
 

@@ -499,7 +499,7 @@ async fn a_tenant_or_non_admin_session_is_forbidden() {
         assert_eq!(page.status, StatusCode::FORBIDDEN);
         assert!(!carries_a_jwt(&page.body));
     }
-    assert!(issued_events(&rig).is_empty());
+    assert_eq!(issued_events(&rig), [] as [hearth::audit::AuditEvent; 0]);
 }
 
 // ─── step-up ─────────────────────────────────────────────────────────────────
@@ -853,7 +853,7 @@ async fn wrong_step_up_passwords_lock_the_account_until_the_window_passes() {
         "the 429 says how long the lockout still runs"
     );
     assert!(!carries_a_jwt(&page.body));
-    assert!(issued_events(&rig).is_empty());
+    assert_eq!(issued_events(&rig), [] as [hearth::audit::AuditEvent; 0]);
 
     // It is the login lockout, not a second counter: login's password check
     // is refused too, and so is the enrolment step-up.
@@ -931,7 +931,7 @@ async fn wrong_step_up_totp_codes_spend_the_totp_guess_budget() {
             .verify_totp(&sys, &op.id, &totp_code(&secret, rig.now_secs())),
         Err(IdentityError::RateLimited)
     ));
-    assert!(issued_events(&rig).is_empty());
+    assert_eq!(issued_events(&rig), [] as [hearth::audit::AuditEvent; 0]);
 
     rig.clock.advance(LOCKOUT_MICROS + 1_000_000);
     let page = mint_with_totp(&rig, &op, "15").await;

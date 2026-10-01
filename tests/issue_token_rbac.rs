@@ -140,9 +140,9 @@ async fn claims_empty_for_user_with_no_assignments() {
         .validate_token(&realm, pair.access_token())
         .expect("validate");
 
-    assert!(claims.roles.is_empty());
-    assert!(claims.groups.is_empty());
-    assert!(claims.permissions.is_empty());
+    assert_eq!(claims.roles, [] as [std::string::String; 0]);
+    assert_eq!(claims.groups, [] as [std::string::String; 0]);
+    assert_eq!(claims.permissions, [] as [std::string::String; 0]);
 }
 
 #[tokio::test]

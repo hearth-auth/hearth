@@ -274,7 +274,7 @@ async fn invitation_e2e_flow() {
 
     assert_eq!(invitation.email(), "newuser@test.com");
     assert_eq!(invitation.role(), OrganizationRole::Member);
-    assert!(!token.is_empty());
+    assert_ne!(token, "");
 
     // 2. List invitations
     let invitations = identity

@@ -270,7 +270,7 @@ fn scope_intersection_basic() {
 
 #[test]
 fn scope_intersection_empty_on_no_overlap() {
-    assert!(intersect_scopes("openid", "mcp:tools:invoke").is_empty());
+    assert_eq!(intersect_scopes("openid", "mcp:tools:invoke"), "");
 }
 
 #[test]

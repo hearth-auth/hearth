@@ -191,7 +191,7 @@ async fn orphan_record_persisted_and_loadable() {
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].realm_slug, "persisted-orphan");
     assert!(loaded[0].user_count > 0);
-    assert!(!loaded[0].detected_at.is_empty());
+    assert_ne!(loaded[0].detected_at, "");
 }
 
 #[tokio::test]

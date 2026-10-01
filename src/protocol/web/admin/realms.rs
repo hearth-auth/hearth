@@ -3020,14 +3020,14 @@ mod metadata_pill_tests {
     fn non_object_metadata_returns_empty() {
         let meta = json!("scalar string");
         let (pills, extra) = build_metadata_pills(&AuditAction::SessionCreated, Some(&meta));
-        assert!(pills.is_empty());
+        assert_eq!(pills, [] as [(std::string::String, std::string::String); 0]);
         assert_eq!(extra, 0);
     }
 
     #[test]
     fn none_metadata_returns_empty() {
         let (pills, extra) = build_metadata_pills(&AuditAction::UserCreated, None);
-        assert!(pills.is_empty());
+        assert_eq!(pills, [] as [(std::string::String, std::string::String); 0]);
         assert_eq!(extra, 0);
     }
 

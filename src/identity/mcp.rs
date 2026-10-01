@@ -160,7 +160,7 @@ mod tests {
     fn empty_intersection_when_no_overlap() {
         let result = intersect_three("openid", "mcp:tools:invoke", Some("mcp:tools:invoke"));
         // subject has no MCP scopes → intersection is empty
-        assert!(result.is_empty());
+        assert_eq!(result, "");
     }
 
     #[test]

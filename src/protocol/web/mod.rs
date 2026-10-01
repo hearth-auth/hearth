@@ -2530,7 +2530,7 @@ mod tests {
         // etag_for and with_theme_css logic directly.
         let css = "body { color: red; }".to_string();
         let expected = etag_for(&css);
-        assert!(!expected.is_empty());
+        assert_ne!(expected, "");
         assert_ne!(expected, etag_for(""));
     }
 }

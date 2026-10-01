@@ -19,6 +19,7 @@ pub mod identity {
         clippy::doc_markdown,
         clippy::similar_names,
         clippy::useless_borrows_in_formatting,
+        clippy::double_must_use,
         mismatched_lifetime_syntaxes
     )]
     pub mod v1 {
@@ -40,6 +41,7 @@ pub mod rbac {
         clippy::doc_markdown,
         clippy::similar_names,
         clippy::useless_borrows_in_formatting,
+        clippy::double_must_use,
         mismatched_lifetime_syntaxes
     )]
     pub mod v1 {
@@ -61,6 +63,7 @@ pub mod events {
         clippy::doc_markdown,
         clippy::similar_names,
         clippy::useless_borrows_in_formatting,
+        clippy::double_must_use,
         mismatched_lifetime_syntaxes
     )]
     pub mod v1 {

@@ -106,7 +106,7 @@ async fn client_credentials_full_flow() {
         )
         .expect("client credentials token");
 
-    assert!(!token_resp.access_token().is_empty());
+    assert_ne!(token_resp.access_token(), "");
     assert_eq!(token_resp.token_type(), "Bearer");
     assert!(token_resp.expires_in() > 0);
 
@@ -202,8 +202,8 @@ async fn device_authorization_full_flow() {
         )
         .expect("device authorize");
 
-    assert!(!device_resp.device_code.is_empty());
-    assert!(!device_resp.user_code.is_empty());
+    assert_ne!(device_resp.device_code, "");
+    assert_ne!(device_resp.user_code, "");
     assert_eq!(
         device_resp.user_code.len(),
         8,
@@ -230,9 +230,9 @@ async fn device_authorization_full_flow() {
         .poll_device_token(&realm, &device_resp.device_code, client.client_id(), None)
         .expect("poll device token after approval");
 
-    assert!(!token_resp.access_token().is_empty());
-    assert!(!token_resp.id_token().is_empty());
-    assert!(!token_resp.refresh_token().is_empty());
+    assert_ne!(token_resp.access_token(), "");
+    assert_ne!(token_resp.id_token(), "");
+    assert_ne!(token_resp.refresh_token(), "");
     assert_eq!(token_resp.token_type(), "Bearer");
     assert!(token_resp.expires_in() > 0);
 
@@ -1027,8 +1027,8 @@ async fn password_grant_success() {
         )
         .expect("password_grant_token should succeed");
 
-    assert!(!response.access_token().is_empty());
-    assert!(!response.refresh_token().is_empty());
+    assert_ne!(response.access_token(), "");
+    assert_ne!(response.refresh_token(), "");
     assert_eq!(response.token_type, "Bearer");
 }
 

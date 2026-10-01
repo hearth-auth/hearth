@@ -2516,7 +2516,7 @@ mod tests {
             .expect("append");
 
         // Verify the hash was computed using genesis
-        assert!(!event.integrity_hash.is_empty());
+        assert_ne!(event.integrity_hash, "");
         // Integrity check should pass
         let valid = engine
             .verify_integrity(&realm_id, None, None)

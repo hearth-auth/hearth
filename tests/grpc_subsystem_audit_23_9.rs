@@ -150,7 +150,7 @@ async fn grpc_device_authorize_accepts_a_confidential_client_with_its_secret() {
         !resp.device_code.is_empty(),
         "the gate must not break the legitimate flow"
     );
-    assert!(!resp.user_code.is_empty());
+    assert_ne!(resp.user_code, "");
 }
 
 #[tokio::test]
@@ -166,7 +166,7 @@ async fn grpc_device_authorize_still_serves_a_public_client() {
         .expect("a public client needs no secret (RFC 8628 §3.1)")
         .into_inner();
 
-    assert!(!resp.device_code.is_empty());
+    assert_ne!(resp.device_code, "");
 }
 
 /// The `client_secret_post` fallback the proto documents: the secret rides in
@@ -206,7 +206,7 @@ async fn grpc_device_authorize_honours_the_body_client_secret_the_proto_document
         .await
         .expect("DeviceAuthorizationRequest.client_secret is the documented post fallback")
         .into_inner();
-    assert!(!resp.device_code.is_empty());
+    assert_ne!(resp.device_code, "");
 
     let err = svc
         .device_authorize(device_request_with_body_secret(&realm, &client_id, "wrong"))
