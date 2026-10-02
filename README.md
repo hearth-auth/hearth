@@ -213,7 +213,7 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 **Protocols**
 - OIDC Core 1.0 + Discovery 1.0 + Dynamic Client Registration (RFC 7591; RFC 7592 management endpoints are roadmap)
 - Token Introspection (RFC 7662), Revocation (RFC 7009), RP-initiated logout
-- SAML 2.0 in **both** roles: Service Provider (inbound federation — SP-initiated and IdP-initiated SSO, plus Single Logout) and Identity Provider (Hearth asserts to third-party SPs at `/realms/{realm}/saml/sso`). Encrypted assertions are not supported — see [docs/specs/SAML.md](docs/specs/SAML.md)
+- SAML 2.0 as a Service Provider (inbound federation from your corporate IdP — SP-initiated and IdP-initiated SSO). Hearth is not a SAML IdP; applications connect over OIDC. Encrypted assertions and Single Logout are not supported — see [docs/specs/SAML.md](docs/specs/SAML.md)
 - SCIM 2.0 provisioning (Users, Groups, Service Provider Config)
 - Signed webhook subscriptions for auth and admin events
 - gRPC management API (RBAC admin surface)

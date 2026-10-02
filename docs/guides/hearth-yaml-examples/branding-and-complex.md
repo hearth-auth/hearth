@@ -263,15 +263,6 @@ realms:
         refresh_token_ttl: "1d"
     scim:
       bearer_token: "${SCIM_ENTERPRISE_TOKEN}"
-    saml_service_providers:
-      workday:
-        entity_id: "https://wd5.myworkday.com/acme/login-saml2.htmld"
-        acs_url: "https://wd5.myworkday.com/acme/login-saml2.htmld"
-        nameid_format: emailAddress
-        sign_assertions: true
-        attribute_map:
-          email: "wd:Worker_AuthenticationAlias"
-          display_name: "wd:Worker_PreferredName"
     federation:
       link_existing_accounts: confirm
       providers:
@@ -350,8 +341,8 @@ realms:
 - Each realm is an isolated identity namespace with its own signing key, user store, and
   session pool. Cross-realm SSO is not automatic.
 - `auth.token.*` inside a realm overrides global `token.*` TTLs for that realm only.
-- `scim.bearer_token` and `saml_service_providers` can coexist; each handles a different
-  enterprise integration path (SCIM = provisioning, SAML = authentication).
+- `scim.bearer_token` and `federation.providers` can coexist; each handles a different
+  enterprise integration path (SCIM = provisioning, federation = authentication).
 - `federation.providers.microsoft.issuer` pins to a single Azure AD tenant. Omitting the
   tenant-specific issuer allows tokens from _any_ Microsoft tenant — a security risk for
   B2B deployments.

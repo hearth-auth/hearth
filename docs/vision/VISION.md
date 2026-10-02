@@ -185,7 +185,7 @@ Hearth makes decisions so you don't have to. The configuration surface is delibe
 
 What Hearth explicitly **does**:
 - OIDC / OAuth 2.0 (authorization code, client credentials, device authorization)
-- SAML 2.0 (SP-initiated and IdP-initiated)
+- SAML 2.0 as a service provider (SP-initiated and IdP-initiated login)
 - WebAuthn / Passkeys
 - Magic links / passwordless email
 - TOTP / authenticator apps

@@ -627,23 +627,6 @@ realms:
         grant_types: [client_credentials]
         trust_level: first_party
         declared_scopes: [admin]
-    saml_service_providers:
-      jira:
-        entity_id: "https://acme.atlassian.net"
-        acs_url: "https://acme.atlassian.net/plugins/servlet/samlconsumer"
-        slo_url: "https://acme.atlassian.net/plugins/servlet/samlslo"
-        sp_certificate_pem: |
-          -----BEGIN CERTIFICATE-----
-          MIID...replace-with-real-cert...IDAQAB
-          -----END CERTIFICATE-----
-        sign_assertions: true
-        sign_responses: true
-        want_authn_requests_signed: false
-        nameid_format: emailAddress         # emailAddress | persistent | transient | unspecified
-        attribute_map:
-          email:      "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"
-          givenName:  "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname"
-          surname:    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname"
     permissions:
       - { name: incident.declare,  display_name: "Declare incident",  category: ops }
       - { name: incident.resolve,  display_name: "Resolve incident",  category: ops }

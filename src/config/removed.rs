@@ -31,7 +31,14 @@ pub struct RemovedKey {
 }
 
 /// Keys of features removed in [`REMOVED_IN`]. Each removal adds its own keys.
-pub const REMOVED_KEYS: &[RemovedKey] = &[];
+pub const REMOVED_KEYS: &[RemovedKey] = &[RemovedKey {
+    path: "realms.*.saml_service_providers",
+    feature: "the SAML IdP side (Hearth issuing assertions to service providers)",
+    replacement: Some(
+        "Hearth stays a SAML service provider; connect applications to Hearth over OpenID \
+         Connect",
+    ),
+}];
 
 /// Returns the error for the first removed key present in `yaml`.
 ///

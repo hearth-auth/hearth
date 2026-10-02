@@ -907,15 +907,14 @@ fn decrypted_members(
 }
 
 /// The live API never creates organizations (nor their memberships and
-/// invitations), agents, external IdPs, federation links, SAML service
-/// providers or a SAML signing key in the system realm. A system-realm archive
+/// invitations), agents, external IdPs, federation links or a SAML signing
+/// key in the system realm. A system-realm archive
 /// carrying them — hand-built, since no export of a real store can — must not
 /// write them there either: each is refused and reported, and the rest of the
 /// restore carries on.
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // one record of each forbidden family
 async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() {
-    use hearth::identity::federation::saml::{SamlNameIdFormat, SamlServiceProvider};
     use hearth::identity::federation::{FederationSecret, IdpConfig, IdpKind};
     use hearth::identity::{
         AgentOwner, CreateAgentRequest, CreateInvitationRequest, CreateOrganizationRequest,
@@ -993,22 +992,6 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
         updated_at: hearth::core::Timestamp::from_micros(0),
     })
     .expect("idp");
-    id.register_saml_sp(
-        &tenant,
-        &SamlServiceProvider {
-            sp_key: "crm".to_string(),
-            entity_id: "https://crm.example".to_string(),
-            acs_url: "https://crm.example/acs".to_string(),
-            slo_url: None,
-            sp_certificate_pem: None,
-            sign_assertions: true,
-            sign_responses: true,
-            want_authn_requests_signed: false,
-            nameid_format: SamlNameIdFormat::EmailAddress,
-            attribute_map: std::collections::BTreeMap::new(),
-        },
-    )
-    .expect("saml sp");
     id.get_or_create_saml_signing_key(&tenant, "https://tenant.example")
         .expect("saml key");
     // A consent needs a client, and the system realm refuses clients.
@@ -1046,7 +1029,6 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
         "invitations.ndjson",
         "agents.ndjson",
         "identity_providers.ndjson",
-        "saml_service_providers.ndjson",
         "saml_signing_key.json",
     ]
     .iter()
@@ -1094,7 +1076,6 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
         ("agents", &report.agents),
         ("identity_providers", &report.identity_providers),
         ("federation_links", &report.federation_links),
-        ("saml_service_providers", &report.saml_service_providers),
         ("consents", &report.consents),
         ("scim_mappings", &report.scim_mappings),
     ] {
@@ -1117,7 +1098,6 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
     let sys = system_realm();
     assert!(id.get_organization(&sys, org.id()).expect("get").is_none());
     assert!(id.get_idp(&sys, &idp_id).expect("get").is_none());
-    assert!(id.get_saml_sp_by_key(&sys, "crm").expect("get").is_none());
     assert!(
         id.get_consent(&sys, user.id(), client.client_id())
             .expect("get consent")

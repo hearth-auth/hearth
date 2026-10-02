@@ -99,8 +99,7 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::InvalidAttestation { .. }
         | IdentityError::InvalidAssertion { .. } => (Code::InvalidArgument, err.to_string()),
         IdentityError::Saml(ref e) => match e {
-            crate::identity::federation::saml::SamlError::UnknownSp
-            | crate::identity::federation::saml::SamlError::UnknownIdp => {
+            crate::identity::federation::saml::SamlError::UnknownIdp => {
                 (Code::NotFound, err.to_string())
             }
             crate::identity::federation::saml::SamlError::MetadataFetch { .. } => {

@@ -1006,11 +1006,6 @@ fn reconcile_declared_realms(
         if let Some(fed) = &yaml_cfg.federation {
             reconcile_federation_for_realm(engine, &realm_id, name, fed, report)?;
         }
-
-        // Reconcile SAML Service Provider registrations (Hearth as IdP).
-        if let Some(sps) = &yaml_cfg.saml_service_providers {
-            reconcile_saml_sps_for_realm(engine, &realm_id, name, sps, report)?;
-        }
     }
 
     // Archive storage realms not in YAML
@@ -1843,55 +1838,6 @@ fn build_saml_idp_config(
         created_at: now,
         updated_at: now,
     })
-}
-
-/// Reconciles SAML Service Providers (Hearth-as-IdP side) declared in
-/// `realms.{name}.saml_service_providers`.
-pub(crate) fn reconcile_saml_sps_for_realm(
-    engine: &dyn IdentityEngine,
-    realm_id: &RealmId,
-    realm_name: &str,
-    sps: &std::collections::HashMap<String, crate::config::SamlServiceProviderYaml>,
-    _report: &mut ReconcileReport,
-) -> Result<(), IdentityError> {
-    use crate::identity::federation::saml::{SamlNameIdFormat, SamlServiceProvider};
-
-    let mut yaml_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (sp_key, yaml) in sps {
-        yaml_keys.insert(sp_key.clone());
-        let nameid_format = match yaml.nameid_format.as_deref().unwrap_or("emailAddress") {
-            "persistent" => SamlNameIdFormat::Persistent,
-            "transient" => SamlNameIdFormat::Transient,
-            "unspecified" => SamlNameIdFormat::Unspecified,
-            _ => SamlNameIdFormat::EmailAddress,
-        };
-        let attribute_map = yaml.attribute_map.clone().unwrap_or_default();
-
-        let sp = SamlServiceProvider {
-            sp_key: sp_key.clone(),
-            entity_id: yaml.entity_id.clone(),
-            acs_url: yaml.acs_url.clone(),
-            slo_url: yaml.slo_url.clone(),
-            sp_certificate_pem: yaml.sp_certificate_pem.clone(),
-            sign_assertions: yaml.sign_assertions.unwrap_or(true),
-            sign_responses: yaml.sign_responses.unwrap_or(true),
-            want_authn_requests_signed: yaml.want_authn_requests_signed.unwrap_or(false),
-            nameid_format,
-            attribute_map,
-        };
-        engine.register_saml_sp(realm_id, &sp)?;
-        info!(realm = %realm_name, sp_key = %sp_key, "reconciled SAML SP");
-    }
-
-    // Remove SPs no longer in YAML.
-    for existing in engine.list_saml_sps(realm_id)? {
-        if !yaml_keys.contains(&existing.sp_key) {
-            engine.delete_saml_sp(realm_id, &existing.sp_key)?;
-            info!(realm = %realm_name, sp_key = %existing.sp_key, "removed SAML SP no longer in YAML");
-        }
-    }
-
-    Ok(())
 }
 
 // ── Config snapshot I/O ────────────────────────────────────────────────────────

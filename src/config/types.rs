@@ -3085,10 +3085,6 @@ pub struct RealmYamlConfig {
     /// connectors not represented in YAML are removed.
     #[serde(default)]
     pub federation: Option<FederationYamlConfig>,
-    /// SAML 2.0 Service Provider registrations (IdP side — Hearth as IdP).
-    /// Reconciled at startup; runtime SPs not represented here are removed.
-    #[serde(default)]
-    pub saml_service_providers: Option<std::collections::HashMap<String, SamlServiceProviderYaml>>,
     /// YAML-authored permission registry.
     #[serde(default)]
     pub permissions: Option<Vec<PermissionYamlConfig>>,
@@ -3194,29 +3190,6 @@ pub struct RealmScimYaml {
     /// before it is persisted into the runtime realm config.
     #[serde(default)]
     pub bearer_token: Option<String>,
-}
-
-/// YAML for a single SAML SP registration (Hearth as IdP issues to this SP).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SamlServiceProviderYaml {
-    pub entity_id: String,
-    pub acs_url: String,
-    #[serde(default)]
-    pub slo_url: Option<String>,
-    #[serde(default)]
-    pub sp_certificate_pem: Option<String>,
-    #[serde(default)]
-    pub sign_assertions: Option<bool>,
-    #[serde(default)]
-    pub sign_responses: Option<bool>,
-    #[serde(default)]
-    pub want_authn_requests_signed: Option<bool>,
-    /// One of `emailAddress` / `persistent` / `transient` / `unspecified`.
-    #[serde(default)]
-    pub nameid_format: Option<String>,
-    #[serde(default)]
-    pub attribute_map: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// YAML for `realms.{name}.federation.*`.

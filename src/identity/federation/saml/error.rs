@@ -48,9 +48,6 @@ pub enum SamlError {
         /// Sanitized reason — never contains full URL or upstream body.
         reason: String,
     },
-    /// A SAML `<AuthnRequest>` referenced an SP entity ID that is not
-    /// registered for this realm.
-    UnknownSp,
     /// A SAML callback referenced an IdP that is not registered for
     /// this realm.
     UnknownIdp,
@@ -76,7 +73,6 @@ impl SamlError {
             Self::DestinationMismatch => "destination",
             Self::UnsupportedAlgorithm => "algorithm",
             Self::MetadataFetch { .. } => "metadata_fetch",
-            Self::UnknownSp => "unknown_sp",
             Self::UnknownIdp => "unknown_idp",
             Self::InvalidAuthnRequest { .. } => "invalid_authn_request",
         }
@@ -96,7 +92,7 @@ impl SamlError {
             | Self::UnsupportedAlgorithm
             | Self::InvalidAuthnRequest { .. } => Some("HEARTH_SAML_INVALID"),
             Self::MetadataFetch { .. } => Some("HEARTH_SAML_METADATA_FETCH_FAILED"),
-            Self::UnknownSp | Self::UnknownIdp => Some("HEARTH_SAML_ENTITY_NOT_FOUND"),
+            Self::UnknownIdp => Some("HEARTH_SAML_ENTITY_NOT_FOUND"),
         }
     }
 }
@@ -115,7 +111,6 @@ impl fmt::Display for SamlError {
             Self::MetadataFetch { reason } => {
                 write!(f, "SAML metadata fetch failed: {reason}")
             }
-            Self::UnknownSp => write!(f, "unknown SAML service provider"),
             Self::UnknownIdp => write!(f, "unknown SAML identity provider"),
             Self::InvalidAuthnRequest { reason } => {
                 write!(f, "invalid SAML AuthnRequest: {reason}")

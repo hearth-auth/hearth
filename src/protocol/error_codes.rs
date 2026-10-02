@@ -411,7 +411,7 @@ mod tests {
             Some(SAML_INVALID)
         );
         assert_eq!(
-            for_identity_error(&IdentityError::Saml(SamlError::UnknownSp)),
+            for_identity_error(&IdentityError::Saml(SamlError::UnknownIdp)),
             Some(SAML_ENTITY_NOT_FOUND)
         );
     }

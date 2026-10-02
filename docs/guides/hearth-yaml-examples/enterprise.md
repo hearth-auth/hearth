@@ -43,44 +43,12 @@ realms:
 
 ---
 
-## Example 35 — SAML SP registration
+## Example 35 — SAML SP registration (removed in 3.0.0)
 
-**Audience:** operators who need Hearth to act as a SAML Identity Provider, issuing SAML
-assertions to external service providers (Salesforce, Workday, internal wikis, etc.).
-
-```yaml
-oidc:
-  issuer: "https://auth.example.com"
-
-realms:
-  enterprise:
-    saml_service_providers:
-      salesforce:
-        entity_id: "https://saml.salesforce.com"
-        acs_url: "https://salesforce.com/services/oauth2/callback"
-        slo_url: "https://salesforce.com/services/auth/logout"
-        nameid_format: emailAddress   # emailAddress | persistent | transient | unspecified
-        sign_assertions: true
-        sign_responses: false
-        attribute_map:
-          email: "User.Email"
-          display_name: "User.Name"
-          department: "User.Department"
-
-      internal-wiki:
-        entity_id: "https://wiki.internal.example.com/saml"
-        acs_url: "https://wiki.internal.example.com/saml/acs"
-        nameid_format: persistent
-        sign_assertions: true
-```
-
-- `saml_service_providers` keys (e.g. `salesforce`) are the SP identifier in Hearth's routing.
-- `entity_id` and `acs_url` are required; all other fields are optional.
-- Hearth signs assertions with the realm's Ed25519 signing key. Download the realm's public
-  key from `GET /v1/realms/<slug>/keys` in JWK format to configure trust in the SP.
-- `attribute_map` maps Hearth's internal field names to the SAML attribute names the SP
-  expects (`email` → `User.Email` in this example).
-- Set `slo_url` to participate in SAML Single Logout; omit it to skip SLO support.
+Hearth no longer acts as a SAML Identity Provider, so `saml_service_providers` is gone and
+a configuration that sets it refuses to start. Connect applications to Hearth over OpenID
+Connect. Hearth still **consumes** SAML from your corporate IdP: see
+`realms.<name>.federation` with `type: saml` in the configuration reference.
 
 ---
 

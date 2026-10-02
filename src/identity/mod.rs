@@ -2241,7 +2241,7 @@ pub trait IdentityEngine: Send + Sync {
     // ===== SAML 2.0 =====
 
     /// Returns (or lazily creates) this realm's RSA signing key used for
-    /// SAML metadata and `<Response>`/`<Assertion>` signing.
+    /// the realm's SAML SP metadata (its certificate is published there).
     ///
     /// Off the hot path: RSA keygen is slow and happens once per realm.
     fn get_or_create_saml_signing_key(
@@ -2249,36 +2249,6 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         issuer_cn: &str,
     ) -> Result<std::sync::Arc<crate::identity::tokens::RsaSigningKey>, IdentityError>;
-
-    /// Registers (or updates) a SAML Service Provider in a realm.
-    fn register_saml_sp(
-        &self,
-        realm_id: &RealmId,
-        sp: &federation::saml::SamlServiceProvider,
-    ) -> Result<(), IdentityError>;
-
-    /// Resolves a registered SP by its entity ID.
-    fn get_saml_sp_by_entity_id(
-        &self,
-        realm_id: &RealmId,
-        entity_id: &str,
-    ) -> Result<Option<federation::saml::SamlServiceProvider>, IdentityError>;
-
-    /// Resolves a registered SP by operator-assigned key.
-    fn get_saml_sp_by_key(
-        &self,
-        realm_id: &RealmId,
-        sp_key: &str,
-    ) -> Result<Option<federation::saml::SamlServiceProvider>, IdentityError>;
-
-    /// Lists all registered SPs in a realm.
-    fn list_saml_sps(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<Vec<federation::saml::SamlServiceProvider>, IdentityError>;
-
-    /// Deletes a registered SP.
-    fn delete_saml_sp(&self, realm_id: &RealmId, sp_key: &str) -> Result<(), IdentityError>;
 
     /// Persists a SAML state bag (SP-initiated login; 10-minute TTL).
     ///
@@ -2310,21 +2280,6 @@ pub trait IdentityEngine: Send + Sync {
         assertion_id: &str,
         expires_at_secs: i64,
     ) -> Result<(), IdentityError>;
-
-    /// Records that the IdP issued an assertion to an SP for a user session.
-    /// Enables SLO fan-out at logout time.
-    fn record_saml_sp_session(
-        &self,
-        realm_id: &RealmId,
-        registration: &federation::saml::SamlSessionRegistration,
-    ) -> Result<(), IdentityError>;
-
-    /// Enumerates an IdP-issued session's SP registrations for SLO.
-    fn list_saml_sp_sessions(
-        &self,
-        realm_id: &RealmId,
-        session_id: &SessionId,
-    ) -> Result<Vec<federation::saml::SamlSessionRegistration>, IdentityError>;
 
     // ===== Migration / import (Phase 1 Step 30) =====
 
@@ -2935,23 +2890,9 @@ pub trait IdentityEngine: Send + Sync {
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError>;
 
-    /// Returns every registered SAML service provider in a realm.
-    fn export_all_saml_service_providers(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<Vec<crate::identity::federation::saml::SamlServiceProvider>, IdentityError>;
-
-    /// Restores one SAML service-provider registration.
-    fn import_saml_service_provider(
-        &self,
-        realm_id: &RealmId,
-        sp: &crate::identity::federation::saml::SamlServiceProvider,
-        overwrite: bool,
-    ) -> Result<ImportOutcome, IdentityError>;
-
     /// Returns the realm's SAML signing key as plaintext JSON
-    /// (`{"pkcs8":…,"cert":…}`), or `None` when the realm has never acted as a
-    /// SAML IdP.
+    /// (`{"pkcs8":…,"cert":…}`), or `None` when the realm has none yet — the
+    /// key is created the first time the realm's SAML SP metadata is served.
     ///
     /// At rest the key is sealed under the node's KEK. The bytes returned here
     /// are **unsealed**, because the destination's KEK is a different key: an

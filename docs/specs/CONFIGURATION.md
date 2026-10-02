@@ -1721,44 +1721,15 @@ realms:
 
 ---
 
-### `realms.<name>.saml_service_providers`
+### `realms.<name>.saml_service_providers` — removed in 3.0.0
 
-Declarative SAML 2.0 Service Provider (SP) registrations where **Hearth acts as the IdP**. Keyed by an operator-assigned slug that identifies the SP. Reconciled at startup — runtime SPs not present in YAML are removed.
+This key registered SAML service providers for Hearth to act as a SAML **IdP**.
+The IdP side was removed in 3.0.0; Hearth is a SAML service provider only
+(see `realms.<name>.federation`). A configuration that still sets the key refuses
+to start:
 
-Each entry configures one SP:
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `entity_id` | string | *required* | SP entity ID (a URI, e.g. `https://app.example.com/saml/metadata`). Must match the `Issuer` in AuthnRequests from this SP. |
-| `acs_url` | string | *required* | Assertion Consumer Service URL — where Hearth posts the SAML response. |
-| `slo_url` | string | — | Single Logout Service URL. When present, Hearth sends a `<LogoutRequest>` here on user logout. |
-| `sp_certificate_pem` | string | — | PEM-encoded SP certificate. Verifies signed AuthnRequests and signed `<LogoutRequest>`s from this SP. Required when `want_authn_requests_signed: true`. The server refuses to start if the PEM does not parse as an RSA certificate. |
-| `sign_assertions` | bool | `true` | Whether Hearth signs individual `<Assertion>` elements. |
-| `sign_responses` | bool | `false` | Whether Hearth signs the outer `<Response>` envelope in addition to assertions. |
-| `want_authn_requests_signed` | bool | `false` | Require incoming AuthnRequests from this SP to carry a valid XML signature; the SSO endpoint answers `403` otherwise. `sp_certificate_pem` is required alongside it — the server refuses to start without one. The HTTP-Redirect binding carries its signature in query parameters, not in the XML, so an SP with this flag set must use the HTTP-POST binding. When any SP in the realm sets it, the realm's IdP metadata advertises `WantAuthnRequestsSigned="true"`. |
-| `nameid_format` | string | `emailAddress` | NameID format to use in assertions: `emailAddress`, `persistent`, `transient`, or `unspecified`. |
-| `attribute_map` | map | `{}` | Custom SAML attribute statements. Keys are attribute names; values are Hearth claim paths (e.g. `user.email`, `user.display_name`, `roles`). |
-
-```yaml
-realms:
-  corp:
-    saml_service_providers:
-      salesforce:
-        entity_id: "https://myorg.my.salesforce.com"
-        acs_url: "https://myorg.my.salesforce.com/sso/saml"
-        slo_url: "https://myorg.my.salesforce.com/slo/saml"
-        sign_assertions: true
-        sign_responses: false
-        nameid_format: emailAddress
-        attribute_map:
-          email: user.email
-          displayName: user.display_name
-          groups: roles
 ```
-
-The SAML IdP metadata (public signing key, SSO endpoint) for a realm is available at:
-```
-GET /realms/{realm-name}/saml/idp-metadata.xml
+configuration key 'realms.corp.saml_service_providers' is no longer supported: the SAML IdP side (Hearth issuing assertions to service providers) was removed in Hearth 3.0.0. Remove the key from the configuration. Instead: Hearth stays a SAML service provider; connect applications to Hearth over OpenID Connect.
 ```
 
 ---

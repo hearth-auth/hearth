@@ -1240,30 +1240,6 @@ pub fn router(state: WebState) -> Router {
             "/realms/{realm}/federation/saml/begin",
             axum::routing::get(saml::sp_begin),
         )
-        .route(
-            "/realms/{realm}/saml/metadata",
-            axum::routing::get(saml::idp_metadata),
-        )
-        .route(
-            "/realms/{realm}/saml/sso",
-            axum::routing::get(saml::idp_sso_get)
-                .post(saml::idp_sso_post)
-                .route_layer(axum::extract::DefaultBodyLimit::max(
-                    crate::protocol::http::BODY_LIMIT_SAML,
-                )),
-        )
-        .route(
-            "/realms/{realm}/saml/sso/init",
-            axum::routing::get(saml::idp_sso_init),
-        )
-        .route(
-            "/realms/{realm}/saml/slo-idp",
-            axum::routing::get(saml::idp_slo_get)
-                .post(saml::idp_slo_post)
-                .route_layer(axum::extract::DefaultBodyLimit::max(
-                    crate::protocol::http::BODY_LIMIT_SAML,
-                )),
-        )
         // --- Browser-facing OAuth authorize + consent flow ---
         .route(
             "/oauth/authorize",

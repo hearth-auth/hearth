@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use common::TestHarness;
 use hearth::core::{IdpId, Timestamp};
 use hearth::identity::federation::saml::{
-    build_post_form_html, build_response_xml, sign_element, verify_signed_element, ResponseBuilder,
-    SamlError, SamlIdpConfig, SamlNameIdFormat, SamlServiceProvider, SamlSpOutcome, SamlSpService,
+    build_response_xml, sign_element, verify_signed_element, ResponseBuilder, SamlError,
+    SamlIdpConfig, SamlNameIdFormat, SamlSpOutcome, SamlSpService,
 };
 use hearth::identity::tokens::RsaSigningKey;
 use hearth::identity::{CreateRealmRequest, IdentityError};
@@ -212,44 +212,6 @@ async fn sp_rejects_audience_mismatch() {
 }
 
 #[tokio::test]
-async fn engine_stores_and_retrieves_saml_sp() {
-    let h = TestHarness::embedded().await.expect("harness");
-    let realm = h
-        .identity()
-        .create_realm(&CreateRealmRequest {
-            name: "acme".into(),
-            config: None,
-        })
-        .expect("create");
-
-    let sp = SamlServiceProvider {
-        sp_key: "my-crm".into(),
-        entity_id: "https://crm.example".into(),
-        acs_url: "https://crm.example/acs".into(),
-        slo_url: None,
-        sp_certificate_pem: None,
-        sign_assertions: true,
-        sign_responses: true,
-        want_authn_requests_signed: false,
-        nameid_format: SamlNameIdFormat::EmailAddress,
-        attribute_map: BTreeMap::new(),
-    };
-    h.identity()
-        .register_saml_sp(realm.id(), &sp)
-        .expect("register");
-
-    let got = h
-        .identity()
-        .get_saml_sp_by_entity_id(realm.id(), "https://crm.example")
-        .expect("get")
-        .expect("some");
-    assert_eq!(got.sp_key, "my-crm");
-
-    let listed = h.identity().list_saml_sps(realm.id()).expect("list");
-    assert_eq!(listed.len(), 1);
-}
-
-#[tokio::test]
 async fn engine_replay_protection_works() {
     let h = TestHarness::embedded().await.expect("harness");
     let realm = h
@@ -299,48 +261,6 @@ async fn engine_lazy_creates_saml_signing_key() {
     // Deterministic: same cert DER + same key id.
     assert_eq!(k1.cert_der(), k2.cert_der());
     assert_eq!(k1.key_id(), k2.key_id());
-}
-
-#[tokio::test]
-async fn idp_can_issue_signed_response() {
-    let h = TestHarness::embedded().await.expect("harness");
-    let realm = h
-        .identity()
-        .create_realm(&CreateRealmRequest {
-            name: "acme".into(),
-            config: None,
-        })
-        .expect("create");
-    let key = h
-        .identity()
-        .get_or_create_saml_signing_key(realm.id(), "https://idp.test")
-        .expect("key");
-
-    let xml = build_response_xml(&ResponseBuilder {
-        response_id: "_r",
-        in_response_to: Some("_req"),
-        issue_instant: Timestamp::from_micros(1_700_000_000 * 1_000_000),
-        destination: "https://sp/acs",
-        issuer: "https://idp.test",
-        audience: "https://sp",
-        assertion_id: "_a",
-        subject_name_id: "user@test",
-        subject_name_id_format: SamlNameIdFormat::EmailAddress.as_uri(),
-        session_index: "s",
-        not_before: Timestamp::from_micros((1_700_000_000 - 10) * 1_000_000),
-        not_on_or_after: Timestamp::from_micros((1_700_000_000 + 300) * 1_000_000),
-        attributes: &BTreeMap::new(),
-    });
-    let signed = sign_element(xml.as_bytes(), "_r", &key).expect("sign");
-
-    // Verify with the same realm's cert.
-    let cert_pem = cert_der_to_pem(key.cert_der());
-    let verified = verify_signed_element(&signed, "Response", &cert_pem).expect("verify");
-    assert_eq!(verified.id, "_r");
-
-    // HTML POST form wraps a base64 payload.
-    let html = build_post_form_html("https://sp/acs", "SAMLResponse", &signed, Some("rs"), None);
-    assert!(html.contains("action=\"https://sp/acs\""));
 }
 
 /// Extracts the `<saml:Assertion>…</saml:Assertion>` substring from a

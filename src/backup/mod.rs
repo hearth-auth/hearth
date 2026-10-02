@@ -25,7 +25,6 @@
 //! realms/<realm-slug>/identity_providers.ndjson
 //! realms/<realm-slug>/federation_links.ndjson
 //! realms/<realm-slug>/webhooks.ndjson
-//! realms/<realm-slug>/saml_service_providers.ndjson
 //! realms/<realm-slug>/saml_signing_key.json     (AES-256-GCM encrypted)
 //! realms/<realm-slug>/scim_mappings.ndjson
 //! realms/<realm-slug>/invitations.ndjson

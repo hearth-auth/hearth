@@ -71,15 +71,10 @@ rejected unconditionally — algorithm downgrade is a common SAML attack vector.
 
 The following behaviors are enforced unconditionally and cannot be disabled via configuration:
 
-- **IdP SSO requires an authenticated session.** `GET`/`POST /ui/realms/{realm}/saml/sso` and
-  `GET /ui/realms/{realm}/saml/sso/init` require a valid Hearth UI session in the same realm.
-  Unauthenticated callers are redirected to login. This prevents Hearth's SP from acting as a
-  signing oracle — before this restriction, any unauthenticated caller could mint a signed SAML
-  assertion using a fixed placeholder subject.
-
-- **DEFLATE decompression bomb protection.** Inbound `SAMLRequest`/`SAMLResponse` payloads
-  on the HTTP-Redirect binding are limited to 1 MiB of decompressed output. Payloads that
-  expand beyond this limit are rejected before reaching the XML parser.
+- **Hearth is a SAML service provider only.** It does not act as a SAML IdP (removed in
+  3.0.0), so it signs no assertions and serves no SSO endpoint that could become a signing
+  oracle. The Assertion Consumer Service accepts the HTTP-POST binding only; Hearth receives
+  no DEFLATE-compressed HTTP-Redirect payloads.
 
 - **Audience/destination validated against `onboarding.base_url`.** When `onboarding.base_url`
   is set in `hearth.yaml`, SAML assertion audience and destination are validated against that

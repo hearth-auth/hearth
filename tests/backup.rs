@@ -2240,40 +2240,23 @@ async fn restore_carries_webhooks_with_their_signing_secret() {
     assert_eq!(report.webhooks.created, 1);
 }
 
-/// SAML SPs and the per-realm RSA key whose certificate they pinned.
+/// The per-realm SAML RSA key, whose certificate the SP metadata publishes to
+/// every upstream IdP.
 ///
 /// Source and destination are sealed under **different** KEKs, which is the
 /// whole point: a naive round-trip would copy ciphertext the destination
 /// cannot open, and it would look like it worked until the first SAML login.
 #[tokio::test]
-async fn restore_carries_saml_service_providers_and_a_usable_signing_key() {
-    use std::collections::BTreeMap;
-
+async fn restore_carries_a_usable_saml_signing_key() {
     let src = common::TestHarness::embedded_with_kek([7u8; 32])
         .await
         .expect("src harness");
     let (realm, _email, _password) = seeded_realm(&src);
     let source_key = src
         .identity()
-        .get_or_create_saml_signing_key(&realm, "hearth-test-idp")
+        .get_or_create_saml_signing_key(&realm, "hearth-test-sp")
         .expect("create saml key");
     let source_cert = source_key.cert_der().to_vec();
-
-    let sp = hearth::identity::federation::saml::SamlServiceProvider {
-        sp_key: "my-crm".to_string(),
-        entity_id: "https://crm.example".to_string(),
-        acs_url: "https://crm.example/acs".to_string(),
-        slo_url: None,
-        sp_certificate_pem: None,
-        sign_assertions: true,
-        sign_responses: true,
-        want_authn_requests_signed: false,
-        nameid_format: hearth::identity::federation::saml::SamlNameIdFormat::EmailAddress,
-        attribute_map: BTreeMap::new(),
-    };
-    src.identity()
-        .register_saml_sp(&realm, &sp)
-        .expect("register sp");
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
@@ -2282,28 +2265,23 @@ async fn restore_carries_saml_service_providers_and_a_usable_signing_key() {
         .await
         .expect("dst harness");
     let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
-
-    let restored_sp = dst
-        .identity()
-        .get_saml_sp_by_entity_id(&restored_realm, "https://crm.example")
-        .expect("get sp")
-        .expect("the SP registration must survive the restore");
-    assert_eq!(restored_sp.acs_url, sp.acs_url);
-    assert!(restored_sp.sign_assertions);
-    assert_eq!(report.saml_service_providers.created, 1);
+    assert!(
+        report.retired_members.is_empty(),
+        "a v3 export writes no retired member"
+    );
 
     // `get_or_create` would silently GENERATE a fresh key if the restored one
     // were unreadable, so an equal certificate is proof the restored key was
     // decrypted under the destination's own KEK and is usable.
     let restored_key = dst
         .identity()
-        .get_or_create_saml_signing_key(&restored_realm, "hearth-test-idp")
+        .get_or_create_saml_signing_key(&restored_realm, "hearth-test-sp")
         .expect("load restored saml key");
     assert_eq!(
         restored_key.cert_der(),
         source_cert.as_slice(),
         "the restored SAML key must be the ORIGINAL one, re-sealed under the destination's KEK — \
-         a freshly generated key hands every SP a certificate it does not trust"
+         a freshly generated key hands every upstream IdP a certificate it does not trust"
     );
 }
 

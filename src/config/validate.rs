@@ -580,7 +580,6 @@ impl Config {
         );
         validate_realm_applications_all(self.realms.as_ref(), &mut issues);
         validate_realm_organizations_all(self.realms.as_ref(), &mut issues);
-        validate_realm_saml_sps_all(self.realms.as_ref(), &mut issues);
         validate_realm_federation_keys_all(self.realms.as_ref(), &mut issues);
         validate_realm_protected_resources_all(self.realms.as_ref(), self.dev_mode, &mut issues);
         validate_realm_introspection_clients_all(self.realms.as_ref(), &mut issues);
@@ -1340,39 +1339,6 @@ fn validate_email_transport_log_prod_all(
     }
 }
 
-/// Checks one SAML SP registration's signing-verification pairing.
-///
-/// `want_authn_requests_signed: true` is only enforceable with a certificate
-/// to verify against, and the certificate is only usable if it parses. Both
-/// are checked at boot so the operator learns about a broken pairing then,
-/// not at the first federated login (audit 2026-08-28 §4.10#4).
-///
-/// Returns `Some((field, reason))` on a problem.
-fn saml_sp_signing_problem(
-    realm: &str,
-    sp_key: &str,
-    sp: &crate::config::SamlServiceProviderYaml,
-) -> Option<(String, String)> {
-    let base = format!("realms.{realm}.saml_service_providers.{sp_key}");
-    if let Some(pem) = sp.sp_certificate_pem.as_deref() {
-        if let Err(e) = crate::identity::federation::saml::validate_signing_cert_pem(pem) {
-            return Some((
-                format!("{base}.sp_certificate_pem"),
-                format!("not a usable RSA certificate: {e}"),
-            ));
-        }
-    } else if sp.want_authn_requests_signed == Some(true) {
-        return Some((
-            format!("{base}.want_authn_requests_signed"),
-            "requires `sp_certificate_pem` — without a certificate there is \
-             nothing to verify an AuthnRequest signature against, and the SSO \
-             endpoint refuses every request from this SP"
-                .to_string(),
-        ));
-    }
-    None
-}
-
 fn validate_realm_protected_resources_all(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
     dev_mode: bool,
@@ -1445,23 +1411,6 @@ fn validate_realm_introspection_clients_all(
                          (applications / oauth_clients)"
                     ),
                 });
-            }
-        }
-    }
-}
-
-fn validate_realm_saml_sps_all(
-    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
-    issues: &mut Vec<ValidationIssue>,
-) {
-    let Some(realms) = realms else { return };
-    for (name, cfg) in realms {
-        let Some(sps) = &cfg.saml_service_providers else {
-            continue;
-        };
-        for (sp_key, sp) in sps {
-            if let Some((field, reason)) = saml_sp_signing_problem(name, sp_key, sp) {
-                issues.push(ValidationIssue { field, reason });
             }
         }
     }
@@ -4265,104 +4214,6 @@ realms:
     }
 
     // ── SAML SP signing pairing (§4.10#4) ─────────────────────────────────
-
-    /// `want_authn_requests_signed: true` is only enforceable against a
-    /// registered certificate. Boot must refuse the unenforceable pairing
-    /// rather than accept a flag that turns the SP off.
-    #[test]
-    fn saml_sp_wanting_signed_authn_requests_without_certificate_is_refused() {
-        let yaml = r#"
-oidc:
-  issuer: "https://auth.example.com"
-server:
-  trust_forwarded_proto: true
-  trusted_proxies: ["127.0.0.1"]
-security:
-  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
-email:
-  transport: smtp
-  from: "noreply@example.com"
-  smtp:
-    host: "smtp.example.com"
-    port: 587
-realms:
-  acme:
-    saml_service_providers:
-      crm:
-        entity_id: "https://crm.example"
-        acs_url: "https://crm.example/acs"
-        want_authn_requests_signed: true
-"#;
-        let err = Config::from_yaml_str(yaml)
-            .expect_err("want_authn_requests_signed without a certificate must be refused");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("sp_certificate_pem"),
-            "the error must name the missing key: {msg}"
-        );
-    }
-
-    /// The same SP with the flag left at its default is accepted.
-    #[test]
-    fn saml_sp_without_signing_requirement_is_accepted() {
-        let yaml = r#"
-oidc:
-  issuer: "https://auth.example.com"
-server:
-  trust_forwarded_proto: true
-  trusted_proxies: ["127.0.0.1"]
-security:
-  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
-email:
-  transport: smtp
-  from: "noreply@example.com"
-  smtp:
-    host: "smtp.example.com"
-    port: 587
-realms:
-  acme:
-    saml_service_providers:
-      crm:
-        entity_id: "https://crm.example"
-        acs_url: "https://crm.example/acs"
-"#;
-        Config::from_yaml_str(yaml).expect("an SP that does not require signing must be accepted");
-    }
-
-    /// A certificate that cannot be parsed can never verify a signature, so
-    /// it is refused at boot instead of at the first federated login.
-    #[test]
-    fn saml_sp_certificate_pem_must_be_a_usable_certificate() {
-        let yaml = r#"
-oidc:
-  issuer: "https://auth.example.com"
-server:
-  trust_forwarded_proto: true
-  trusted_proxies: ["127.0.0.1"]
-security:
-  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
-email:
-  transport: smtp
-  from: "noreply@example.com"
-  smtp:
-    host: "smtp.example.com"
-    port: 587
-realms:
-  acme:
-    saml_service_providers:
-      crm:
-        entity_id: "https://crm.example"
-        acs_url: "https://crm.example/acs"
-        want_authn_requests_signed: true
-        sp_certificate_pem: "not a certificate"
-"#;
-        let err = Config::from_yaml_str(yaml).expect_err("an unusable certificate must be refused");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("sp_certificate_pem"),
-            "the error must name the offending key: {msg}"
-        );
-    }
 
     // ── GA audit 3 round 3: federation PEMs are parsed at load/reload ───────
     //

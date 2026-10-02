@@ -52,10 +52,10 @@ pub use types::{
     OrganizationYamlConfig, OtlpConfig, OtlpProtocol, PasswordPolicyYaml, PasswordSecurityYaml,
     PepperYaml, PermissionYamlConfig, PostmarkConfig, ProtectedResourceYamlConfig, RateLimitYaml,
     RealmAuthYaml, RealmEmailYaml, RealmMigrateYaml, RealmScimYaml, RealmSecurityYaml,
-    RealmTokenYaml, RealmWebYaml, RealmYamlConfig, RoleYamlConfig, SamlServiceProviderYaml,
-    ScopeBundleYamlConfig, SecurityYaml, SeedUserYamlConfig, SeedingYamlConfig, SendgridConfig,
-    ServerConfig, SmsConfig, SmsTransport, SmtpConfig, SmtpEncryption, SnsSmsConfig,
-    StorageSection, TlsMinVersionYaml, TokenYamlConfig, TurnstileYaml, TwilioConfig,
+    RealmTokenYaml, RealmWebYaml, RealmYamlConfig, RoleYamlConfig, ScopeBundleYamlConfig,
+    SecurityYaml, SeedUserYamlConfig, SeedingYamlConfig, SendgridConfig, ServerConfig, SmsConfig,
+    SmsTransport, SmtpConfig, SmtpEncryption, SnsSmsConfig, StorageSection, TlsMinVersionYaml,
+    TokenYamlConfig, TurnstileYaml, TwilioConfig,
 };
 pub use types::{AgentAuthCapabilities, AgentAuthConfig};
 pub use types::{ClusterConfig, PeerConfig};

@@ -292,12 +292,6 @@ const REALM_ID_TOKEN_RSA_KEY_PREFIX: &str = "realm:idtoken_rsa:";
 /// active keys never picks up a retiring one.
 const REALM_ID_TOKEN_RSA_RETIRING_PREFIX: &str = "realm:idtoken_rsa_retiring:";
 
-/// Prefix for SAML registered Service Providers (per realm).
-///
-/// Format: `saml:sp:{sp_key}` — JSON-serialized `SamlServiceProvider`.
-/// The SP key is a stable slug (from YAML) so reconciliation survives edits.
-const SAML_SP_PREFIX: &str = "saml:sp:";
-
 /// Prefix for SAML outbound-request state (SP side).
 ///
 /// Format: `saml:state:{token}` — JSON-serialized `SamlStateBag`. 10-minute
@@ -310,22 +304,12 @@ const SAML_STATE_PREFIX: &str = "saml:state:";
 /// the assertion's `NotOnOrAfter - now`; duplicates are replay attacks.
 const SAML_ASSERTION_PREFIX: &str = "saml:asn:";
 
-/// Prefix for SAML IdP-issued session → SP registration (IdP side).
-///
-/// Format: `saml:sp_session:{session_uuid}:{sp_key}` — JSON-serialized
-/// `SamlSessionRegistration`. Used for SLO fan-out: when a user logs out
-/// at Hearth (acting as IdP), we find all SPs that consumed an assertion
-/// for that session and propagate `LogoutRequest`s.
-const SAML_SP_SESSION_PREFIX: &str = "saml:sp_session:";
-
 /// Prefix for SAML in-flight logout state.
 ///
 /// Format: `saml:logout:{token}` — JSON-serialized `SamlLogoutStateBag`.
 /// Matches the SP-side / IdP-side logout round-trip (LogoutRequest sent →
 /// LogoutResponse received). 5-minute TTL; single-use.
 #[allow(dead_code)]
-const SAML_LOGOUT_STATE_PREFIX: &str = "saml:logout:";
-
 /// Prefix for the SCIM `externalId` → Hearth `UserId` index.
 ///
 /// Format: `scim:ext_user:{external_id}` — value is the stringified
@@ -1704,20 +1688,6 @@ pub(crate) fn encode_realm_saml_key(realm_id: &RealmId) -> Vec<u8> {
     format!("{REALM_SAML_KEY_PREFIX}{}", realm_id.as_uuid()).into_bytes()
 }
 
-/// Encodes the storage key for a SAML registered Service Provider.
-///
-/// Format: `saml:sp:{sp_key}` — the SP key is a stable slug from YAML.
-pub(crate) fn encode_saml_sp_key(sp_key: &str) -> Vec<u8> {
-    format!("{SAML_SP_PREFIX}{sp_key}").into_bytes()
-}
-
-/// Returns the scan prefix for every SAML SP registration in the realm.
-///
-/// Format: `saml:sp:` — used by reconcile and cascade cleanup.
-pub(crate) fn saml_sp_scan_prefix() -> Vec<u8> {
-    SAML_SP_PREFIX.as_bytes().to_vec()
-}
-
 /// Encodes the storage key for SAML SP-side outbound request state.
 ///
 /// Format: `saml:state:{opaque_token}`.
@@ -1746,38 +1716,6 @@ pub(crate) fn encode_saml_assertion_prefix_for_idp(idp_id: &IdpId) -> Vec<u8> {
 /// Returns the scan prefix for all SAML assertion sentinels in the realm.
 pub(crate) fn saml_assertion_scan_prefix() -> Vec<u8> {
     SAML_ASSERTION_PREFIX.as_bytes().to_vec()
-}
-
-/// Encodes the SAML SP-session registration key (IdP side, for SLO fan-out).
-///
-/// Format: `saml:sp_session:{session_uuid}:{sp_key}`.
-pub(crate) fn encode_saml_sp_session(session_id: &SessionId, sp_key: &str) -> Vec<u8> {
-    format!("{SAML_SP_SESSION_PREFIX}{}:{sp_key}", session_id.as_uuid()).into_bytes()
-}
-
-/// Returns the scan prefix for all SP registrations on a session.
-pub(crate) fn encode_saml_sp_session_prefix(session_id: &SessionId) -> Vec<u8> {
-    format!("{SAML_SP_SESSION_PREFIX}{}:", session_id.as_uuid()).into_bytes()
-}
-
-/// Returns the scan prefix for all SP session registrations in the realm.
-#[allow(dead_code)]
-pub(crate) fn saml_sp_session_scan_prefix() -> Vec<u8> {
-    SAML_SP_SESSION_PREFIX.as_bytes().to_vec()
-}
-
-/// Encodes the SAML logout state key.
-///
-/// Format: `saml:logout:{opaque_token}`.
-#[allow(dead_code)]
-pub(crate) fn encode_saml_logout_key(token: &str) -> Vec<u8> {
-    format!("{SAML_LOGOUT_STATE_PREFIX}{token}").into_bytes()
-}
-
-/// Returns the scan prefix for SAML logout state.
-#[allow(dead_code)]
-pub(crate) fn saml_logout_scan_prefix() -> Vec<u8> {
-    SAML_LOGOUT_STATE_PREFIX.as_bytes().to_vec()
 }
 
 /// Encodes the session → grant-family index key.

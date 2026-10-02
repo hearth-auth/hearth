@@ -76,7 +76,7 @@
 | FAPI 2.0 Security Profile (per-client + per-realm) | ✅ Shipped | `ClientProfile::Fapi2`, `RealmConfig::fapi_profile` (`src/identity/oidc.rs`); normative spec [docs/specs/OIDC.md](specs/OIDC.md) |
 | RFC 8693 token exchange / RFC 8707 resource indicators | ✅ Shipped | `src/identity/engine/oauth.rs`; see [docs/specs/AGENT_AUTH.md](specs/AGENT_AUTH.md) |
 | SAML 2.0 — SP (inbound federation) | ✅ Shipped | `src/identity/federation/saml/sp.rs`; spec [docs/specs/SAML.md](specs/SAML.md) |
-| SAML 2.0 — IdP (Hearth asserts to third-party SPs) | ✅ Shipped | `src/identity/federation/saml/idp.rs`; routes `/realms/{realm}/saml/{metadata,sso,sso/init,slo-idp}` |
+| SAML 2.0 — IdP (Hearth asserts to third-party SPs) | ❌ Removed in 3.0.0 | Scope trim (OpenSpec `scope-trim-trusted-core`); `realms.<name>.saml_service_providers` now stops startup |
 | SCIM 2.0 provisioning (Users, Groups, ServiceProviderConfig) | ✅ Shipped | `src/protocol/scim/` |
 | Agent identity — Agent Card, DPoP, delegation, AATs, approvals | ✅ Shipped | `src/protocol/http/agents.rs`, `src/identity/engine/{aat,approval,txn,cross_realm,spiffe}.rs` |
 

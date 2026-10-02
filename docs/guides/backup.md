@@ -62,7 +62,7 @@ A `.hearth-backup` file is a zstd-compressed archive. Inside, each realm is stor
 | `realms/<slug>/identity_providers.ndjson` | External IdP connector configurations, under their original `IdpId` |
 | `realms/<slug>/federation_links.ndjson` | User-to-IdP account links (both index directions rebuilt on import) |
 | `realms/<slug>/webhooks.ndjson` | Webhook registrations, HMAC signing secret included |
-| `realms/<slug>/saml_service_providers.ndjson` | SAML service-provider registrations |
+| `realms/<slug>/saml_service_providers.ndjson` | **Retired in 3.0.0.** Written by earlier releases for the SAML IdP side. A 3.x restore skips it with a warning and lists it in the restore summary; it never fails the restore |
 | `realms/<slug>/saml_signing_key.json` | The realm's SAML RSA key and certificate (AES-256-GCM encrypted with the DEK; re-sealed under the destination's KEK on import) |
 | `realms/<slug>/scim_mappings.ndjson` | SCIM `externalId` mappings for users and groups |
 | `realms/<slug>/invitations.ndjson` | Organization invitations, with the token, dedup and listing indexes rebuilt on import |

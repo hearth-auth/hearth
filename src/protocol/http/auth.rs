@@ -862,8 +862,7 @@ pub(crate) fn identity_error_to_response(
             crate::identity::federation::saml::SamlError::MetadataFetch { .. } => {
                 (StatusCode::BAD_GATEWAY, "SAML metadata fetch failed")
             }
-            crate::identity::federation::saml::SamlError::UnknownSp
-            | crate::identity::federation::saml::SamlError::UnknownIdp => {
+            crate::identity::federation::saml::SamlError::UnknownIdp => {
                 (StatusCode::NOT_FOUND, "SAML entity not found")
             }
             _ => (StatusCode::BAD_REQUEST, "invalid SAML message"),

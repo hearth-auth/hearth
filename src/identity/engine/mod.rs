@@ -13742,64 +13742,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         })
     }
 
-    fn export_all_saml_service_providers(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<Vec<crate::identity::federation::saml::SamlServiceProvider>, IdentityError> {
-        let prefix = keys::saml_sp_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in entries {
-            if let Ok(sp) = serde_json::from_slice::<
-                crate::identity::federation::saml::SamlServiceProvider,
-            >(&entry.value)
-            {
-                out.push(sp);
-            }
-        }
-        Ok(out)
-    }
-
-    fn import_saml_service_provider(
-        &self,
-        realm_id: &RealmId,
-        sp: &crate::identity::federation::saml::SamlServiceProvider,
-        overwrite: bool,
-    ) -> Result<ImportOutcome, IdentityError> {
-        // The live API never creates this in the system realm, so a restore
-        // must not either (the `create_*` twin refuses it, or it has none that
-        // can reach the system realm).
-        if keys::is_system_realm(realm_id) {
-            return Err(IdentityError::SystemRealmProtected {
-                operation: "import_saml_service_provider",
-            });
-        }
-        let key = keys::encode_saml_sp_key(&sp.sp_key);
-        let exists = self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .is_some();
-        if exists && !overwrite {
-            return Ok(ImportOutcome::Skipped);
-        }
-        let bytes = serde_json::to_vec(sp).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(realm_id, &key, &bytes)
-            .map_err(Self::storage_err)?;
-        Ok(if exists {
-            ImportOutcome::Overwritten
-        } else {
-            ImportOutcome::Created
-        })
-    }
-
     fn export_realm_saml_key(
         &self,
         realm_id: &RealmId,
@@ -16779,89 +16721,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(arc)
     }
 
-    fn register_saml_sp(
-        &self,
-        realm_id: &RealmId,
-        sp: &crate::identity::federation::saml::SamlServiceProvider,
-    ) -> Result<(), IdentityError> {
-        // Archival is a freeze: refuse mutations on a non-active realm
-        // (audit 2026-08-28 §4.20#5).
-        self.require_active_realm(realm_id)?;
-        let key = keys::encode_saml_sp_key(&sp.sp_key);
-        let bytes = serde_json::to_vec(sp).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(realm_id, &key, &bytes)
-            .map_err(Self::storage_err)
-    }
-
-    fn get_saml_sp_by_entity_id(
-        &self,
-        realm_id: &RealmId,
-        entity_id: &str,
-    ) -> Result<Option<crate::identity::federation::saml::SamlServiceProvider>, IdentityError> {
-        for sp in self.list_saml_sps(realm_id)? {
-            if sp.entity_id == entity_id {
-                return Ok(Some(sp));
-            }
-        }
-        Ok(None)
-    }
-
-    fn get_saml_sp_by_key(
-        &self,
-        realm_id: &RealmId,
-        sp_key: &str,
-    ) -> Result<Option<crate::identity::federation::saml::SamlServiceProvider>, IdentityError> {
-        let key = keys::encode_saml_sp_key(sp_key);
-        match self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-        {
-            Some(bytes) => {
-                let sp =
-                    serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                        reason: e.to_string(),
-                    })?;
-                Ok(Some(sp))
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn list_saml_sps(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<Vec<crate::identity::federation::saml::SamlServiceProvider>, IdentityError> {
-        let prefix = keys::saml_sp_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            let sp: crate::identity::federation::saml::SamlServiceProvider =
-                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            out.push(sp);
-        }
-        Ok(out)
-    }
-
-    fn delete_saml_sp(&self, realm_id: &RealmId, sp_key: &str) -> Result<(), IdentityError> {
-        // Archival is a freeze: refuse mutations on a non-active realm
-        // (audit 2026-08-28 §4.20#5).
-        self.require_active_realm(realm_id)?;
-        let key = keys::encode_saml_sp_key(sp_key);
-        self.storage
-            .delete(realm_id, &key)
-            .map_err(Self::storage_err)
-    }
-
     fn put_saml_state(
         &self,
         bag: &crate::identity::federation::saml::SamlStateBag,
@@ -16957,43 +16816,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         } else {
             Err(IdentityError::Saml(SamlError::Replay))
         }
-    }
-
-    fn record_saml_sp_session(
-        &self,
-        realm_id: &RealmId,
-        registration: &crate::identity::federation::saml::SamlSessionRegistration,
-    ) -> Result<(), IdentityError> {
-        let key = keys::encode_saml_sp_session(&registration.session_id, &registration.sp_key);
-        let bytes = serde_json::to_vec(registration).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(realm_id, &key, &bytes)
-            .map_err(Self::storage_err)
-    }
-
-    fn list_saml_sp_sessions(
-        &self,
-        realm_id: &RealmId,
-        session_id: &SessionId,
-    ) -> Result<Vec<crate::identity::federation::saml::SamlSessionRegistration>, IdentityError>
-    {
-        let prefix = keys::encode_saml_sp_session_prefix(session_id);
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            let reg: crate::identity::federation::saml::SamlSessionRegistration =
-                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            out.push(reg);
-        }
-        Ok(out)
     }
 
     fn is_storage_healthy(&self) -> bool {

@@ -729,7 +729,6 @@ pub enum XmlStep<'a> {
 /// `<saml:Attribute>`, a `<saml:Conditions>` — leaves the signature valid. A
 /// field reader that can see into it can therefore be fed unsigned values
 /// (GA audit 3, G-1). Every SAML field extractor (`parse_response`,
-/// `parse_authn_request`, `parse_logout_request`, `parse_logout_response`,
 /// `parse_idp_metadata`) reads the document through this walker, so none of
 /// them can.
 ///

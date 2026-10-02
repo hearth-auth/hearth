@@ -6,6 +6,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+<!-- Scope trim to a trusted core, 2026-10 (branch feature/bloat-removal, OpenSpec
+     scope-trim-trusted-core). Ships as 3.0.0; removals have no deprecation window because
+     Hearth has no production users yet (see VERSIONING.md). -->
+
+### Removed
+- **BREAKING: Hearth no longer acts as a SAML Identity Provider.** The routes
+  `/ui/realms/{realm}/saml/metadata`, `/saml/sso` (GET and POST), `/saml/sso/init` and
+  `/saml/slo-idp` (GET and POST) are gone and answer `404`, and the
+  `realms.<name>.saml_service_providers` config key is removed. Hearth remains a SAML
+  **service provider** for federation with a corporate IdP (`realms.<name>.federation`);
+  connect applications to Hearth over OpenID Connect. The `UnknownSp` SAML error is gone with
+  the SP registry.
+
+### Changed
+- **BREAKING: a configuration key of a removed feature now stops startup with a named
+  error.** Instead of serde's generic "unknown field", the message names the key, the removed
+  feature, the release that removed it (3.0.0) and what to use instead. The check runs in every
+  loader, `serve --dev` included. First key covered: `realms.<name>.saml_service_providers`.
+- Backups no longer contain `saml_service_providers.ndjson`. Restoring an older archive that
+  does skips that member with a warning and lists it in the restore summary
+  (`ImportReport::retired_members`); the rest of the realm restores as before.
+
 <!-- GA audit round 3 follow-ups, 2026-09-30 (branch feature/ga-sweep-4-2026-09-29). -->
 
 ### Security

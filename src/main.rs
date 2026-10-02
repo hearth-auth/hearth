@@ -5426,7 +5426,6 @@ fn import_report_had_errors(report: &hearth::backup::ImportReport) -> bool {
         || report.identity_providers.errored > 0
         || report.federation_links.errored > 0
         || report.webhooks.errored > 0
-        || report.saml_service_providers.errored > 0
         || report.scim_mappings.errored > 0
         || report.invitations.errored > 0
         || report.revocations.errored > 0
@@ -5575,7 +5574,7 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
 /// 23.5). A restore report that hides seven of its eleven entity types is
 /// indistinguishable from a clean one.
 fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
-    let buckets: [(&str, &hearth::backup::EntityCounts); 23] = [
+    let buckets: [(&str, &hearth::backup::EntityCounts); 22] = [
         ("realms", &report.realms),
         ("users", &report.users),
         ("mfa", &report.mfa_factors),
@@ -5593,7 +5592,6 @@ fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
         ("idps", &report.identity_providers),
         ("federation links", &report.federation_links),
         ("webhooks", &report.webhooks),
-        ("saml sps", &report.saml_service_providers),
         ("scim mappings", &report.scim_mappings),
         ("invitations", &report.invitations),
         ("revocations", &report.revocations),
@@ -5609,6 +5607,9 @@ fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
             counts.overwritten,
             counts.errored
         );
+    }
+    for member in &report.retired_members {
+        tracing::warn!("  skipped {member}: its feature was removed in Hearth 3.0.0");
     }
     if !report.conflicts.is_empty() {
         tracing::info!("  conflicts ({}):", report.conflicts.len());

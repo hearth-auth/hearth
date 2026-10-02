@@ -8,14 +8,14 @@ Each numbered group ships as one PR, in this order (design decision 1). Each PR 
 
 ## 2. SAML IdP side (PR 1)
 
-- [ ] 2.1 Red tests: the six IdP routes answer `404`; `realms.<name>.saml_service_providers` stops startup; a v2 archive with `saml_service_providers.ndjson` restores with one warning
-- [ ] 2.2 Green-before-delete guard: confirm the SP-side tests in `tests/saml.rs`, `tests/saml_web_hardening.rs` and `tests/web_ui_federation.rs` pass. Move the SP-side cases into `tests/saml_sp.rs`
-- [ ] 2.3 Delete `src/identity/federation/saml/idp.rs`, the IdP handlers in `src/protocol/web/saml.rs` (`idp_metadata`, `idp_sso_get/post`, `idp_complete_sso`, `idp_sso_init`, `idp_slo_get/post`, `idp_complete_slo`, `reject_session_realm_mismatch`, `asserted_attributes`) and their routes in `src/protocol/web/mod.rs:1243–1266`
-- [ ] 2.4 Delete the SP registry: the engine trait methods (`identity/mod.rs:2254–2281`, the caller-less `record/list_saml_sp_session*`), the engine impl, the `saml:sp:` storage keys, `reconcile_saml_sps_for_realm`, `SamlServiceProviderYaml` and its validation
-- [ ] 2.5 Delete the IdP-only code in `logout.rs` and the `build_response_xml`/`ResponseBuilder` paths in `response.rs`. Move any test-only helpers the SP tests need into a `#[cfg(test)]` module
-- [ ] 2.6 Backup: stop exporting `saml_service_providers.ndjson`; make the importer skip it with a warning (`backup/export.rs`, `import.rs`, `types.rs`, `main.rs:5429`)
-- [ ] 2.7 Update `docs/specs/SAML.md`, `federation.md`, `backup.md`, `security-hardening.md`, `error-codes.md`, `CONFIGURATION.md`, the hearth-yaml examples and README
-- [ ] 2.8 CHANGELOG `### Removed` entry for the SAML IdP side
+- [x] 2.1 Red tests: the six IdP routes answer `404`; `realms.<name>.saml_service_providers` stops startup; a v2 archive with `saml_service_providers.ndjson` restores with one warning
+- [x] 2.2 Green-before-delete guard: confirm the SP-side tests pass. `tests/saml.rs` was already SP-side apart from two IdP tests, so it became `tests/saml_sp.rs`; the IdP tests left `tests/saml_web_hardening.rs`. `sign_element`, `build_response_xml` and `ResponseBuilder` stay in the library as fixtures the SP tests use to play the upstream IdP — no route reaches them
+- [x] 2.3 Delete `src/identity/federation/saml/idp.rs`, the IdP handlers in `src/protocol/web/saml.rs` (`idp_metadata`, `idp_sso_get/post`, `idp_complete_sso`, `idp_sso_init`, `idp_slo_get/post`, `idp_complete_slo`, `reject_session_realm_mismatch`, `asserted_attributes`) and their routes in `src/protocol/web/mod.rs:1243–1266`
+- [x] 2.4 Delete the SP registry: the engine trait methods (`identity/mod.rs:2254–2281`, the caller-less `record/list_saml_sp_session*`), the engine impl, the `saml:sp:` storage keys, `reconcile_saml_sps_for_realm`, `SamlServiceProviderYaml` and its validation
+- [x] 2.5 Delete the IdP-only SAML library code: all of `logout.rs` (the SP-side SLO builders were never wired either), `build_idp_metadata`, `parse_authn_request`, the inbound Redirect decoder and the POST-binding page builder, the logout state keys, and the `UnknownSp` error
+- [x] 2.6 Backup: stop exporting `saml_service_providers.ndjson`; make the importer skip it with a warning (`backup/export.rs`, `import.rs`, `types.rs`, `main.rs:5429`)
+- [x] 2.7 Update `docs/specs/SAML.md`, `federation.md`, `backup.md`, `security-hardening.md`, `error-codes.md`, `CONFIGURATION.md`, the hearth-yaml examples and README
+- [x] 2.8 CHANGELOG `### Removed` entry for the SAML IdP side
 
 ## 3. SAML SP strict profile (PR 2)
 
