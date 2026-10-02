@@ -59,6 +59,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `hearth_dfp_keys_active`), and `DELETE /admin/users/{id}/device-fingerprints`. Refresh tokens
   keep their DPoP-key and confidential-client binding. The email OTP key is now always derived
   from the process cookie secret, like the login cookie it belongs to.
+- **BREAKING: the last of the ROPC password grant is gone.** Both token endpoints already
+  refused `grant_type=password` (HEA-1862); the engine's `password_grant_token` and
+  `PasswordGrantRequest`, kept only for tests, are now removed too. Registering or updating a
+  client with `password` in `grant_types` is refused (`400`; `invalid_client_metadata` on
+  `POST /register`) instead of storing a grant no endpoint serves.
 
 ### Security
 - **`GET /admin/users/{id}/effective-permissions?org_id=` no longer reports a suspended
@@ -72,6 +77,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `<samlp:Status>`, for example, used to be ignored; it is now an error. Responses that sign the
   Response, the Assertion, or both are unaffected. The SP suite now also runs the eight published
   XML signature-wrapping variants (XSW1–XSW8).
+
+### Fixed
+- The realm-scoped token endpoint (`/realms/{realm}/token`) answered an unknown `grant_type`
+  with `{"error":"unsupported grant_type: <value>"}`, echoing the caller's input and not using
+  the RFC 6749 §5.2 code. It now answers `unsupported_grant_type` with
+  `HEARTH_UNSUPPORTED_GRANT_TYPE`, exactly like the global `/token`.
 
 ### Changed
 - **BREAKING: a configuration key of a removed feature now stops startup with a named

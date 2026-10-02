@@ -1,13 +1,10 @@
-//! Integration tests for the step-up MFA grant that completes a password
-//! (ROPC) grant for a user holding a second factor (HEA-836).
+//! Integration tests for the step-up MFA grant (HEA-836): the token endpoint
+//! grant that verifies a password plus a TOTP or recovery code.
 //!
-//! A password grant proves the password and nothing else, so a user who holds
-//! a second factor is answered `StepUpChallengeRequired`; the step-up grant
-//! then re-verifies the password plus the MFA code and issues tokens.
-//!
-//! Adaptive MFA (device fingerprinting) was removed in Hearth 3.0.0; the
-//! tests of the fingerprint gate that used to live here went with it. The
-//! step-up grant itself is kept and is exercised here with an enrolled TOTP.
+//! The ROPC password grant that used to send clients here, and adaptive MFA
+//! (device fingerprinting), were removed in Hearth 3.0.0; their tests went
+//! with them. The step-up grant itself is kept and is exercised here with an
+//! enrolled TOTP.
 
 mod common;
 
@@ -16,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use hearth::audit::{AuditAction, AuditQuery};
 use hearth::core::RealmId;
 use hearth::identity::{
-    CleartextPassword, CreateRealmRequest, CreateUserRequest, IdentityError, PasswordGrantRequest,
-    StepUpMfaGrantRequest, User,
+    CleartextPassword, CreateRealmRequest, CreateUserRequest, IdentityError, StepUpMfaGrantRequest,
+    User,
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -25,16 +22,6 @@ use hearth::identity::{
 // ──────────────────────────────────────────────────────────────
 
 const PASSWORD: &str = "S3cur3P@ss!1";
-
-fn ropc(email: &str) -> PasswordGrantRequest {
-    PasswordGrantRequest {
-        email: email.to_string(),
-        password: PASSWORD.to_string(),
-        scope: None,
-        client_ip: Some("10.20.30.40".to_string()),
-        user_agent: Some("Chrome/125.0".to_string()),
-    }
-}
 
 fn step_up(email: &str, mfa_code: String) -> StepUpMfaGrantRequest {
     StepUpMfaGrantRequest {
@@ -127,25 +114,6 @@ fn next_step_code(secret_base32: &str) -> String {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Control: no second factor → the password grant issues tokens
-// ──────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn password_grant_without_a_second_factor_issues_tokens() {
-    let h = common::TestHarness::embedded().await.expect("harness");
-    let (realm, user) = realm_and_user(&h, "stepup-nofactor");
-
-    let response = h
-        .identity()
-        .password_grant_token(&realm, &ropc(user.email()))
-        .expect("a user with no second factor and no mfa_required gets tokens");
-    assert!(
-        !response.access_token.is_empty(),
-        "access token must be non-empty"
-    );
-}
-
-// ──────────────────────────────────────────────────────────────
 // BLK-1: Step-up completion grant issues tokens
 // ──────────────────────────────────────────────────────────────
 
@@ -155,16 +123,6 @@ async fn step_up_completion_issues_token() {
     let (realm, user) = realm_and_user(&h, "stepup-complete");
     let secret = enrol_totp(&h, &realm, &user);
 
-    // A password grant for a user holding TOTP is sent to step-up.
-    let err = h
-        .identity()
-        .password_grant_token(&realm, &ropc(user.email()))
-        .expect_err("a user holding TOTP must be sent to step-up");
-    assert!(
-        matches!(err, IdentityError::StepUpChallengeRequired),
-        "expected StepUpChallengeRequired, got: {err:?}"
-    );
-
     // Complete the step-up with the correct MFA code.
     let response = h
         .identity()
@@ -173,17 +131,6 @@ async fn step_up_completion_issues_token() {
     assert!(
         !response.access_token().is_empty(),
         "access token must be non-empty"
-    );
-
-    // Completing a step-up once does not waive the factor (GA audit B4/B5):
-    // the next password-only grant is sent back to step-up.
-    let second_login = h
-        .identity()
-        .password_grant_token(&realm, &ropc(user.email()))
-        .expect_err("a user holding TOTP must prove it on every password grant");
-    assert!(
-        matches!(second_login, IdentityError::StepUpChallengeRequired),
-        "expected StepUpChallengeRequired, got: {second_login:?}"
     );
 }
 

@@ -620,3 +620,27 @@ impl TestHarness {
         self.base_url.as_deref()
     }
 }
+
+/// Signs `user_id` in with a fresh session and returns its token pair.
+///
+/// Replaces the engine's ROPC `password_grant_token`, removed in 3.0.0, for
+/// tests that need a user token and do not test how it was obtained. It lives
+/// in the test tree, so no production build contains it. It proves no second
+/// factor: a realm with `mfa_required` refuses it, as it should.
+#[allow(dead_code)]
+pub fn user_token_pair(
+    identity: &dyn IdentityEngine,
+    realm_id: &hearth::core::RealmId,
+    user_id: &hearth::core::UserId,
+) -> hearth::identity::TokenPair {
+    let session = identity
+        .create_session(
+            realm_id,
+            user_id,
+            &hearth::identity::SessionContext::default(),
+        )
+        .expect("create session");
+    identity
+        .issue_tokens(realm_id, user_id, session.id())
+        .expect("issue tokens")
+}

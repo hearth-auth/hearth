@@ -11,10 +11,7 @@ use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use hearth::identity::{
-    CleartextPassword, CreateRealmRequest, CreateUserRequest, DcrPolicy, PasswordGrantRequest,
-    RealmConfig,
-};
+use hearth::identity::{CreateRealmRequest, CreateUserRequest, DcrPolicy, RealmConfig};
 use hearth::protocol::http::{router, AppState};
 use tower::ServiceExt as _;
 
@@ -539,33 +536,7 @@ async fn dcr_authenticated_policy_accepts_valid_token() {
             },
         )
         .expect("assign hearth.clients.admin");
-    h.identity()
-        .set_password(
-            &realm_id,
-            user.id(),
-            &CleartextPassword::from_string("HearthDcr123!".to_string()),
-        )
-        .expect("set password");
-
-    let token_resp = tokio::task::spawn_blocking({
-        let identity = h.identity_arc();
-        let realm_id = realm_id.clone();
-        move || {
-            identity.password_grant_token(
-                &realm_id,
-                &PasswordGrantRequest {
-                    email: "dcr-test@example.com".to_string(),
-                    password: "HearthDcr123!".to_string(),
-                    scope: None,
-                    client_ip: None,
-                    user_agent: None,
-                },
-            )
-        }
-    })
-    .await
-    .expect("spawn_blocking")
-    .expect("password_grant_token");
+    let token_resp = common::user_token_pair(h.identity(), &realm_id, user.id());
 
     let app = build_app(&h).await;
 

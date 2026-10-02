@@ -98,10 +98,10 @@ pub use oidc::{
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     GeneratedClientSecret, IdTokenSigningAlg, IntrospectionResponse, JarClaims, JwtBearerRequest,
     LiveTokenAuthority, OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse,
-    PasswordGrantRequest, PasswordGrantResponse, PushedAuthorizationRequest,
-    PushedAuthorizationResponse, RefreshBindContext, RegisterClientRequest, ResponseMode,
-    StepUpMfaGrantRequest, TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest,
-    UpdateClientRequest, UserInfoResponse,
+    PasswordGrantResponse, PushedAuthorizationRequest, PushedAuthorizationResponse,
+    RefreshBindContext, RegisterClientRequest, ResponseMode, StepUpMfaGrantRequest,
+    TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
+    UserInfoResponse,
 };
 pub use operator_token::{
     OperatorToken, OperatorTokenIssuer, OPERATOR_TOKEN_DEFAULT_TTL, OPERATOR_TOKEN_MAX_TTL,
@@ -898,18 +898,6 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<OidcDiscoveryDocument, IdentityError>;
 
     // ===== OAuth 2.0 Extended (Step 22) =====
-
-    /// Issues tokens via the Resource Owner Password Credentials Grant (RFC 6749 §4.3).
-    ///
-    /// Looks up the user by email, verifies the password (enforcing per-account
-    /// rate limits), creates a session, and issues an access + refresh token pair.
-    /// Returns `Err(InvalidCredential)` for wrong email or password (intentionally
-    /// vague for enumeration resistance).
-    fn password_grant_token(
-        &self,
-        realm_id: &RealmId,
-        request: &PasswordGrantRequest,
-    ) -> Result<PasswordGrantResponse, IdentityError>;
 
     /// Completes a step-up MFA challenge and issues tokens (HEA-836).
     ///

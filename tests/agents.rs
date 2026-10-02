@@ -1180,41 +1180,12 @@ async fn agent_endpoint_cross_realm_bola() {
 /// deliberate, reviewed change.
 #[tokio::test]
 async fn m1_non_agent_token_claim_set_unchanged() {
-    use hearth::identity::{CleartextPassword, PasswordGrantRequest};
-
     let harness = common::TestHarness::embedded().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
 
     let user_id = make_user(identity, &realm_id);
-    let password = "HearthTest123!";
-    identity
-        .set_password(
-            &realm_id,
-            &user_id,
-            &CleartextPassword::from_string(password.to_string()),
-        )
-        .expect("set password");
-
-    let email = identity
-        .get_user(&realm_id, &user_id)
-        .expect("get user")
-        .expect("user exists")
-        .email()
-        .to_string();
-
-    let response = identity
-        .password_grant_token(
-            &realm_id,
-            &PasswordGrantRequest {
-                email: email.clone(),
-                password: password.to_string(),
-                scope: None,
-                client_ip: None,
-                user_agent: None,
-            },
-        )
-        .expect("password grant");
+    let response = common::user_token_pair(identity, &realm_id, &user_id);
 
     // Decode without verifying signature — we only care about the claim set
     let token = response.access_token();

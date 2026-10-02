@@ -8,7 +8,7 @@
 
 use hearth::config::{MailgunConfig, MailtrapConfig, PostmarkConfig, SendgridConfig, SmtpConfig};
 use hearth::core::FormSecret;
-use hearth::identity::{PasswordGrantRequest, StepUpMfaGrantRequest};
+use hearth::identity::StepUpMfaGrantRequest;
 use hearth::protocol::web::account::ChangePasswordForm;
 use hearth::protocol::web::handlers::{LoginForm, RegisterForm, ResetPasswordFormData};
 
@@ -80,17 +80,6 @@ fn web_forms_do_not_print_passwords() {
 
 #[test]
 fn grant_requests_do_not_print_credentials() {
-    assert_redacted(
-        "PasswordGrantRequest",
-        &format!(
-            "{:?}",
-            PasswordGrantRequest {
-                email: "user@example.com".to_string(),
-                password: SECRET.to_string(),
-                ..Default::default()
-            }
-        ),
-    );
     assert_redacted(
         "StepUpMfaGrantRequest",
         &format!(

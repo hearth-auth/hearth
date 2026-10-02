@@ -12,8 +12,8 @@ mod common;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hearth::identity::{
-    CleartextPassword, CreateRealmRequest, CreateUserRequest, IdentityError, MfaProof,
-    PasswordGrantRequest, RealmConfig, SessionContext, StepUpMfaGrantRequest,
+    CleartextPassword, CreateRealmRequest, CreateUserRequest, IdentityError, MfaProof, RealmConfig,
+    SessionContext, StepUpMfaGrantRequest,
 };
 
 const PASSWORD: &str = "S3cur3P@ss!1";
@@ -168,58 +168,7 @@ async fn create_session_is_unchanged_when_the_realm_does_not_require_mfa() {
         .expect("no MFA policy means no gate");
 }
 
-// ─── ROPC ───────────────────────────────────────────────────────────────────
-
-/// ROPC never runs a challenge. With an enrolled factor it must ask the client
-/// to come back through the step-up MFA grant.
-#[tokio::test]
-async fn ropc_demands_the_second_factor_when_the_realm_requires_mfa() {
-    let (h, realm, user) = mfa_realm_and_user("mfa-use-ropc").await;
-    enrol_totp(&h, &realm, user.id());
-
-    let err = h
-        .identity()
-        .password_grant_token(
-            realm.id(),
-            &PasswordGrantRequest {
-                email: user.email().to_string(),
-                password: PASSWORD.to_string(),
-                scope: None,
-                client_ip: Some("10.1.2.3".to_string()),
-                user_agent: Some("UA/1".to_string()),
-            },
-        )
-        .expect_err("ROPC must not issue tokens without the second factor");
-    assert!(
-        matches!(err, IdentityError::StepUpChallengeRequired),
-        "expected StepUpChallengeRequired, got: {err:?}"
-    );
-}
-
-/// ROPC for an MFA-required user who has no factor at all must send them to
-/// enrolment, not issue tokens.
-#[tokio::test]
-async fn ropc_demands_enrolment_when_the_user_has_no_factor() {
-    let (h, realm, user) = mfa_realm_and_user("mfa-use-ropc-nofactor").await;
-
-    let err = h
-        .identity()
-        .password_grant_token(
-            realm.id(),
-            &PasswordGrantRequest {
-                email: user.email().to_string(),
-                password: PASSWORD.to_string(),
-                scope: None,
-                client_ip: Some("10.1.2.4".to_string()),
-                user_agent: Some("UA/1".to_string()),
-            },
-        )
-        .expect_err("ROPC must not issue tokens to an MFA-required user with no factor");
-    assert!(
-        matches!(err, IdentityError::EnrollMfaRequired),
-        "expected EnrollMfaRequired, got: {err:?}"
-    );
-}
+// ─── Step-up MFA grant ──────────────────────────────────────────────────────
 
 /// The step-up MFA grant verifies a TOTP code, so it still issues tokens on an
 /// MFA-required realm. This guards the fix against over-blocking.

@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use hearth::core::{Clock, RealmId, SystemClock};
 use hearth::identity::{
-    ApplicationStatus, AuthorizationRequest, CleartextPassword, ClientCredentialsRequest,
-    CreateRealmRequest, CreateUserRequest, CredentialConfig, DeviceAuthorizationRequest,
-    EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, IdentityError, PasswordGrantRequest,
-    RateLimitConfig, RegisterClientRequest, TokenRevocationRequest, UpdateClientRequest, User,
+    ApplicationStatus, AuthorizationRequest, ClientCredentialsRequest, CreateRealmRequest,
+    CreateUserRequest, CredentialConfig, DeviceAuthorizationRequest, EmbeddedIdentityEngine,
+    IdentityConfig, IdentityEngine, IdentityError, RateLimitConfig, RegisterClientRequest,
+    TokenRevocationRequest, UpdateClientRequest, User,
 };
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
@@ -962,7 +962,7 @@ async fn archived_client_blocks_and_restore_allows_authorize() {
         .expect("authorize on restored client must succeed");
 }
 
-// ===== Password grant (ROPC) =====
+// ===== Per-IP rate limit =====
 
 fn build_engine_with_ip_rl(ip_max: u32) -> (impl IdentityEngine, tempfile::TempDir) {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -996,88 +996,6 @@ fn build_engine_with_ip_rl(ip_max: u32) -> (impl IdentityEngine, tempfile::TempD
     )
     .expect("engine");
     (engine, temp)
-}
-
-#[tokio::test]
-async fn password_grant_success() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
-    let realm = create_realm(&harness);
-    let user = create_user(&harness, &realm);
-    let password = "correct-horse-battery-staple";
-    harness
-        .identity()
-        .set_password(
-            &realm,
-            user.id(),
-            &CleartextPassword::from_string(password.to_string()),
-        )
-        .expect("set password");
-
-    let response = harness
-        .identity()
-        .password_grant_token(
-            &realm,
-            &PasswordGrantRequest {
-                email: user.email().to_string(),
-                password: password.to_string(),
-                scope: None,
-                ..Default::default()
-            },
-        )
-        .expect("password_grant_token should succeed");
-
-    assert_ne!(response.access_token(), "");
-    assert_ne!(response.refresh_token(), "");
-    assert_eq!(response.token_type, "Bearer");
-}
-
-#[tokio::test]
-async fn password_grant_wrong_password_returns_invalid_credential() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
-    let realm = create_realm(&harness);
-    let user = create_user(&harness, &realm);
-    harness
-        .identity()
-        .set_password(
-            &realm,
-            user.id(),
-            &CleartextPassword::from_string("rightful1-pass".to_string()),
-        )
-        .expect("set password");
-
-    let result = harness.identity().password_grant_token(
-        &realm,
-        &PasswordGrantRequest {
-            email: user.email().to_string(),
-            password: "wrong".to_string(),
-            scope: None,
-            ..Default::default()
-        },
-    );
-    assert!(
-        matches!(result, Err(IdentityError::InvalidCredential { .. })),
-        "wrong password must return InvalidCredential; got: {result:?}"
-    );
-}
-
-#[tokio::test]
-async fn password_grant_unknown_email_returns_invalid_credential() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
-    let realm = create_realm(&harness);
-
-    let result = harness.identity().password_grant_token(
-        &realm,
-        &PasswordGrantRequest {
-            email: "nobody@nowhere.invalid".to_string(),
-            password: "anything".to_string(),
-            scope: None,
-            ..Default::default()
-        },
-    );
-    assert!(
-        matches!(result, Err(IdentityError::InvalidCredential { .. })),
-        "unknown email must return InvalidCredential (not NotFound); got: {result:?}"
-    );
 }
 
 #[test]
@@ -1238,7 +1156,8 @@ async fn introspection_scoped_to_intended_audience() {
 
 // ===== Every refresh token belongs to a family (audit 2026-08-28 §4.19#3, §4.16#6) =====
 
-/// A ROPC (password grant) refresh token must carry an `fid` and rotate.
+/// A session refresh token (the `issue_tokens` path every non-code grant
+/// shares) must carry an `fid` and rotate.
 ///
 /// The password, step-up-MFA, device and password-reset grants minted refresh
 /// tokens with no `fid`, so `refresh_tokens` took the legacy branch that has
@@ -1246,40 +1165,19 @@ async fn introspection_scoped_to_intended_audience() {
 /// FAPI DPoP gates — the token replayed forever and theft detection could
 /// never fire (production-readiness audit 2026-08-28 §4.19#3, §4.16#6).
 #[tokio::test]
-async fn password_grant_refresh_token_carries_fid_and_rotates() {
+async fn session_refresh_token_carries_fid_and_rotates() {
     use hearth::identity::decode_claims_unverified;
 
     let harness = common::TestHarness::embedded().await.expect("harness");
     let realm = create_realm(&harness);
     let user = create_user(&harness, &realm);
-    let password = "correct-horse-battery-staple";
-    harness
-        .identity()
-        .set_password(
-            &realm,
-            user.id(),
-            &CleartextPassword::from_string(password.to_string()),
-        )
-        .expect("set password");
-
-    let response = harness
-        .identity()
-        .password_grant_token(
-            &realm,
-            &PasswordGrantRequest {
-                email: user.email().to_string(),
-                password: password.to_string(),
-                scope: None,
-                ..Default::default()
-            },
-        )
-        .expect("password_grant_token should succeed");
+    let response = common::user_token_pair(harness.identity(), &realm, user.id());
 
     let refresh = response.refresh_token().to_string();
     let claims = decode_claims_unverified(&refresh).expect("decode refresh token");
     assert!(
         claims.fid.is_some(),
-        "a ROPC refresh token must carry a grant-family identifier (fid), got none"
+        "a session refresh token must carry a grant-family identifier (fid), got none"
     );
 
     // Rotation: redeeming the token succeeds once…
@@ -1301,7 +1199,7 @@ async fn password_grant_refresh_token_carries_fid_and_rotates() {
         .refresh_tokens(&realm, &refresh, None, None);
     assert!(
         matches!(replay, Err(IdentityError::TokenRevoked)),
-        "replaying a rotated ROPC refresh token must trip reuse detection \
+        "replaying a rotated session refresh token must trip reuse detection \
          (TokenRevoked), got: {replay:?}"
     );
 }

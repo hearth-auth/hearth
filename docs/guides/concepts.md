@@ -131,7 +131,7 @@ A scope bundle maps a scope string to a subset of permissions. Even if a user ha
 Every use of a refresh token issues a *new* refresh token and invalidates the old one. If a refresh token is presented a second time (i.e., a token was stolen and used in parallel), Hearth detects the reuse and revokes the **entire grant family** — all access and refresh tokens derived from that original login. This prevents silent session hijacking.
 
 Rotation is not optional and has no fallback path. Every grant that mints a refresh
-token — authorization code, ROPC, step-up MFA, device code and password reset alike —
+token — authorization code, step-up MFA, device code and password reset alike —
 records a grant family and embeds its id in the token as `fid`. A refresh token that
 carries no `fid` is **refused**, not served: the branch that used to honour one had
 neither rotation, nor reuse detection, nor the client-authentication, DPoP and consent

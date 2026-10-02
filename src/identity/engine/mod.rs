@@ -9425,7 +9425,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // path, which already uses `get_signing_key_or_default`.
         let realm_signing_key = self.get_signing_key_or_default(realm_id);
         // Every refresh token belongs to a grant family, so rotation and
-        // reuse detection apply to ROPC, step-up-MFA, device-grant and
+        // reuse detection apply to step-up-MFA, device-grant and
         // password-reset refreshes exactly as they do to the
         // authorization-code grant. `refresh_tokens` refuses a token that
         // carries no `fid`, so omitting the family here does not degrade to a
@@ -9941,14 +9941,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     }
 
     // ===== OAuth 2.0 Extended (Step 22) =====
-
-    fn password_grant_token(
-        &self,
-        realm_id: &RealmId,
-        request: &crate::identity::oidc::PasswordGrantRequest,
-    ) -> Result<crate::identity::oidc::PasswordGrantResponse, IdentityError> {
-        self.password_grant_token_inner(realm_id, request)
-    }
 
     fn step_up_mfa_grant_token(
         &self,

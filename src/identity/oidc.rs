@@ -1956,7 +1956,7 @@ pub(crate) struct StoredDeviceCode {
 /// Tracks a grant family for refresh token rotation and theft detection.
 ///
 /// Every grant that issues a refresh token creates one: the authorization-code
-/// exchange, and — through `issue_tokens_with_context` — ROPC, step-up MFA, the
+/// exchange, and — through `issue_tokens_with_context` — step-up MFA, the
 /// device grant, password reset and Hearth's own session tokens. The
 /// `client_credentials` and `jwt-bearer` grants issue no refresh token (RFC 6749
 /// §4.4.3) and so create no family.
@@ -2527,42 +2527,9 @@ mod tests {
     }
 }
 
-// ===== Resource Owner Password Credentials Grant (RFC 6749 §4.3) =====
+// ===== Step-up MFA grant =====
 
-/// Request for the Resource Owner Password Credentials (ROPC) grant.
-///
-/// Identifies the end-user by email address. The client_id is used for
-/// per-client rate limiting only; no client authentication is required for
-/// public clients.
-#[derive(Clone, Default)]
-pub struct PasswordGrantRequest {
-    /// The user's email address.
-    pub email: String,
-    /// The user's plaintext password.
-    pub password: String,
-    /// Optional OAuth scope (space-delimited). Passed through to the token.
-    pub scope: Option<String>,
-    /// Client IP address, after proxy normalisation. Unused since adaptive MFA
-    /// was removed in 3.0.0; the grant itself goes in the next removal.
-    pub client_ip: Option<String>,
-    /// Raw `User-Agent` header value. Unused since adaptive MFA was removed.
-    pub user_agent: Option<String>,
-}
-
-/// Redacts the password (GA audit L20).
-impl std::fmt::Debug for PasswordGrantRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PasswordGrantRequest")
-            .field("email", &self.email)
-            .field("password", &"<redacted>")
-            .field("scope", &self.scope)
-            .field("client_ip", &self.client_ip)
-            .field("user_agent", &self.user_agent)
-            .finish()
-    }
-}
-
-/// Response from a successful ROPC grant — mirrors `OidcTokenResponse`.
+/// Token pair issued by the step-up MFA grant — mirrors `OidcTokenResponse`.
 #[derive(Debug, Clone)]
 pub struct PasswordGrantResponse {
     /// Short-lived access token (JWT).
@@ -2587,7 +2554,7 @@ impl PasswordGrantResponse {
     }
 }
 
-/// Request to complete a step-up MFA challenge issued during ROPC login.
+/// Request to complete a step-up MFA challenge at the token endpoint.
 ///
 /// Used with `grant_type = urn:hearth:params:grant-type:step-up-mfa`.
 /// The caller re-supplies the password and adds an `mfa_code`; both are

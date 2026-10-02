@@ -80,7 +80,6 @@ realms:
         grant_types:
           - authorization_code
           - refresh_token
-          - password                  # ROPC drives the lookup_user hot path
     seed_users:
       - email: admin@bulk.demo
         display_name: Bulk Admin

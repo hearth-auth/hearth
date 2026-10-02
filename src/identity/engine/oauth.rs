@@ -157,6 +157,7 @@ impl EmbeddedIdentityEngine {
         }
         // Validate client name (non-empty, length limit)
         let client_name = validation::validate_client_name(&request.client_name)?;
+        refuse_password_grant(&request.grant_types)?;
 
         // Redirect URIs are optional for M2M grants (client_credentials, device_code,
         // jwt-bearer). For all other grant types, at least one is required.
@@ -1336,89 +1337,6 @@ impl EmbeddedIdentityEngine {
     }
 
     // ===== OAuth 2.0 Extended (Step 22) =====
-
-    pub(super) fn password_grant_token_inner(
-        &self,
-        realm_id: &RealmId,
-        request: &crate::identity::oidc::PasswordGrantRequest,
-    ) -> Result<crate::identity::oidc::PasswordGrantResponse, IdentityError> {
-        // 1. Look up user by email (timing-safe: dummy-hash on miss). The
-        //    dummy verify runs under the REALM's Argon2 parameters: the global
-        //    dummy is cheaper than a realm with a raised cost, so an unknown
-        //    address answered measurably faster (GA audit L14).
-        let user = match self.get_user_by_email(realm_id, &request.email)? {
-            Some(u) => u,
-            None => {
-                let dummy_pw = CleartextPassword::from_string(request.password.clone());
-                self.dummy_verify_for_realm(realm_id, &dummy_pw);
-                return Err(IdentityError::InvalidCredential {
-                    reason: "verification failed".to_string(),
-                });
-            }
-        };
-
-        // 2. Verify password (also enforces per-account rate limiting)
-        let pw = CleartextPassword::from_string(request.password.clone());
-        let matches = self.verify_password(realm_id, user.id(), &pw)?;
-        if !matches {
-            return Err(IdentityError::InvalidCredential {
-                reason: "verification failed".to_string(),
-            });
-        }
-
-        // 3a. Block token issuance when required actions are pending (HEA-905).
-        //     Checked after password verification so the error is only reachable
-        //     by a caller who knows the password — no enumeration risk.
-        if !user.required_actions().is_empty() {
-            return Err(IdentityError::RequiredActionsBlocking {
-                actions: user.required_actions().to_vec(),
-            });
-        }
-
-        // 3a-bis. Realm-wide `mfa_required` (audit 2026-08-28 §4.18#3).
-        //    ROPC proves the password and nothing else, so it can never satisfy
-        //    a second-factor policy on its own. Send the caller to the step-up
-        //    MFA grant when a factor exists, and to enrolment when none does.
-        //    Without this the request would reach `create_session` and fail with
-        //    a bare `MfaRequired`, which tells the client nothing about what to
-        //    do next.
-        if self
-            .get_realm(realm_id)?
-            .is_some_and(|r| r.config().mfa_required.unwrap_or(false))
-        {
-            return if self.has_second_factor(realm_id, user.id())? {
-                Err(IdentityError::StepUpChallengeRequired)
-            } else {
-                Err(IdentityError::EnrollMfaRequired)
-            };
-        }
-
-        // 3c. A second factor the user holds binds here too (GA audit B4/B5):
-        //     a user who holds a factor is sent to the step-up grant, which
-        //     proves it; the engine's session gate would refuse the unproved
-        //     session anyway, with an error that tells the client nothing
-        //     about what to do next.
-        if self.has_second_factor(realm_id, user.id())? {
-            return Err(IdentityError::StepUpChallengeRequired);
-        }
-
-        // 4. Create session and issue token pair. Steps 3a-bis and 3c have
-        //    refused every user who owes a second factor, so the default
-        //    (unproven) context is correct here.
-        let session = self.create_session(
-            realm_id,
-            user.id(),
-            &crate::identity::SessionContext::default(),
-        )?;
-        let token_pair = self.issue_tokens(realm_id, user.id(), session.id())?;
-
-        Ok(crate::identity::oidc::PasswordGrantResponse {
-            access_token: token_pair.access_token().to_string(),
-            refresh_token: token_pair.refresh_token().to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: self.config.token.access_token_ttl_secs,
-        })
-    }
 
     pub(super) fn step_up_mfa_grant_token_inner(
         &self,
@@ -4557,6 +4475,7 @@ impl EmbeddedIdentityEngine {
                     reason: "grant_types cannot be empty".to_string(),
                 });
             }
+            refuse_password_grant(grant_types)?;
             client.set_grant_types(grant_types.clone());
         }
         if let Some(require) = request.require_consent {
@@ -5797,4 +5716,19 @@ impl EmbeddedIdentityEngine {
         );
         Ok(())
     }
+}
+
+/// Refuses the ROPC `password` grant in a client's `grant_types`.
+///
+/// No token endpoint serves it, so a client registered for it could never
+/// use it; registration says so instead of storing a grant that does
+/// nothing. Every surface that writes `grant_types` — dynamic registration,
+/// the admin API, the console — reaches the engine through here.
+fn refuse_password_grant(grant_types: &[String]) -> Result<(), IdentityError> {
+    if grant_types.iter().any(|g| g == "password") {
+        return Err(IdentityError::InvalidInput {
+            reason: "the password grant (ROPC) is not supported".to_string(),
+        });
+    }
+    Ok(())
 }

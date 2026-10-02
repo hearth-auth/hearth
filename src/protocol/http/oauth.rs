@@ -413,7 +413,7 @@ struct HttpTokenRequest {
     // Device code field
     #[serde(default)]
     device_code: Option<FormSecret>,
-    // ROPC (password grant) fields — RFC 6749 §4.3
+    // Step-up MFA grant: the user re-proves the password with the code.
     #[serde(default)]
     username: Option<String>,
     #[serde(default)]
@@ -4462,9 +4462,14 @@ async fn realm_token_exchange(
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
-        other => (
+        // The same answer as the global endpoint: the RFC 6749 §5.2 code, and
+        // never the caller's own `grant_type` echoed back.
+        _ => (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("unsupported grant_type: {other}")})),
+            Json(serde_json::json!({
+                "error": "unsupported_grant_type",
+                "error_code": crate::protocol::error_codes::UNSUPPORTED_GRANT_TYPE,
+            })),
         )
             .into_response(),
     };
