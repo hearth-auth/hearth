@@ -19,11 +19,11 @@ Each numbered group ships as one PR, in this order (design decision 1). Each PR 
 
 ## 3. SAML SP strict profile (PR 2)
 
-- [ ] 3.1 Red tests from `specs/saml-sp-profile`: DOCTYPE, two assertions, two signatures, and a wrapped-copy XSW case that names a different user
-- [ ] 3.2 Enforce the structural checks in the SP response parser before signature verification
-- [ ] 3.3 Read the subject and attributes only from the element the verified reference identifies
-- [ ] 3.4 Choose a maintained third-party XSW corpus, vendor it under `tests/fixtures/saml-xsw/` with its licence, and add a CI step that runs it
-- [ ] 3.5 CHANGELOG `### Security` entry
+- [x] 3.1 Red tests from `specs/saml-sp-profile`: DOCTYPE, two assertions, two signatures, and a wrapped-copy XSW case that names a different user
+- [x] 3.2 Enforce the structural checks before signature verification. DOCTYPE and the one-assertion count already existed; added `check_signature_placement` (`saml/xml.rs`), called from `SamlSpService::complete_inner`
+- [x] 3.3 Read the subject and attributes only from the element the verified reference identifies — already true: exactly one assertion in the document, and its ID must equal the verified ID. Covered by the XSW tests
+- [x] 3.4 XSW corpus. **Changed during apply:** no maintained, vendorable corpus exists, so `tests/saml_sp.rs` generates XSW1–XSW8 (Somorovsky et al. 2012) from a real signed document; it runs in the normal CI suite
+- [x] 3.5 CHANGELOG `### Security` entry
 
 ## 4. Public gRPC (PR 3)
 

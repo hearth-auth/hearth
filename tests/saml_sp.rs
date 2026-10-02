@@ -1425,3 +1425,224 @@ fn sp_accepts_an_assertion_whose_prefix_is_declared_on_the_response() {
         "prefix declared on the Response",
     );
 }
+
+// ============================================================================
+// scope-trim-trusted-core, group 3 — the strict SP profile.
+//
+// Structure is checked before any signature is verified: no DOCTYPE, exactly
+// one `<saml:Assertion>`, and a `<ds:Signature>` only where the profile puts
+// one — a direct child of the root `<samlp:Response>` or of the assertion, at
+// most one each. A signature anywhere else is an unverified region inside a
+// signed element; it is refused, never ignored.
+// ============================================================================
+
+/// The victim's NameID swapped into a copy of mallory's signed assertion.
+fn victim_copy_of(signed_assertion: &str) -> String {
+    let (unsigned, _) = xsw_split_signature(signed_assertion);
+    let forged = unsigned.replace("mallory@corp.example", "ceo@corp.example");
+    assert_ne!(forged, unsigned, "fixture must name mallory");
+    forged
+}
+
+/// Neither rejected for a non-SAML reason nor — above all — accepted as the
+/// victim. Every structural refusal in this section must be a rejection.
+fn assert_refused(idp_cfg: &SamlIdpConfig, xml: &str, case: &str) {
+    match xsw_complete(idp_cfg, xml) {
+        SamlSpOutcome::Rejected { error } => assert!(
+            matches!(error, IdentityError::Saml(_)),
+            "{case}: rejected for a non-SAML reason: {error:?}"
+        ),
+        SamlSpOutcome::Accepted { identity, .. } => panic!(
+            "{case}: ACCEPTED as {} — the strict profile must refuse it",
+            identity.email
+        ),
+    }
+}
+
+#[test]
+fn strict_profile_rejects_a_doctype_at_the_acs() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let (response, _) = xsw_assertion_signed_for_mallory(&idp_key, &BTreeMap::new());
+    xsw_assert_accepted_as_mallory(&idp_cfg, &response, "control");
+    assert_refused(
+        &idp_cfg,
+        &format!("<!DOCTYPE samlp:Response []>{response}"),
+        "doctype",
+    );
+}
+
+#[test]
+fn strict_profile_rejects_a_second_assertion_in_any_position() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let (response, signed) = xsw_assertion_signed_for_mallory(&idp_key, &BTreeMap::new());
+    let forged = victim_copy_of(&signed);
+    for (case, xml) in [
+        (
+            "sibling before",
+            xsw_insert_before(&response, &signed, &forged),
+        ),
+        (
+            "sibling after",
+            xsw_insert_after(&response, &signed, &forged),
+        ),
+        (
+            "inside Extensions",
+            xsw_insert_before(
+                &response,
+                "<samlp:Status>",
+                &format!("<samlp:Extensions>{forged}</samlp:Extensions>"),
+            ),
+        ),
+    ] {
+        assert_refused(&idp_cfg, &xml, case);
+    }
+}
+
+/// A `<ds:Signature>` outside the two places the profile allows is refused,
+/// even when it is empty and the verified signature is intact.
+#[test]
+fn strict_profile_rejects_a_signature_outside_its_two_allowed_places() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let (response, _) = xsw_assertion_signed_for_mallory(&idp_key, &BTreeMap::new());
+    xsw_assert_accepted_as_mallory(&idp_cfg, &response, "control");
+    let stray = xsw_extra_signature("");
+    for (case, xml) in [
+        (
+            "inside Subject",
+            xsw_insert_after(&response, "<saml:Subject>", &stray),
+        ),
+        (
+            "inside Status",
+            xsw_insert_after(&response, "<samlp:Status>", &stray),
+        ),
+        (
+            "inside the verified signature's KeyInfo",
+            xsw_insert_after(&response, "<ds:KeyInfo>", &stray),
+        ),
+    ] {
+        assert_refused(&idp_cfg, &xml, case);
+    }
+}
+
+/// Signing both the Response and the Assertion is common (Okta, ADFS). Two
+/// signatures, one in each allowed place, must still be accepted.
+#[test]
+fn strict_profile_accepts_a_response_and_an_assertion_each_signed_once() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let (response, _) = xsw_assertion_signed_for_mallory(&idp_key, &BTreeMap::new());
+    let both = sign_element(response.as_bytes(), "_r1", &idp_key).expect("sign response");
+    let both = String::from_utf8(both).expect("utf8");
+    let signatures =
+        both.matches("<ds:Signature ").count() + both.matches("<ds:Signature>").count();
+    assert_eq!(signatures, 2, "fixture signs twice");
+    xsw_assert_accepted_as_mallory(&idp_cfg, &both, "response + assertion signed");
+}
+
+/// A Response signed at the Response level only (the assertion unsigned),
+/// asserting mallory — the shape XSW1 and XSW2 attack.
+fn response_signed_for_mallory(idp_key: &RsaSigningKey) -> String {
+    let response = xsw_response_for_mallory(&BTreeMap::new());
+    String::from_utf8(sign_element(response.as_bytes(), "_r1", idp_key).expect("sign"))
+        .expect("utf8")
+}
+
+/// The eight signature-wrapping variants of Somorovsky et al., "On Breaking
+/// SAML: Be Whoever You Want to Be" (USENIX Security 2012), built from a real
+/// signed document. Each moves the signed original somewhere the verifier
+/// still finds it and plants an unsigned copy naming the victim where a naive
+/// parser would read it. None may sign anyone in as the victim; under the
+/// strict profile every one is refused.
+#[test]
+fn strict_profile_refuses_the_eight_published_xsw_variants() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let assertion_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let response_cfg = xsw_idp_config(&idp_key, "NameID", false);
+
+    // Response-level signature: XSW1, XSW2.
+    let signed_resp = response_signed_for_mallory(&idp_key);
+    xsw_assert_accepted_as_mallory(&response_cfg, &signed_resp, "response-signed control");
+    let (resp_unsigned, resp_sig) = xsw_split_signature(&signed_resp);
+    let forged_response = resp_unsigned
+        .replace("mallory@corp.example", "ceo@corp.example")
+        .replacen(r#"ID="_r1""#, r#"ID="_evil""#, 1);
+    // XSW1: evil Response root; its (copied) signature carries the original
+    // signed Response as an <ds:Object>.
+    let sig_with_original = resp_sig.replacen(
+        "</ds:Signature>",
+        &format!("<ds:Object>{signed_resp}</ds:Object></ds:Signature>"),
+        1,
+    );
+    let xsw1 = xsw_insert_after(&forged_response, "</saml:Issuer>", &sig_with_original);
+    // XSW2: as XSW1, but the original is a detached sibling before the
+    // signature instead of inside it.
+    let xsw2 = xsw_insert_after(
+        &forged_response,
+        "</saml:Issuer>",
+        &format!("{signed_resp}{resp_sig}"),
+    );
+
+    // Assertion-level signature: XSW3–XSW8.
+    let (response, signed) = xsw_assertion_signed_for_mallory(&idp_key, &BTreeMap::new());
+    let (_, sig) = xsw_split_signature(&signed);
+    let evil = victim_copy_of(&signed).replacen(r#"ID="_signed1""#, r#"ID="_evil""#, 1);
+    let evil_open_end = evil.find('>').expect("evil open tag") + 1;
+    let (evil_open, evil_rest) = evil.split_at(evil_open_end);
+    // XSW3: evil assertion as the previous sibling of the signed original.
+    let xsw3 = xsw_insert_before(&response, &signed, &evil);
+    // XSW4: evil assertion wraps the signed original as its child.
+    let xsw4 = response.replace(&signed, &format!("{evil_open}{signed}{evil_rest}"));
+    // XSW5: evil assertion carries the copied signature; the original follows
+    // it unsigned.
+    let (signed_unsigned, _) = xsw_split_signature(&signed);
+    let evil_with_sig = format!("{evil_open}{sig}{evil_rest}");
+    let xsw5 = response.replace(&signed, &format!("{evil_with_sig}{signed_unsigned}"));
+    // XSW6: evil assertion with the signature; the original inside it as an
+    // <ds:Object>.
+    let sig_holding_original = sig.replacen(
+        "</ds:Signature>",
+        &format!("<ds:Object>{signed}</ds:Object></ds:Signature>"),
+        1,
+    );
+    let xsw6 = response.replace(
+        &signed,
+        &format!("{evil_open}{sig_holding_original}{evil_rest}"),
+    );
+    // XSW7: original hidden in <samlp:Extensions>; evil assertion in place.
+    let xsw7 = xsw_insert_before(
+        &response.replace(&signed, &evil),
+        "<samlp:Status>",
+        &format!("<samlp:Extensions>{signed}</samlp:Extensions>"),
+    );
+    // XSW8: evil assertion whose signature holds the original, unsigned, in
+    // an <ds:Object>.
+    let sig_holding_unsigned = sig.replacen(
+        "</ds:Signature>",
+        &format!("<ds:Object>{signed_unsigned}</ds:Object></ds:Signature>"),
+        1,
+    );
+    let xsw8 = response.replace(
+        &signed,
+        &format!("{evil_open}{sig_holding_unsigned}{evil_rest}"),
+    );
+
+    for (case, cfg, xml) in [
+        ("XSW1", &response_cfg, &xsw1),
+        ("XSW2", &response_cfg, &xsw2),
+        ("XSW3", &assertion_cfg, &xsw3),
+        ("XSW4", &assertion_cfg, &xsw4),
+        ("XSW5", &assertion_cfg, &xsw5),
+        ("XSW6", &assertion_cfg, &xsw6),
+        ("XSW7", &assertion_cfg, &xsw7),
+        ("XSW8", &assertion_cfg, &xsw8),
+    ] {
+        assert!(
+            xml.contains("ceo@corp.example"),
+            "{case}: fixture plants the victim"
+        );
+        assert_refused(cfg, xml, case);
+    }
+}

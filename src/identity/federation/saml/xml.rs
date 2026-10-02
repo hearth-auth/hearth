@@ -528,6 +528,85 @@ pub fn count_elements(
     }
 }
 
+/// Refuses a `<ds:Signature>` anywhere the SAML SP profile does not put one.
+///
+/// A signature is allowed only as a direct child of the root
+/// `<samlp:Response>` or of a `<saml:Assertion>`, and at most one per parent
+/// (scope-trim-trusted-core, strict SP profile). Any other `<ds:Signature>` —
+/// inside `<samlp:Status>`, `<saml:Subject>`, another signature's `<KeyInfo>`
+/// or `<Object>`, or a second one under the same parent — is a region no
+/// verifier looks at. The parsers already never read inside one; refusing
+/// the document outright removes the region instead of trusting every reader
+/// to skip it.
+///
+/// # Errors
+///
+/// Returns [`SamlError::Signature`] on a misplaced or duplicate signature, and
+/// a parse error on malformed XML, a `DOCTYPE`, or more than
+/// `MAX_SAML_XML_EVENTS` events.
+pub fn check_signature_placement(xml: &[u8]) -> Result<(), IdentityError> {
+    /// One open element: may it hold a signature, and has it got one yet?
+    struct Frame {
+        may_hold_signature: bool,
+        has_signature: bool,
+    }
+    let misplaced = || IdentityError::Saml(SamlError::Signature);
+
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().expand_empty_elements = false;
+
+    let mut scope = NsScope::new(&Namespaces::new());
+    let mut buf = Vec::new();
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut event_count: usize = 0;
+
+    loop {
+        event_count += 1;
+        if event_count > crate::abuse::MAX_SAML_XML_EVENTS {
+            return Err(parse_err("XML document exceeds maximum element limit"));
+        }
+        let (start, empty) = match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => (e.into_owned(), false),
+            Ok(Event::Empty(e)) => (e.into_owned(), true),
+            Ok(Event::End(_)) => {
+                scope.leave();
+                stack.pop();
+                buf.clear();
+                continue;
+            }
+            Ok(Event::DocType(_)) => {
+                return Err(parse_err("DOCTYPE declarations are rejected"));
+            }
+            Ok(Event::Eof) => return Ok(()),
+            Err(e) => return Err(parse_err(format!("XML scan error: {e}"))),
+            Ok(_) => {
+                buf.clear();
+                continue;
+            }
+        };
+        scope.enter(&start)?;
+        if scope.is(&start, ns::DS, "Signature") {
+            match stack.last_mut() {
+                Some(parent) if parent.may_hold_signature && !parent.has_signature => {
+                    parent.has_signature = true;
+                }
+                _ => return Err(misplaced()),
+            }
+        }
+        let is_root_response = stack.is_empty() && scope.is(&start, ns::SAMLP, "Response");
+        let may_hold_signature = is_root_response || scope.is(&start, ns::SAML, "Assertion");
+        if empty {
+            scope.leave();
+        } else {
+            stack.push(Frame {
+                may_hold_signature,
+                has_signature: false,
+            });
+        }
+        buf.clear();
+    }
+}
+
 /// Counts the **direct children of the root element** of `xml` (a slice
 /// whose root inherits `inherited`) with the given (namespace_uri,
 /// local_name).
@@ -864,6 +943,69 @@ fn id_match(e: &BytesStart<'_>, id_attr: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DS_NS: &str = r#"xmlns:ds="http://www.w3.org/2000/09/xmldsig#""#;
+
+    fn placement(xml: &str) -> Result<(), IdentityError> {
+        check_signature_placement(xml.as_bytes())
+    }
+
+    #[test]
+    fn signature_placement_allows_one_under_response_and_one_under_assertion() {
+        let xml = format!(
+            r#"<samlp:Response xmlns:samlp="{}" xmlns:saml="{}" {DS_NS}><ds:Signature/><saml:Assertion><ds:Signature><ds:SignedInfo/></ds:Signature></saml:Assertion></samlp:Response>"#,
+            ns::SAMLP,
+            ns::SAML
+        );
+        placement(&xml).expect("the two profile positions are allowed");
+    }
+
+    #[test]
+    fn signature_placement_refuses_a_self_closing_stray_signature() {
+        let xml = format!(
+            r#"<samlp:Response xmlns:samlp="{}" {DS_NS}><samlp:Status><ds:Signature/></samlp:Status></samlp:Response>"#,
+            ns::SAMLP
+        );
+        assert!(matches!(
+            placement(&xml),
+            Err(IdentityError::Saml(SamlError::Signature))
+        ));
+    }
+
+    #[test]
+    fn signature_placement_refuses_two_under_one_parent_and_one_inside_another() {
+        let two = format!(
+            r#"<samlp:Response xmlns:samlp="{}" {DS_NS}><ds:Signature/><ds:Signature/></samlp:Response>"#,
+            ns::SAMLP
+        );
+        let nested = format!(
+            r#"<samlp:Response xmlns:samlp="{}" {DS_NS}><ds:Signature><ds:KeyInfo><ds:Signature/></ds:KeyInfo></ds:Signature></samlp:Response>"#,
+            ns::SAMLP
+        );
+        for xml in [two, nested] {
+            assert!(
+                matches!(
+                    placement(&xml),
+                    Err(IdentityError::Saml(SamlError::Signature))
+                ),
+                "{xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn signature_placement_refuses_a_signature_on_a_nested_response() {
+        // Only the ROOT Response may hold one; a Response wrapped inside the
+        // document is an XSW1/XSW2 shape.
+        let xml = format!(
+            r#"<samlp:Response xmlns:samlp="{}" {DS_NS}><samlp:Response><ds:Signature/></samlp:Response></samlp:Response>"#,
+            ns::SAMLP
+        );
+        assert!(matches!(
+            placement(&xml),
+            Err(IdentityError::Saml(SamlError::Signature))
+        ));
+    }
 
     #[test]
     fn escape_text_covers_gt_lt_amp_cr() {

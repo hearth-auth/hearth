@@ -19,6 +19,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   connect applications to Hearth over OpenID Connect. The `UnknownSp` SAML error is gone with
   the SP registry.
 
+### Security
+- **SAML SP: strict signature placement.** The Assertion Consumer Service now refuses, before
+  verifying any signature, a response with a `<ds:Signature>` anywhere except directly under the
+  root `<samlp:Response>` or the `<saml:Assertion>` (one each). A stray signature inside
+  `<samlp:Status>`, for example, used to be ignored; it is now an error. Responses that sign the
+  Response, the Assertion, or both are unaffected. The SP suite now also runs the eight published
+  XML signature-wrapping variants (XSW1–XSW8).
+
 ### Changed
 - **BREAKING: a configuration key of a removed feature now stops startup with a named
   error.** Instead of serde's generic "unknown field", the message names the key, the removed

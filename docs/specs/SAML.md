@@ -212,6 +212,20 @@ but consumes another. Hearth defends structurally:
   spelling: `sp_accepts_an_entra_style_default_namespace_response`,
   `sp_rejects_a_second_default_namespace_signature`,
   `sp_rejects_a_moved_default_namespace_signature_with_content_after_key_info`.)
+- **Signatures only where the profile puts them (strict SP profile, 3.0.0).**
+  Before any signature is verified, `check_signature_placement`
+  (`saml/xml.rs`) refuses, with `SamlError::Signature`, any `<ds:Signature>`
+  that is not a direct child of the root `<samlp:Response>` or of the
+  `<saml:Assertion>`, and a second one under either. A signature inside
+  `<samlp:Status>`, `<saml:Subject>`, a nested `<samlp:Response>`, or another
+  signature's `<ds:KeyInfo>` / `<ds:Object>` is an unverified region; the
+  parsers never read inside one (§3), and the document is now refused instead.
+  Signing both the Response and the Assertion, once each, stays accepted.
+  (Tests: `strict_profile_rejects_a_signature_outside_its_two_allowed_places`,
+  `strict_profile_accepts_a_response_and_an_assertion_each_signed_once`,
+  `strict_profile_refuses_the_eight_published_xsw_variants` — XSW1–XSW8 of
+  Somorovsky et al., USENIX Security 2012, generated from a real signed
+  document; and the `signature_placement_*` unit tests.)
 - **Nothing but `SignedInfo`, `SignatureValue` and `KeyInfo` in a signature.**
   The verified `<ds:Signature>` MUST have exactly one `<ds:SignedInfo>`,
   exactly one `<ds:SignatureValue>`, at most one `<ds:KeyInfo>`, and no other
