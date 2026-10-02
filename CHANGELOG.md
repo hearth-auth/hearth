@@ -10,6 +10,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
      scope-trim-trusted-core). Ships as 3.0.0; removals have no deprecation window because
      Hearth has no production users yet (see VERSIONING.md). -->
 
+### Added
+- **REST routes for every admin operation that was gRPC-only**, ahead of the public gRPC API's
+  removal: organization CRUD (`GET`/`POST /admin/organizations`, `GET`/`PATCH`/`DELETE
+  /admin/organizations/{id}`), extra org roles (`GET`/`POST
+  /admin/organizations/{id}/members/{user_id}/roles`, `DELETE …/roles/{role_name}`), group role
+  assignment (`POST /admin/groups/{id}/roles`; unassign with `DELETE /admin/assignments/{id}`),
+  role members (`GET /admin/roles/{id}/members`), direct user permissions (`GET`/`POST
+  /admin/users/{id}/permissions`, `DELETE /admin/users/{id}/permissions/{permission}`), the
+  permission registry (`GET /admin/permissions`) and audit chain verification (`POST
+  /admin/audit/verify`). All require `hearth.realm.admin`. They are stricter than the gRPC
+  handlers were: suspending an organization passes the admin privilege ceiling like deleting it,
+  an organization `slug` cannot be changed (`400` instead of silently ignored), `granted_by` is
+  always the caller, and an `org_id` that does not exist answers `404`. Direct permission grants
+  and revocations are now audited.
+
 ### Removed
 - **BREAKING: Hearth no longer acts as a SAML Identity Provider.** The routes
   `/ui/realms/{realm}/saml/metadata`, `/saml/sso` (GET and POST), `/saml/sso/init` and

@@ -39,6 +39,9 @@ use super::{
 };
 
 /// Registers all admin API routes (mounted under `/admin` by the parent router).
+mod orgs;
+mod rbac_extras;
+
 pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
     use axum::routing::{delete, get, patch, post};
     axum::Router::new()
@@ -108,6 +111,43 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
         )
         .route("/audit", get(admin_list_audit))
         .route("/roles", get(admin_list_roles).post(admin_create_role))
+        .route(
+            "/roles/{id}/members",
+            get(rbac_extras::admin_list_role_members),
+        )
+        .route("/permissions", get(rbac_extras::admin_list_permissions))
+        .route("/audit/verify", post(rbac_extras::admin_verify_audit))
+        .route(
+            "/groups/{id}/roles",
+            post(rbac_extras::admin_assign_group_role),
+        )
+        .route(
+            "/users/{id}/permissions",
+            get(rbac_extras::admin_list_user_permissions)
+                .post(rbac_extras::admin_grant_user_permission),
+        )
+        .route(
+            "/users/{id}/permissions/{permission}",
+            delete(rbac_extras::admin_revoke_user_permission),
+        )
+        .route(
+            "/organizations",
+            get(orgs::admin_list_organizations).post(orgs::admin_create_organization),
+        )
+        .route(
+            "/organizations/{id}",
+            get(orgs::admin_get_organization)
+                .patch(orgs::admin_update_organization)
+                .delete(orgs::admin_delete_organization),
+        )
+        .route(
+            "/organizations/{id}/members/{user_id}/roles",
+            get(orgs::admin_list_additional_roles).post(orgs::admin_add_additional_role),
+        )
+        .route(
+            "/organizations/{id}/members/{user_id}/roles/{role_name}",
+            delete(orgs::admin_remove_additional_role),
+        )
         .route(
             "/roles/{id}",
             get(admin_get_role)
@@ -4615,16 +4655,43 @@ async fn admin_assign_role(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    // Privilege-ceiling check (HEA-SEC-13): a sub-admin (hearth.realm.admin) may only
-    // assign roles whose effective permissions are a subset of their own. hearth.admin
-    // bypasses this — they unconditionally hold all permissions.
+    if let Some(refusal) = role_permission_ceiling_refusal(&state, &auth, &role_id) {
+        return refusal;
+    }
+    let scope = match resolve_org_scope(&state, &auth, body.org_id.as_deref()) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match state.rbac.assign_role(
+        &auth.realm_id,
+        &AssignRoleRequest {
+            subject: Subject::User(user_id),
+            role_id,
+            scope,
+            assigned_by: Some(auth.user_id.clone()),
+        },
+    ) {
+        Ok(a) => (StatusCode::CREATED, Json(a)).into_response(),
+        Err(e) => rbac_error_to_response(&e).into_response(),
+    }
+}
+
+/// Privilege-ceiling check (HEA-SEC-13) for granting a role: a sub-admin
+/// (`hearth.realm.admin`) may only hand out roles whose effective permissions
+/// are a subset of its own. `hearth.admin` bypasses this — it unconditionally
+/// holds all permissions. Returns the refusal, or `None` when allowed.
+///
+/// Shared by every route that grants a role: user and group assignment and
+/// extra org roles.
+fn role_permission_ceiling_refusal(
+    state: &AppState,
+    auth: &AdminAuth,
+    role_id: &RoleId,
+) -> Option<Response> {
     if !auth.permissions.iter().any(|p| p == "hearth.admin") {
-        let role_perms = match state
-            .rbac
-            .resolve_role_permissions(&auth.realm_id, &role_id)
-        {
+        let role_perms = match state.rbac.resolve_role_permissions(&auth.realm_id, role_id) {
             Ok(perms) => perms,
-            Err(e) => return rbac_error_to_response(&e).into_response(),
+            Err(e) => return Some(rbac_error_to_response(&e).into_response()),
         };
         let assigner_perms: std::collections::HashSet<&str> =
             auth.permissions.iter().map(String::as_str).collect();
@@ -4638,19 +4705,31 @@ async fn admin_assign_role(
                 missing_permission = %p,
                 "role assignment blocked: role contains permission assigner does not hold"
             );
-            return (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": "forbidden",
-                    "error_description": "role contains permissions the assigner does not hold"
-                })),
-            )
-                .into_response();
+            return Some(
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "forbidden",
+                        "error_description": "role contains permissions the assigner does not hold"
+                    })),
+                )
+                    .into_response(),
+            );
         }
     }
-    let scope = match body.org_id {
+    None
+}
+
+/// Resolves an optional `org_id` into an assignment scope, refusing an
+/// organization that does not exist in the caller's realm (task 26.45).
+fn resolve_org_scope(
+    state: &AppState,
+    auth: &AdminAuth,
+    org_id: Option<&str>,
+) -> Result<Scope, Response> {
+    match org_id {
         Some(s) => {
-            let stripped = s.strip_prefix("org_").unwrap_or(&s);
+            let stripped = s.strip_prefix("org_").unwrap_or(s);
             match uuid::Uuid::parse_str(stripped).map(crate::core::OrganizationId::new) {
                 Ok(oid) => {
                     // Task 26.45: the organisation must exist.
@@ -4670,45 +4749,29 @@ async fn admin_assign_role(
                     // task 26.16 made `active_org_context` fail closed on an
                     // unknown organisation — but it was one before that.
                     match state.identity.get_organization(&auth.realm_id, &oid) {
-                        Ok(Some(_)) => Scope::Org { org_id: oid },
-                        Ok(None) => {
-                            return (
-                                StatusCode::NOT_FOUND,
-                                Json(serde_json::json!({
-                                    "error": "organization not found",
-                                    "error_description":
-                                        "the organization named by org_id does not exist in \
-                                         this realm; a role scoped to it could never grant \
-                                         anything"
-                                })),
-                            )
-                                .into_response();
-                        }
-                        Err(e) => return identity_error_to_response(&e).into_response(),
+                        Ok(Some(_)) => Ok(Scope::Org { org_id: oid }),
+                        Ok(None) => Err((
+                            StatusCode::NOT_FOUND,
+                            Json(serde_json::json!({
+                                "error": "organization not found",
+                                "error_description":
+                                    "the organization named by org_id does not exist in \
+                                     this realm; a role scoped to it could never grant \
+                                     anything"
+                            })),
+                        )
+                            .into_response()),
+                        Err(e) => Err(identity_error_to_response(&e).into_response()),
                     }
                 }
-                Err(_) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "invalid org id"})),
-                    )
-                        .into_response();
-                }
+                Err(_) => Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid org id"})),
+                )
+                    .into_response()),
             }
         }
-        None => Scope::Realm,
-    };
-    match state.rbac.assign_role(
-        &auth.realm_id,
-        &AssignRoleRequest {
-            subject: Subject::User(user_id),
-            role_id,
-            scope,
-            assigned_by: Some(auth.user_id.clone()),
-        },
-    ) {
-        Ok(a) => (StatusCode::CREATED, Json(a)).into_response(),
-        Err(e) => rbac_error_to_response(&e).into_response(),
+        None => Ok(Scope::Realm),
     }
 }
 

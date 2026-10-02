@@ -476,6 +476,20 @@
         }
       }
     },
+    "/admin/audit/verify": {
+      "post": {
+        "summary": "Verify the realm's audit hash chain",
+        "operationId": "adminVerifyAudit",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ok, event_count}`"
+          }
+        }
+      }
+    },
     "/admin/backup": {
       "post": {
         "summary": "Create a backup",
@@ -1011,6 +1025,259 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/admin/groups/{id}/roles": {
+      "post": {
+        "summary": "Assign a role to a group",
+        "description": "Body: `{role_id, org_id?}`. Same ceiling and org-existence rules as `POST /admin/users/{id}/roles`. Unassign with `DELETE /admin/assignments/{id}`.",
+        "operationId": "adminAssignGroupRole",
+        "tags": [
+          "Admin"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The role assignment"
+          },
+          "403": {
+            "description": "The role holds permissions the caller lacks"
+          },
+          "404": {
+            "description": "No such group or organization"
+          }
+        }
+      }
+    },
+    "/admin/organizations": {
+      "get": {
+        "summary": "List organizations",
+        "description": "Requires `hearth.realm.admin`. `cursor` is a decimal offset; follow `next_cursor` until it is null.",
+        "operationId": "adminListOrganizations",
+        "tags": [
+          "Admin"
+        ],
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{items: [Organization], next_cursor}`"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create an organization",
+        "description": "Requires `hearth.realm.admin`. Body: `{slug, display_name, member_limit?, attributes?}`. Refused in the system realm.",
+        "operationId": "adminCreateOrganization",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "201": {
+            "description": "The created organization"
+          },
+          "403": {
+            "description": "Missing `hearth.realm.admin`",
+            "or the system realm": null
+          }
+        }
+      }
+    },
+    "/admin/organizations/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get an organization",
+        "operationId": "adminGetOrganization",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "The organization"
+          },
+          "404": {
+            "description": "No such organization in the realm"
+          }
+        }
+      },
+      "patch": {
+        "summary": "Update an organization",
+        "description": "Body: `{display_name?, status? (active|suspended), member_limit?, attributes?}`. A `slug` is refused with 400 (it is immutable). Suspending is checked against the admin privilege ceiling, like a delete.",
+        "operationId": "adminUpdateOrganization",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "The updated organization"
+          },
+          "400": {
+            "description": "A slug change or an unknown status"
+          },
+          "403": {
+            "description": "A member holds admin authority the caller lacks"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete an organization",
+        "description": "Refused when a member holds admin authority in the organization that the caller lacks.",
+        "operationId": "adminDeleteOrganization",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "403": {
+            "description": "Admin privilege ceiling"
+          }
+        }
+      }
+    },
+    "/admin/organizations/{id}/members/{user_id}/roles": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "user_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "List a member's extra org roles",
+        "operationId": "adminListAdditionalRoles",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "`{items: [role_name]}`"
+          }
+        }
+      },
+      "post": {
+        "summary": "Give a member an extra org role",
+        "description": "Body: `{role_name}`. The user must be a member (409 otherwise); a sub-admin may only give roles within its own permissions.",
+        "operationId": "adminAddAdditionalRole",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "204": {
+            "description": "Added"
+          },
+          "403": {
+            "description": "The role holds permissions the caller lacks"
+          },
+          "404": {
+            "description": "No such organization",
+            "user or role": null
+          },
+          "409": {
+            "description": "The user is not a member of the organization"
+          }
+        }
+      }
+    },
+    "/admin/organizations/{id}/members/{user_id}/roles/{role_name}": {
+      "delete": {
+        "summary": "Remove a member's extra org role",
+        "description": "Checked against the admin privilege ceiling.",
+        "operationId": "adminRemoveAdditionalRole",
+        "tags": [
+          "Admin"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          }
+        }
+      }
+    },
+    "/admin/permissions": {
+      "get": {
+        "summary": "List the realm's permission registry",
+        "operationId": "adminListPermissions",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "`{items: [{name, status}]}`"
           }
         }
       }
@@ -1628,6 +1895,44 @@
         }
       }
     },
+    "/admin/roles/{id}/members": {
+      "get": {
+        "summary": "List the users and groups holding a role",
+        "operationId": "adminListRoleMembers",
+        "tags": [
+          "Admin"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{items: [{subject_type, subject_id}], next_cursor}`"
+          }
+        }
+      }
+    },
     "/admin/roles/{roleId}": {
       "get": {
         "operationId": "RbacAdminService_GetRole",
@@ -2076,6 +2381,92 @@
         "responses": {
           "204": {
             "description": "Fingerprints deleted"
+          }
+        }
+      }
+    },
+    "/admin/users/{id}/permissions": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "List a user's direct permission grants",
+        "operationId": "adminListUserPermissions",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "`{items: [{permission, scope_type, org_id, granted_by, granted_at}]}`"
+          }
+        }
+      },
+      "post": {
+        "summary": "Grant a permission directly to a user",
+        "description": "Body: `{permission, org_id?}`. A sub-admin may grant only a permission it holds; `granted_by` is the caller.",
+        "operationId": "adminGrantUserPermission",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "201": {
+            "description": "The grant"
+          },
+          "403": {
+            "description": "The caller does not hold the permission"
+          },
+          "404": {
+            "description": "No such user or organization"
+          }
+        }
+      }
+    },
+    "/admin/users/{id}/permissions/{permission}": {
+      "delete": {
+        "summary": "Revoke a direct permission grant",
+        "description": "Add `?org_id=` for an org-scoped grant. Checked against the admin privilege ceiling.",
+        "operationId": "adminRevokeUserPermission",
+        "tags": [
+          "Admin"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "permission",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "org_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "403": {
+            "description": "Admin privilege ceiling"
           }
         }
       }

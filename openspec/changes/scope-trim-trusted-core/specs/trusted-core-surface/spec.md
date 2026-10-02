@@ -19,6 +19,23 @@ The server SHALL NOT register any route for a removed feature. A request to a re
 - **WHEN** a client requests the SP metadata or posts a valid response to the Assertion Consumer Service under `/ui/realms/{realm}/federation/saml/`
 - **THEN** the server serves the request as it did before this change
 
+### Requirement: Every admin operation has a REST route
+Before the public gRPC API is removed, every admin operation it offered SHALL be available over REST under `/admin`, with authorization at least as strict as the gRPC handler's: `hearth.realm.admin`, system-realm write refusal, and the admin privilege ceiling on every change that grants or removes authority.
+
+(Added during apply: sixteen operations — organization CRUD, group roles, role members, direct user permissions, extra org roles, the permission registry and audit integrity — existed only over gRPC.)
+
+#### Scenario: Organization CRUD over REST
+- **WHEN** a realm administrator calls `POST`, `GET`, `PATCH` and `DELETE` on `/admin/organizations[/{id}]`
+- **THEN** each answers like the gRPC operation did, and a caller without `hearth.realm.admin` gets `403`
+
+#### Scenario: Suspension is checked like deletion
+- **WHEN** a sub-admin sets `status: suspended` on an organization whose member holds admin authority the sub-admin lacks
+- **THEN** the server answers `403` and the organization stays active
+
+#### Scenario: Grants never exceed the caller
+- **WHEN** a sub-admin grants a permission, assigns a group role, or gives an extra org role that carries a permission the sub-admin does not hold
+- **THEN** the server answers `403` and nothing is granted
+
 ### Requirement: No public gRPC listener
 The server SHALL NOT open a gRPC listener for clients. The Raft peer listener (`cluster.peer_address`) is internal and stays.
 
