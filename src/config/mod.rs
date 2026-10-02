@@ -6,6 +6,7 @@
 pub mod diff;
 mod env;
 pub mod error;
+pub mod removed;
 mod security_keys;
 mod types;
 pub mod validate;

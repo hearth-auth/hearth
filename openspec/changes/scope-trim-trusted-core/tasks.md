@@ -2,9 +2,9 @@ Each numbered group ships as one PR, in this order (design decision 1). Each PR 
 
 ## 1. Shared groundwork
 
-- [ ] 1.1 Write red tests for the removed-key table: an `sms:` block and a `server.grpc_port` key each stop startup with an error that names the key, the feature and `3.0.0`
-- [ ] 1.2 Add the removed-key table in `src/config/` and rewrite the `deny_unknown_fields` parse error through it. Each later group adds its own keys to the table
-- [ ] 1.3 Add a red black-box helper to `tests/common/mod.rs` that asserts a route answers `404` like an unknown path. Later groups use it
+- [x] 1.1 Write red tests for the removed-key check. **Changed during apply:** `sms:` and `server.grpc_port` are still valid keys until groups 4 and 6 remove them, so the group 1 tests run against a fixture table (`src/config/removed.rs` tests). Each removal group adds its keys to `REMOVED_KEYS` with its own integration test through both parse paths
+- [x] 1.2 Add the removed-key table in `src/config/` and rewrite the `deny_unknown_fields` parse error through it. Each later group adds its own keys to the table
+- [x] 1.3 Add a black-box helper (`tests/common/routes.rs`, `assert_route_absent` over the composed router, self-tested in `tests/route_absence_helper.rs`) that asserts a route answers `404` like an unknown path. Later groups use it
 
 ## 2. SAML IdP side (PR 1)
 

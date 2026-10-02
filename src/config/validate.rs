@@ -7,6 +7,7 @@ use std::path::Path;
 
 use super::env;
 use super::error::ConfigError;
+use super::removed::{removed_key_issue, REMOVED_KEYS};
 use super::types::{
     parse_duration_to_micros, AgentAuthConfig, AuthConfig, BrandingConfig, CompactionSection,
     Config, DemoConfig, EmailConfig, EmailTransport, MetricsConfig, ObservabilityConfig,
@@ -205,6 +206,9 @@ impl Config {
     /// Returns an error for invalid YAML or values that fail validation.
     pub fn from_yaml_str(yaml: &str) -> Result<Self, ConfigError> {
         let (substituted, warnings) = env::substitute_env_vars(yaml);
+        if let Some(err) = removed_key_issue(&substituted, REMOVED_KEYS) {
+            return Err(err);
+        }
         // HEA control-liveness 10.2 / audit §4.7#3: `dev_mode` is
         // #[serde(default)], so serde WOULD accept it here. This explicit
         // refusal — not any serde attribute — is what keeps it unreachable
@@ -346,6 +350,11 @@ impl Config {
     /// Environment variables are still substituted.
     pub fn from_yaml_str_unchecked(yaml: &str) -> Result<Self, ConfigError> {
         let (substituted, warnings) = env::substitute_env_vars(yaml);
+        // A removed key is refused even here: `--dev` loads through this path,
+        // and dev must fail the same way production does.
+        if let Some(err) = removed_key_issue(&substituted, REMOVED_KEYS) {
+            return Err(err);
+        }
         let mut config: Self = serde_norway::from_str(&substituted)
             .map_err(|e| ConfigError::ParseError(e.to_string()))?;
         config.config_warnings = warnings;

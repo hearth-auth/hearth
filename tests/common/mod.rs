@@ -8,6 +8,8 @@
 // so not all variants/methods are used in every binary.
 #![allow(dead_code)]
 
+pub mod routes;
+
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
