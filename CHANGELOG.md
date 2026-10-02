@@ -50,8 +50,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `sms_otp_expiry_seconds` / `sms_otp_max_attempts`, the error codes `HEARTH_INVALID_SMS_OTP` /
   `HEARTH_SMS_RESEND_LIMIT_EXCEEDED` and the SMS caps of the outbound volume shield and the
   cross-realm aggregation cap are gone. Second factors are TOTP (with recovery codes), passkeys
-  and security keys, and email OTP. A user stored before 3.0.0 with a phone number or a pending
-  `ENROLL_PHONE_OTP` still loads; both are dropped.
+  and security keys, and email OTP.
 - **BREAKING: risk scoring, adaptive MFA and device fingerprinting are removed.** MFA is a
   policy (`mfa_required`), never a score. Gone: `security.risk_scorer`, the refresh-token
   User-Agent/ASN drift check that fed it, per-realm `adaptive_mfa`, device-fingerprint records
@@ -97,9 +96,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   feature, the release that removed it (3.0.0) and what to use instead. The check runs in every
   loader, `serve --dev` included. Keys covered: `realms.<name>.saml_service_providers`, the
   gRPC keys, `sms`, `security.risk_scorer` and the four SMS shield caps.
-- Backups no longer contain `saml_service_providers.ndjson`. Restoring an older archive that
-  does skips that member with a warning and lists it in the restore summary
-  (`ImportReport::retired_members`); the rest of the realm restores as before.
+- Backups no longer contain `saml_service_providers.ndjson`; an archive that does is refused as
+  containing an unrecognized member.
 
 <!-- GA audit round 3 follow-ups, 2026-09-30 (branch feature/ga-sweep-4-2026-09-29). -->
 

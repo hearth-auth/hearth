@@ -94,9 +94,9 @@ A client or agent that requires DPoP SHALL still get DPoP-bound tokens on every 
 - **WHEN** a client configured to require DPoP (`dpop_bound_access_tokens: true`) calls the token endpoint with the authorization code, client credentials, refresh token, JWT bearer, or device code grant, and sends no `DPoP` header
 - **THEN** the server refuses the request with `invalid_dpop_proof` or `invalid_request`, and issues no token
 
-### Requirement: Old backup archives still import
-The backup importer SHALL accept an archive that contains `saml_service_providers.ndjson`. It SHALL skip that file and log a warning.
+### Requirement: Removed features leave no stored-data compatibility code
+Hearth has no deployments, so a removed feature's storage fields, enum variants, audit actions and backup archive members SHALL be deleted outright, with no reader for data written before 3.0.0. Only `hearth.yaml` keys keep a named "removed in 3.0.0" error.
 
-#### Scenario: Restore a v2 archive
-- **WHEN** an operator restores a v2.0.x archive that contains `saml_service_providers.ndjson`
-- **THEN** the restore succeeds, every other record is restored, and the log has one warning that names the skipped file
+#### Scenario: Restore an archive with an IdP member
+- **WHEN** an operator restores an archive that contains `saml_service_providers.ndjson`
+- **THEN** the restore fails with the importer's existing unrecognized-member error, and writes nothing

@@ -5298,9 +5298,6 @@ fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
             counts.errored
         );
     }
-    for member in &report.retired_members {
-        tracing::warn!("  skipped {member}: its feature was removed in Hearth 3.0.0");
-    }
     if !report.conflicts.is_empty() {
         tracing::info!("  conflicts ({}):", report.conflicts.len());
         for c in &report.conflicts {

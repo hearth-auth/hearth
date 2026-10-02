@@ -28,15 +28,6 @@ use zeroize::Zeroizing;
 
 use super::{decrypt_bytes, unwrap_dek, ArchiveReader, BackupError};
 
-/// Archive members written by an earlier release for a feature this release
-/// removed (scope-trim-trusted-core). A restore skips each one with a warning
-/// and names it in [`ImportReport::retired_members`]: the data has no home
-/// any more, but an old archive must still restore everything else.
-pub(crate) const RETIRED_MEMBERS: &[&str] = &[
-    // The SAML IdP side's service-provider registry, removed in 3.0.0.
-    "saml_service_providers.ndjson",
-];
-
 /// Every archive member (relative to `realms/<slug>/`) the importer knows how
 /// to restore. A member NOT in this list is a hard error — see the fail-closed
 /// check in [`BackupImporter::import_realm`] (HEA-2160).
@@ -238,9 +229,6 @@ pub struct ImportReport {
     /// refused rather than restored weaker than its source (a missing or
     /// unverifiable credential), each with its reason.
     pub conflicts: Vec<Conflict>,
-    /// Archive members skipped because their feature was removed, by full
-    /// member path. See [`RETIRED_MEMBERS`].
-    pub retired_members: Vec<String>,
 }
 
 /// Records the outcome of a single record import into the matching
@@ -525,14 +513,6 @@ impl BackupImporter {
         let member_prefix = format!("realms/{realm_slug}/");
         for key in files.keys() {
             let member = key.strip_prefix(&member_prefix).unwrap_or(key);
-            if RETIRED_MEMBERS.contains(&member) {
-                tracing::warn!(
-                    member = %key,
-                    "skipping an archive member whose feature was removed in Hearth 3.0.0"
-                );
-                report.retired_members.push(key.clone());
-                continue;
-            }
             if !RECOGNIZED_MEMBERS.contains(&member) {
                 return Err(BackupError::UnrecognizedMember { path: key.clone() });
             }
@@ -2209,91 +2189,6 @@ mod tests {
                 .expect("get realm")
                 .is_none(),
             "no realm must be created when the restore fails closed"
-        );
-    }
-
-    /// scope-trim-trusted-core: v3 removed the SAML IdP side, so a v2 archive
-    /// may still carry `saml_service_providers.ndjson`. That member is retired,
-    /// not unknown: the restore must succeed, restore everything else, skip the
-    /// member, and name it in the report — never fail, never drop it silently.
-    #[test]
-    fn retired_saml_service_providers_member_is_skipped_and_reported() {
-        let dir = TempDir::new().expect("tmpdir");
-        let archive_path = dir.path().join("v2-idp.hearth-backup");
-        let slug = "v2-idp-realm";
-        let realm_uuid = "00000000-0000-0000-0000-0000000000ab";
-
-        let realm_json = serde_json::json!({
-            "id": realm_uuid,
-            "name": slug,
-            "status": "Active",
-            "config": {},
-            "created_at": 0,
-            "updated_at": 0
-        });
-
-        let dek = BackupExporter::generate_dek().expect("dek");
-        let (wrapped_dek_b64, dek_wrapping_params) =
-            wrap_dek(&dek, &test_passphrase()).expect("wrap dek");
-        let realm_enc =
-            encrypt_bytes(&serde_json::to_vec(&realm_json).expect("ser"), &dek).expect("enc realm");
-        let sp_line = br#"{"sp_key":"crm","entity_id":"https://crm.example/sp"}
-"#;
-        let sps_enc = encrypt_bytes(sp_line, &dek).expect("enc sps");
-
-        let manifest = BackupManifest {
-            format_version: crate::backup::MANIFEST_VERSION,
-            hearth_version: "2.0.4".to_string(),
-            created_at: Timestamp::from_micros(0),
-            realms: vec![RealmManifest {
-                realm_id: format!("realm_{realm_uuid}"),
-                slug: slug.to_string(),
-                record_counts: RecordCounts::default(),
-                audit_chain_included: false,
-            }],
-            checksums: std::collections::BTreeMap::new(),
-            sections_encrypted: true,
-            wrapped_dek_b64: Some(wrapped_dek_b64),
-            signing_key_dek_b64: None,
-            dek_wrapping_params: Some(dek_wrapping_params),
-            detached_signature_b64: None,
-        };
-
-        let mut writer = BackupArchive::create(&archive_path).expect("create archive");
-        writer
-            .add_file(&format!("realms/{slug}/realm.json"), &realm_enc)
-            .expect("add realm.json");
-        writer
-            .add_file(
-                &format!("realms/{slug}/saml_service_providers.ndjson"),
-                &sps_enc,
-            )
-            .expect("add retired member");
-        writer.finish(manifest).expect("finish");
-
-        let rig = make_rig();
-        let reader = BackupArchive::open(&archive_path).expect("open");
-        let importer = BackupImporter::new(
-            Arc::clone(&rig.identity),
-            Arc::clone(&rig.rbac),
-            Arc::clone(&rig.audit),
-        );
-
-        let report = importer
-            .import_realm(slug, &reader, &opts_with_passphrase())
-            .expect("a v2 archive with the retired IdP member must still restore");
-        assert_eq!(
-            report.retired_members,
-            vec![format!("realms/{slug}/saml_service_providers.ndjson")],
-            "the skipped member must be named in the report"
-        );
-        let realm_id = RealmId::new(uuid::Uuid::parse_str(realm_uuid).expect("parse uuid"));
-        assert!(
-            rig.identity
-                .get_realm(&realm_id)
-                .expect("get realm")
-                .is_some(),
-            "the realm itself must be restored"
         );
     }
 

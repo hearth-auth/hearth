@@ -102,19 +102,6 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         // MFA lifecycle
         domain::AuditAction::MfaEnabled => pb::AuditAction::MfaEnabled,
         domain::AuditAction::MfaDisabled => pb::AuditAction::MfaDisabled,
-        // Adaptive MFA / step-up
-        domain::AuditAction::StepUpMfaTriggered => pb::AuditAction::StepUpMfaTriggered,
-        domain::AuditAction::StepUpMfaCompleted => pb::AuditAction::StepUpMfaCompleted,
-        // SMS OTP enrollment
-        domain::AuditAction::SmsOtpEnrollmentStarted => pb::AuditAction::SmsOtpEnrollmentStarted,
-        domain::AuditAction::SmsOtpEnrollmentVerified => pb::AuditAction::SmsOtpEnrollmentVerified,
-        domain::AuditAction::SmsOtpEnrollmentFailed => pb::AuditAction::SmsOtpEnrollmentFailed,
-        // SMS MFA challenges
-        domain::AuditAction::SmsMfaChallengeSucceeded => pb::AuditAction::SmsMfaChallengeSucceeded,
-        domain::AuditAction::SmsMfaChallengeFailed => pb::AuditAction::SmsMfaChallengeFailed,
-        domain::AuditAction::SmsMfaLocked => pb::AuditAction::SmsMfaLocked,
-        // Device fingerprints
-        domain::AuditAction::DeviceFingerprintsErased => pb::AuditAction::DeviceFingerprintsErased,
         // Session management
         domain::AuditAction::SessionLimitEnforced => pb::AuditAction::SessionLimitEnforced,
         domain::AuditAction::SessionsRevoked => pb::AuditAction::SessionsRevoked,

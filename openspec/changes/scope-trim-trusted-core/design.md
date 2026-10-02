@@ -57,9 +57,9 @@ Add one function, `effective_mfa_requirement(realm, org, client, user_roles) -> 
 The parser rejects a document that has a DTD or a `DOCTYPE`, more than one `Assertion`, or more than one `ds:Signature` in the signed scope. It verifies the one signature, and then it reads attributes only from the element the signature references, found by ID through the verified reference. An external XSW corpus runs in CI.
 **Why:** signature wrapping lives in the gap between "the signature is valid" and "the data I read is the data that was signed". The strict profile removes the ambiguity before any crypto runs.
 
-### 6. Old backups that contain IdP data still import
-The importer skips `saml_service_providers.ndjson` and logs a warning that names the file and the release that removed the IdP side. The export stops writing that file.
-**Why:** an operator must be able to restore an old archive into v3.
+### 6. No stored-data compatibility code
+The export stops writing `saml_service_providers.ndjson`, and the importer treats it like any unknown member: a hard error. The same holds for storage fields, enum variants and audit actions of removed features: they are deleted, with no reader for older data.
+**Why:** Hearth has no deployments (owner, 2026-10-02: "we have no users at all"), so a compatibility reader protects nothing and is code to maintain. Changed during apply; groups 2 and 7 first shipped such readers and a follow-up removed them.
 
 ### 7. The importers stay in the `hearth migrate` subcommand
 The survey shows they are already offline-only: there is no HTTP route. A separate binary would add release work and remove no attack surface.

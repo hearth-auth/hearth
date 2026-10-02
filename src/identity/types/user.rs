@@ -80,15 +80,14 @@ pub enum RequiredAction {
 impl RequiredAction {
     /// Canonical execution priority. Lower numbers run first.
     ///
-    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`, `ENROLL_MFA=3`, `ENROLL_EMAIL_OTP=5`.
-    /// (4 was `ENROLL_PHONE_OTP`, removed in 3.0.0 with SMS one-time codes.)
+    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`, `ENROLL_MFA=3`, `ENROLL_EMAIL_OTP=4`.
     #[must_use]
     pub fn priority(self) -> u8 {
         match self {
             Self::VerifyEmail => 1,
             Self::UpdatePassword => 2,
             Self::EnrollMfa => 3,
-            Self::EnrollEmailOtp => 5,
+            Self::EnrollEmailOtp => 4,
         }
     }
 
@@ -115,64 +114,6 @@ impl RequiredAction {
     }
 }
 
-/// Wire form of [`RequiredAction`] in stored and exported user records.
-///
-/// Postcard writes an enum by variant position and the JSON export by name,
-/// so a removed action keeps its slot here: never reorder these variants.
-/// A retired action decodes, and [`Self::into_current`] drops it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub(crate) enum StoredRequiredAction {
-    /// [`RequiredAction::VerifyEmail`].
-    VerifyEmail,
-    /// [`RequiredAction::UpdatePassword`].
-    UpdatePassword,
-    /// [`RequiredAction::EnrollMfa`].
-    EnrollMfa,
-    /// `ENROLL_PHONE_OTP`, retired in 3.0.0 with SMS one-time codes.
-    #[serde(rename = "ENROLL_PHONE_OTP")]
-    RetiredEnrollPhoneOtp,
-    /// [`RequiredAction::EnrollEmailOtp`].
-    EnrollEmailOtp,
-}
-
-impl StoredRequiredAction {
-    /// The current action, or `None` for a retired one.
-    pub(crate) fn into_current(self) -> Option<RequiredAction> {
-        match self {
-            Self::VerifyEmail => Some(RequiredAction::VerifyEmail),
-            Self::UpdatePassword => Some(RequiredAction::UpdatePassword),
-            Self::EnrollMfa => Some(RequiredAction::EnrollMfa),
-            Self::RetiredEnrollPhoneOtp => None,
-            Self::EnrollEmailOtp => Some(RequiredAction::EnrollEmailOtp),
-        }
-    }
-}
-
-impl From<RequiredAction> for StoredRequiredAction {
-    fn from(a: RequiredAction) -> Self {
-        match a {
-            RequiredAction::VerifyEmail => Self::VerifyEmail,
-            RequiredAction::UpdatePassword => Self::UpdatePassword,
-            RequiredAction::EnrollMfa => Self::EnrollMfa,
-            RequiredAction::EnrollEmailOtp => Self::EnrollEmailOtp,
-        }
-    }
-}
-
-/// Deserializes a required-action list and drops retired actions, so a user
-/// exported before 3.0.0 with `ENROLL_PHONE_OTP` still imports.
-fn deserialize_current_actions<'de, D>(deserializer: D) -> Result<Vec<RequiredAction>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let stored = Vec::<StoredRequiredAction>::deserialize(deserializer)?;
-    Ok(stored
-        .into_iter()
-        .filter_map(StoredRequiredAction::into_current)
-        .collect())
-}
-
 /// A user record within a realm.
 ///
 /// Fields are private; access via accessor methods. Email is always stored
@@ -188,11 +129,7 @@ pub struct User {
     attributes: BTreeMap<String, String>,
     status: UserStatus,
     /// Pending actions the user must complete. Absent in old records = [].
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "deserialize_current_actions"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     required_actions: Vec<RequiredAction>,
     /// Whether the user's email address has been verified. Absent in old records = false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -357,15 +294,8 @@ impl User {
             last_name: self.last_name.clone(),
             attributes: self.attributes.clone(),
             status: self.status,
-            required_actions: self
-                .required_actions
-                .iter()
-                .copied()
-                .map(StoredRequiredAction::from)
-                .collect(),
+            required_actions: self.required_actions.clone(),
             email_verified: self.email_verified,
-            retired_phone_number: None,
-            retired_phone_verified: false,
             email_otp_enabled: self.email_otp_enabled,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -382,11 +312,7 @@ impl User {
             last_name: r.last_name,
             attributes: r.attributes,
             status: r.status,
-            required_actions: r
-                .required_actions
-                .into_iter()
-                .filter_map(StoredRequiredAction::into_current)
-                .collect(),
+            required_actions: r.required_actions,
             email_verified: r.email_verified,
             email_otp_enabled: r.email_otp_enabled,
             created_at: r.created_at,
@@ -408,14 +334,8 @@ pub(crate) struct UserStorageRecord {
     pub(crate) last_name: String,
     pub(crate) attributes: BTreeMap<String, String>,
     pub(crate) status: UserStatus,
-    pub(crate) required_actions: Vec<StoredRequiredAction>,
+    pub(crate) required_actions: Vec<RequiredAction>,
     pub(crate) email_verified: bool,
-    /// Retired in 3.0.0 with SMS one-time codes: written `None`, ignored on
-    /// read. The slot stays because postcard is positional.
-    pub(crate) retired_phone_number: Option<String>,
-    /// Retired in 3.0.0 with SMS one-time codes: written `false`, ignored on
-    /// read.
-    pub(crate) retired_phone_verified: bool,
     pub(crate) email_otp_enabled: bool,
     pub(crate) created_at: Timestamp,
     pub(crate) updated_at: Timestamp,
@@ -529,13 +449,12 @@ mod tests {
         ]
     }
 
-    fn arb_required_action() -> impl Strategy<Value = StoredRequiredAction> {
+    fn arb_required_action() -> impl Strategy<Value = RequiredAction> {
         prop_oneof![
-            Just(StoredRequiredAction::VerifyEmail),
-            Just(StoredRequiredAction::UpdatePassword),
-            Just(StoredRequiredAction::EnrollMfa),
-            Just(StoredRequiredAction::RetiredEnrollPhoneOtp),
-            Just(StoredRequiredAction::EnrollEmailOtp),
+            Just(RequiredAction::VerifyEmail),
+            Just(RequiredAction::UpdatePassword),
+            Just(RequiredAction::EnrollMfa),
+            Just(RequiredAction::EnrollEmailOtp),
         ]
     }
 
@@ -554,8 +473,6 @@ mod tests {
             (
                 proptest::collection::vec(arb_required_action(), 0..3),
                 any::<bool>(),
-                proptest::option::of(".*"),
-                any::<bool>(),
                 any::<bool>(),
                 arb_timestamp(),
                 arb_timestamp(),
@@ -564,15 +481,7 @@ mod tests {
             .prop_map(
                 |(
                     (uuid, email, display_name, first_name, last_name, attributes, status),
-                    (
-                        required_actions,
-                        email_verified,
-                        retired_phone_number,
-                        retired_phone_verified,
-                        email_otp_enabled,
-                        created_at,
-                        updated_at,
-                    ),
+                    (required_actions, email_verified, email_otp_enabled, created_at, updated_at),
                 )| UserStorageRecord {
                     id: UserId::new(uuid),
                     email,
@@ -583,8 +492,6 @@ mod tests {
                     status,
                     required_actions,
                     email_verified,
-                    retired_phone_number,
-                    retired_phone_verified,
                     email_otp_enabled,
                     created_at,
                     updated_at,
@@ -600,77 +507,5 @@ mod tests {
             let decoded: UserStorageRecord = crate::codec::decode(&bytes).expect("decode");
             prop_assert_eq!(rec, decoded);
         }
-    }
-
-    /// Postcard writes enum variants by position. The retired SMS action keeps
-    /// slot 3, so a stored `ENROLL_EMAIL_OTP` still reads as itself.
-    #[test]
-    fn stored_action_positions_are_pinned() {
-        let pos = |a: StoredRequiredAction| crate::codec::encode(&a).expect("encode");
-        assert_eq!(pos(StoredRequiredAction::VerifyEmail), vec![0]);
-        assert_eq!(pos(StoredRequiredAction::UpdatePassword), vec![1]);
-        assert_eq!(pos(StoredRequiredAction::EnrollMfa), vec![2]);
-        assert_eq!(pos(StoredRequiredAction::RetiredEnrollPhoneOtp), vec![3]);
-        assert_eq!(pos(StoredRequiredAction::EnrollEmailOtp), vec![4]);
-    }
-
-    /// A user stored before 3.0.0 with a phone and a pending
-    /// `ENROLL_PHONE_OTP` still decodes; the retired data is dropped.
-    #[test]
-    fn a_pre_3_0_record_with_sms_data_decodes_without_it() {
-        let ts = Timestamp::from_micros(1_000);
-        let record = UserStorageRecord {
-            id: UserId::new(uuid::Uuid::new_v4()),
-            email: "old@example.com".to_string(),
-            display_name: "Old".to_string(),
-            first_name: String::new(),
-            last_name: String::new(),
-            attributes: BTreeMap::new(),
-            status: UserStatus::Active,
-            required_actions: vec![
-                StoredRequiredAction::RetiredEnrollPhoneOtp,
-                StoredRequiredAction::EnrollEmailOtp,
-            ],
-            email_verified: true,
-            retired_phone_number: Some("+15555550100".to_string()),
-            retired_phone_verified: true,
-            email_otp_enabled: false,
-            created_at: ts,
-            updated_at: ts,
-        };
-        let bytes = crate::codec::encode(&record).expect("encode");
-        let decoded: UserStorageRecord = crate::codec::decode(&bytes).expect("decode");
-        let user = User::from_storage_record(decoded);
-        assert_eq!(user.required_actions(), &[RequiredAction::EnrollEmailOtp]);
-
-        let rewritten = user.to_storage_record();
-        assert_eq!(rewritten.retired_phone_number, None, "never written again");
-        assert!(!rewritten.retired_phone_verified);
-        assert_eq!(
-            rewritten.required_actions,
-            vec![StoredRequiredAction::EnrollEmailOtp]
-        );
-    }
-
-    /// The JSON form (backup export) drops the retired action by name.
-    #[test]
-    fn json_with_enroll_phone_otp_imports_without_it() {
-        let user = User::new(
-            UserId::new(uuid::Uuid::new_v4()),
-            "j@example.com".to_string(),
-            "J".to_string(),
-            String::new(),
-            String::new(),
-            UserStatus::Active,
-            vec![RequiredAction::VerifyEmail],
-            Timestamp::from_micros(1),
-            Timestamp::from_micros(1),
-        );
-        let mut json = serde_json::to_value(&user).expect("to json");
-        json["required_actions"] = serde_json::json!(["ENROLL_PHONE_OTP", "VERIFY_EMAIL"]);
-        json["phone_number"] = serde_json::json!("+15555550100");
-        json["phone_verified"] = serde_json::json!(true);
-        let back: User = serde_json::from_value(json).expect("old export must import");
-        assert_eq!(back.required_actions(), &[RequiredAction::VerifyEmail]);
     }
 }

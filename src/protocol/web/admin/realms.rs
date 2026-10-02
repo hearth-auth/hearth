@@ -496,15 +496,6 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::BreachCheckUnavailable => "Breach Check Unavailable",
         A::MfaEnabled => "MFA Enabled",
         A::MfaDisabled => "MFA Disabled",
-        A::StepUpMfaTriggered => "Step-Up MFA Triggered",
-        A::StepUpMfaCompleted => "Step-Up MFA Completed",
-        A::SmsOtpEnrollmentStarted => "SMS OTP Enrollment Started",
-        A::SmsOtpEnrollmentVerified => "SMS OTP Enrollment Verified",
-        A::SmsOtpEnrollmentFailed => "SMS OTP Enrollment Failed",
-        A::SmsMfaChallengeSucceeded => "SMS MFA Challenge Succeeded",
-        A::SmsMfaChallengeFailed => "SMS MFA Challenge Failed",
-        A::SmsMfaLocked => "SMS MFA Locked",
-        A::DeviceFingerprintsErased => "Device Fingerprints Erased",
         A::SessionLimitEnforced => "Session Limit Enforced",
         A::SessionsRevoked => "All Sessions Revoked",
         A::RealmExportWatermarked => "Realm Export (Watermarked)",
@@ -615,15 +606,6 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::OrphanedReferenceSkipped
         | A::PasswordCompromisedRejected
         | A::BreachCheckUnavailable
-        | A::StepUpMfaTriggered
-        | A::StepUpMfaCompleted
-        | A::SmsOtpEnrollmentStarted
-        | A::SmsOtpEnrollmentVerified
-        | A::SmsOtpEnrollmentFailed
-        | A::SmsMfaChallengeSucceeded
-        | A::SmsMfaChallengeFailed
-        | A::SmsMfaLocked
-        | A::DeviceFingerprintsErased
         | A::MfaEnabled
         | A::MfaDisabled => "Security",
         // System — realm config, federation/SAML/SCIM integrations,
@@ -3183,12 +3165,6 @@ mod action_category_tests {
             A::OrphanedReferenceSkipped,
             A::PasswordCompromisedRejected,
             A::BreachCheckUnavailable,
-            A::SmsOtpEnrollmentStarted,
-            A::SmsOtpEnrollmentVerified,
-            A::SmsOtpEnrollmentFailed,
-            A::SmsMfaChallengeSucceeded,
-            A::SmsMfaChallengeFailed,
-            A::SmsMfaLocked,
         ] {
             assert_eq!(action_category(&a), "Security", "{a:?}");
         }

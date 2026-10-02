@@ -2264,11 +2264,7 @@ async fn restore_carries_a_usable_saml_signing_key() {
     let dst = common::TestHarness::embedded_with_kek([9u8; 32])
         .await
         .expect("dst harness");
-    let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
-    assert!(
-        report.retired_members.is_empty(),
-        "a v3 export writes no retired member"
-    );
+    let (restored_realm, _report) = restore_into(&dst, &tmp, &slug);
 
     // `get_or_create` would silently GENERATE a fresh key if the restored one
     // were unreadable, so an equal certificate is proof the restored key was
