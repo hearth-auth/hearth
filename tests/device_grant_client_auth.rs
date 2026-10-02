@@ -200,3 +200,35 @@ async fn device_token_poll_refuses_a_confidential_client_without_its_secret() {
     assert_eq!(realm_status, 401, "realm-scoped twin must refuse");
     assert_eq!(header_status, 401, "header-routed twin must refuse");
 }
+
+/// A wrong secret is refused on both twins. Ported from the removed gRPC
+/// `DeviceAuthorize` test (task 23.9). The correct secret is the control: it
+/// is served, so the refusal is about the secret and not the flow.
+#[tokio::test]
+async fn device_authorization_refuses_a_wrong_secret() {
+    let harness = common::TestHarness::server().await.expect("server harness");
+    let ctx = setup(&harness).await;
+
+    let (realm_ok, header_ok) = post_both(
+        &ctx,
+        "device_authorization",
+        format!(
+            "client_id={}&client_secret={CONFIDENTIAL_SECRET}&scope=openid",
+            ctx.confidential_client
+        ),
+    )
+    .await;
+    assert_eq!((realm_ok, header_ok), (200, 200), "control: right secret");
+
+    let (realm_status, header_status) = post_both(
+        &ctx,
+        "device_authorization",
+        format!(
+            "client_id={}&client_secret=not-the-secret&scope=openid",
+            ctx.confidential_client
+        ),
+    )
+    .await;
+    assert_eq!(realm_status, 401, "realm-scoped twin must refuse");
+    assert_eq!(header_status, 401, "header-routed twin must refuse");
+}

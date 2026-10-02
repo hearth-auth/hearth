@@ -12,8 +12,7 @@ info:
 # the merged spec by `scripts/merge_openapi.py` (matched by operationId; an
 # entry that matches nothing fails the merge, so this list cannot go stale).
 # Realms are declared in hearth.yaml: `POST /admin/realms` and
-# `PATCH /admin/realms/{id}` answer 405, and the gRPC CreateRealm / UpdateRealm
-# RPCs answer FAILED_PRECONDITION (GA audit round 3, G-7).
+# `PATCH /admin/realms/{id}` answer 405 (GA audit round 3, G-7).
 x-hearth-omit-operations:
   - IdentityAdminService_CreateRealm
   - IdentityAdminService_UpdateRealm
@@ -639,8 +638,7 @@ paths:
         `X-Realm-ID` set to the system realm); the target realm's cross-realm
         trust policy applies. The system realm cannot be suspended. Audited in
         the target realm with the actor and old/new status. YAML
-        reconciliation never clears a suspension. gRPC twin:
-        `IdentityAdminService/SuspendRealm`.
+        reconciliation never clears a suspension.
       operationId: IdentityAdminService_SuspendRealm
       tags: [IdentityAdminService]
       parameters:
@@ -671,7 +669,7 @@ paths:
       description: >-
         Restores a suspended realm to active. Same gate as suspend. An
         archived realm is not revived (409): only reappearing in hearth.yaml
-        does that. gRPC twin: `IdentityAdminService/UnsuspendRealm`.
+        does that.
       operationId: IdentityAdminService_UnsuspendRealm
       tags: [IdentityAdminService]
       parameters:

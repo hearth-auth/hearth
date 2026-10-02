@@ -6,27 +6,19 @@
 //! header route rejected a `client_assertion` as an unknown field (`400`) and
 //! the realm route ignored it and answered `401`, because a client with keys
 //! and no secret is not public. A FAPI 2.0 client (JWKS, no secret) could
-//! therefore never start a device flow. Both routes (form and JSON) and gRPC
-//! `DeviceAuthorize` now accept and verify `client_assertion_type` +
+//! therefore never start a device flow. Both routes (form and JSON) now
+//! accept and verify `client_assertion_type` +
 //! `client_assertion`; the poll at `/token` (`device_code` grant) takes the
 //! assertion too.
 
 mod common;
 
-use std::sync::Arc;
-
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use hearth::core::{ClientId, RealmId};
 use hearth::identity::{ClientTrustLevel, CreateRealmRequest, RegisterClientRequest};
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::oauth::OAuthSvc;
-use hearth::protocol::grpc::server::GrpcState;
-use hearth::protocol::proto::identity::v1 as id_pb;
-use hearth::protocol::proto::identity::v1::o_auth_service_server::OAuthService;
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
-use tonic::Code;
 
 const JWT_BEARER: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -73,7 +65,8 @@ impl ClientKey {
 }
 
 struct Env {
-    h: common::TestHarness,
+    /// Keeps the engines behind the spawned server alive.
+    _h: common::TestHarness,
     base: String,
     realm_name: String,
     realm_id: RealmId,
@@ -118,7 +111,7 @@ async fn env() -> Env {
         .client_id()
         .clone();
     Env {
-        h,
+        _h: h,
         base,
         realm_name,
         realm_id,
@@ -274,6 +267,13 @@ async fn a_forged_assertion_is_refused() {
                 ],
             ),
             (
+                "malformed JWT",
+                vec![
+                    ("client_assertion_type", JWT_BEARER.to_string()),
+                    ("client_assertion", "a.b.c".to_string()),
+                ],
+            ),
+            (
                 "foreign key",
                 vec![
                     ("client_assertion_type", JWT_BEARER.to_string()),
@@ -301,71 +301,5 @@ async fn a_forged_assertion_is_refused() {
             .post(route, Encoding::Form, "device_authorization", &body)
             .await;
         assert_eq!(status, 400, "{route:?} assertion + secret: {answer}");
-    }
-}
-
-fn grpc_request(
-    env: &Env,
-    assertion_type: Option<&str>,
-    assertion: Option<String>,
-) -> tonic::Request<id_pb::DeviceAuthorizationRequest> {
-    let mut r = tonic::Request::new(id_pb::DeviceAuthorizationRequest {
-        client_id: env.id(),
-        scope: None,
-        client_secret: None,
-        client_assertion_type: assertion_type.map(str::to_string),
-        client_assertion: assertion,
-    });
-    r.metadata_mut().insert(
-        "x-realm-id",
-        env.realm_id.as_uuid().to_string().parse().unwrap(),
-    );
-    r
-}
-
-#[tokio::test]
-async fn grpc_device_authorize_verifies_the_assertion() {
-    let env = env().await;
-    let svc = OAuthSvc::new(GrpcState::new(
-        env.h.identity_arc(),
-        env.h.rbac_arc(),
-        env.h.audit_arc(),
-        Arc::new(AdminRateLimiter::new()),
-    ));
-
-    let err = svc
-        .device_authorize(grpc_request(&env, None, None))
-        .await
-        .expect_err("a key-holding client presenting nothing is refused");
-    assert_eq!(err.code(), Code::Unauthenticated);
-
-    let resp = svc
-        .device_authorize(grpc_request(
-            &env,
-            Some(JWT_BEARER),
-            Some(env.key.assertion(&env.client, &env.issuer)),
-        ))
-        .await
-        .expect("a verified assertion starts the flow");
-    assert_ne!(resp.into_inner().device_code, "");
-
-    for (assertion_type, assertion) in [
-        (None, Some("junk".to_string())),
-        (Some("urn:x"), Some("junk".to_string())),
-        (Some(JWT_BEARER), Some("a.b.c".to_string())),
-        (
-            Some(JWT_BEARER),
-            Some(ClientKey::new().assertion(&env.client, &env.issuer)),
-        ),
-    ] {
-        let err = svc
-            .device_authorize(grpc_request(&env, assertion_type, assertion.clone()))
-            .await
-            .expect_err("a forged assertion is refused");
-        assert_eq!(
-            err.code(),
-            Code::Unauthenticated,
-            "type={assertion_type:?} assertion={assertion:?}"
-        );
     }
 }

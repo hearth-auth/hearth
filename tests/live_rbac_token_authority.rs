@@ -2,8 +2,8 @@
 //! GA audit 3 B-2 / C-8 / C-9 — the live-RBAC surfaces answer for the TOKEN,
 //! not for the user behind it.
 //!
-//! Introspection-mode resource servers (`/introspect`, gRPC `Introspect`),
-//! decision-mode resource servers (`POST /oauth/authorize`, gRPC `Decide`) and
+//! Introspection-mode resource servers (`/introspect`), decision-mode
+//! resource servers (`POST /oauth/authorize`) and
 //! `GET /v1/me/permissions` resolved the user's full live RBAC set for any
 //! token they were handed:
 //!
@@ -37,11 +37,7 @@ use hearth::identity::{
     DecidePermissionRequest, RegisterClientRequest, RegisterProtectedResourceRequest,
     Rfc8693Request, SessionContext, TokenIntrospectionRequest, TokenIssuanceContext,
 };
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::oauth::OAuthSvc;
-use hearth::protocol::grpc::GrpcState;
 use hearth::protocol::http::{router, AppState};
-use hearth::protocol::proto::identity::v1::{self as pb, o_auth_service_server::OAuthService};
 use hearth::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, ScopeSpec, Subject};
 use tower::ServiceExt as _;
 
@@ -263,15 +259,6 @@ impl Fixture {
         )))
     }
 
-    fn grpc(&self) -> OAuthSvc {
-        OAuthSvc::new(GrpcState::new(
-            self.h.identity_arc(),
-            self.h.rbac_arc(),
-            self.h.audit_arc(),
-            Arc::new(AdminRateLimiter::new()),
-        ))
-    }
-
     async fn http(
         &self,
         method: &str,
@@ -298,15 +285,6 @@ impl Fixture {
             status,
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
         )
-    }
-
-    fn grpc_request<T>(&self, body: T) -> tonic::Request<T> {
-        let mut req = tonic::Request::new(body);
-        req.metadata_mut().insert(
-            "x-realm-id",
-            self.realm.as_uuid().to_string().parse().unwrap(),
-        );
-        req
     }
 }
 
@@ -574,7 +552,7 @@ async fn decide_denies_a_delegation_beyond_the_actors_permissions() {
 
 /// Deleting a protected resource stops every token minted for it
 /// (AGENT_AUTH.md §2.5). `validate_token` and introspection honoured the
-/// cutoff; the decision path, engine and gRPC alike, did not.
+/// cutoff; the decision path, engine and REST alike, did not.
 #[tokio::test]
 async fn decide_denies_a_token_for_a_removed_protected_resource() {
     let f = setup().await;
@@ -584,6 +562,18 @@ async fn decide_denies_a_token_for_a_removed_protected_resource() {
         f.decide(&for_a, "docs.view", None),
         "control: allowed before removal"
     );
+    let bearer = format!("Bearer {for_a}");
+    let rest_decide = || {
+        f.http(
+            "POST",
+            "/oauth/authorize",
+            &bearer,
+            Some(serde_json::json!({"permission": "docs.view"})),
+        )
+    };
+    let (status, body) = rest_decide().await;
+    assert_eq!(status, StatusCode::OK, "control: body {body}");
+    assert_eq!(body["allowed"], true, "control: REST allowed; body {body}");
 
     f.h.identity()
         .delete_protected_resource(&f.realm, &resource.id)
@@ -593,14 +583,12 @@ async fn decide_denies_a_token_for_a_removed_protected_resource() {
         !f.decide(&for_a, "docs.view", None),
         "a token for a removed protected resource must not be allowed"
     );
-    let mut req = f.grpc_request(pb::TokenDecisionRequest {
-        permission: "docs.view".into(),
-        ..Default::default()
-    });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {for_a}").parse().unwrap());
-    let resp = f.grpc().decide(req).await.expect("decide").into_inner();
-    assert!(!resp.allowed, "gRPC Decide must deny it too");
+    let (status, body) = rest_decide().await;
+    assert_eq!(status, StatusCode::OK, "body {body}");
+    assert_eq!(
+        body["allowed"], false,
+        "POST /oauth/authorize must deny it too; body {body}"
+    );
 }
 
 // ── B-2 on every surface ────────────────────────────────────────────────────
@@ -676,75 +664,6 @@ async fn rest_introspect_releases_no_live_rbac_for_a_third_party_clients_token()
             && strings(&body["roles"]).is_empty()
             && strings(&body["groups"]).is_empty(),
         "POST /introspect must release no live RBAC for a third-party token; body {body}"
-    );
-}
-
-#[tokio::test]
-async fn grpc_decide_denies_a_third_party_clients_token() {
-    let f = setup().await;
-    let decide = |token: &str| {
-        let mut req = f.grpc_request(pb::TokenDecisionRequest {
-            permission: "docs.view".into(),
-            ..Default::default()
-        });
-        req.metadata_mut()
-            .insert("authorization", format!("Bearer {token}").parse().unwrap());
-        req
-    };
-    let svc = f.grpc();
-    let control = svc
-        .decide(decide(&f.session_token))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(control.allowed, "control: first-party token allowed");
-    let resp = svc
-        .decide(decide(&f.third_party_token))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(
-        !resp.allowed,
-        "gRPC Decide must deny a third-party client's token"
-    );
-}
-
-#[tokio::test]
-async fn grpc_introspect_releases_no_live_rbac_for_a_third_party_clients_token() {
-    let f = setup().await;
-    let introspect = |token: &str| {
-        let mut req = f.grpc_request(pb::TokenIntrospectionRequest {
-            token: token.into(),
-            token_type_hint: None,
-        });
-        req.metadata_mut().insert(
-            "x-hearth-client-id",
-            f.rs.as_uuid().to_string().parse().unwrap(),
-        );
-        req.metadata_mut()
-            .insert("x-hearth-client-secret", RS_SECRET.parse().unwrap());
-        req
-    };
-    let svc = f.grpc();
-    let control = svc
-        .introspect(introspect(&f.session_token))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(
-        control.permissions.contains(&"docs.view".to_string()),
-        "control: live permissions for a first-party token; got {:?}",
-        control.permissions
-    );
-    let resp = svc
-        .introspect(introspect(&f.third_party_token))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(resp.active, "the third-party token itself is valid");
-    assert!(
-        resp.permissions.is_empty() && resp.roles.is_empty() && resp.groups.is_empty(),
-        "gRPC Introspect must release no live RBAC for a third-party token; got {resp:?}"
     );
 }
 

@@ -28,7 +28,6 @@ use hearth::identity::{
     CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, OidcConfig,
     RateLimitConfig, TokenConfig,
 };
-use hearth::protocol;
 use hearth::protocol::admin_auth::JwksRateLimiter;
 use hearth::protocol::http::{self, AppState};
 use hearth::protocol::tls::{build_server_config, ReloadableTlsConfig, TlsConfigParams};
@@ -70,16 +69,6 @@ enum Commands {
         /// the startup phase only (respects existing log level for steady-state).
         #[arg(long, short = 'v')]
         verbose: bool,
-
-        /// Allow gRPC server reflection in production mode (A-43).
-        ///
-        /// gRPC reflection exposes the full API schema to any unauthenticated caller.
-        /// Hearth refuses to start with `security.grpc.reflection_enabled = true` in
-        /// production mode unless this flag is explicitly passed.
-        ///
-        /// Use only for debugging. Never enable in real deployments.
-        #[arg(long)]
-        allow_reflection_in_prod: bool,
     },
     /// Manage realms.
     Realm {
@@ -577,18 +566,8 @@ async fn main() {
             port,
             bind,
             verbose,
-            allow_reflection_in_prod,
         } => {
-            if let Err(e) = run_serve(
-                dev,
-                config_path,
-                port,
-                bind,
-                verbose,
-                allow_reflection_in_prod,
-            )
-            .await
-            {
+            if let Err(e) = run_serve(dev, config_path, port, bind, verbose).await {
                 // Route through report_startup_fatal — tracing may not be
                 // initialized yet if the error occurred during config loading,
                 // in which case a bare `tracing::error!` writes nowhere and the
@@ -952,31 +931,18 @@ fn split_bind_override(bind: &str) -> (String, Option<u16>) {
 /// logging / I/O) so the prod-safety gate is unit tested; the caller emits the
 /// operator-facing warn/error log.
 ///
-/// `http_bind` is the raw `server.bind_address` and `grpc_bind` the effective
-/// gRPC bind (`None` when the gRPC listener is disabled), both already trimmed
-/// by the caller. A bare `localhost` is treated as loopback; anything that does
-/// not parse to a loopback `IpAddr` (including a wildcard `0.0.0.0` / `::`) is
+/// `http_bind` is the raw `server.bind_address`, already trimmed by the
+/// caller. A bare `localhost` is treated as loopback; anything that does not
+/// parse to a loopback `IpAddr` (including a wildcard `0.0.0.0` / `::`) is
 /// non-loopback and refuses the request.
-fn loadtest_unthrottle_decision(
-    enabled: bool,
-    dev: bool,
-    http_bind: &str,
-    grpc_bind: Option<&str>,
-) -> LoadtestUnthrottle {
+fn loadtest_unthrottle_decision(enabled: bool, dev: bool, http_bind: &str) -> LoadtestUnthrottle {
     if !enabled {
         return LoadtestUnthrottle::Off;
     }
     if !dev {
         return LoadtestUnthrottle::RefusedNotDev;
     }
-    // Every effective bind must be loopback. A disabled gRPC listener (`None`)
-    // cannot be reached, so it does not gate the decision.
-    let all_loopback = bind_is_loopback(http_bind)
-        && match grpc_bind {
-            Some(g) => bind_is_loopback(g),
-            None => true,
-        };
-    if all_loopback {
+    if bind_is_loopback(http_bind) {
         LoadtestUnthrottle::Enabled
     } else {
         LoadtestUnthrottle::RefusedNonLoopback
@@ -1058,16 +1024,11 @@ enum DevBindCheck {
 ///
 /// Pure (no logging / I/O) so the gate is unit-testable; the caller emits the
 /// operator-facing error.
-fn dev_mode_bind_check(dev: bool, http_bind: &str, grpc_bind: Option<&str>) -> DevBindCheck {
+fn dev_mode_bind_check(dev: bool, http_bind: &str) -> DevBindCheck {
     if !dev {
         return DevBindCheck::NotDev;
     }
-    let all_loopback = bind_is_loopback(http_bind)
-        && match grpc_bind {
-            Some(g) => bind_is_loopback(g),
-            None => true,
-        };
-    if all_loopback {
+    if bind_is_loopback(http_bind) {
         DevBindCheck::Ok
     } else {
         DevBindCheck::RefusedNonLoopback
@@ -1166,7 +1127,6 @@ async fn run_serve(
     port_override: Option<u16>,
     bind_override: Option<String>,
     verbose: bool,
-    allow_reflection_in_prod: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration. This runs before `telemetry::init` below, so a
     // failure here cannot be reported through `tracing` — write the same
@@ -1830,15 +1790,6 @@ async fn run_serve(
             }
         }
     }
-
-    // A-43: Resolve effective reflection_enabled and apply the production guard.
-    // `None` in the config means "use the mode default": true in --dev, false in prod.
-    let reflection_enabled = protocol::grpc::resolve_grpc_reflection(
-        config.security.grpc.reflection_enabled,
-        config.dev_mode,
-        allow_reflection_in_prod,
-    )
-    .map_err(|e| e.to_string())?;
 
     // In dev mode, upgrade Log and Smtp to mailcatcher so `make dev` works without
     // Docker or a real mail server. Production cloud transports (sendgrid, postmark,
@@ -2680,32 +2631,18 @@ async fn run_serve(
     // is loopback, disable every request-rate limiter so a single-node
     // throughput/soak test can saturate the hot path instead of measuring the
     // rate limiter. Refused (fail-safe: limiters stay ON) when not in dev mode
-    // (guards reverse-proxy prod topologies) or when any bind — including the
-    // gRPC listener, which may diverge from the HTTP bind — is non-loopback, so
-    // this can never silently expose a public server (HEA-1797).
+    // (guards reverse-proxy prod topologies) or when the bind is non-loopback,
+    // so this can never silently expose a public server (HEA-1797).
     let bind = config.server.bind_address.trim();
-    // Effective gRPC bind: only relevant when the gRPC listener is enabled
-    // (`grpc_port` set); it inherits `bind_address` when `grpc_bind_address` is
-    // unset. Mirrors the resolution at the gRPC spawn site below.
-    let grpc_bind = config.server.grpc_port.map(|_| {
-        config
-            .server
-            .grpc_bind_address
-            .as_deref()
-            .unwrap_or(config.server.bind_address.as_str())
-            .trim()
-    });
     // Hard gate: dev mode must never expose on a non-loopback address (HEA-1980).
     // The config-file validation in validate.rs catches a non-loopback
     // bind_address when a config file is used, but (a) the CLI --bind override
     // is applied after that validation, and (b) Config::dev() (the no-config-file
     // path) skips validate() entirely — so both cases bypass the earlier check.
-    if let DevBindCheck::RefusedNonLoopback = dev_mode_bind_check(config.dev_mode, bind, grpc_bind)
-    {
+    if let DevBindCheck::RefusedNonLoopback = dev_mode_bind_check(config.dev_mode, bind) {
         error!(
             bind_address = %bind,
-            grpc_bind_address = grpc_bind.unwrap_or("<disabled>"),
-            "dev mode refused: all effective binds must be loopback (HEA-1980). \
+            "dev mode refused: the bind address must be loopback (HEA-1980). \
              --dev enables unauthenticated endpoints (/dev/seed-session, /admin/bootstrap) \
              and weakened Argon2 parameters — exposing them on a routable interface \
              is a critical security risk. Use --bind 127.0.0.1 or --bind ::1."
@@ -2717,13 +2654,11 @@ async fn run_serve(
         config.security.load_test_unthrottled.unwrap_or(false),
         config.dev_mode,
         bind,
-        grpc_bind,
     ) {
         LoadtestUnthrottle::Off => false,
         LoadtestUnthrottle::Enabled => {
             tracing::warn!(
                 bind_address = %bind,
-                grpc_bind_address = grpc_bind.unwrap_or("<disabled>"),
                 "security.load_test_unthrottled=true — ALL request-rate limiters \
                  (token endpoint, admin API, export, request shaper) are DISABLED. \
                  Load-test-only mode; never enable on a production bind."
@@ -2738,10 +2673,9 @@ async fn run_serve(
         LoadtestUnthrottle::RefusedNonLoopback => {
             tracing::error!(
                 bind_address = %bind,
-                grpc_bind_address = grpc_bind.unwrap_or("<disabled>"),
-                "security.load_test_unthrottled=true refused: every effective bind \
-                 (HTTP and gRPC) must be loopback; rate limiters remain ENABLED. \
-                 Bind both to 127.0.0.1 or ::1 to run an unthrottled load test."
+                "security.load_test_unthrottled=true refused: the bind address must be \
+                 loopback; rate limiters remain ENABLED. Bind to 127.0.0.1 or ::1 to \
+                 run an unthrottled load test."
             );
             false
         }
@@ -3243,55 +3177,6 @@ async fn run_serve(
         _ => None,
     };
 
-    // Spawn the gRPC management API alongside the HTTP server. Both share
-    // the `AdminRateLimiter` so rate limits apply across protocols.
-    let grpc_server = if let Some(grpc_port) = config.server.grpc_port {
-        let bind = config
-            .server
-            .grpc_bind_address
-            .as_deref()
-            .unwrap_or(config.server.bind_address.as_str());
-        let grpc_addr: SocketAddr = format!("{bind}:{grpc_port}")
-            .parse()
-            .map_err(|e| format!("invalid gRPC bind address: {e}"))?;
-        let grpc_state = protocol::grpc::GrpcState::new(
-            Arc::clone(&identity_engine),
-            Arc::clone(&rbac_engine),
-            Arc::clone(&audit_engine),
-            Arc::clone(&app_state.admin_rate_limiter),
-        )
-        // A-2: share the same RequestShaper so HTTP + gRPC per-IP counts
-        // accumulate in the same sliding window.
-        .with_shaper(Arc::clone(&request_shaper));
-        let grpc_tls = tls.as_ref().map(|(_, acceptor)| acceptor.clone());
-        let grpc_tls_enabled = grpc_tls.is_some();
-        let shutdown = shutdown_requested(shutdown_signal_rx.clone());
-        let handle = tokio::spawn(async move {
-            if let Err(e) = protocol::grpc::serve(
-                grpc_addr,
-                grpc_state,
-                reflection_enabled,
-                grpc_tls,
-                shutdown,
-            )
-            .await
-            {
-                error!(error = %e, "gRPC server exited with error");
-            }
-        });
-        info!(address = %grpc_addr, tls = grpc_tls_enabled, "gRPC management API enabled");
-        if !grpc_tls_enabled && !config.dev_mode {
-            warn!(
-                address = %grpc_addr,
-                "gRPC management API is PLAINTEXT (no server.tls_cert_path): admin tokens and \
-                 client secrets are not encrypted on this listener"
-            );
-        }
-        Some(handle)
-    } else {
-        None
-    };
-
     // Write PID file for `hearth config reload` CLI.
     let pid_file_path = data_dir.join("hearth.pid");
     std::fs::write(&pid_file_path, std::process::id().to_string())
@@ -3424,10 +3309,10 @@ async fn run_serve(
         }
     }
 
-    // gRPC and the Raft peer server began draining at the signal, alongside
-    // HTTP; wait for them only until the SAME deadline (L24).
+    // The Raft peer server began draining at the signal, alongside HTTP; wait
+    // for it only until the SAME deadline (L24).
     let deadline = shared_drain_deadline(&shutdown_signal_rx, Duration::from_secs(drain_secs));
-    for (listener, handle) in [("gRPC", grpc_server), ("Raft peer", raft_server)] {
+    for (listener, handle) in [("Raft peer", raft_server)] {
         let Some(handle) = handle else { continue };
         if tokio::time::timeout_at(deadline, handle).await.is_err() {
             warn!(
@@ -7521,7 +7406,7 @@ mod tests {
     fn unthrottle_off_when_flag_unset() {
         // Flag unset → limiters stay on regardless of dev/bind (even loopback).
         assert_eq!(
-            loadtest_unthrottle_decision(false, true, "127.0.0.1", None),
+            loadtest_unthrottle_decision(false, true, "127.0.0.1"),
             LoadtestUnthrottle::Off
         );
     }
@@ -7531,20 +7416,11 @@ mod tests {
         // Dev mode + loopback HTTP bind, gRPC disabled → enabled.
         for bind in ["127.0.0.1", "127.0.0.53", "::1", "localhost", "LOCALHOST"] {
             assert_eq!(
-                loadtest_unthrottle_decision(true, true, bind, None),
+                loadtest_unthrottle_decision(true, true, bind),
                 LoadtestUnthrottle::Enabled,
                 "{bind} must be treated as loopback"
             );
         }
-    }
-
-    #[test]
-    fn unthrottle_enabled_when_both_binds_loopback() {
-        // HEA-1797 Finding 1: an enabled gRPC listener must also be loopback.
-        assert_eq!(
-            loadtest_unthrottle_decision(true, true, "127.0.0.1", Some("::1")),
-            LoadtestUnthrottle::Enabled
-        );
     }
 
     #[test]
@@ -7553,23 +7429,9 @@ mod tests {
         // guard that keeps rate limiters on if the flag is set by mistake.
         for bind in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10", "example.com"] {
             assert_eq!(
-                loadtest_unthrottle_decision(true, true, bind, None),
+                loadtest_unthrottle_decision(true, true, bind),
                 LoadtestUnthrottle::RefusedNonLoopback,
                 "{bind} must refuse the unthrottle escape hatch"
-            );
-        }
-    }
-
-    #[test]
-    fn unthrottle_refused_on_divergent_grpc_bind() {
-        // HEA-1797 Finding 1: HTTP loopback but gRPC on a public interface must
-        // refuse — otherwise the disabled shaper + admin limiter leak onto a
-        // publicly reachable gRPC management endpoint.
-        for grpc in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10"] {
-            assert_eq!(
-                loadtest_unthrottle_decision(true, true, "127.0.0.1", Some(grpc)),
-                LoadtestUnthrottle::RefusedNonLoopback,
-                "gRPC bind {grpc} must refuse even when HTTP is loopback"
             );
         }
     }
@@ -7579,12 +7441,12 @@ mod tests {
         // HEA-1797 Finding 2: a prod-config binary on loopback can still be
         // internet-reachable behind a reverse proxy — refuse unless --dev.
         assert_eq!(
-            loadtest_unthrottle_decision(true, false, "127.0.0.1", None),
+            loadtest_unthrottle_decision(true, false, "127.0.0.1"),
             LoadtestUnthrottle::RefusedNotDev
         );
         // Non-dev takes precedence over a bind check.
         assert_eq!(
-            loadtest_unthrottle_decision(true, false, "0.0.0.0", Some("0.0.0.0")),
+            loadtest_unthrottle_decision(true, false, "0.0.0.0"),
             LoadtestUnthrottle::RefusedNotDev
         );
     }
@@ -7789,7 +7651,7 @@ mod tests {
         // Gate only applies in --dev mode; production mode always passes through.
         for bind in ["0.0.0.0", "::", "10.0.0.5", "127.0.0.1"] {
             assert_eq!(
-                dev_mode_bind_check(false, bind, None),
+                dev_mode_bind_check(false, bind),
                 DevBindCheck::NotDev,
                 "non-dev mode must not be refused for bind {bind}"
             );
@@ -7797,8 +7659,8 @@ mod tests {
     }
 
     #[test]
-    fn dev_bind_check_dev_loopback_http_no_grpc() {
-        // Dev + loopback HTTP, gRPC disabled → Ok. Covers both bare-host and
+    fn dev_bind_check_dev_loopback_http() {
+        // Dev + loopback HTTP → Ok. Covers both bare-host and
         // `host:port` forms — the HEA-1997 runbook §3A prescribes the latter
         // (`--bind 127.0.0.1:8420`), which HEA-2008 must accept.
         for bind in [
@@ -7812,7 +7674,7 @@ mod tests {
             "localhost:8420",
         ] {
             assert_eq!(
-                dev_mode_bind_check(true, bind, None),
+                dev_mode_bind_check(true, bind),
                 DevBindCheck::Ok,
                 "{bind} is loopback and must be allowed in dev mode"
             );
@@ -7834,36 +7696,11 @@ mod tests {
             "garbage",
         ] {
             assert_eq!(
-                dev_mode_bind_check(true, bind, None),
+                dev_mode_bind_check(true, bind),
                 DevBindCheck::RefusedNonLoopback,
                 "dev mode with http bind {bind} must be refused"
             );
         }
-    }
-
-    #[test]
-    fn dev_bind_check_refused_non_loopback_grpc() {
-        // Dev + loopback HTTP but non-loopback gRPC → refused (both binds must be loopback).
-        for grpc in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10"] {
-            assert_eq!(
-                dev_mode_bind_check(true, "127.0.0.1", Some(grpc)),
-                DevBindCheck::RefusedNonLoopback,
-                "dev mode with grpc bind {grpc} must be refused even when http is loopback"
-            );
-        }
-    }
-
-    #[test]
-    fn dev_bind_check_dev_both_binds_loopback() {
-        // Dev + loopback HTTP + loopback gRPC → Ok.
-        assert_eq!(
-            dev_mode_bind_check(true, "127.0.0.1", Some("::1")),
-            DevBindCheck::Ok
-        );
-        assert_eq!(
-            dev_mode_bind_check(true, "::1", Some("127.0.0.1")),
-            DevBindCheck::Ok
-        );
     }
 
     #[test]
@@ -7872,12 +7709,12 @@ mod tests {
         // config-file validation misses because it runs before the override is
         // applied (HEA-1980).
         assert_eq!(
-            dev_mode_bind_check(true, "0.0.0.0", None),
+            dev_mode_bind_check(true, "0.0.0.0"),
             DevBindCheck::RefusedNonLoopback,
             "--dev --bind 0.0.0.0 must be refused at startup"
         );
         assert_eq!(
-            dev_mode_bind_check(true, "::", None),
+            dev_mode_bind_check(true, "::"),
             DevBindCheck::RefusedNonLoopback,
             "--dev --bind :: must be refused at startup"
         );

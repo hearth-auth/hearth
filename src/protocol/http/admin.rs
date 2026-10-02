@@ -3208,6 +3208,9 @@ async fn admin_get_user_effective_permissions(
         }
         None => None,
     };
+    // A suspended or archived organisation grants nothing, here as in tokens
+    // and `/v1/me/permissions` (the gRPC twin applied this; REST did not).
+    let org_id = state.identity.active_org_context(&auth.realm_id, org_id);
     let scope = params.get("scope").cloned();
 
     let resolved = match state.rbac.resolve_permissions(

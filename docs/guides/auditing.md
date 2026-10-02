@@ -209,16 +209,25 @@ curl -X POST https://auth.example.com/admin/realms/production/audit/verify \
 
 A clean result returns `200 OK` with a summary of the verified event count. A broken chain returns a non-2xx status with the position of the first inconsistency.
 
-### gRPC equivalents
+### Admin API (bearer token)
 
-Both operations are available on the gRPC `AuditService`:
+Both operations are also available on the REST admin API, for scripts that authenticate
+with an admin bearer token and `X-Realm-ID` rather than a console session:
 
-| gRPC RPC | Equivalent REST |
+| Operation | Route |
 |---|---|
-| `AuditService.ListEvents` | `GET /admin/api/realms/{realm}/audit/events` |
-| `AuditService.VerifyIntegrity` | `POST /admin/realms/{realm}/audit/verify` |
+| List audit events | `GET /admin/audit` |
+| Verify the hash chain | `POST /admin/audit/verify` — answers `200` with `{"ok": <bool>, "event_count": <n>}` |
 
-Both gRPC methods require an admin bearer token carrying the `hearth.realm.admin` permission. A token with only `hearth.users.admin` or other sub-admin permissions will receive `PERMISSION_DENIED`.
+```bash
+curl -X POST https://auth.example.com/admin/audit/verify \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "X-Realm-ID: $REALM_ID"
+```
+
+Both routes require a token carrying the `hearth.realm.admin` permission (or `hearth.admin`); a
+token with only `hearth.users.admin` or other sub-admin permissions receives `403`. These replace
+the `AuditService` gRPC methods removed in 3.0.0.
 
 ---
 

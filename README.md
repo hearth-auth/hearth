@@ -216,7 +216,6 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 - SAML 2.0 as a Service Provider (inbound federation from your corporate IdP — SP-initiated and IdP-initiated SSO). Hearth is not a SAML IdP; applications connect over OIDC. Encrypted assertions and Single Logout are not supported — see [docs/specs/SAML.md](docs/specs/SAML.md)
 - SCIM 2.0 provisioning (Users, Groups, Service Provider Config)
 - Signed webhook subscriptions for auth and admin events
-- gRPC management API (RBAC admin surface)
 - REST/JSON over HTTP/1.1 and HTTP/2
 
 **Operations**
@@ -326,7 +325,7 @@ The Rust suite, the seven SDK suites and the SDK conformance check are all in th
 ### Prerequisites
 
 - **Rust 1.88.0+** (see [`Cargo.toml`](Cargo.toml) `rust-version`)
-- **`protoc`** — `build.rs` runs it on every build to generate the gRPC types.
+- **`protoc`** — `build.rs` runs it on every build to generate the API message types from `proto/`.
   Install it (`brew install protobuf`, `apt install protobuf-compiler`, or a
   release from [protobuf/releases](https://github.com/protocolbuffers/protobuf/releases))
   and make sure it is on `PATH`, or set `PROTOC=/path/to/protoc`.
@@ -635,7 +634,7 @@ Production deployment (containerised, persistent storage, real email) lives in [
 ## CLI Reference
 
 ```text
-hearth serve [--dev] [-c, --config <path>] [--port <u16>] [--bind <addr>] [-v] [--allow-reflection-in-prod]
+hearth serve [--dev] [-c, --config <path>] [--port <u16>] [--bind <addr>] [-v]
 hearth realm create
 hearth app create --server <url> --realm-id <uuid> --name <name> --redirect-uri <url> --token <admin-bearer-token>
 hearth migrate keycloak --file <export.json> [--data-dir <path>] [--realm <uuid>] [--dry-run]
@@ -1099,7 +1098,7 @@ Hearth administrators live in an invisible **system realm** — distinct from an
 
 - **Admin sign-in:** `GET /ui/admin/login`. The session cookie is bound to the system realm, not any app realm.
 - **Admin email verification:** `GET /ui/admin/verify-email?token=...` — the link embedded in the first-run setup email.
-- **The system realm is read-only through public APIs.** `realms: { system: {} }` in YAML is a config error at parse time (`src/config/validate.rs`). Fifteen engine entry points reject the reserved realm with a 403 `SystemRealmProtected` — by nil UUID where the request is id-addressed, and by the reserved name `system` where it is name-addressed: `create_realm`, `update_realm`, `delete_realm`, `create_user`, `create_user_attributed`, `register_user`, `register_client`, `create_organization`, `update_organization`, `create_agent`, `import_realm`, `import_user`, `import_client`, `seed_demo_users`, and realm reconciliation. **RBAC writes are gated at the protocol edge instead**, not in the engine: `reject_system_realm_write` guards ten REST admin routes (`src/protocol/http/admin.rs`) and seventeen gRPC `RbacAdmin` RPCs (`src/protocol/grpc/rbac_admin.rs`), because the operator console legitimately writes system-realm roles through the engine directly. The realm does not appear in `list_realms()` or `search_realms()`, `get_realm_by_name("system")` returns `None`, and `/ui/realms/system/...` URLs return 404.
+- **The system realm is read-only through public APIs.** `realms: { system: {} }` in YAML is a config error at parse time (`src/config/validate.rs`). Fifteen engine entry points reject the reserved realm with a 403 `SystemRealmProtected` — by nil UUID where the request is id-addressed, and by the reserved name `system` where it is name-addressed: `create_realm`, `update_realm`, `delete_realm`, `create_user`, `create_user_attributed`, `register_user`, `register_client`, `create_organization`, `update_organization`, `create_agent`, `import_realm`, `import_user`, `import_client`, `seed_demo_users`, and realm reconciliation. **RBAC writes are gated at the protocol edge instead**, not in the engine: `reject_system_realm_write` guards the REST admin RBAC write routes (`src/protocol/http/admin.rs` and `src/protocol/http/admin/`), because the operator console legitimately writes system-realm roles through the engine directly. The realm does not appear in `list_realms()` or `search_realms()`, `get_realm_by_name("system")` returns `None`, and `/ui/realms/system/...` URLs return 404.
 - **Operators run the first-run setup exactly once**, regardless of how many application realms they've declared. The admin user is always placed in the system realm; tenant realms stay empty of operators.
 
 Admins administer tenant realms via a `?realm=<name>` query parameter on admin URLs, which persists for the session via the `hearth_ui_admin_target` cookie. Switching realms is done either by visiting `/ui/admin/realms` and clicking "Administer this realm" next to the target, or by typing `?realm=<name>` in the URL. The admin's session cookie is always bound to the system realm; the target realm is orthogonal.
@@ -1170,7 +1169,7 @@ See the [full Auth0 migration guide](docs/guides/migrating-from-auth0.md) for bu
 │                     Single binary process                     │
 │                                                              │
 │  ┌─────────────────────────────────────────────────────────┐ │
-│  │  Protocol   REST · gRPC · OIDC · SAML · SCIM · WebUI   │ │
+│  │  Protocol   REST · OIDC · SAML · SCIM · WebUI          │ │
 │  └────────────────────────┬────────────────────────────────┘ │
 │                            │                                  │
 │  ┌─────────────────────────▼──────────────────────────────┐  │
@@ -1194,7 +1193,7 @@ See the [full Auth0 migration guide](docs/guides/migrating-from-auth0.md) for bu
 | Layer | Path | Role |
 |---|---|---|
 | Core | `src/core/` | Shared types and traits only. No logic, no state. |
-| Protocol | `src/protocol/` | Stateless wire adapters (REST, gRPC, OIDC, SAML, SCIM). |
+| Protocol | `src/protocol/` | Stateless wire adapters (REST, OIDC, SAML, SCIM). |
 | Identity | `src/identity/` | Users, credentials, sessions, realms, tokens. |
 | RBAC | `src/rbac/` | Roles, groups, assignments, permission resolution into JWT claims. |
 | Cluster | `src/cluster/` | Raft consensus (`openraft`). Invisible in single-node mode. **Experimental in 1.x — not production-supported.** |

@@ -620,7 +620,7 @@ Failure-mode contract (MUST be implemented by all resource servers using this mo
 - HTTP 400 — missing `permission` field. Treat as a client programming error; deny the request.
 - HTTP 5xx — transient server failure. Resource servers SHOULD deny the request and SHOULD NOT retry in the hot path to avoid cascading failures.
 
-**Fail-closed invariant:** Hearth MUST return `{"allowed": false}` — never `{"allowed": true}` — when any of the following are true: signature invalid, token expired, session revoked, token on the JTI blocklist, token's `aud` names a removed protected resource (AGENT_AUTH.md §2.5), token's `cnf.jkt` is blocked, `resource` not in the token's `aud`, the requested permission is not in the token's live authority (§7.4.4). gRPC `Decide` applies the same rule, and additionally denies any `cnf`-bound token (it has no DPoP proof channel).
+**Fail-closed invariant:** Hearth MUST return `{"allowed": false}` — never `{"allowed": true}` — when any of the following are true: signature invalid, token expired, session revoked, token on the JTI blocklist, token's `aud` names a removed protected resource (AGENT_AUTH.md §2.5), token's `cnf.jkt` is blocked, `resource` not in the token's `aud`, the requested permission is not in the token's live authority (§7.4.4).
 
 **Security requirement:** `POST /oauth/authorize` MUST be treated as an internal service endpoint. Operators MUST NOT expose it to public internet or browser clients. Resource servers SHOULD implement a circuit breaker or timeout so a Hearth slowdown does not stall all protected requests indefinitely.
 
@@ -659,7 +659,7 @@ B-4).
 
 ---
 
-## 8. HTTP and gRPC API
+## 8. HTTP API
 
 ### 8.1 Bearer-authenticated user endpoints
 
@@ -700,7 +700,7 @@ All admin endpoints require the `hearth.admin` permission in the caller's access
   ```
 - `GET /admin/roles/{id}` — fetch a role.
 - `PATCH /admin/roles/{id}` — update name/description/permissions/parents.
-- `DELETE /admin/roles/{id}` — delete a role. It fails with `409 role_in_use` (gRPC `DeleteRole`: `FAILED_PRECONDITION`) while the role has assignments (user or group, realm- or org-scoped), is a parent of another role, or is held as an extra org role; `?cascade=true` (gRPC `cascade: true`) removes the assignments, the parent links and the extra org-role rows in the same atomic batch as the role. The web console always cascades. The demotion ceiling below covers everything a cascade removes.
+- `DELETE /admin/roles/{id}` — delete a role. It fails with `409 role_in_use` while the role has assignments (user or group, realm- or org-scoped), is a parent of another role, or is held as an extra org role; `?cascade=true` removes the assignments, the parent links and the extra org-role rows in the same atomic batch as the role. The web console always cascades. The demotion ceiling below covers everything a cascade removes.
 
 #### Groups
 
@@ -739,7 +739,7 @@ Sub-admins (callers who hold realm-scoped admin permissions but NOT `hearth.admi
 
 - A sub-admin may only grant permissions that they themselves hold in their own token's `permissions` claim.
 - A sub-admin may only define (create/update) roles whose permission sets are subsets of their own permissions.
-- Attempting to grant or define a permission the caller does not hold returns `PERMISSION_DENIED` (HTTP 403 / gRPC `PERMISSION_DENIED`).
+- Attempting to grant or define a permission the caller does not hold is refused with HTTP `403 Forbidden`.
 
 Callers holding `hearth.admin` bypass this check — `hearth.admin` implicitly covers all permissions.
 
@@ -747,18 +747,18 @@ Callers holding `hearth.admin` bypass this check — `hearth.admin` implicitly c
 
 **Applies to:**
 - `POST /admin/roles` and `PATCH /admin/roles/{id}` — role permission set must be ⊆ caller's permissions
-- gRPC `GrantUserPermission` — granted permission must be held by caller
-- gRPC `AddAdditionalRole` — role permissions must be ⊆ caller's permissions; the user must be a member of the organization (`FAILED_PRECONDITION` otherwise)
+- `POST /admin/users/{id}/permissions` — granted permission must be held by caller
+- `POST /admin/organizations/{id}/members/{user_id}/roles` (extra org role) — role permissions must be ⊆ caller's permissions; the user must be a member of the organization (`FAILED_PRECONDITION` otherwise)
 
 #### Demotion ceiling (GA audit rounds 3–4)
 
 The reverse direction is covered too: a sub-admin MUST NOT demote, modify or sign out a user who holds an admin-grade permission (`hearth.admin`, `hearth.users.admin`, `hearth.clients.admin`, `hearth.realm.admin`, `hearth.agents.admin`) the sub-admin lacks, counting permissions held at realm level and in each of the user's organizations. Org-scoped permissions count for every organization the user belongs to **and** every organization named by one of its org-scoped role assignments (direct or through a group) or direct grants: permission resolution (`GET /v1/me/permissions?org_id=`, the admin effective-permissions endpoints) honours those without checking membership. The rule is `protocol::admin_auth::check_user_admin_ceiling`; operations that affect several users apply it to each (`check_group_admin_ceiling`, `check_users_admin_ceiling`, `check_org_admin_ceiling`, `check_role_change_admin_ceiling`):
 
 - role unassignment, permission revocation, extra-role removal, group-member removal and group deletion;
-- organization member removal (SCIM `PUT`/`PATCH /Groups`) and organization deletion (gRPC `DeleteOrganization`, SCIM `DELETE /Groups`) — every affected member;
-- role update or deletion (`PATCH`/`DELETE /admin/roles/{id}`, gRPC `UpdateRole`/`DeleteRole`) that removes an admin permission from the role's transitive set, including a rename (extra org roles are stored by name) — every holder of the role or of a role inheriting from it, directly, through a group, or as an extra org role.
+- organization member removal (SCIM `PUT`/`PATCH /Groups`) and organization deletion (`DELETE /admin/organizations/{id}`, SCIM `DELETE /Groups`) — every affected member;
+- role update or deletion (`PATCH`/`DELETE /admin/roles/{id}`) that removes an admin permission from the role's transitive set, including a rename (extra org roles are stored by name) — every holder of the role or of a role inheriting from it, directly, through a group, or as an extra org role.
 
-A multi-user check resolves only the affected users who are among the realm's admin holders (every user reachable from a role whose transitive permissions include an admin-grade one — by direct or group assignment at any scope, or as an extra org role — plus every direct grantee of one); other users hold no admin permission and pass without resolution. It fails closed (`503` / `UNAVAILABLE`) past 100 000 affected users, 10 000 admin holders or 50 000 permission resolutions. `hearth.admin` bypasses it. The console admits only `hearth.admin`; `hearth.yaml` reconciliation is operator-authoritative and exempt.
+A multi-user check resolves only the affected users who are among the realm's admin holders (every user reachable from a role whose transitive permissions include an admin-grade one — by direct or group assignment at any scope, or as an extra org role — plus every direct grantee of one); other users hold no admin permission and pass without resolution. It fails closed (`503`) past 100 000 affected users, 10 000 admin holders or 50 000 permission resolutions. `hearth.admin` bypasses it. The console admits only `hearth.admin`; `hearth.yaml` reconciliation is operator-authoritative and exempt.
 
 ### 8.3 Error envelope
 
@@ -768,9 +768,9 @@ All endpoints return errors in the shared envelope:
 ```
 Extra fields MAY include `limit`, `limit_value`, `actual_value`, `remediation` for size errors, and `entity` / `path` for cycle errors.
 
-### 8.4 gRPC
+### 8.4 No gRPC surface
 
-The gRPC admin surface exposes RPCs matching the HTTP endpoints one-to-one under a service named `RbacAdminService`. Message shapes mirror the HTTP JSON bodies, generated from `proto/hearth/rbac/v1/rbac.proto`. Auth is bearer metadata, same as existing gRPC admin services. There is NO service-to-service `Check` RPC — callers decode the JWT's `permissions` claim locally.
+Hearth 3.0.0 removed the public gRPC API, including `RbacAdminService`; every RBAC admin operation is served over HTTP under `/admin`. `proto/hearth/rbac/v1/rbac.proto` remains the schema of the HTTP JSON bodies. There is no service-to-service `Check` call — callers decode the JWT's `permissions` claim locally.
 
 ### 8.5 Multi-tenancy
 
@@ -970,7 +970,7 @@ Network errors surface as `HearthError` with `status: 0`, not as the host langua
 SDKs MUST NOT:
 
 - Poll any endpoint for permission changes.
-- Hold persistent connections (SSE, WebSocket, gRPC streams) for cache coherence.
+- Hold persistent connections (SSE, WebSocket, streaming RPC) for cache coherence.
 - Accept a `subject` parameter in any check method — the subject is always the bearer-token user, enforced by the token itself.
 - Expose vocabulary from prior tuple-based authorization models. Those concepts are not part of Hearth's authorization surface.
 - Persist decoded permissions to disk or across process restarts. Tokens are short-lived; persistence is the app's responsibility if required.
@@ -1437,7 +1437,7 @@ operator guide including a decision tree, mode comparison, and Keycloak mapping.
 - [`ARCHITECTURE.md § 1`](./ARCHITECTURE.md) — module placement (`src/rbac/` as a peer of `src/identity/`).
 - [`ARCHITECTURE.md § 3`](./ARCHITECTURE.md) — hot path rules (RBAC resolution is OFF the hot path; token claim reads are on it).
 - [`ARCHITECTURE.md § 4.2`](./ARCHITECTURE.md) — wire protocol rules.
-- [`ARCHITECTURE.md § 4.2.1`](./ARCHITECTURE.md) — authorization HTTP & gRPC surface; `/oauth/authorize` and `/introspect` are off the hot path.
+- [`ARCHITECTURE.md § 4.2.1`](./ARCHITECTURE.md) — authorization HTTP surface; `/oauth/authorize` and `/introspect` are off the hot path.
 - [`ARCHITECTURE.md § 5`](./ARCHITECTURE.md) — error policy; `RbacError` follows the standard pattern.
 - [`ARCHITECTURE.md § 7`](./ARCHITECTURE.md) — multi-tenancy invariants.
 - [`CONFIGURATION.md`](./CONFIGURATION.md) — declarative YAML for realms, roles, permissions, groups, scopes.

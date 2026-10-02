@@ -1,40 +1,36 @@
 #![allow(clippy::unwrap_used)]
-//! Task 26.34 (follow-up to 26.16) — the gRPC half of the organisation kill
-//! switch.
+//! Task 26.34 (follow-up to 26.16) — the organisation kill switch on the admin
+//! effective-permissions read.
 //!
 //! Task 26.16 made `OrganizationStatus::Suspended` mean something: token
 //! issuance in a suspended org context is refused, and the live-RBAC paths drop
 //! the org context so org-scoped authority evaporates while realm-scoped
-//! authority survives. It closed four paths — `issue_tokens_with_context`,
-//! `introspect`, `decide_token_permission` and `GET /me/permissions`.
+//! authority survives. The admin resolver
+//! (`GET /admin/users/{id}/effective-permissions?org_id=`, formerly also the
+//! gRPC `ResolveEffectivePermissions`) takes a caller-supplied `org_id`; an
+//! operator who froze a tenant must not still be told that tenant's members
+//! hold their org-scoped permissions.
 //!
-//! `RbacAdminService::ResolveEffectivePermissions` is the fifth, and it was
-//! missed. It takes a caller-supplied `org_id` straight off the wire and hands
-//! it to `resolve_permissions` unchecked, so an operator who froze a tenant was
-//! still told over gRPC exactly which org-scoped permissions that tenant's
-//! members hold — and any integration resolving through this RPC still acted on
-//! them.
-//!
-//! The shape of the test matches the HTTP one in
-//! `tests/org_suspension_kill_switch.rs`: two roles, one realm-scoped and one
-//! org-scoped, so a suspension that killed both would be as wrong as one that
-//! killed neither.
+//! The shape matches `tests/org_suspension_kill_switch.rs`: two roles, one
+//! realm-scoped and one org-scoped, so a suspension that killed both would be
+//! as wrong as one that killed neither. Ported from the removed
+//! `grpc_org_suspension.rs`.
 
 mod common;
 
 use std::sync::Arc;
 
+use axum::body::{to_bytes, Body};
+use axum::http::{Request, StatusCode};
 use hearth::core::{OrganizationId, RealmId, UserId};
 use hearth::identity::{
     CreateOrganizationRequest, CreateUserRequest, OrganizationConfig, OrganizationRole,
     OrganizationStatus, UpdateOrganizationRequest,
 };
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::rbac_admin::RbacAdminSvc;
-use hearth::protocol::grpc::server::GrpcState;
-use hearth::protocol::proto::rbac::v1::{self as pb, rbac_admin_service_server::RbacAdminService};
+use hearth::protocol::http::{router, AppState};
 use hearth::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, Subject};
-use tonic::Request;
+use serde_json::Value;
+use tower::ServiceExt as _;
 
 struct Ctx {
     h: common::TestHarness,
@@ -42,7 +38,7 @@ struct Ctx {
     org: OrganizationId,
     user: UserId,
     token: String,
-    svc: RbacAdminSvc,
+    app: axum::Router,
 }
 
 fn perms(list: &[&str]) -> Vec<Permission> {
@@ -52,7 +48,7 @@ fn perms(list: &[&str]) -> Vec<Permission> {
 }
 
 /// Builds a realm with an organisation, a member holding one realm-scoped role
-/// and one org-scoped role, and an admin token for the gRPC service.
+/// and one org-scoped role, and an admin token for the REST admin API.
 #[allow(clippy::too_many_lines)] // Fixture setup: one realm, one org, four roles, two users.
 async fn ctx() -> Ctx {
     let h = common::TestHarness::embedded().await.expect("harness");
@@ -64,8 +60,8 @@ async fn ctx() -> Ctx {
         .create_organization(
             &realm,
             &CreateOrganizationRequest {
-                name: "acme-grpc".to_string(),
-                slug: "acme-grpc".to_string(),
+                name: "acme-rest".to_string(),
+                slug: "acme-rest".to_string(),
                 description: None,
                 config: Some(OrganizationConfig { max_members: None }),
                 ..Default::default()
@@ -133,7 +129,7 @@ async fn ctx() -> Ctx {
             .expect("assign role");
     }
 
-    // The admin identity the RPC authenticates as.
+    // The admin identity the REST call authenticates as.
     let admin = h
         .identity()
         .create_user(
@@ -172,13 +168,11 @@ async fn ctx() -> Ctx {
         .access_token()
         .to_string();
 
-    let state = GrpcState::new(
+    let app = router(Arc::new(AppState::new(
         h.identity_arc(),
         h.rbac_arc(),
         h.audit_arc(),
-        Arc::new(AdminRateLimiter::new()),
-    );
-    let svc = RbacAdminSvc::new(state);
+    )));
 
     Ctx {
         h,
@@ -186,38 +180,40 @@ async fn ctx() -> Ctx {
         org,
         user,
         token,
-        svc,
+        app,
     }
 }
 
-/// Runs `ResolveEffectivePermissions` in `ctx.org`'s context.
+/// `GET /admin/users/{id}/effective-permissions` in `ctx.org`'s context.
 async fn resolve(ctx: &Ctx) -> Vec<String> {
-    let mut req = Request::new(pb::ResolveEffectivePermissionsRequest {
-        realm_id: ctx.realm.as_uuid().to_string(),
-        user_id: ctx.user.as_uuid().to_string(),
-        org_id: ctx.org.as_uuid().to_string(),
-        scope: String::new(),
-    });
-    req.metadata_mut().insert(
-        "authorization",
-        format!("Bearer {}", ctx.token).parse().expect("meta"),
-    );
-    req.metadata_mut().insert(
-        "x-realm-id",
-        ctx.realm.as_uuid().to_string().parse().expect("realm meta"),
-    );
-    ctx.svc
-        .resolve_effective_permissions(req)
-        .await
-        .expect("resolve must succeed")
-        .into_inner()
-        .permissions
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/admin/users/{}/effective-permissions?org_id={}",
+            ctx.user.as_uuid(),
+            ctx.org.as_uuid()
+        ))
+        .header("x-realm-id", ctx.realm.as_uuid().to_string())
+        .header("authorization", format!("Bearer {}", ctx.token))
+        .body(Body::empty())
+        .expect("request");
+    let resp = ctx.app.clone().oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.expect("body");
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "resolve must succeed: {body}");
+    body["permissions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no permissions array: {body}"))
+        .iter()
+        .filter_map(|p| p.as_str().map(str::to_owned))
+        .collect()
 }
 
 /// A suspended organisation must stop granting its org-scoped permissions over
-/// gRPC, exactly as it does over HTTP.
+/// the admin resolver, exactly as it does in tokens and `/v1/me/permissions`.
 #[tokio::test]
-async fn a_suspended_org_stops_granting_over_grpc() {
+async fn a_suspended_org_stops_granting_on_the_admin_resolver() {
     let ctx = ctx().await;
 
     // Precondition: while Active the org-scoped permission resolves. Without
@@ -244,8 +240,8 @@ async fn a_suspended_org_stops_granting_over_grpc() {
     let suspended = resolve(&ctx).await;
     assert!(
         !suspended.iter().any(|p| p == "docs.write"),
-        "a suspended org must not keep granting its org-scoped permission over \
-         gRPC; got {suspended:?}"
+        "a suspended org must not keep granting its org-scoped permission on \
+         the admin resolver; got {suspended:?}"
     );
     // Realm-scoped authority is untouched: suspension kills the org, not the
     // member's account. A change that dropped both would be as wrong as one

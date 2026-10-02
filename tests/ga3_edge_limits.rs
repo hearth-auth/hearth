@@ -3,8 +3,9 @@
 //!
 //! * E-1: the HTTP request shaper's "per-realm" bucket was one server-wide
 //!   bucket (`""`), so ~10 addresses at the per-IP cap starved every tenant.
-//! * E-2: every limiter map grew without bound; the gRPC realm key was any
-//!   attacker-chosen string.
+//! * E-2: every limiter map grew without bound. (Its gRPC realm-key half
+//!   went with the public gRPC API; the HTTP half is pinned by
+//!   `e1_admin_realm_bucket_is_keyed_by_a_uuid_x_realm_id`.)
 //! * E-3: every per-IP limiter keyed on the full IPv6 address, so one host
 //!   with a routed `/64` had 2^64 fresh budgets.
 //! * E-6: the raw request method was a Prometheus label, so every invented
@@ -18,9 +19,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hearth::abuse::shaper::{RequestShaper, ShaperConfig};
-use hearth::protocol::grpc::server::grpc_rate_limit_interceptor;
 use hearth::protocol::http::{router, AppState};
-use tonic::transport::server::TcpConnectInfo;
 use tower::ServiceExt as _;
 
 /// A `oneshot` request from an explicit peer, so the shaper sees a real
@@ -189,40 +188,6 @@ async fn e1_admin_realm_bucket_is_keyed_by_a_uuid_x_realm_id() {
         state.request_shaper.realm_bucket_count(),
         2,
         "only the two real realm ids may hold a bucket"
-    );
-}
-
-// ── E-2: the gRPC realm key is bounded ──────────────────────────────────────
-
-/// The gRPC interceptor keyed the realm bucket on the raw `x-realm-id`
-/// metadata — any string, one map entry per request, forever. Only a UUID
-/// names a realm; anything else must open no bucket.
-#[test]
-fn e2_grpc_non_uuid_realm_header_opens_no_realm_bucket() {
-    let shaper = Arc::new(RequestShaper::with_config(ShaperConfig {
-        ip_rps: None,
-        realm_rps: Some(1),
-    }));
-    let intercept = grpc_rate_limit_interceptor(Arc::clone(&shaper));
-
-    for i in 0..200 {
-        let mut req = tonic::Request::new(());
-        let junk = format!("junk-realm-{i}-{}", "x".repeat(2_000));
-        req.metadata_mut()
-            .insert("x-realm-id", junk.parse().expect("ascii metadata"));
-        req.extensions_mut().insert(TcpConnectInfo {
-            local_addr: None,
-            remote_addr: Some("203.0.113.7:4000".parse().expect("addr")),
-        });
-        assert!(
-            intercept(req).is_ok(),
-            "a call naming no real realm is not realm-limited (call {i})"
-        );
-    }
-    assert_eq!(
-        shaper.realm_bucket_count(),
-        0,
-        "attacker-chosen non-UUID realm headers must not populate the realm map"
     );
 }
 

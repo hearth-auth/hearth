@@ -119,7 +119,7 @@ Stored as a SHA-256 hash chain under `audit:evt:{realm_uuid}:{seq}:{idx}` (see
 | Passwords (Bcrypt import) | Bcrypt (`$2y$`/`$2b$`) | Verify-only; upgraded to Argon2id on next `change_password` |
 | Passwords (Keycloak import) | PBKDF2-HMAC-SHA256 | Verify-only; upgraded to Argon2id on next `change_password` |
 | OAuth client secrets (Hearth-generated) | SHA-256 | 256-bit CSPRNG secret; stored as `$hearth-sha256$v=1$…`. Used by DCR (`POST /register`), the console, and secret regeneration |
-| OAuth client secrets (caller-chosen) | Argon2id | Same parameters as passwords. gRPC `RegisterClient`/`CreateApplication`, `hearth.yaml`, migration import, and any secret stored before the SHA-256 format existed |
+| OAuth client secrets (caller-chosen) | Argon2id | Same parameters as passwords. `hearth.yaml`, migration import, and any secret stored before the SHA-256 format existed |
 | TOTP recovery codes | Argon2id | Plaintext returned once at enrollment |
 | Refresh tokens | SHA-256 | Stored as `current_refresh_hash` inside grant family |
 | Authorization codes | SHA-256 | Key = `oauth:code:{sha256}` |

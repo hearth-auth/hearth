@@ -31,14 +31,36 @@ pub struct RemovedKey {
 }
 
 /// Keys of features removed in [`REMOVED_IN`]. Each removal adds its own keys.
-pub const REMOVED_KEYS: &[RemovedKey] = &[RemovedKey {
-    path: "realms.*.saml_service_providers",
-    feature: "the SAML IdP side (Hearth issuing assertions to service providers)",
-    replacement: Some(
-        "Hearth stays a SAML service provider; connect applications to Hearth over OpenID \
-         Connect",
-    ),
-}];
+pub const REMOVED_KEYS: &[RemovedKey] = &[
+    RemovedKey {
+        path: "realms.*.saml_service_providers",
+        feature: "the SAML IdP side (Hearth issuing assertions to service providers)",
+        replacement: Some(
+            "Hearth stays a SAML service provider; connect applications to Hearth over OpenID \
+             Connect",
+        ),
+    },
+    RemovedKey {
+        path: "server.grpc_port",
+        feature: "the public gRPC API",
+        replacement: Some("use the REST admin API under /admin"),
+    },
+    RemovedKey {
+        path: "server.grpc_bind_address",
+        feature: "the public gRPC API",
+        replacement: Some("use the REST admin API under /admin"),
+    },
+    RemovedKey {
+        path: "server.grpc_allow_plaintext",
+        feature: "the public gRPC API",
+        replacement: Some("use the REST admin API under /admin"),
+    },
+    RemovedKey {
+        path: "security.grpc",
+        feature: "the public gRPC API",
+        replacement: Some("use the REST admin API under /admin"),
+    },
+];
 
 /// Returns the error for the first removed key present in `yaml`.
 ///

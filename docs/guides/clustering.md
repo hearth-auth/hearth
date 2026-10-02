@@ -126,7 +126,7 @@ count twice. The caller should re-read before retrying, exactly as for a
 
 **What clients see.** A write the cluster cannot serve right now answers **`503 Service
 Unavailable`** with a `Retry-After` header (2 s) and one of two stable codes
-([error codes](./error-codes.md#cluster-availability)); gRPC answers **`UNAVAILABLE`**:
+([error codes](./error-codes.md#cluster-availability)):
 
 | `error_code` | When | What to do |
 |---|---|---|
@@ -234,7 +234,7 @@ Before enabling cluster mode in a test environment:
 
 1. **NTP on every node.** Hearth embeds a `leader_timestamp` (wall-clock microseconds) in every Raft log entry so all nodes apply the same timestamp to concurrent writes. Clocks must be NTP-synchronized.
 
-2. **Mutual TLS certificates.** All inter-node gRPC connections are mTLS — plaintext is unconditionally rejected. You need:
+2. **Mutual TLS certificates.** All inter-node gRPC connections (the internal Raft peer transport, `cluster.peer_address`; Hearth has no public gRPC API) are mTLS — plaintext is unconditionally rejected. You need:
    - A CA certificate shared by all nodes
    - A leaf certificate and private key for each node, signed by that CA
 

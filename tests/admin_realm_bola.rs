@@ -17,6 +17,8 @@
 //! | POST   /admin/realms/{id}/rotate-signing-key   | `cross_realm_rotate_signing_key_is_forbidden`     |
 //! | POST   /admin/realms/{id}/sv-bump-all          | `cross_realm_sv_bump_all_is_forbidden`            |
 //! | DELETE /admin/realms/{id}                      | `cross_realm_delete_realm_is_forbidden`           |
+//! | PATCH  /admin/realms/{id}                      | `cross_realm_update_realm_is_refused_and_leaves_realm_b_intact` (405) |
+//! | POST   /admin/realms                           | `cross_realm_create_realm_is_refused_and_creates_nothing` (405) |
 //!
 //! Positive path (system realm superuser):
 //! | `system_realm_admin_can_get_any_realm`                                                         |
@@ -574,4 +576,119 @@ async fn system_realm_admin_lists_all_realms() {
             "system realm admin must see every tenant; missing {realm:?} in {ids:?}"
         );
     }
+}
+
+// ─── Realm writes are YAML-managed (HEA-799, ported from gRPC) ────────────────
+// `PATCH /admin/realms/{id}` and `POST /admin/realms` are refused for every
+// caller since GA audit round 3 (G-7). The cross-realm cases below, ported
+// from the removed `grpc_cross_realm_bfla.rs`, pin that a realm-A admin can
+// neither rename realm-B nor mint a realm.
+
+/// Reads the `message` of a refusal body.
+async fn refusal_message(resp: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    body["message"].as_str().unwrap_or_default().to_string()
+}
+
+#[tokio::test]
+async fn cross_realm_update_realm_is_refused_and_leaves_realm_b_intact() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let (realm_a, token_a) = setup_realm_admin(&h, "ur-a").await;
+    let (realm_b, _) = setup_realm_admin(&h, "ur-b").await;
+    let realm_b_name = h
+        .identity()
+        .get_realm(&realm_b)
+        .expect("lookup")
+        .expect("realm-B exists")
+        .name()
+        .to_string();
+
+    // Control: the route exists and the token works — realm-A reads itself.
+    let own = build_app(&h)
+        .oneshot(req(
+            "GET",
+            format!("/admin/realms/{}", realm_a.as_uuid()),
+            &token_a,
+            &realm_a,
+            "",
+        ))
+        .await
+        .expect("request");
+    assert_eq!(own.status(), StatusCode::OK);
+
+    let resp = build_app(&h)
+        .oneshot(req(
+            "PATCH",
+            format!("/admin/realms/{}", realm_b.as_uuid()),
+            &token_a,
+            &realm_a,
+            r#"{"name":"pwned"}"#,
+        ))
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        refusal_message(resp).await,
+        hearth::protocol::admin_auth::REALMS_ARE_YAML_MANAGED,
+        "the refusal must be the YAML-managed one, not a router 405"
+    );
+    let stored = h
+        .identity()
+        .get_realm(&realm_b)
+        .expect("lookup")
+        .expect("realm-B still exists");
+    assert_eq!(stored.name(), realm_b_name, "realm-B must not be renamed");
+    assert!(
+        h.identity()
+            .get_realm_by_name("pwned")
+            .expect("lookup")
+            .is_none(),
+        "no realm may carry the new name"
+    );
+}
+
+#[tokio::test]
+async fn cross_realm_create_realm_is_refused_and_creates_nothing() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let (realm_a, token_a) = setup_realm_admin(&h, "cr-a").await;
+    let name = format!("new-realm-{}", uuid::Uuid::new_v4());
+
+    // Control: the collection route serves this admin.
+    let list = build_app(&h)
+        .oneshot(req(
+            "GET",
+            "/admin/realms".to_string(),
+            &token_a,
+            &realm_a,
+            "",
+        ))
+        .await
+        .expect("request");
+    assert_eq!(list.status(), StatusCode::OK);
+
+    let resp = build_app(&h)
+        .oneshot(req(
+            "POST",
+            "/admin/realms".to_string(),
+            &token_a,
+            &realm_a,
+            &format!(r#"{{"name":"{name}"}}"#),
+        ))
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        refusal_message(resp).await,
+        hearth::protocol::admin_auth::REALMS_ARE_YAML_MANAGED
+    );
+    assert!(
+        h.identity()
+            .get_realm_by_name(&name)
+            .expect("lookup")
+            .is_none(),
+        "no realm may be created"
+    );
 }

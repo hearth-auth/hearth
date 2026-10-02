@@ -3629,22 +3629,17 @@ async fn me_permissions(
     }
 
     // A suspended or archived organisation grants nothing: drop the org
-    // context so only realm-scoped authority is reported
-    // (subsystem audit 2026-09-21, finding O-2).
-    let org_id = params
-        .get("org_id")
-        .and_then(|s| {
+    // context so only realm-scoped authority is reported (subsystem audit
+    // 2026-09-21, finding O-2). The rule lives in the engine, so every
+    // surface applies the same one.
+    let org_id = state.identity.active_org_context(
+        &realm_id,
+        params.get("org_id").and_then(|s| {
             uuid::Uuid::parse_str(s)
                 .ok()
                 .map(crate::core::OrganizationId::new)
-        })
-        .filter(|oid| {
-            matches!(
-                state.identity.get_organization(&realm_id, oid),
-                Ok(Some(ref org))
-                    if org.status() == crate::identity::OrganizationStatus::Active
-            )
-        });
+        }),
+    );
     let scope = params.get("scope").cloned();
 
     // The TOKEN's live authority, not the user's (GA audit 3 B-2/B-5): a

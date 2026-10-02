@@ -7965,8 +7965,6 @@ THE SOFTWARE.
 License: MIT License (MIT)
 Used by:
   - tonic-build 0.14.6
-  - tonic-health 0.14.6
-  - tonic-reflection 0.14.6
   - tonic-types 0.14.6
   - tonic 0.14.6
 

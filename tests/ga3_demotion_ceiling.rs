@@ -6,7 +6,7 @@
 //! the group that carries the role, or delete that group — and could revoke
 //! their sessions and consents. Every such operation now runs
 //! `admin_auth::check_user_admin_ceiling` (or its group form) on each affected
-//! user, over REST and gRPC. The ceiling also counts admin permissions a user
+//! user, over REST. The ceiling also counts admin permissions a user
 //! holds only through an organization-scoped grant.
 
 mod common;
@@ -20,11 +20,7 @@ use hearth::identity::{
     CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, OrganizationRole,
     SessionContext,
 };
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::rbac_admin::RbacAdminSvc;
-use hearth::protocol::grpc::server::GrpcState;
 use hearth::protocol::http::{router, AppState};
-use hearth::protocol::proto::rbac::v1::{self as pb, rbac_admin_service_server::RbacAdminService};
 use hearth::rbac::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, GroupId, GroupMember, Permission, Scope,
     Subject, UserPermissionGrant,
@@ -59,15 +55,6 @@ impl Fixture {
             h.audit_arc(),
         )));
         Self { h, realm, app }
-    }
-
-    fn grpc(&self) -> RbacAdminSvc {
-        RbacAdminSvc::new(GrpcState::new(
-            self.h.identity_arc(),
-            self.h.rbac_arc(),
-            self.h.audit_arc(),
-            Arc::new(AdminRateLimiter::new()),
-        ))
     }
 
     fn user(&self, label: &str) -> UserId {
@@ -210,23 +197,6 @@ impl Fixture {
             .await
             .expect("oneshot")
             .status()
-    }
-
-    fn grpc_req<T>(&self, token: &str, msg: T) -> tonic::Request<T> {
-        let mut r = tonic::Request::new(msg);
-        r.metadata_mut().insert(
-            "authorization",
-            format!("Bearer {token}").parse().expect("valid header"),
-        );
-        r.metadata_mut().insert(
-            "x-realm-id",
-            self.realm
-                .as_uuid()
-                .to_string()
-                .parse()
-                .expect("valid header"),
-        );
-        r
     }
 }
 
@@ -437,194 +407,4 @@ async fn org_scoped_admin_permission_counts_for_the_ceiling() {
             .email()
             .to_string();
     assert_eq!(after, before);
-}
-
-// ── demotion and consents over gRPC ──────────────────────────────────────────
-
-#[tokio::test]
-async fn grpc_realm_sub_admin_cannot_demote_a_superuser() {
-    let f = Fixture::new().await;
-    let svc = f.grpc();
-    let (root, root_assignment) = f.superuser();
-    f.h.rbac()
-        .grant_user_permission(
-            &f.realm,
-            &UserPermissionGrant {
-                realm_id: f.realm.clone(),
-                user_id: root.clone(),
-                permission: Permission::new("hearth.users.admin").expect("perm"),
-                scope: Scope::Realm,
-                granted_at: hearth::core::Timestamp::from_micros(0),
-                granted_by: None,
-            },
-        )
-        .expect("direct grant");
-    let group = f.group_with(GroupMember::User(root.clone()));
-    let token = f.sub_admin("hearth.realm.admin");
-    let realm_id = f.realm.as_uuid().to_string();
-
-    let unassign = svc
-        .unassign_user_role(f.grpc_req(
-            &token,
-            pb::UnassignUserRoleRequest {
-                realm_id: realm_id.clone(),
-                user_id: root.as_uuid().to_string(),
-                assignment_id: root_assignment.as_uuid().to_string(),
-            },
-        ))
-        .await
-        .expect_err("UnassignUserRole on a superuser");
-    let revoke = svc
-        .revoke_user_permission(f.grpc_req(
-            &token,
-            pb::RevokeUserPermissionRequest {
-                realm_id: realm_id.clone(),
-                user_id: root.as_uuid().to_string(),
-                permission: "hearth.users.admin".to_string(),
-                scope_type: "realm".to_string(),
-                org_id: String::new(),
-            },
-        ))
-        .await
-        .expect_err("RevokeUserPermission on a superuser");
-    let remove = svc
-        .remove_group_member(f.grpc_req(
-            &token,
-            pb::RemoveGroupMemberRequest {
-                realm_id: realm_id.clone(),
-                group_id: group.as_uuid().to_string(),
-                member: Some(pb::GroupMember {
-                    r#type: pb::group_member::Type::User as i32,
-                    id: root.as_uuid().to_string(),
-                }),
-            },
-        ))
-        .await
-        .expect_err("RemoveGroupMember of a superuser");
-    let delete = svc
-        .delete_group(f.grpc_req(
-            &token,
-            pb::DeleteGroupRequest {
-                realm_id: realm_id.clone(),
-                group_id: group.as_uuid().to_string(),
-            },
-        ))
-        .await
-        .expect_err("DeleteGroup holding a superuser");
-
-    for (name, err) in [
-        ("UnassignUserRole", unassign),
-        ("RevokeUserPermission", revoke),
-        ("RemoveGroupMember", remove),
-        ("DeleteGroup", delete),
-    ] {
-        assert_eq!(err.code(), tonic::Code::PermissionDenied, "{name}");
-    }
-    assert!(f.holds_superuser(&root));
-}
-
-#[tokio::test]
-async fn grpc_users_sub_admin_cannot_revoke_a_superusers_consent() {
-    let f = Fixture::new().await;
-    let svc = f.grpc();
-    let (root, _) = f.superuser();
-    let token = f.sub_admin("hearth.users.admin");
-
-    let err = svc
-        .revoke_consent(f.grpc_req(
-            &token,
-            pb::RevokeConsentRequest {
-                realm_id: f.realm.as_uuid().to_string(),
-                user_id: root.as_uuid().to_string(),
-                client_id: uuid::Uuid::new_v4().to_string(),
-            },
-        ))
-        .await
-        .expect_err("RevokeConsent on a superuser");
-
-    assert_eq!(err.code(), tonic::Code::PermissionDenied);
-}
-
-/// `UnassignGroupRole` on the group that makes a user a superuser, and
-/// `RemoveAdditionalRole` on a superuser, are refused for a realm sub-admin;
-/// unassigning a plain group's role is still allowed.
-#[tokio::test]
-async fn grpc_realm_sub_admin_cannot_unassign_a_group_role_or_additional_role() {
-    let f = Fixture::new().await;
-    let svc = f.grpc();
-    let root = f.user("root");
-    let root_group = f.group_with(GroupMember::User(root.clone()));
-    let root_group_assignment = f.assign(Subject::Group(root_group.clone()), "realm.admin");
-    assert!(f.holds_superuser(&root), "fixture: superuser via the group");
-    let plain = f.user("plain");
-    let plain_group = f.group_with(GroupMember::User(plain.clone()));
-    let plain_group_assignment = f.assign(Subject::Group(plain_group.clone()), "realm.member");
-    let org: OrganizationId =
-        f.h.identity()
-            .create_organization(
-                &f.realm,
-                &CreateOrganizationRequest {
-                    name: "Acme".into(),
-                    slug: format!("acme-{}", uuid::Uuid::new_v4().simple()),
-                    description: None,
-                    config: None,
-                    attributes: Default::default(),
-                },
-            )
-            .expect("create org")
-            .id()
-            .clone();
-    let token = f.sub_admin("hearth.realm.admin");
-    let realm_id = f.realm.as_uuid().to_string();
-
-    let unassign = svc
-        .unassign_group_role(f.grpc_req(
-            &token,
-            pb::UnassignGroupRoleRequest {
-                realm_id: realm_id.clone(),
-                group_id: root_group.as_uuid().to_string(),
-                assignment_id: root_group_assignment.as_uuid().to_string(),
-            },
-        ))
-        .await
-        .expect_err("UnassignGroupRole demoting a superuser");
-    let additional = svc
-        .remove_additional_role(f.grpc_req(
-            &token,
-            pb::RemoveAdditionalRoleRequest {
-                realm_id: realm_id.clone(),
-                org_id: org.as_uuid().to_string(),
-                user_id: root.as_uuid().to_string(),
-                role_name: "realm.member".to_string(),
-            },
-        ))
-        .await
-        .expect_err("RemoveAdditionalRole on a superuser");
-    let plain_unassign = svc
-        .unassign_group_role(f.grpc_req(
-            &token,
-            pb::UnassignGroupRoleRequest {
-                realm_id: realm_id.clone(),
-                group_id: plain_group.as_uuid().to_string(),
-                assignment_id: plain_group_assignment.as_uuid().to_string(),
-            },
-        ))
-        .await;
-
-    assert_eq!(unassign.code(), tonic::Code::PermissionDenied, "group role");
-    assert_eq!(
-        additional.code(),
-        tonic::Code::PermissionDenied,
-        "additional role"
-    );
-    assert!(f.holds_superuser(&root), "the superuser keeps hearth.admin");
-    plain_unassign.expect("a plain group's role stays unassignable");
-    let remaining =
-        f.h.rbac()
-            .list_group_assignments(&f.realm, &plain_group)
-            .expect("list");
-    assert!(
-        remaining.iter().all(|a| a.id != plain_group_assignment),
-        "the plain group's assignment is gone: {remaining:?}"
-    );
 }

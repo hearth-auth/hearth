@@ -52,16 +52,15 @@ included"):
 - A client's ID tokens are signed with the algorithm in its `id_token_signed_response_alg`
   (OIDC Dynamic Client Registration §2). The only accepted values are `RS256` and `EdDSA`
   (case-sensitive); anything else — `none`, every `HS*`, `ES256`, `PS256` — is rejected at
-  registration and update (`invalid_client_metadata` on the RFC 7591 endpoints, `400` / gRPC
-  `InvalidArgument` elsewhere).
+  registration and update (`invalid_client_metadata` on the RFC 7591 endpoints, `400`
+  elsewhere).
 - **Defaults.** The value is resolved at registration and stored explicitly:
   - Dynamic Client Registration (`POST /register`, `POST /realms/{realm}/register`): omitted
     means **`RS256`**, the default OIDC Registration §2 prescribes — **`EdDSA` in a realm with a
     `fapi_profile`** (see FAPI 2.0 below). The registration response echoes the resolved value
     (RFC 7591 §3.2.1).
   - Administrative surfaces (admin REST `POST /clients`, `POST /admin/applications` and
-    `PATCH /admin/applications/{id}`; gRPC `RegisterClient`, `CreateApplication` and
-    `UpdateApplication`; the console; `hearth.yaml` applications; backup and migration import):
+    `PATCH /admin/applications/{id}`; the console; `hearth.yaml` applications; backup and migration import):
     omitted means **`EdDSA`** (on an update: unchanged), so existing automation is unaffected.
   - A client record stored before this setting existed carries no value and reads as `EdDSA` —
     what it was always issued — so an upgrade changes no client's algorithm.
@@ -161,9 +160,7 @@ Enforces all Baseline requirements plus:
    and their `/realms/{realm}/…` twins. `client_secret_basic`, `client_secret_post`, and `none`
    are rejected with `401 {"error":"invalid_client","error_description":"FAPI 2.0 requires
    private_key_jwt client authentication; …"}`. The refusal depends on the realm alone and is
-   decided before any secret is hashed. gRPC carries no client assertion, so gRPC client
-   authentication (`Introspect`, `Revoke`, `DeviceAuthorization`, `ClientCredentials`, the code
-   exchange) is refused in such a realm with `UNAUTHENTICATED`.
+   decided before any secret is hashed.
 
 ### 2.2 Per-Client Profile (`ClientProfile::Fapi2`)
 
@@ -279,8 +276,7 @@ or an assertion key), so one stored without keys fails closed rather than counti
 or any client that registered a JWKS or an assertion key and no secret — presenting only its
 `client_id` is `401 invalid_client` at `/as/par`, at every `/token` grant (including
 `authorization_code`, `refresh_token`, `device_code` and token exchange, each of which accepts a
-`client_assertion`), at `/device_authorization` (which accepts one too, as does gRPC
-`DeviceAuthorize`), at `/introspect` and `/revoke`, and over gRPC. A FAPI 2.0 client that
+`client_assertion`), at `/device_authorization` (which accepts one too), and at `/introspect` and `/revoke`. A FAPI 2.0 client that
 somehow holds a secret is refused (`invalid_client`, naming `private_key_jwt`) after the secret
 verifies.
 
@@ -538,10 +534,10 @@ into the identity registry at startup and on every config reload
   the resource is removed; a resource server that verifies such a JWT offline keeps accepting it
   until it expires.
 - **Authorization requests are held to the same registry** (AGENT_AUTH.md §2.3): a `resource`
-  at `/authorize` (browser, JSON, gRPC) or PAR that is not a registered protected resource answers
+  at `/authorize` (browser, JSON) or PAR that is not a registered protected resource answers
   RFC 8707 `invalid_target`; an accepted one is stored, consent-keyed and minted in canonical
   form.
-- There is no admin REST/gRPC write API for the registry, deliberately.
+- There is no admin REST write API for the registry, deliberately.
 - Config load refuses an entry whose `resource_uri` is not a valid resource indicator (or has
   surrounding whitespace), a `resource_uri` declared twice in one realm **after
   canonicalization**, an `mcp:`-prefixed bundle name that is not `mcp:{category}:{action}`, and —
@@ -776,7 +772,7 @@ Content-Type: application/json
 }
 ```
 
-The same Bearer-auth requirement applies to the equivalent gRPC `Authorize` RPC. Both JSON routes
+Both JSON routes
 (`POST /authorize` with `X-Realm-ID` and `POST /realms/{realm}/authorize`) accept a pushed request
 (RFC 9126): with `request_uri` the pushed entry is consumed — single-use — and supplies every
 parameter; a `client_id` in the body must match it.
@@ -788,13 +784,12 @@ screen, so a code is minted only for a client the bearer token may speak for:
 - a token that names no client — a Hearth first-party session token — MAY authorize a
   **first-party** client only.
 
-Any other request is refused with `403` and `error_code: "HEARTH_CLIENT_MISMATCH"` (gRPC
-`PERMISSION_DENIED`) before any side effect. Without this rule a third-party app's token minted a
+Any other request is refused with `403` and `error_code: "HEARTH_CLIENT_MISMATCH"` before any side effect. Without this rule a third-party app's token minted a
 code for a first-party public client — which needs neither consent nor a secret — and redeemed it
 for that client's tokens carrying the user's full permissions. The consent rule (a third-party
 client needs a recorded consent covering the scopes, `HEARTH_CONSENT_REQUIRED`) and the MFA-use rule
-still apply on top. Enforced by the engine (`authorize_non_interactive`), so the global, realm and
-gRPC surfaces cannot diverge; pinned by `tests/oauth_non_interactive_authorize.rs`.
+still apply on top. Enforced by the engine (`authorize_non_interactive`), so the global and realm
+surfaces cannot diverge; pinned by `tests/oauth_non_interactive_authorize.rs`.
 
 ---
 
@@ -823,23 +818,20 @@ authorization request (RFC 8628 §3.1) and the device access token request (RFC 
 the same rule the `authorization_code` arm applies. HTTP Basic Auth takes precedence; body
 `client_secret` is the `client_secret_post` fallback. A missing or wrong secret returns `401`
 `invalid_client`. Public clients carry no secret and are unaffected. A `private_key_jwt` client
-presents `client_assertion_type` + `client_assertion` on both (form or JSON; gRPC
-`DeviceAuthorizationRequest` fields 4 and 5), verified as at the token endpoint. Dynamic client registration
+presents `client_assertion_type` + `client_assertion` on both (form or JSON), verified as at the token endpoint. Dynamic client registration
 (`POST /register`, RFC 7591) and the JSON permission-decision endpoint remain JSON-only by design.
 
 ### 8.1 Introspection and Revocation — Client Authentication
 
 **Introspection serves confidential clients only** (RFC 7662 §2.1, §4; task 26.43). `POST
-/introspect`, `POST /realms/{realm}/introspect` and the gRPC `OAuthService.Introspect` RPC MUST
+/introspect`, and `POST /realms/{realm}/introspect` MUST
 authenticate the caller as a confidential client, by exactly one of:
 
 | Method | How it is presented |
 |--------|---------------------|
 | `client_secret_basic` | `Authorization: Basic base64(client_id:client_secret)` |
 | `client_secret_post` | `client_id` + `client_secret` body fields |
-| `private_key_jwt` | `client_id` + `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer` + `client_assertion` (RFC 7523 §2.2 — same rules as the token endpoint: signed with the client's assertion key (EdDSA) or a key from its registered JWKS (PS256/ES256/EdDSA, §2.2.5), `iss`/`sub` = the client, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min). HTTP only. |
-
-gRPC callers present `x-hearth-client-id` + `x-hearth-client-secret` metadata.
+| `private_key_jwt` | `client_id` + `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer` + `client_assertion` (RFC 7523 §2.2 — same rules as the token endpoint: signed with the client's assertion key (EdDSA) or a key from its registered JWKS (PS256/ES256/EdDSA, §2.2.5), `iss`/`sub` = the client, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min). |
 
 A **public client** (no stored secret) is refused with `401` `{"error":"invalid_client"}` and
 `WWW-Authenticate: Basic` (RFC 6749 §5.2) — including when it presents a made-up secret. A
@@ -851,16 +843,15 @@ invalid_client`. The work done is a function of the caller's input only — a pr
 exactly one Argon2id verification on every arm, and no secret costs none — so response time does
 not reveal whether a client exists or which type it is. Combining an assertion with a secret or a
 Basic header is `400 invalid_request` (RFC 6749 §2.3, §5.2). After authentication the RFC 7662
-audience restriction applies to the authenticated client on every surface, gRPC included.
+audience restriction applies to the authenticated client on every surface.
 
-**Revocation still accepts public clients** (RFC 7009 §2.1): `POST /revoke`, its realm twin and
-gRPC `Revoke` authenticate a public client by `client_id` alone and a secret-bearing confidential
+**Revocation still accepts public clients** (RFC 7009 §2.1): `POST /revoke` and its realm twin
+authenticate a public client by `client_id` alone and a secret-bearing confidential
 client by its secret (`client_secret_basic` / `client_secret_post`). A `private_key_jwt` client —
 one with an assertion key and no secret, as every FAPI 2.0 client is — is confidential too: the
 HTTP routes accept its `client_assertion` (same rules and `400 invalid_request` on a combined
 secret as introspection above) and refuse it with `401 invalid_client` when it presents only its
-`client_id` or a made-up secret. gRPC `Revoke` carries no assertion, so it refuses such a client
-with `UNAUTHENTICATED`; it revokes over HTTP.
+`client_id` or a made-up secret.
 
 **Revocation is restricted to the caller's own tokens** (RFC 7009 §2.1: the server "verifies
 whether the token was issued to the client making the revocation request"). Every wire surface
@@ -896,7 +887,7 @@ for a user-session token; the machine subject's own client or an `aud` member fo
 An exchanged token inherits the subject token's `sid`, so revoking it by ending that session would
 also kill the subject client's own tokens. A delegated token (one carrying `act`) is therefore
 revoked by its `jti` (the blocklist the sessionless tokens use), leaving the subject's session
-live. A token issued to another client is a silent no-op: the response is `200` (gRPC `OK`),
+live. A token issued to another client is a silent no-op: the response is `200`,
 identical to the response for an invalid token (RFC 7009 §2.2), and nothing is revoked or audited.
 `revoking_client_id: None` is reserved for trusted in-process callers that have authorized the
 revocation themselves. Covered by `tests/revoke_client_ownership.rs`.
@@ -954,8 +945,8 @@ and a FAPI 2.0 Advanced realm accepts nothing else from any client (§2.1.2 item
 | `tests/oauth_form_encoding.rs` | Form + JSON content-type acceptance on token/revoke/introspect/PAR/device-authorization and their realm twins (HEA-2077) |
 | `tests/device_grant_client_auth.rs` | Confidential-client authentication on both device-grant endpoints and both realm twins (audit 2026-08-28 §4.19#4, §4.22#6) |
 | `tests/par_client_auth.rs` | RFC 9126 §2 client authentication at `/as/par` and its realm twin: confidential clients refused without or with wrong credentials, `client_secret_basic`/`client_secret_post`/`private_key_jwt` accepted, public client by `client_id` only and refused when presenting a secret, authenticated client bound to the body and request object, FAPI 2.0 client and FAPI realm, KDF-gate shed |
-| `tests/introspect_confidential_only.rs` | Introspection refuses public clients (HTTP, realm twin, gRPC); secret and `private_key_jwt` authentication; gRPC audience restriction; discovery auth-method metadata; public-client revocation still accepted (task 26.43) |
-| `tests/revoke_client_ownership.rs` | RFC 7009 §2.1 revocation ownership — a client revokes only tokens issued to it (`act.sub`, `azp`, grant family, `client_credentials` subject) on `/revoke`, the realm twin and gRPC `Revoke`; foreign and first-party tokens are a silent `200` no-op; device-grant tokens belong to the device client and exchanged tokens to the exchanging client, both minted through the real grant; `private_key_jwt` clients must present their assertion |
+| `tests/introspect_confidential_only.rs` | Introspection refuses public clients (HTTP, realm twin); secret and `private_key_jwt` authentication; discovery auth-method metadata; public-client revocation still accepted (task 26.43) |
+| `tests/revoke_client_ownership.rs` | RFC 7009 §2.1 revocation ownership — a client revokes only tokens issued to it (`act.sub`, `azp`, grant family, `client_credentials` subject) on `/revoke` and the realm twin; foreign and first-party tokens are a silent `200` no-op; device-grant tokens belong to the device client and exchanged tokens to the exchanging client, both minted through the real grant; `private_key_jwt` clients must present their assertion |
 | `tests/realm_token_exchange_client_auth.rs` | Token-exchange client auth enforcement + DPoP re-binding prevention on both endpoints (HEA-2024) |
 | `tests/fixtures/fapi2/conformance_vectors.json` | Test vectors for per-client FAPI 2.0 |
 | `tests/id_token_rs256.rs` | RS256 ID tokens (§1.2): discovery, DCR defaults and validation, JWKS verification, access-token containment, `id_token_hint`/revocation, rotation grace, KEK sealing, realm delete, concurrent provisioning |

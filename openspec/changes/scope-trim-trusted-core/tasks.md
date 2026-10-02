@@ -39,14 +39,14 @@ Sixteen admin operations existed only over gRPC (`docs/api/grpc-only.txt`; `Clie
 
 ## 5. Public gRPC (PR 4)
 
-- [ ] 5.1 Red tests: a single-node server listens only on the HTTP port; each `grpc_*` key and `security.grpc` stops startup; a 3-node cluster still elects a leader and replicates
-- [ ] 5.2 Delete `src/protocol/grpc/`, the startup wiring (`main.rs:1836`, `3248–3280`), the config keys, the `shaper.rs` gRPC interceptor and `examples/grpc-admin-flow`
-- [ ] 5.3 Drop `tonic-health`, `tonic-reflection` and the unused `tonic-types` from `Cargo.toml`. Keep `tonic`, `tonic-prost`, `prost`, `pbjson` and `pbjson-types`
-- [ ] 5.4 Remove the `service` blocks from `proto/hearth/{identity,rbac,events}/v1`. Regenerate `openapi.proto-derived.json` and diff `docs/api/openapi.json`. If the REST paths disappear, keep the `service` blocks as schema-only and document that in `PROTO.md` (design decision 3)
-- [ ] 5.5 Delete the ~13 gRPC-only test files. Port any assertion that guards REST behaviour into a REST test first
-- [ ] 5.6 Update `buf.gen.yaml`, the Makefile `proto-gen`/`proto-check` targets, `.githooks/pre-commit`, and the `proto-freshness`/`proto-governance` CI jobs to match
-- [ ] 5.7 Update `docs/specs/PROTO.md`, `docs/api/grpc-only.txt` (delete), `api-reference.md`, `admin-api.md`, `CONFIGURATION.md`, `ARCHITECTURE.md`, `clustering.md`
-- [ ] 5.8 CHANGELOG `### Removed` entry for public gRPC
+- [x] 5.1 Red tests: a single-node server listens only on the HTTP port; each `grpc_*` key and `security.grpc` stops startup; a 3-node cluster still elects a leader and replicates
+- [x] 5.2 Delete `src/protocol/grpc/`, the startup wiring (`main.rs:1836`, `3248–3280`), the config keys, the `shaper.rs` gRPC interceptor and `examples/grpc-admin-flow`
+- [x] 5.3 Drop `tonic-health`, `tonic-reflection` and the unused `tonic-types` from `Cargo.toml`. Keep `tonic`, `tonic-prost`, `prost`, `pbjson` and `pbjson-types`
+- [x] 5.4 Remove the `service` blocks from `proto/hearth/{identity,rbac,events}/v1`. Regenerate `openapi.proto-derived.json` and diff `docs/api/openapi.json`. If the REST paths disappear, keep the `service` blocks as schema-only and document that in `PROTO.md` (design decision 3) — **Kept the `service` blocks** as the REST schema (design decision 3): `openapi.json` is merged from a committed file and `buf generate` output is unchanged, so removing them gained nothing. `build.rs` now generates no server or client stubs (`build_server(false)`, `build_client(false)`); `docs/specs/PROTO.md` documents this
+- [x] 5.5 Delete the ~13 gRPC-only test files. Port any assertion that guards REST behaviour into a REST test first — 127 gRPC tests audited: 27 guarded shared behaviour and were ported to REST (new: `rest_sub_admin_bfla.rs`, `rest_audit_admin.rs`, `rest_org_suspension.rs`, `ga3_realm_trust_policy_rest.rs`, `ga3_realm_yaml_managed_rest.rs`, `tls_config_hardening.rs`; plus in-place REST ports in mixed files). The port of `grpc_org_suspension.rs` exposed a REST bug — `GET /admin/users/{id}/effective-permissions?org_id=` reported a suspended org's permissions — fixed by routing it (and `/v1/me/permissions`) through `active_org_context`
+- [x] 5.6 Update `buf.gen.yaml`, the Makefile `proto-gen`/`proto-check` targets, `.githooks/pre-commit`, and the `proto-freshness`/`proto-governance` CI jobs to match — the protos are unchanged, so `buf.gen.yaml`, the `proto-*` targets, the pre-commit hook and the proto CI jobs need no change. `scripts/check-auth-discard.sh` now scans `src/protocol/http/admin/*.rs` instead of the deleted gRPC module
+- [x] 5.7 Update `docs/specs/PROTO.md`, `docs/api/grpc-only.txt` (delete), `api-reference.md`, `admin-api.md`, `CONFIGURATION.md`, `ARCHITECTURE.md`, `clustering.md`
+- [x] 5.8 CHANGELOG `### Removed` entry for public gRPC
 
 ## 6. MFA policy (PR 5)
 

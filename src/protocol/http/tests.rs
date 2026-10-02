@@ -3860,3 +3860,156 @@ async fn a_cluster_outage_answers_503_with_retry_after_and_a_stable_code() {
         );
     }
 }
+
+/// A realm user who is a member of a fresh organization, with `docs.read`
+/// granted realm-wide and `docs.write` granted inside the organization.
+#[cfg(feature = "dev-endpoints")]
+fn member_with_realm_and_org_grants(
+    state: &AppState,
+    realm_id: &RealmId,
+) -> (crate::core::UserId, crate::core::OrganizationId) {
+    use crate::identity::{CreateOrganizationRequest, CreateUserRequest, OrganizationRole};
+    use crate::rbac::{Permission, Scope, UserPermissionGrant};
+
+    let user = state
+        .identity
+        .create_user(
+            realm_id,
+            &CreateUserRequest {
+                email: "member@suspension.test".into(),
+                display_name: "member".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("user")
+        .id()
+        .clone();
+    let org = state
+        .identity
+        .create_organization(
+            realm_id,
+            &CreateOrganizationRequest {
+                name: "acme".into(),
+                slug: "acme-suspension".into(),
+                description: None,
+                config: None,
+                attributes: Default::default(),
+            },
+        )
+        .expect("org")
+        .id()
+        .clone();
+    state
+        .identity
+        .add_member(realm_id, &org, &user, OrganizationRole::Member)
+        .expect("member");
+    for (perm, scope) in [
+        ("docs.read", Scope::Realm),
+        (
+            "docs.write",
+            Scope::Org {
+                org_id: org.clone(),
+            },
+        ),
+    ] {
+        state
+            .rbac
+            .grant_user_permission(
+                realm_id,
+                &UserPermissionGrant {
+                    realm_id: realm_id.clone(),
+                    user_id: user.clone(),
+                    permission: Permission::new(perm).expect("perm"),
+                    scope,
+                    granted_at: crate::core::Timestamp::from_micros(0),
+                    granted_by: None,
+                },
+            )
+            .expect("grant");
+    }
+    (user, org)
+}
+
+/// scope-trim-trusted-core, group 5 (ported from the deleted
+/// `grpc_org_suspension.rs`): a suspended organization grants nothing, so
+/// `GET /admin/users/{id}/effective-permissions?org_id=` must not report its
+/// org-scoped permissions — while realm-scoped ones stay. The REST handler
+/// passed `org_id` straight to the resolver; gRPC filtered it through
+/// `IdentityEngine::active_org_context`.
+#[cfg(feature = "dev-endpoints")]
+#[tokio::test]
+async fn effective_permissions_drop_a_suspended_orgs_grants() {
+    use crate::identity::{OrganizationStatus, UpdateOrganizationRequest};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(tmp.path());
+    let (realm, token) = bootstrap_dev(&state).await;
+    let realm_id = RealmId::new(realm.parse().expect("realm uuid"));
+    let (user, org) = member_with_realm_and_org_grants(&state, &realm_id);
+    let permissions = |state: Arc<AppState>| {
+        let uri = format!(
+            "/admin/users/{}/effective-permissions?org_id={}",
+            user.as_uuid(),
+            org.as_uuid()
+        );
+        let token = token.clone();
+        let realm = realm.clone();
+        async move {
+            let resp = router(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(uri)
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("x-realm-id", realm)
+                        .body(axum::body::Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(resp.status(), StatusCode::OK);
+            let b = axum::body::to_bytes(resp.into_body(), 64_000)
+                .await
+                .expect("body");
+            let v: serde_json::Value = serde_json::from_slice(&b).expect("json");
+            v["permissions"]
+                .as_array()
+                .expect("permissions")
+                .iter()
+                .filter_map(|p| p.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        }
+    };
+
+    let active = permissions(Arc::clone(&state)).await;
+    assert!(
+        active.contains(&"docs.write".to_string()),
+        "control: {active:?}"
+    );
+    assert!(
+        active.contains(&"docs.read".to_string()),
+        "control: {active:?}"
+    );
+
+    state
+        .identity
+        .update_organization(
+            &realm_id,
+            &org,
+            &UpdateOrganizationRequest {
+                status: Some(OrganizationStatus::Suspended),
+                ..UpdateOrganizationRequest::default()
+            },
+        )
+        .expect("suspend");
+    let suspended = permissions(Arc::clone(&state)).await;
+    assert!(
+        !suspended.contains(&"docs.write".to_string()),
+        "a suspended org must not grant: {suspended:?}"
+    );
+    assert!(
+        suspended.contains(&"docs.read".to_string()),
+        "realm-scoped grants survive: {suspended:?}"
+    );
+}

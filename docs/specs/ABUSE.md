@@ -1164,7 +1164,7 @@ configured `issuer` for the IdP connector **before** exchanging the code.
 
 - **Present + matching** → allowed.
 - **Present + mismatched** → `IdentityError::FederationIdpMixup`
-  (HTTP 400, gRPC `INVALID_ARGUMENT`, wire code `HEARTH_FEDERATION_IDP_MIXUP`).
+  (HTTP 400, wire code `HEARTH_FEDERATION_IDP_MIXUP`).
 - **Absent** → allowed (fail-open; not all authorization servers send it — RFC 9207
   is optional for the AS side).
 
@@ -1788,44 +1788,13 @@ CAPTCHA check in handler order.
 
 ---
 
-## A-43 — gRPC Reflection Production-Disable
+## A-43 — gRPC Reflection Production-Disable (retired in 3.0.0)
 
-### Threat
-
-`grpc.reflection.v1.ServerReflection` exposes the full API schema
-(service names, method signatures, request/response types) to any unauthenticated
-caller.  In production this is an enumeration and reconnaissance primitive.
-
-### Mitigation
-
-`security.grpc.reflection_enabled` (default `false`) gates the reflection service.
-
-- **`--dev` mode**: defaults to `true` — grpcurl / Postman work out-of-the-box.
-- **Production (`null`/absent or `false`)**: service is omitted from the gRPC router entirely; clients that query it receive an "unimplemented" status, not schema data.
-- **Production with `true`**: Hearth **refuses to start** unless `--allow-reflection-in-prod` is passed.  The error message is actionable:
-
-  ```
-  security.grpc.reflection_enabled = true is not allowed in production mode.
-  Pass --allow-reflection-in-prod to override (debugging only; never in real deployments).
-  ```
-
-### Fail-closed
-
-The guard is fail-closed.  There is no runtime fallback: if the invariant is violated the process exits before accepting any connection.
-
-### Configuration surface
-
-```yaml
-security:
-  grpc:
-    reflection_enabled: false   # default; omit for production-safe behaviour
-```
-
-CLI:
-
-```
-hearth serve --allow-reflection-in-prod   # required when reflection_enabled = true in prod
-```
+Hearth 3.0.0 removed the public gRPC API, and with it the gRPC reflection service
+this control gated. There is no reflection endpoint to enumerate. The
+`security.grpc.reflection_enabled` key and the `hearth serve --allow-reflection-in-prod`
+flag are gone; a configuration that still sets `security.grpc` refuses to start with an
+error naming the removed key (see `CONFIGURATION.md`).
 
 ---
 

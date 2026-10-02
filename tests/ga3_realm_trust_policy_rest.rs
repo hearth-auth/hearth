@@ -1,47 +1,31 @@
-//! GA audit round 3 — gRPC `GetRealm` / `DeleteRealm` honour the target
-//! realm's cross-realm trust policy, as REST `/admin/realms/{id}` does.
+//! GA audit round 3 — `GET` / `DELETE /admin/realms/{id}` honour the target
+//! realm's cross-realm trust policy.
 //!
 //! A realm opts into enforcement by storing a policy that names the system
 //! realm as its source. REST routes every `/admin/realms/{id}` request through
 //! `scoped_realm`, which refuses the crossing when such a policy withholds
-//! `hearth.admin`. The gRPC twins checked only "same realm, or caller is the
-//! system realm", so the same system-realm token read and deleted a realm REST
-//! refused it. Both surfaces now call
-//! `hearth::protocol::admin_auth::admin_realm_scope`.
+//! `hearth.admin`, and permits it when the pair is ungoverned or the policy
+//! grants `hearth.admin`. (These assertions were first written against the
+//! gRPC twins, removed with the public gRPC API.)
 
 mod common;
 
 use std::sync::Arc;
 
-use axum::body::Body;
+use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use hearth::core::RealmId;
 use hearth::identity::{
     CreateCrossRealmPolicyRequest, CreateRealmRequest, CreateUserRequest, RealmStatus,
     SessionContext, UpdateRealmRequest,
 };
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::identity::IdentityAdminSvc;
-use hearth::protocol::grpc::server::GrpcState;
 use hearth::protocol::http::{router, AppState};
-use hearth::protocol::proto::identity::v1::{
-    self as pb, identity_admin_service_server::IdentityAdminService,
-};
 use hearth::rbac::{AssignRoleRequest, Scope, Subject};
-use tonic::Code;
+use serde_json::Value;
 use tower::ServiceExt as _;
 
 fn system_realm() -> RealmId {
     RealmId::new(uuid::Uuid::nil())
-}
-
-fn make_svc(h: &common::TestHarness) -> IdentityAdminSvc {
-    IdentityAdminSvc::new(GrpcState::new(
-        h.identity_arc(),
-        h.rbac_arc(),
-        h.audit_arc(),
-        Arc::new(AdminRateLimiter::new()),
-    ))
 }
 
 /// A system-realm `realm.admin` (holds `hearth.admin`) and its token.
@@ -103,180 +87,148 @@ fn tenant_realm(h: &common::TestHarness) -> RealmId {
         .clone()
 }
 
-/// Stores a policy in `target` naming the system realm as source but granting
-/// only an unrelated capability — i.e. the realm refuses admin crossings.
-fn deny_system_crossings(h: &common::TestHarness, target: &RealmId) {
+fn archive(h: &common::TestHarness, realm: &RealmId) {
+    h.identity()
+        .update_realm(
+            realm,
+            &UpdateRealmRequest {
+                status: Some(RealmStatus::Archived),
+                ..UpdateRealmRequest::default()
+            },
+        )
+        .expect("archive realm");
+}
+
+/// Stores a policy in `target` naming the system realm as source and granting
+/// `capability`.
+fn store_policy(h: &common::TestHarness, target: &RealmId, capability: &str) {
     h.identity()
         .create_cross_realm_policy(
             target,
             &CreateCrossRealmPolicyRequest {
                 source_realm_id: system_realm(),
-                allowed_capabilities: vec!["search:read".to_string()],
+                allowed_capabilities: vec![capability.to_string()],
                 expires_in_secs: None,
             },
         )
         .expect("store policy");
 }
 
-fn grpc_req<T>(token: &str, msg: T) -> tonic::Request<T> {
-    let mut r = tonic::Request::new(msg);
-    r.metadata_mut().insert(
-        "authorization",
-        format!("Bearer {token}").parse().expect("valid header"),
-    );
-    r.metadata_mut().insert(
-        "x-realm-id",
-        system_realm()
-            .as_uuid()
-            .to_string()
-            .parse()
-            .expect("valid header"),
-    );
-    r
+/// Stores a policy in `target` naming the system realm as source but granting
+/// only an unrelated capability — i.e. the realm refuses admin crossings.
+fn deny_system_crossings(h: &common::TestHarness, target: &RealmId) {
+    store_policy(h, target, "search:read");
 }
 
-async fn rest_get_realm(h: &common::TestHarness, token: &str, target: &RealmId) -> StatusCode {
+/// Sends `method /admin/realms/{target}` as the system realm.
+async fn rest_realm(
+    h: &common::TestHarness,
+    method: &str,
+    token: &str,
+    target: &RealmId,
+) -> (StatusCode, Value) {
     let app = router(Arc::new(AppState::new(
         h.identity_arc(),
         h.rbac_arc(),
         h.audit_arc(),
     )));
     let req = Request::builder()
-        .method("GET")
+        .method(method)
         .uri(format!("/admin/realms/{}", target.as_uuid()))
         .header("x-realm-id", system_realm().as_uuid().to_string())
         .header("authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .expect("build request");
-    app.oneshot(req).await.expect("oneshot").status()
+    let resp = app.oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.expect("body");
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
-/// The REST control and the gRPC twin side by side: both must refuse.
+/// A policy that withholds `hearth.admin` from the system realm refuses the
+/// read; the same token reads an ungoverned realm (control).
 #[tokio::test]
 async fn get_realm_refused_when_target_policy_denies_system_realm() {
     let h = common::TestHarness::embedded().await.expect("harness");
-    let svc = make_svc(&h);
     let token = system_admin_token(&h);
+    let control = tenant_realm(&h);
     let target = tenant_realm(&h);
     deny_system_crossings(&h, &target);
 
-    let rest = rest_get_realm(&h, &token, &target).await;
-    let grpc = svc
-        .get_realm(grpc_req(
-            &token,
-            pb::GetRealmRequest {
-                id: target.as_uuid().to_string(),
-            },
-        ))
-        .await;
-
-    assert_eq!(rest, StatusCode::FORBIDDEN, "REST control");
+    let (ok, _) = rest_realm(&h, "GET", &token, &control).await;
     assert_eq!(
-        grpc.expect_err("gRPC GetRealm must honour the trust policy")
-            .code(),
-        Code::PermissionDenied
+        ok,
+        StatusCode::OK,
+        "control: an ungoverned realm is readable"
+    );
+
+    let (refused, body) = rest_realm(&h, "GET", &token, &target).await;
+    assert_eq!(refused, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body.get("id").is_none(),
+        "a refused read must not leak the realm: {body}"
     );
 }
 
 /// The destructive variant: an archived realm whose policy refuses the system
-/// realm may not be purged over gRPC either.
+/// realm may not be purged; an archived ungoverned realm may (control).
 #[tokio::test]
 async fn delete_realm_refused_when_target_policy_denies_system_realm() {
     let h = common::TestHarness::embedded().await.expect("harness");
-    let svc = make_svc(&h);
     let token = system_admin_token(&h);
+    let control = tenant_realm(&h);
     let target = tenant_realm(&h);
     // The policy first: a non-active realm refuses new policies.
     deny_system_crossings(&h, &target);
-    h.identity()
-        .update_realm(
-            &target,
-            &UpdateRealmRequest {
-                status: Some(RealmStatus::Archived),
-                ..UpdateRealmRequest::default()
-            },
-        )
-        .expect("archive realm");
+    archive(&h, &target);
+    archive(&h, &control);
 
-    let err = svc
-        .delete_realm(grpc_req(
-            &token,
-            pb::DeleteRealmRequest {
-                id: target.as_uuid().to_string(),
-            },
-        ))
-        .await
-        .expect_err("gRPC DeleteRealm must honour the trust policy");
-
-    assert_eq!(err.code(), Code::PermissionDenied);
+    let (refused, body) = rest_realm(&h, "DELETE", &token, &target).await;
+    assert_eq!(refused, StatusCode::FORBIDDEN, "{body}");
     assert!(
         h.identity().get_realm(&target).expect("lookup").is_some(),
         "the realm must not be deleted"
     );
+
+    let (deleted, body) = rest_realm(&h, "DELETE", &token, &control).await;
+    assert_eq!(deleted, StatusCode::NO_CONTENT, "control: {body}");
+    assert!(
+        h.identity().get_realm(&control).expect("lookup").is_none(),
+        "control: the ungoverned archived realm is purged"
+    );
 }
 
 /// Ungoverned pairs stay permissive-with-audit, and a policy that grants
-/// `hearth.admin` allows the crossing — the gRPC side must not over-refuse.
+/// `hearth.admin` allows the crossing — enforcement must not over-refuse.
 #[tokio::test]
 async fn get_realm_permitted_when_ungoverned_or_granted() {
     let h = common::TestHarness::embedded().await.expect("harness");
-    let svc = make_svc(&h);
     let token = system_admin_token(&h);
     let ungoverned = tenant_realm(&h);
     let granted = tenant_realm(&h);
-    h.identity()
-        .create_cross_realm_policy(
-            &granted,
-            &CreateCrossRealmPolicyRequest {
-                source_realm_id: system_realm(),
-                allowed_capabilities: vec!["hearth.admin".to_string()],
-                expires_in_secs: None,
-            },
-        )
-        .expect("store policy");
+    store_policy(&h, &granted, "hearth.admin");
 
     for target in [&ungoverned, &granted] {
-        let realm = svc
-            .get_realm(grpc_req(
-                &token,
-                pb::GetRealmRequest {
-                    id: target.as_uuid().to_string(),
-                },
-            ))
-            .await
-            .expect("crossing must be permitted")
-            .into_inner();
-        assert_eq!(realm.id, target.as_uuid().to_string());
+        let (status, body) = rest_realm(&h, "GET", &token, target).await;
+        assert_eq!(status, StatusCode::OK, "crossing must be permitted: {body}");
+        assert_eq!(body["id"], target.as_uuid().to_string(), "{body}");
     }
 }
 
-/// gRPC `DeleteRealm` writes the audit event REST `DELETE /admin/realms/{id}`
-/// writes: `realm_deleted`, in the system realm (the deleted realm's own key
-/// space must stay empty), attributed to the caller.
+/// `DELETE /admin/realms/{id}` writes `realm_deleted` in the system realm (the
+/// deleted realm's own key space must stay empty), attributed to the caller.
 #[tokio::test]
-async fn grpc_delete_realm_is_audited_like_rest() {
+async fn delete_realm_is_audited_in_the_system_realm() {
     let h = common::TestHarness::embedded().await.expect("harness");
-    let svc = make_svc(&h);
     let (operator_id, token) = system_admin(&h);
     let target = tenant_realm(&h);
-    h.identity()
-        .update_realm(
-            &target,
-            &UpdateRealmRequest {
-                status: Some(RealmStatus::Archived),
-                ..UpdateRealmRequest::default()
-            },
-        )
-        .expect("archive realm");
+    archive(&h, &target);
 
-    svc.delete_realm(grpc_req(
-        &token,
-        pb::DeleteRealmRequest {
-            id: target.as_uuid().to_string(),
-        },
-    ))
-    .await
-    .expect("DeleteRealm on an archived realm");
+    let (status, body) = rest_realm(&h, "DELETE", &token, &target).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
 
     let events = h
         .audit()

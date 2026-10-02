@@ -1,41 +1,27 @@
-//! GA audit round 3 — G-7: gRPC `CreateRealm` / `UpdateRealm` are refused.
+//! GA audit round 3 — G-7: realms are declared in `hearth.yaml`, so
+//! `POST /admin/realms` and `PATCH /admin/realms/{id}` are refused with `405`
+//! and the YAML-managed message, and touch nothing.
 //!
-//! Realms are declared in `hearth.yaml`; REST `POST /admin/realms` and
-//! `PATCH /admin/realms/{id}` answer 405 for that reason. The gRPC twins were
-//! still live, and `UpdateRealm` replaced the realm's WHOLE config with the
-//! three fields the proto carries plus defaults — a "change the session TTL"
-//! call silently dropped `mfa_required`, the CIDR policy, the lockout policy,
-//! the SCIM bearer token, webhooks and the FAPI profile until the next YAML
-//! reload. Both RPCs now answer `FAILED_PRECONDITION` with the REST message,
-//! after admin authentication, and touch nothing.
+//! The removed gRPC `UpdateRealm` once replaced the realm's WHOLE config with
+//! the three fields its message carried — a "change the session TTL" call
+//! silently dropped the SCIM bearer token, the lockout policy and the rest.
+//! These tests pin that the only remaining runtime surface cannot do that.
 
 mod common;
 
 use std::sync::Arc;
 
+use axum::body::{to_bytes, Body};
+use axum::http::{Request, StatusCode};
 use hearth::core::RealmId;
 use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, RealmConfig, RealmStatus, SessionContext,
 };
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::identity::IdentityAdminSvc;
-use hearth::protocol::grpc::server::GrpcState;
-use hearth::protocol::proto::identity::v1::{
-    self as pb, identity_admin_service_server::IdentityAdminService,
-};
+use hearth::protocol::admin_auth::REALMS_ARE_YAML_MANAGED;
+use hearth::protocol::http::{router, AppState};
 use hearth::rbac::{AssignRoleRequest, Scope, Subject};
-use tonic::{Code, Request};
-
-const REFUSAL: &str = "Realms are managed via hearth.yaml. Remove this endpoint from your client.";
-
-fn make_svc(h: &common::TestHarness) -> IdentityAdminSvc {
-    IdentityAdminSvc::new(GrpcState::new(
-        h.identity_arc(),
-        h.rbac_arc(),
-        h.audit_arc(),
-        Arc::new(AdminRateLimiter::new()),
-    ))
-}
+use serde_json::{json, Value};
+use tower::ServiceExt as _;
 
 fn assign_realm_admin(h: &common::TestHarness, realm: &RealmId, user: &hearth::identity::User) {
     let role = h
@@ -121,53 +107,64 @@ fn system_admin_token(h: &common::TestHarness) -> String {
     mint(h, &sys, &user)
 }
 
-fn grpc_req<T>(realm_id: &RealmId, token: &str, msg: T) -> Request<T> {
-    let mut r = Request::new(msg);
-    r.metadata_mut().insert(
-        "authorization",
-        format!("Bearer {token}").parse().expect("valid header"),
-    );
-    r.metadata_mut().insert(
-        "x-realm-id",
-        realm_id
-            .as_uuid()
-            .to_string()
-            .parse()
-            .expect("valid header"),
-    );
-    r
+async fn rest(
+    h: &common::TestHarness,
+    method: &str,
+    uri: &str,
+    realm: &RealmId,
+    token: &str,
+    body: Option<&Value>,
+) -> (StatusCode, Value) {
+    let app = router(Arc::new(AppState::new(
+        h.identity_arc(),
+        h.rbac_arc(),
+        h.audit_arc(),
+    )));
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("x-realm-id", realm.as_uuid().to_string())
+        .header("authorization", format!("Bearer {token}"))
+        .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+        .expect("build request");
+    let resp = app.oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.expect("body");
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
-/// The audit trigger: a realm admin "changes the session TTL" over gRPC. This
-/// must be refused and the stored config must keep every field it had.
+fn assert_yaml_managed_refusal(status: StatusCode, body: &Value) {
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert_eq!(body["message"], REALMS_ARE_YAML_MANAGED, "{body}");
+}
+
+/// The audit trigger: a realm admin "changes the session TTL". This must be
+/// refused and the stored config must keep every field it had.
 #[tokio::test]
 async fn update_realm_is_refused_and_leaves_config_intact() {
     let h = common::TestHarness::embedded().await.expect("harness");
-    let svc = make_svc(&h);
     let (realm_id, token) = tenant_realm_with_config(&h);
+    let uri = format!("/admin/realms/{}", realm_id.as_uuid());
 
-    let err = svc
-        .update_realm(grpc_req(
-            &realm_id,
-            &token,
-            pb::UpdateRealmCall {
-                id: realm_id.as_uuid().to_string(),
-                body: Some(pb::UpdateRealmRequest {
-                    name: None,
-                    status: None,
-                    config: Some(pb::RealmConfig {
-                        session_ttl_micros: Some(3_600_000_000),
-                        password_memory_cost: None,
-                        password_time_cost: None,
-                    }),
-                }),
-            },
-        ))
-        .await
-        .expect_err("gRPC UpdateRealm must be refused: realms are YAML-managed");
+    // Control: the route and realm exist and the token is a working admin.
+    let (ok, body) = rest(&h, "GET", &uri, &realm_id, &token, None).await;
+    assert_eq!(ok, StatusCode::OK, "control: {body}");
 
-    assert_eq!(err.code(), Code::FailedPrecondition);
-    assert_eq!(err.message(), REFUSAL);
+    let (status, body) = rest(
+        &h,
+        "PATCH",
+        &uri,
+        &realm_id,
+        &token,
+        Some(&json!({"config": {"session_ttl_micros": 3_600_000_000_u64}})),
+    )
+    .await;
+    assert_yaml_managed_refusal(status, &body);
+
     let stored = h
         .identity()
         .get_realm(&realm_id)
@@ -187,12 +184,12 @@ async fn update_realm_is_refused_and_leaves_config_intact() {
 }
 
 /// The status and rename variants are refused the same way: a realm cannot be
-/// suspended or detached from its YAML entry over gRPC.
+/// suspended or detached from its YAML entry.
 #[tokio::test]
 async fn update_realm_status_and_name_are_refused() {
     let h = common::TestHarness::embedded().await.expect("harness");
-    let svc = make_svc(&h);
     let (realm_id, token) = tenant_realm_with_config(&h);
+    let uri = format!("/admin/realms/{}", realm_id.as_uuid());
     let original_name = h
         .identity()
         .get_realm(&realm_id)
@@ -201,23 +198,21 @@ async fn update_realm_status_and_name_are_refused() {
         .name()
         .to_string();
 
-    let err = svc
-        .update_realm(grpc_req(
-            &realm_id,
-            &token,
-            pb::UpdateRealmCall {
-                id: realm_id.as_uuid().to_string(),
-                body: Some(pb::UpdateRealmRequest {
-                    name: Some("detached".into()),
-                    status: Some(pb::RealmStatus::Suspended as i32),
-                    config: None,
-                }),
-            },
-        ))
-        .await
-        .expect_err("status/name update must be refused");
+    let (ok, body) = rest(&h, "GET", &uri, &realm_id, &token, None).await;
+    assert_eq!(ok, StatusCode::OK, "control: {body}");
+    assert_eq!(body["name"], original_name.as_str(), "control: {body}");
 
-    assert_eq!(err.code(), Code::FailedPrecondition);
+    let (status, body) = rest(
+        &h,
+        "PATCH",
+        &uri,
+        &realm_id,
+        &token,
+        Some(&json!({"name": "detached", "status": "suspended"})),
+    )
+    .await;
+    assert_yaml_managed_refusal(status, &body);
+
     let stored = h
         .identity()
         .get_realm(&realm_id)
@@ -227,28 +222,29 @@ async fn update_realm_status_and_name_are_refused() {
     assert_eq!(stored.name(), original_name);
 }
 
-/// System-realm admins could create realms over gRPC while REST answers 405.
+/// A system-realm admin cannot create a realm either.
 #[tokio::test]
 async fn create_realm_is_refused_for_system_admin() {
     let h = common::TestHarness::embedded().await.expect("harness");
-    let svc = make_svc(&h);
     let token = system_admin_token(&h);
+    let sys = RealmId::new(uuid::Uuid::nil());
     let name = format!("ga3-created-{}", uuid::Uuid::new_v4());
 
-    let err = svc
-        .create_realm(grpc_req(
-            &RealmId::new(uuid::Uuid::nil()),
-            &token,
-            pb::CreateRealmRequest {
-                name: name.clone(),
-                config: None,
-            },
-        ))
-        .await
-        .expect_err("gRPC CreateRealm must be refused: realms are YAML-managed");
+    // Control: the same path answers GET for this admin, so the 405 below is
+    // the method refusal, not a missing route or a bad token.
+    let (ok, body) = rest(&h, "GET", "/admin/realms", &sys, &token, None).await;
+    assert_eq!(ok, StatusCode::OK, "control: {body}");
 
-    assert_eq!(err.code(), Code::FailedPrecondition);
-    assert_eq!(err.message(), REFUSAL);
+    let (status, body) = rest(
+        &h,
+        "POST",
+        "/admin/realms",
+        &sys,
+        &token,
+        Some(&json!({"name": name})),
+    )
+    .await;
+    assert_yaml_managed_refusal(status, &body);
     assert!(
         h.identity()
             .get_realm_by_name(&name)
@@ -256,31 +252,4 @@ async fn create_realm_is_refused_for_system_admin() {
             .is_none(),
         "no realm may be created by a refused call"
     );
-}
-
-/// The refusal sits behind admin authentication like every other RPC on the
-/// service: an anonymous caller learns nothing but `UNAUTHENTICATED`.
-#[tokio::test]
-async fn refused_realm_rpcs_still_authenticate_first() {
-    let h = common::TestHarness::embedded().await.expect("harness");
-    let svc = make_svc(&h);
-    let (realm_id, _token) = tenant_realm_with_config(&h);
-
-    let update = svc
-        .update_realm(Request::new(pb::UpdateRealmCall {
-            id: realm_id.as_uuid().to_string(),
-            body: Some(pb::UpdateRealmRequest::default()),
-        }))
-        .await
-        .expect_err("anonymous update must fail");
-    let create = svc
-        .create_realm(Request::new(pb::CreateRealmRequest {
-            name: "anon".into(),
-            config: None,
-        }))
-        .await
-        .expect_err("anonymous create must fail");
-
-    assert_eq!(update.code(), Code::Unauthenticated);
-    assert_eq!(create.code(), Code::Unauthenticated);
 }

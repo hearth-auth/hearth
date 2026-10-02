@@ -310,7 +310,7 @@ abuse-check:
 
 ## Guard: auth results in protocol handler files must never be discarded (HEA-1657).
 ## Fails on `let _auth`, `let _ = extract_admin_auth(...)`, or unbound auth calls in
-## src/protocol/http/admin.rs and src/protocol/grpc/*.rs.
+## src/protocol/http/admin.rs and src/protocol/http/admin/*.rs.
 auth-discard-check: ## Lint for discarded authentication results (HEA-1657)
 	@bash scripts/check-auth-discard.sh
 

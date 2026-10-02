@@ -1,14 +1,15 @@
 #![allow(clippy::unwrap_used)]
-//! Adversarial and unit tests for A-43 (gRPC reflection production-disable)
-//! and A-44 (TLS 0-RTT off + mTLS OCSP/CRL).
+//! Adversarial and unit tests for the shared rustls server configuration:
+//! A-44 (TLS 0-RTT off + mTLS CRL) and HEA-SEC-33 (`security.tls.min_version`).
 //!
-//! D-4 taxonomy: negative-scenario (adversarial) + unit per §3.46–§3.47.
+//! D-4 taxonomy: negative-scenario (adversarial) + unit per §3.47. (Moved from
+//! `abuse_grpc_tls.rs` when the public gRPC API and its reflection tests,
+//! A-43, were removed.)
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use hearth::protocol::grpc::resolve_grpc_reflection;
 use hearth::protocol::tls::{build_server_config, load_crls, TlsConfigParams};
 use tempfile::TempDir;
 
@@ -80,81 +81,6 @@ fn base_params(dir: &Path) -> (TlsConfigParams, PathBuf, PathBuf) {
         tls13_only: false,
     };
     (params, cert_path, key_path)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// A-43 — gRPC reflection production-disable
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Unit: `reflection_enabled = None` resolves to `false` in production (dev=false).
-#[test]
-fn a43_reflection_defaults_false_in_prod() {
-    let effective = resolve_grpc_reflection(None, false, false)
-        .expect("None config in prod must not trigger the guard");
-    assert!(!effective, "reflection must default to false in production");
-}
-
-/// Unit: `reflection_enabled = None` resolves to `true` in dev mode.
-#[test]
-fn a43_reflection_defaults_true_in_dev() {
-    let effective =
-        resolve_grpc_reflection(None, true, false).expect("None config in dev must be allowed");
-    assert!(effective, "reflection must default to true in dev mode");
-}
-
-/// Adversarial: explicit `Some(true)` in prod without escape hatch is refused.
-#[test]
-fn a43_reflection_true_in_prod_is_rejected() {
-    let result = resolve_grpc_reflection(Some(true), false, false);
-    assert!(
-        result.is_err(),
-        "startup guard must fire when reflection=true in prod without --allow-reflection-in-prod"
-    );
-}
-
-/// Unit: explicit `Some(true)` in prod WITH escape hatch is allowed.
-#[test]
-fn a43_reflection_true_in_prod_with_flag_is_allowed() {
-    let effective = resolve_grpc_reflection(Some(true), false, true)
-        .expect("guard must NOT fire when --allow-reflection-in-prod is passed");
-    assert!(
-        effective,
-        "reflection must be effectively enabled when explicitly on with the override"
-    );
-}
-
-/// Unit: explicit `Some(false)` in prod with escape hatch keeps reflection off.
-#[test]
-fn a43_reflection_explicit_false_never_enabled() {
-    for dev_mode in [true, false] {
-        for allow in [true, false] {
-            let effective = resolve_grpc_reflection(Some(false), dev_mode, allow)
-                .expect("explicit false never triggers the guard");
-            assert!(
-                !effective,
-                "explicit false must disable reflection in any mode (dev={dev_mode}, allow={allow})"
-            );
-        }
-    }
-}
-
-/// Config deserialization: `security.grpc.reflection_enabled` round-trips correctly.
-#[test]
-fn a43_config_grpc_reflection_enabled_deserializes() {
-    use hearth::config::SecurityYaml;
-    use serde_norway::from_str;
-
-    let yaml = "grpc:\n  reflection_enabled: true\n";
-    let sec: SecurityYaml = from_str(yaml).expect("deser");
-    assert_eq!(sec.grpc.reflection_enabled, Some(true));
-
-    let yaml_false = "grpc:\n  reflection_enabled: false\n";
-    let sec_false: SecurityYaml = from_str(yaml_false).expect("deser");
-    assert_eq!(sec_false.grpc.reflection_enabled, Some(false));
-
-    let yaml_absent = "";
-    let sec_absent: SecurityYaml = from_str(yaml_absent).expect("deser");
-    assert_eq!(sec_absent.grpc.reflection_enabled, None);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

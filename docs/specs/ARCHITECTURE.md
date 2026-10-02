@@ -26,7 +26,7 @@ Hearth is organized into five architectural layers plus a shared core module:
 | Module | Path | Responsibility |
 |--------|------|----------------|
 | **Core** | `src/core/` | Shared types (`UserId`, `RealmId`, `SessionId`, `Timestamp`), error traits, the `Clock` trait, and other foundational types used by every layer. Contains only types and traits — no logic, no state, no I/O. |
-| **Protocol** | `src/protocol/` | Wire format translation: HTTP REST, gRPC, OIDC, OAuth 2.0, SAML, SCIM, WebAuthn. Thin adapters that translate wire requests into Identity Engine calls and serialize responses. Stateless. |
+| **Protocol** | `src/protocol/` | Wire format translation: HTTP REST, OIDC, OAuth 2.0, SAML, SCIM, WebAuthn. Thin adapters that translate wire requests into Identity Engine calls and serialize responses. Stateless. |
 | **Identity Engine** | `src/identity/` | Domain logic: users, credentials, sessions, realms, tokens, audit. Orchestrates authentication flows. Enforces the opinionated decisions about supported flows. |
 | **Authorization Engine** | `src/rbac/` | Claims-based RBAC: roles, groups, permissions, role assignments. Resolves a user's effective permissions at token-issue time for embedding in JWT claims. See [AUTHORIZATION.md](./AUTHORIZATION.md) for the normative model. |
 | **Cluster** | `src/cluster/` | Raft consensus via `openraft`, log replication, leader election, membership changes, snapshots. Wraps the storage engine — in clustered mode, writes go through Raft before reaching storage. Skipped entirely in single-node mode. |
@@ -142,7 +142,7 @@ All API contracts MUST be defined in `.proto` files. Protobuf is the single sour
 **Rules:**
 
 - `.proto` files MUST live in `proto/` at the project root.
-- REST and gRPC endpoints MUST serialize from protobuf-generated Rust types (via `prost`).
+- REST endpoints MUST serialize from protobuf-generated Rust types (via `prost`, with the `pbjson` JSON codec). The `service` blocks in `proto/` are schema only: no gRPC server or client code is generated for them (see [`PROTO.md`](./PROTO.md)).
 - Event schemas (webhooks, streaming) MUST use protobuf definitions from the same `.proto` files.
 - Standard protocol shapes (OIDC, OAuth 2.0) MUST have `.proto` definitions that mirror their RFC-mandated schemas.
 - SDK type generation SHOULD be derived from the `.proto` definitions.
@@ -151,20 +151,20 @@ All API contracts MUST be defined in `.proto` files. Protobuf is the single sour
 ### 4.2 Wire Protocols
 
 - **REST** (JSON over HTTP) is the primary wire protocol, required from Phase 0. Standard protocol endpoints (OIDC, OAuth 2.0, SAML, SCIM) MUST conform strictly to their respective RFCs.
-- **gRPC** SHOULD be supported as a secondary interface by Phase 1, for service-to-service communication in microservice environments.
-- The HTTP framework MUST be `tower`-compatible to share middleware with the gRPC stack (`tonic`). The specific framework choice is an implementation decision.
+- **There is no public gRPC API.** It was removed in 3.0.0; every admin operation is served over REST under `/admin`. gRPC (`tonic`) remains only as the internal node-to-node Raft transport of the cluster layer (§16), which is not a client API.
+- The HTTP framework MUST be `tower`-compatible. The specific framework choice is an implementation decision.
 - The **Identity Engine MUST NOT depend on any wire format or serialization framework.** Protocol adapters are thin translation layers that call into the Identity Engine's trait interface. This decoupling ensures new wire formats can be added without restructuring the core.
 
-### 4.2.1 Authorization HTTP & gRPC Surface
+### 4.2.1 Authorization HTTP Surface
 
-Full reference: [`AUTHORIZATION.md`](./AUTHORIZATION.md) — normative model, JWT claim schema, HTTP & gRPC endpoints, SDK contract.
+Full reference: [`AUTHORIZATION.md`](./AUTHORIZATION.md) — normative model, JWT claim schema, HTTP endpoints, SDK contract.
 
 Summary of the surface this document is responsible for:
 
 - **JWT claims** carry `roles`, `groups`, `permissions`, and (when org-scoped) `oid`. Clients read these synchronously for authorization decisions. See [AUTHORIZATION.md § 5](./AUTHORIZATION.md).
 - **`GET /v1/me/permissions`** — live-introspection escape hatch for backends that want to re-resolve permissions during long-running operations without trusting a possibly-stale JWT. See [AUTHORIZATION.md § 8.1](./AUTHORIZATION.md).
 - **Admin endpoints** under `/admin/roles`, `/admin/groups`, `/admin/users/{id}/roles`, `/admin/groups/{id}/members`, `/admin/groups/{id}/roles` — full CRUD and introspection. Gated by the `hearth.admin` permission. See [AUTHORIZATION.md § 8.2](./AUTHORIZATION.md).
-- **gRPC `RbacAdminService`** — mirror of the admin HTTP surface for service-to-service callers. No service-to-service `Check` RPC; callers decode the JWT locally.
+- No service-to-service `Check` endpoint; callers decode the JWT locally.
 
 #### Permission-delivery modes and hot-path designation
 
@@ -197,7 +197,7 @@ incompatible, startup MUST fail with a clear error directing the operator to re-
 
 **Post-1.0-GA (in force)**:
 
-- HTTP/gRPC endpoints MUST be versioned (`/v1/...`). Breaking changes require a new API version. Previous versions MUST be supported for at least one major release.
+- HTTP endpoints MUST be versioned (`/v1/...`). Breaking changes require a new API version. Previous versions MUST be supported for at least one major release.
 - Config changes MUST NOT break existing config files. New required fields MUST have defaults. Removed fields MUST produce a clear error, not silent behavior change.
 - On-disk format changes MUST include automatic migration on startup. Hearth MUST read data written by the previous minor version without manual intervention.
 
@@ -471,7 +471,7 @@ All entity IDs MUST be distinct newtypes: `struct UserId(Uuid)`, `struct Session
 
 ### 12.4 Serialization
 
-- **Wire format**: JSON for REST, Protobuf for gRPC. Both generated from `.proto` definitions (see [Section 4.1](#41-protobuf-as-single-source-of-truth)).
+- **Wire format**: JSON for REST, with request/response types generated from `.proto` definitions (see [Section 4.1](#41-protobuf-as-single-source-of-truth)).
 - **Storage format**: A compact binary format defined by the storage engine, optimized for identity access patterns. NOT JSON. NOT Protobuf. The storage format is internal and opaque to upper layers.
 - Serialization round-trips (`deserialize(serialize(x)) == x`) MUST be verified by property tests.
 
@@ -557,7 +557,7 @@ These crates are pre-approved and need no additional justification:
 | Serialization | `serde`, `serde_json` | Derive-based |
 | Protobuf | `prost`, `prost-build`, `pbjson` | API contract codegen |
 | Protobuf toolchain | `buf` | Linting, breaking change detection, codegen |
-| gRPC | `tonic` | `tower`-compatible |
+| gRPC (internal Raft peer transport only) | `tonic` | `tower`-compatible; no public gRPC API |
 | Logging | `tracing`, `tracing-subscriber` | Structured, async-aware |
 | CLI | `clap` | Derive-based |
 | Lock-free concurrency | `crossbeam-epoch` (via `core::EpochCell`) | `arc-swap` is banned — see §9.1 |
@@ -636,7 +636,7 @@ hearth/
 ├── src/
 │   ├── main.rs                 # Binary entry point
 │   ├── core/                   # Shared types, traits, error foundations
-│   ├── protocol/               # Wire format adapters (REST, gRPC, OIDC, SAML, SCIM)
+│   ├── protocol/               # Wire format adapters (REST, OIDC, SAML, SCIM)
 │   ├── identity/               # Domain logic (users, credentials, sessions, realms)
 │   ├── rbac/                   # Claims-based RBAC engine (see AUTHORIZATION.md)
 │   ├── cluster/                # Raft consensus (openraft)
@@ -688,7 +688,7 @@ Key architectural decisions codified in this document, with rationale:
 | Cluster consensus | `openraft` | Proven library, not custom — Raft is subtle and `openraft` is battle-tested |
 | Config format | YAML | Operators manage infrastructure with YAML; Hearth targets ops engineers, not Rust developers |
 | Config lifecycle | Immutable after startup | Simplifies concurrency model — config loaded once into `Arc<Config>`, no synchronization |
-| API contracts | Protobuf (`.proto` files) | Single source of truth for REST, gRPC, events, and SDK codegen |
+| API contracts | Protobuf (`.proto` files) | Single source of truth for REST, events, and SDK codegen |
 | Audit trail | WAL-derived, async materialization | Zero write-path overhead; WAL is the durable record, audit store is a materialized view |
 | Embedded mode | Not supported | FFI tax unjustified without proven demand; sync core makes future addition feasible |
 | Unsafe code | Lean on crates | `memmap2`, `crossbeam-epoch` over custom `unsafe`. Matches Hearth's "leverage ecosystem" philosophy |

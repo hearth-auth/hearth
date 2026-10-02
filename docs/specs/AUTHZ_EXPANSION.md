@@ -398,8 +398,11 @@ pub struct OrganizationMembership {
 //   - remove_additional_role(org_id, user_id, role_name) -> Result<(), RbacError>
 //   - list_additional_roles(org_id, user_id) -> Vec<RoleName>
 //
-// gRPC additions in proto/hearth/rbac/v1/rbac.proto: AddOrgMemberRole,
-// RemoveOrgMemberRole, ListOrgMemberAdditionalRoles RPCs.
+// Schema additions in proto/hearth/rbac/v1/rbac.proto: AddOrgMemberRole,
+// RemoveOrgMemberRole, ListOrgMemberAdditionalRoles RPCs (schema only since 3.0.0
+// removed the public gRPC API; served over REST as
+// GET/POST /admin/organizations/{id}/members/{user_id}/roles and
+// DELETE /admin/organizations/{id}/members/{user_id}/roles/{role_name}).
 
 // Audit events (new):
 //   - OrgMemberAdditionalRoleAdded   { actor, org_id, user_id, role_name }

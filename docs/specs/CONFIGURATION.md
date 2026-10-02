@@ -115,7 +115,7 @@ Network binding and TLS configuration.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `bind_address` | string | `"127.0.0.1"` | IP address to bind the HTTP(S) listener to. Use `"0.0.0.0"` for all interfaces. **In `--dev` mode, the server refuses to start if this (or the gRPC bind) is non-loopback (HEA-1980).** |
+| `bind_address` | string | `"127.0.0.1"` | IP address to bind the HTTP(S) listener to. Use `"0.0.0.0"` for all interfaces. **In `--dev` mode, the server refuses to start if this is non-loopback (HEA-1980).** |
 | `port` | integer | `8420` | TCP port for the main listener. |
 | `tls_cert_path` | string | — | Path to a PEM-encoded TLS certificate. If set, `tls_key_path` MUST also be set. |
 | `tls_key_path` | string | — | Path to the PEM-encoded private key for the TLS certificate. |
@@ -124,13 +124,7 @@ Network binding and TLS configuration.
 | `trusted_proxies` | list of strings | `[]` | Trusted reverse proxies, each a single IP address (`10.0.0.7`, `2001:db8::7`) or a CIDR range (`10.42.0.0/16`, `2001:db8:42::/48`) — use a range when proxy addresses change, e.g. Kubernetes ingress-controller pods. When non-empty, the real client IP is extracted from `X-Forwarded-For` using the rightmost-non-trusted algorithm (a hop inside any listed range counts as trusted), `X-Forwarded-Proto` is honoured from a peer inside the list, and such peers are exempt from `operational.max_connections_per_ip`. When empty (the default), the peer socket address is used and both headers are ignored — the safe default for direct-to-internet deployments. Every entry is checked the same way by `hearth config validate` and at start-up; one bad entry refuses the whole config (nothing is silently dropped). Refused: anything that is not an address or `address/prefix`; a range with **host bits set** (`10.0.0.7/8` — write `10.0.0.0/8` for the range or `10.0.0.7` for the address; Hearth refuses rather than guess which you meant); the unspecified address or a range starting at it (`0.0.0.0`, `::`, `0.0.0.0/0`, `::/0`); and a range broader than `/8` (IPv4) or `/16` (IPv6), which would trust a large share of the internet. A loopback entry is refused on a non-loopback `bind_address`. An IPv4-mapped IPv6 entry (`::ffff:10.0.0.7`) is treated as its IPv4 form. |
 | `trust_forwarded_proto` | bool | `false` | Trust the `X-Forwarded-Proto: https` header when deciding whether a request arrived over HTTPS (session cookies carry `Secure`, HSTS is sent, the login Origin check). The header is honoured **only when the connection's TCP peer is listed in `trusted_proxies`**; from any other peer it is removed before the request is handled. **Requires a non-empty `trusted_proxies`** — setting it to `true` with an empty proxy list is refused at start-up and by `hearth config validate`, because the flag would then have no effect. |
 
-| `grpc_port` | integer | — (disabled) | TCP port for the gRPC management API. When unset, no gRPC listener is started. |
-| `grpc_bind_address` | string | `bind_address` | IP address for the gRPC listener. `127.0.0.1` keeps the management API host-local. |
-| `grpc_allow_plaintext` | bool | `false` | Outside `--dev`, a gRPC listener on a non-loopback address with no `tls_cert_path` is refused at start-up (it would carry admin bearer tokens, OAuth client secrets and agent API keys in clear text). Set `true` only when a proxy or service mesh terminates TLS for gRPC. Has no effect when `tls_cert_path` is set. |
-
 When TLS is enabled, Hearth also spawns an HTTP → HTTPS redirect listener on `port - 1` (or port 80 when `port: 443`). Send `SIGHUP` to hot-reload the certificate and key without downtime.
-
-When `tls_cert_path` / `tls_key_path` are set, the gRPC listener (`grpc_port`) serves **TLS with the same certificate** (ALPN `h2`), and inherits `tls_client_ca_path` / `tls_require_client_cert` and `security.tls.*`; a SIGHUP certificate reload reaches both listeners. Clients must connect with `https://`. Without a certificate, gRPC is plaintext — see `grpc_allow_plaintext`.
 
 ```yaml
 server:
@@ -254,7 +248,7 @@ storage:
 
 Multi-node Raft consensus configuration. **Omit this section entirely for single-node deployments** — when absent, Hearth runs in single-node mode with no clustering overhead, no extra port, and no Raft log.
 
-When present, Hearth starts a Raft engine and participates in peer-to-peer log replication over mTLS-secured gRPC. All three TLS certificate fields are required — plaintext peer connections are unconditionally rejected.
+When present, Hearth starts a Raft engine and participates in peer-to-peer log replication over mTLS-secured gRPC (an internal node-to-node transport, not a client API). All three TLS certificate fields are required — plaintext peer connections are unconditionally rejected.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -357,13 +351,13 @@ Operational limits and timeouts.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `request_timeout_secs` | integer | `30` | Maximum time in seconds for a single HTTP request. |
-| `shutdown_timeout_secs` | integer | `10` | Drain deadline in seconds after a shutdown signal (SIGINT or SIGTERM). Every listener — HTTP(S), the HTTP→HTTPS redirect, gRPC and the Raft peer server — stops accepting and starts draining at the signal, and all of them share this one deadline, so the whole drain takes at most this long. **Must be less than `terminationGracePeriodSeconds`** in Kubernetes; the Helm chart default is 60 s, leaving a 30 s buffer above the recommended production value of 30 s. |
-| `max_connections` | integer | `1024` | Maximum concurrent connections served per listener (the HTTP(S) listener, the redirect listener and the gRPC listener each have their own allowance). |
+| `shutdown_timeout_secs` | integer | `10` | Drain deadline in seconds after a shutdown signal (SIGINT or SIGTERM). Every listener — HTTP(S), the HTTP→HTTPS redirect and the Raft peer server — stops accepting and starts draining at the signal, and all of them share this one deadline, so the whole drain takes at most this long. **Must be less than `terminationGracePeriodSeconds`** in Kubernetes; the Helm chart default is 60 s, leaving a 30 s buffer above the recommended production value of 30 s. |
+| `max_connections` | integer | `1024` | Maximum concurrent connections served per listener (the HTTP(S) listener and the redirect listener each have their own allowance). |
 | `queue_depth` | integer | `4096` | Connections allowed to wait for one of the `max_connections` slots; past that, new connections are closed immediately. |
 | `max_connections_per_ip` | integer | `64` | Concurrent connections one client may hold — per IPv4 address, or per IPv6 `/64`. Further connections are closed immediately. `0` disables the cap. Peers listed in `server.trusted_proxies` are exempt, because every client behind a proxy shares its address; the cap is on the TCP peer, so `X-Forwarded-For` does not affect it. |
-| `header_read_timeout_secs` | integer | `10` | Seconds a client has to send its first bytes and each complete set of HTTP/1.1 request headers. Also closes an HTTP/1.1 keep-alive connection left idle this long, and a gRPC connection that does not send the HTTP/2 preface in time. Must be greater than 0. |
-| `tls_handshake_timeout_secs` | integer | `10` | Seconds a client has to complete the TLS handshake on the HTTPS and gRPC listeners. Must be greater than 0. |
-| `http2_keepalive_interval_secs` | integer | `30` | Seconds between HTTP/2 keep-alive `PING`s (HTTP and gRPC listeners); a peer that does not acknowledge within 20 s is disconnected. `0` disables pings. |
+| `header_read_timeout_secs` | integer | `10` | Seconds a client has to send its first bytes and each complete set of HTTP/1.1 request headers. Also closes an HTTP/1.1 keep-alive connection left idle this long. Must be greater than 0. |
+| `tls_handshake_timeout_secs` | integer | `10` | Seconds a client has to complete the TLS handshake on the HTTPS listener. Must be greater than 0. |
+| `http2_keepalive_interval_secs` | integer | `30` | Seconds between HTTP/2 keep-alive `PING`s (HTTP(S) listener); a peer that does not acknowledge within 20 s is disconnected. `0` disables pings. |
 
 Together, `max_connections_per_ip`, `header_read_timeout_secs` and `tls_handshake_timeout_secs` stop one client from holding every connection slot with requests it never finishes (GA audit 2026-09-28, B6).
 
@@ -761,8 +755,7 @@ queueing unboundedly.
 
 The shared pool also admits every **Argon2id client-secret verification** — a
 caller-chosen or legacy client secret presented at `/token`, `/introspect`,
-`/revoke`, `/device_authorization`, `/as/par`, their realm twins or the gRPC OAuth
-service (gRPC sheds with `UNAVAILABLE`). Such a request waits for its permit
+`/revoke`, `/device_authorization`, `/as/par`, or their realm twins. Such a request waits for its permit
 asynchronously — it holds no worker or blocking-pool thread while it waits, so a
 burst larger than the blocking pool is served or shed, never hung — for at most
 `max_queue_wait_ms`. The permit covers the Argon2id verification alone; the rest
@@ -862,7 +855,7 @@ Global per-IP and per-account rate-limit thresholds. These are the server-wide d
 | `login_per_ip.window_seconds` | integer | `60` | Sliding window length in seconds for per-IP failed-login counting. |
 | `login_per_account.max_failures` | integer | `5` | Maximum consecutive failures for a single account before it is locked out. |
 | `login_per_account.lockout_seconds` | integer | `300` | Duration (seconds) of the account lockout after `max_failures` is reached. |
-| `admin_per_minute` | integer | `100` | Maximum admin-API requests per minute per admin user, shared across the REST and gRPC surfaces. Requests beyond the cap receive `429 Too Many Requests`. Set to `0` to disable the limiter entirely. |
+| `admin_per_minute` | integer | `100` | Maximum admin-API requests per minute per admin user. Requests beyond the cap receive `429 Too Many Requests`. Set to `0` to disable the limiter entirely. |
 | `token_per_minute` | integer | `200` | Maximum OAuth token, pushed-authorization (`/as/par`), introspection, revocation and device-authorization requests per minute per `(realm, client)` pair, counted before the client is authenticated — keyed on the claimed `client_id` (body, else Basic username), or on the client IP when there is none. `/as/par` (and its realm twin) has its **own** budget of this size, so a login's push and its code exchange each draw on a separate bucket; the other endpoints share one. Set to `0` to disable the limiter entirely. |
 
 ```yaml
@@ -957,12 +950,12 @@ security:
 
 #### `security.request_shaper`
 
-Global per-client and per-realm one-second sliding-window request limiter (A-2), shared by the HTTP and gRPC listeners. It is **on by default**: when the section is absent the defaults below apply. Set a field to `0` to turn that dimension off (for example when an upstream proxy already rate-limits). A shed request answers `429` with `{"limiter":"shaper"}` (gRPC: `RESOURCE_EXHAUSTED`). Browser static assets (`/ui/static/*`, the favicons) are not counted.
+Global per-client and per-realm one-second sliding-window request limiter (A-2), applied to the HTTP(S) listener. It is **on by default**: when the section is absent the defaults below apply. Set a field to `0` to turn that dimension off (for example when an upstream proxy already rate-limits). A shed request answers `429` with `{"limiter":"shaper"}`. Browser static assets (`/ui/static/*`, the favicons) are not counted.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `ip_rps` | integer | `100` | Maximum requests per second from one client across all endpoints. A client is an IPv4 address, or an IPv6 `/64` (one host is routinely assigned a whole `/64`). `0` disables. |
-| `realm_rps` | integer | `1000` | Maximum requests per second to one realm, across all clients. A request counts against a realm only when it names one: the realm segment of a `/realms/{realm}/…`, `/ui/realms/{realm}/…` or `/v1/{realm}/…` path, otherwise a UUID `X-Realm-ID` header (gRPC: `x-realm-id` metadata). Requests that name no realm — `/health`, root discovery, the admin console — are limited per client only. A realm addressed by name on one route and by id on another is counted in two buckets. `0` disables. |
+| `realm_rps` | integer | `1000` | Maximum requests per second to one realm, across all clients. A request counts against a realm only when it names one: the realm segment of a `/realms/{realm}/…`, `/ui/realms/{realm}/…` or `/v1/{realm}/…` path, otherwise a UUID `X-Realm-ID` header. Requests that name no realm — `/health`, root discovery, the admin console — are limited per client only. A realm addressed by name on one route and by id on another is counted in two buckets. `0` disables. |
 
 Every in-process rate limiter (this one, the JWKS/discovery, token, admin and export limiters, the login tarpit and CAPTCHA challenge store, and the A-3/A-4/A-50 detectors) keeps its per-key state in a bounded map: entries are dropped once their window closes, and each limiter holds at most a fixed number of keys (100 000; 16 384 realm buckets; 65 536 per detector dimension), evicting the soonest-expiring entries when full. Per-IP limiters all bucket IPv6 per `/64`, like `operational.max_connections_per_ip`.
 
@@ -1154,22 +1147,6 @@ security:
 
 ---
 
-#### `security.grpc`
-
-gRPC-specific security settings (A-43).
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `reflection_enabled` | bool | `false` (prod), `true` (dev) | Whether the gRPC server reflection service is exposed. Reflection reveals the full API schema to unauthenticated callers — keep disabled in production. Enabling in production also requires the `--allow-reflection-in-prod` CLI flag; the server refuses to start without it. |
-
-```yaml
-security:
-  grpc:
-    reflection_enabled: false
-```
-
----
-
 #### `security.tls`
 
 TLS-specific security settings (A-44).
@@ -1215,7 +1192,7 @@ measuring the rate limiter.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `load_test_unthrottled` | bool | `false` | When `true`, disables ALL request-rate limiters: token endpoint, admin API, export, and the per-IP/per-realm request shaper. Refused at startup unless **both** conditions are met: the server is running in `--dev` mode (`hearth serve --dev`) **and** every bind address (HTTP and gRPC) is loopback (127.0.0.0/8 or ::1). |
+| `load_test_unthrottled` | bool | `false` | When `true`, disables ALL request-rate limiters: token endpoint, admin API, export, and the per-IP/per-realm request shaper. Refused at startup unless **both** conditions are met: the server is running in `--dev` mode (`hearth serve --dev`) **and** the HTTP bind address is loopback (127.0.0.0/8 or ::1). |
 
 > **Security warning:** Never enable on a production or externally-reachable
 > bind. This removes brute-force, credential-stuffing, and abuse protection.
@@ -1225,9 +1202,8 @@ measuring the rate limiter.
 >    (nginx, Caddy, Cloudflare) is still reachable from the internet. Requiring
 >    `--dev` ensures unthrottled load testing is impossible on any binary
 >    started with a production config.
-> 2. **Every bind must be loopback.** Both the HTTP listener (`server.bind_address`)
->    and the gRPC listener (`server.grpc_bind_address`, when enabled) must resolve
->    to 127.0.0.0/8 or ::1. A wildcard (`0.0.0.0` / `::`) is not loopback and
+> 2. **The bind must be loopback.** The HTTP listener (`server.bind_address`) must
+>    resolve to 127.0.0.0/8 or ::1. A wildcard (`0.0.0.0` / `::`) is not loopback and
 >    causes the server to refuse the flag and keep all limiters on.
 
 When `load_test_unthrottled` is active the server emits an observable signal so
@@ -1255,7 +1231,7 @@ Staged capability gate for agent authentication. Features are enabled per-capabi
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `capabilities.identity` | bool | `false` | **Phase A.** Agent identity surface: `POST/GET/PATCH/DELETE /v1/agents`, credential management (`/v1/agents/{id}/credentials/keys`, `/v1/agents/{id}/credentials`), `GET /.well-known/agent.json`, and gRPC agent methods on `IdentityAdminService`. |
+| `capabilities.identity` | bool | `false` | **Phase A.** Agent identity surface: `POST/GET/PATCH/DELETE /v1/agents`, credential management (`/v1/agents/{id}/credentials/keys`, `/v1/agents/{id}/credentials`), and `GET /.well-known/agent.json`. |
 | `capabilities.approval` | bool | `false` | **Phase B+C.** Approval request lifecycle and tool-level permissions. Adds `POST/GET /v1/approval-requests`, `POST /v1/approval-requests/{id}/approve`, `POST /v1/approval-requests/{id}/deny`, and `POST /v1/tools/invoke`. Requires `identity: true`. |
 | `capabilities.advanced` | bool | `false` | **Phase D.** Attenuating Authorization Tokens (AATs), transaction tokens, cross-realm trust policies, and SPIFFE/mTLS workload identity. Adds `/v1/aats`, `/v1/transaction-tokens`, `/v1/spiffe-mappings`, `/v1/cross-realm-policies`. Requires `identity: true`. |
 
@@ -1731,6 +1707,23 @@ to start:
 ```
 configuration key 'realms.corp.saml_service_providers' is no longer supported: the SAML IdP side (Hearth issuing assertions to service providers) was removed in Hearth 3.0.0. Remove the key from the configuration. Instead: Hearth stays a SAML service provider; connect applications to Hearth over OpenID Connect.
 ```
+
+---
+
+### `server.grpc_port`, `server.grpc_bind_address`, `server.grpc_allow_plaintext`, `security.grpc` — removed in 3.0.0
+
+These keys configured the public gRPC management API and its listener (and, under
+`security.grpc`, the reflection service). The public gRPC API was removed in 3.0.0;
+every admin operation is available over the REST admin API under `/admin`. The
+`hearth serve --allow-reflection-in-prod` flag went with it. A configuration that
+still sets any of these keys refuses to start:
+
+```
+configuration key 'server.grpc_port' is no longer supported: the public gRPC API was removed in Hearth 3.0.0. Remove the key from the configuration. Instead: use the REST admin API under /admin.
+```
+
+Cluster nodes still talk to each other over an internal gRPC transport
+(`cluster.peer_address`); that is not affected.
 
 ---
 
@@ -2343,7 +2336,6 @@ Every field's default value at a glance.
 | `security.ip_reputation` | `enabled` | `false` |
 | `security.ip_reputation` | `action` | `"log"` |
 | `security.ip_reputation.spamhaus` | `refresh_interval_secs` | `86400` (24 h) |
-| `security.grpc` | `reflection_enabled` | `false` (prod), `true` (--dev) |
 | `security` | `load_test_unthrottled` | `false` |
 | `security.rate_limiting.login_per_ip` | `max_attempts` | `10` |
 | `security.rate_limiting.login_per_ip` | `window_seconds` | `60` |

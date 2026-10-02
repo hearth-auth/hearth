@@ -33,8 +33,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   **service provider** for federation with a corporate IdP (`realms.<name>.federation`);
   connect applications to Hearth over OpenID Connect. The `UnknownSp` SAML error is gone with
   the SP registry.
+- **BREAKING: the public gRPC API is removed.** The gRPC listener, its services
+  (`IdentityAdminService`, `ApplicationAdminService`, `RbacAdminService`, `AuditService`,
+  `OAuthService`) and gRPC health/reflection are gone, with the config keys
+  `server.grpc_port`, `server.grpc_bind_address`, `server.grpc_allow_plaintext` and
+  `security.grpc`, and the `hearth serve --allow-reflection-in-prod` flag. A configuration that
+  still sets one of those keys refuses to start and points at the REST admin API, which now
+  covers every former gRPC operation (see **Added**). The `--dev` loopback check and the
+  load-test unthrottle gate now consider only the HTTP bind. Cluster nodes still talk to each
+  other over the internal Raft peer transport (`cluster.peer_address`); that is not a public API.
+  The `proto/` message definitions stay as the schema of the REST API.
 
 ### Security
+- **`GET /admin/users/{id}/effective-permissions?org_id=` no longer reports a suspended
+  organization's permissions.** The REST handler passed `org_id` straight to the resolver, so an
+  administrator was shown org-scoped authority that tokens never carried; it now applies the
+  same active-organization rule as token issuance and `/v1/me/permissions` (which now uses the
+  engine's rule instead of its own copy).
 - **SAML SP: strict signature placement.** The Assertion Consumer Service now refuses, before
   verifying any signature, a response with a `<ds:Signature>` anywhere except directly under the
   root `<samlp:Response>` or the `<saml:Assertion>` (one each). A stray signature inside

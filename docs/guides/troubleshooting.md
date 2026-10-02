@@ -58,7 +58,7 @@ The response contains the new single-use recovery codes. Store or transmit them 
 **Symptom:** All logins for a realm fail with a realm-suspended error.
 
 **Cause:** A system-realm operator suspended the realm with
-`POST /admin/realms/{id}/suspend` (or gRPC `IdentityAdminService/SuspendRealm`), usually as
+`POST /admin/realms/{id}/suspend`, usually as
 an incident-response freeze. The realm's `realm_updated` audit events name who did it and
 when (`previous_status` / `status` in the metadata).
 

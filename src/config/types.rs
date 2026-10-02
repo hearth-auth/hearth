@@ -60,25 +60,6 @@ pub struct ServerConfig {
     /// realm reconciliation runs, else the server refuses to start.
     #[serde(default)]
     pub default_realm: Option<String>,
-    /// Port for the gRPC management API. When `None` (the default), the
-    /// gRPC server is not started — REST-only deployments are unaffected.
-    #[serde(default)]
-    pub grpc_port: Option<u16>,
-    /// Optional bind address for the gRPC listener. Defaults to
-    /// `bind_address` when unset.
-    #[serde(default)]
-    pub grpc_bind_address: Option<String>,
-    /// Allow a plaintext gRPC listener on a non-loopback address outside
-    /// `--dev`.
-    ///
-    /// When `tls_cert_path` / `tls_key_path` are set, gRPC is served over TLS
-    /// with the same certificate as HTTPS and this key has no effect. Without
-    /// them gRPC is plaintext, and production validation refuses a
-    /// non-loopback gRPC bind — admin bearer tokens and client secrets would
-    /// cross the network in clear text — unless this is `true`, for a
-    /// deployment whose gRPC traffic is TLS-terminated by a proxy or mesh.
-    #[serde(default)]
-    pub grpc_allow_plaintext: bool,
     /// Filesystem directory containing the admin UI's mutable static
     /// assets — currently only `app.css` (the Tailwind build output).
     ///
@@ -127,9 +108,6 @@ impl Default for ServerConfig {
             tls_require_client_cert: false,
             trusted_proxies: Vec::new(),
             default_realm: None,
-            grpc_port: None,
-            grpc_bind_address: None,
-            grpc_allow_plaintext: false,
             assets_dir: None,
             trust_forwarded_proto: false,
         }
@@ -1106,9 +1084,6 @@ pub struct SecurityYaml {
     /// CAPTCHA provider configuration (P-1 — HEA-1202).
     #[serde(default)]
     pub captcha: Option<CaptchaYaml>,
-    /// gRPC-specific security settings (A-43).
-    #[serde(default)]
-    pub grpc: GrpcSecurityYaml,
     /// TLS-specific security settings (A-44).
     #[serde(default)]
     pub tls: TlsSecurityYaml,
@@ -1585,7 +1560,6 @@ impl std::fmt::Debug for SecurityYaml {
             .field("allowed_return_to_origins", &self.allowed_return_to_origins)
             .field("ip_reputation", &self.ip_reputation)
             .field("captcha", &self.captcha)
-            .field("grpc", &self.grpc)
             .field("tls", &self.tls)
             .field("backup", &self.backup)
             .field("reserved_slugs", &self.reserved_slugs)
@@ -1751,7 +1725,6 @@ impl Default for SecurityYaml {
             allowed_return_to_origins: Vec::new(),
             ip_reputation: IpReputationYaml::default(),
             captcha: None,
-            grpc: GrpcSecurityYaml::default(),
             tls: TlsSecurityYaml::default(),
             backup: BackupSecurityYaml::default(),
             reserved_slugs: Self::default_reserved_slugs(),
@@ -1981,30 +1954,6 @@ pub struct IpReputationYaml {
     /// Absent / empty = MaxMind ASN lookup disabled.
     #[serde(default)]
     pub maxmind_db_path: Option<String>,
-}
-
-/// `security.grpc` — gRPC-specific security settings (A-43).
-///
-/// Example:
-///
-/// ```yaml
-/// security:
-///   grpc:
-///     reflection_enabled: false   # default; omit for production-safe behaviour
-/// ```
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GrpcSecurityYaml {
-    /// Whether the gRPC server reflection service is enabled.
-    ///
-    /// `null` / absent → `false` in production, `true` under `--dev`.
-    /// Setting this to `true` in production requires the `--allow-reflection-in-prod`
-    /// CLI flag; the server refuses to start without it.
-    ///
-    /// gRPC reflection exposes the full API schema to any unauthenticated caller.
-    /// Keep it off in production.
-    #[serde(default)]
-    pub reflection_enabled: Option<bool>,
 }
 
 /// Minimum TLS protocol version the server will accept (HEA-SEC-33).

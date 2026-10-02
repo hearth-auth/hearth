@@ -7,11 +7,11 @@
 //!
 //! - **Organizations.** Removing a member, or deleting the organization,
 //!   strips every admin permission the member held only in that organization
-//!   (gRPC `DeleteOrganization`; SCIM `PUT`/`PATCH`/`DELETE /Groups`).
+//!   (REST `DELETE /admin/organizations/{id}`; SCIM `PUT`/`PATCH`/`DELETE /Groups`).
 //! - **Role definitions.** Removing an admin permission from a role (directly,
 //!   through its parents, or by renaming it away from the org members who hold
 //!   it as an additional role), or deleting the role, demotes every holder
-//!   (REST `PATCH`/`DELETE /admin/roles/{id}`; gRPC `UpdateRole`/`DeleteRole`).
+//!   (REST `PATCH`/`DELETE /admin/roles/{id}`).
 //!
 //! Every such operation now runs the same rule on each affected user.
 
@@ -26,15 +26,7 @@ use hearth::identity::{
     CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, OrganizationRole,
     RealmConfig, SessionContext, UpdateRealmRequest,
 };
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::identity::IdentityAdminSvc;
-use hearth::protocol::grpc::rbac_admin::RbacAdminSvc;
-use hearth::protocol::grpc::server::GrpcState;
 use hearth::protocol::http::{router, AppState};
-use hearth::protocol::proto::identity::v1::{
-    self as idpb, identity_admin_service_server::IdentityAdminService,
-};
-use hearth::protocol::proto::rbac::v1::{self as pb, rbac_admin_service_server::RbacAdminService};
 use hearth::rbac::{
     AssignRoleRequest, CreateGroupRequest, CreateRoleRequest, GroupMember, Permission, RoleId,
     Scope, Subject, UserPermissionGrant,
@@ -70,15 +62,6 @@ impl Fixture {
             h.audit_arc(),
         )));
         Self { h, realm, app }
-    }
-
-    fn state(&self) -> GrpcState {
-        GrpcState::new(
-            self.h.identity_arc(),
-            self.h.rbac_arc(),
-            self.h.audit_arc(),
-            Arc::new(AdminRateLimiter::new()),
-        )
     }
 
     fn user(&self, label: &str) -> UserId {
@@ -276,23 +259,6 @@ impl Fixture {
             .0
     }
 
-    fn grpc_req<T>(&self, token: &str, msg: T) -> tonic::Request<T> {
-        let mut r = tonic::Request::new(msg);
-        r.metadata_mut().insert(
-            "authorization",
-            format!("Bearer {token}").parse().expect("valid header"),
-        );
-        r.metadata_mut().insert(
-            "x-realm-id",
-            self.realm
-                .as_uuid()
-                .to_string()
-                .parse()
-                .expect("valid header"),
-        );
-        r
-    }
-
     /// Configures a SCIM provisioning token on the realm; returns it.
     fn scim_token(&self) -> String {
         let token = format!("ga4-scim-{}", uuid::Uuid::new_v4());
@@ -342,43 +308,49 @@ fn remove_member_patch(user: &UserId) -> serde_json::Value {
     })
 }
 
-// ── organizations over gRPC ──────────────────────────────────────────────────
+// ── organizations over REST ──────────────────────────────────────────────────
 
-/// `DeleteOrganization` strips the org-scoped `hearth.admin` of its members:
+/// `DELETE /admin/organizations/{id}` strips the org-scoped `hearth.admin` of its members:
 /// a realm sub-admin may not delete an organization one of whose members
 /// out-ranks it, but may still delete one whose members do not.
 #[tokio::test]
-async fn grpc_realm_sub_admin_cannot_delete_an_org_holding_an_org_scoped_superuser() {
+async fn realm_sub_admin_cannot_delete_an_org_holding_an_org_scoped_superuser() {
     let f = Fixture::new().await;
-    let svc = IdentityAdminSvc::new(f.state());
     let org = f.org("acme");
     let root = f.org_superuser(&org);
     let plain_org = f.org("plain");
     f.join(&plain_org, &f.user("plain"));
     let token = f.sub_admin("hearth.realm.admin");
 
-    let refused = svc
-        .delete_organization(f.grpc_req(
+    let refused = f
+        .rest(
+            "DELETE",
+            &format!("/admin/organizations/{}", org.as_uuid()),
             &token,
-            idpb::DeleteOrganizationRequest {
-                id: org.as_uuid().to_string(),
-            },
-        ))
-        .await
-        .expect_err("DeleteOrganization demoting an org superuser");
-    let allowed = svc
-        .delete_organization(f.grpc_req(
+            None,
+        )
+        .await;
+    let allowed = f
+        .rest(
+            "DELETE",
+            &format!("/admin/organizations/{}", plain_org.as_uuid()),
             &token,
-            idpb::DeleteOrganizationRequest {
-                id: plain_org.as_uuid().to_string(),
-            },
-        ))
+            None,
+        )
         .await;
 
-    assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+    assert_eq!(
+        refused,
+        StatusCode::FORBIDDEN,
+        "deleting an org superuser's org"
+    );
     assert!(f.org_exists(&org), "the refused org must survive");
     assert!(f.is_member(&org, &root), "the superuser stays a member");
-    allowed.expect("an org of plain members stays deletable");
+    assert_eq!(
+        allowed,
+        StatusCode::NO_CONTENT,
+        "an org of plain members stays deletable"
+    );
     assert!(!f.org_exists(&plain_org), "the plain org is gone");
 }
 
@@ -600,50 +572,6 @@ async fn rest_realm_sub_admin_cannot_demote_an_additional_role_holder() {
     );
     assert_eq!(delete, StatusCode::FORBIDDEN, "delete the role");
     assert!(f.holds_superuser(&root, Some(&org)));
-}
-
-// ── role definitions over gRPC ───────────────────────────────────────────────
-
-#[tokio::test]
-async fn grpc_realm_sub_admin_cannot_demote_through_a_role_definition() {
-    let f = Fixture::new().await;
-    let svc = RbacAdminSvc::new(f.state());
-    let admin_role = f.role_id("realm.admin");
-    let root = f.user("root");
-    f.assign(&root, &admin_role);
-    let token = f.sub_admin("hearth.realm.admin");
-    let realm_id = f.realm.as_uuid().to_string();
-
-    let update = svc
-        .update_role(f.grpc_req(
-            &token,
-            pb::UpdateRoleRequest {
-                realm_id: realm_id.clone(),
-                role_id: admin_role.as_uuid().to_string(),
-                name: String::new(),
-                description: String::new(),
-                permissions: vec![],
-                parent_role_ids: vec![],
-            },
-        ))
-        .await
-        .expect_err("UpdateRole stripping hearth.admin");
-    let delete = svc
-        .delete_role(f.grpc_req(
-            &token,
-            pb::DeleteRoleRequest {
-                realm_id: realm_id.clone(),
-                role_id: admin_role.as_uuid().to_string(),
-                cascade: false,
-            },
-        ))
-        .await
-        .expect_err("DeleteRole of the superuser's role");
-
-    assert_eq!(update.code(), tonic::Code::PermissionDenied, "UpdateRole");
-    assert_eq!(delete.code(), tonic::Code::PermissionDenied, "DeleteRole");
-    assert!(f.role_exists(&admin_role));
-    assert!(f.holds_superuser(&root, None));
 }
 
 // ── round 2: SCIM Groups see the whole membership ────────────────────────────
@@ -1026,46 +954,48 @@ async fn rest_role_delete_refuses_references_or_cascades_them() {
     assert_eq!(plain, StatusCode::NO_CONTENT);
 }
 
-/// gRPC `DeleteRole` honours `cascade` the same way, and the ceiling covers
-/// a cascade: a sub-admin may not cascade-delete a role a superuser holds.
+/// The ceiling covers a cascade: a sub-admin may not cascade-delete a role a
+/// superuser holds, though it may cascade-delete a referenced plain role.
 #[tokio::test]
-async fn grpc_role_delete_honours_cascade_under_the_ceiling() {
+async fn rest_role_cascade_delete_honours_the_ceiling() {
     let f = Fixture::new().await;
-    let svc = RbacAdminSvc::new(f.state());
     let r = f.referenced_role("auditor");
-    let root = f.sub_admin("realm.admin");
-    let realm_id = f.realm.as_uuid().to_string();
-    let delete = |token: &str, role: &RoleId, cascade: bool| {
-        f.grpc_req(
-            token,
-            pb::DeleteRoleRequest {
-                realm_id: realm_id.clone(),
-                role_id: role.as_uuid().to_string(),
-                cascade,
-            },
-        )
-    };
-
-    let refused = svc
-        .delete_role(delete(&root, &r.role, false))
-        .await
-        .expect_err("a referenced role without cascade");
-    assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
-    assert!(f.role_exists(&r.role));
-
-    // The ceiling: the superuser's own role, cascade or not.
     let sub = f.sub_admin("hearth.realm.admin");
     let admin_role = f.role_id("realm.admin");
-    let denied = svc
-        .delete_role(delete(&sub, &admin_role, true))
-        .await
-        .expect_err("cascade-deleting the superuser role");
-    assert_eq!(denied.code(), tonic::Code::PermissionDenied);
-    assert!(f.role_exists(&admin_role));
+    let holder = f.user("root");
+    f.assign(&holder, &admin_role);
 
-    svc.delete_role(delete(&root, &r.role, true))
-        .await
-        .expect("cascade delete");
+    // The ceiling: the superuser's own role, even with cascade.
+    let denied = f
+        .rest(
+            "DELETE",
+            &format!("/admin/roles/{}?cascade=true", admin_role.as_uuid()),
+            &sub,
+            None,
+        )
+        .await;
+    assert_eq!(
+        denied,
+        StatusCode::FORBIDDEN,
+        "cascade-deleting the superuser role"
+    );
+    assert!(f.role_exists(&admin_role));
+    assert!(f.holds_superuser(&holder, None));
+
+    // Control: the same caller cascade-deletes a referenced plain role.
+    let allowed = f
+        .rest(
+            "DELETE",
+            &format!("/admin/roles/{}?cascade=true", r.role.as_uuid()),
+            &sub,
+            None,
+        )
+        .await;
+    assert_eq!(
+        allowed,
+        StatusCode::NO_CONTENT,
+        "cascade delete of a plain role"
+    );
     f.assert_no_references(&r, "auditor");
 }
 
@@ -1160,22 +1090,24 @@ async fn non_member_org_scoped_authority_counts_for_the_ceiling() {
     }
 
     // An additional org role belongs to a membership.
-    let svc = RbacAdminSvc::new(f.state());
     let stranger = f.user("stranger");
-    let err = svc
-        .add_additional_role(f.grpc_req(
+    let status = f
+        .rest(
+            "POST",
+            &format!(
+                "/admin/organizations/{}/members/{}/roles",
+                org.as_uuid(),
+                stranger.as_uuid()
+            ),
             &f.sub_admin("realm.admin"),
-            pb::AddAdditionalRoleRequest {
-                realm_id: f.realm.as_uuid().to_string(),
-                org_id: org.as_uuid().to_string(),
-                user_id: stranger.as_uuid().to_string(),
-                role_name: "realm.admin".into(),
-                ..Default::default()
-            },
-        ))
-        .await
-        .expect_err("an additional role for a non-member");
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+            Some(&json!({"role_name": "realm.admin"})),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "an additional role for a non-member"
+    );
 }
 
 // ── round 3: the ceiling's cost does not grow with non-admin members ─────────
@@ -1190,32 +1122,45 @@ async fn non_member_org_scoped_authority_counts_for_the_ceiling() {
 async fn org_delete_ceiling_scales_to_large_orgs() {
     const MEMBERS: usize = 5_000;
     let f = Fixture::new().await;
-    let svc = IdentityAdminSvc::new(f.state());
     let guarded = f.org("guarded");
     f.fill(&guarded, MEMBERS);
     let root = f.org_superuser(&guarded);
     let open = f.org("open");
     f.fill(&open, MEMBERS);
     let token = f.sub_admin("hearth.realm.admin");
-    let delete = |org: &OrganizationId| {
-        f.grpc_req(
+    let started = std::time::Instant::now();
+
+    let refused = f
+        .rest(
+            "DELETE",
+            &format!("/admin/organizations/{}", guarded.as_uuid()),
             &token,
-            idpb::DeleteOrganizationRequest {
-                id: org.as_uuid().to_string(),
-            },
+            None,
         )
-    };
+        .await;
+    let allowed = f
+        .rest(
+            "DELETE",
+            &format!("/admin/organizations/{}", open.as_uuid()),
+            &token,
+            None,
+        )
+        .await;
+    let elapsed = started.elapsed();
 
-    let refused = svc
-        .delete_organization(delete(&guarded))
-        .await
-        .expect_err("an org with an out-ranking member");
-    let allowed = svc.delete_organization(delete(&open)).await;
-
-    assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+    assert_eq!(
+        refused,
+        StatusCode::FORBIDDEN,
+        "an org with an out-ranking member"
+    );
     assert!(f.org_exists(&guarded) && f.is_member(&guarded, &root));
-    allowed.expect("an org of plain members");
+    assert_eq!(allowed, StatusCode::NO_CONTENT, "an org of plain members");
     assert!(!f.org_exists(&open));
+    // Per-member resolution took minutes here; the holder-set check must not.
+    assert!(
+        elapsed < std::time::Duration::from_secs(60),
+        "two 5,000-member ceiling checks took {elapsed:?}"
+    );
 }
 
 impl Fixture {

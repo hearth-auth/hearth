@@ -266,7 +266,7 @@ Hearth compiles to a single binary (dynamically linked against the system C libr
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Protocol Layer**: Speaks OIDC, OAuth 2.0, SAML 2.0, SCIM 2.0, and WebAuthn natively. Each protocol is implemented as a thin adapter over the Identity Engine. The protocol layer also exposes a gRPC and REST management API for operations that don't map to a standard protocol (realm configuration, migration, admin operations).
+**Protocol Layer**: Speaks OIDC, OAuth 2.0, SAML 2.0, SCIM 2.0, and WebAuthn natively. Each protocol is implemented as a thin adapter over the Identity Engine. The protocol layer also exposes a REST management API for operations that don't map to a standard protocol (realm configuration, migration, admin operations).
 
 **Identity Engine**: The core logic layer. Handles user lifecycle, credential management, session management, token issuance and validation, and multi-realm isolation. This is where authentication flows are orchestrated and where the opinionated decisions about supported flows are enforced.
 
@@ -591,7 +591,7 @@ This path is not the only option. The project could remain community-funded and 
 - Magic link / passwordless email authentication
 - TOTP / MFA support
 - Multi-tenancy (realm isolation, per-realm configuration)
-- Admin API (REST + gRPC)
+- Admin API (REST)
 - Admin web console
 - Claims-based RBAC authorization engine (roles, groups, permissions, JWT claims, scope narrowing)
 - Audit logging

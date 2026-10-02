@@ -80,17 +80,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let generated = PathBuf::from(GENERATED_DIR);
     std::fs::create_dir_all(&generated)?;
 
-    // File descriptor set is consumed by both pbjson (for JSON codec) and
-    // tonic-reflection (for runtime service discovery), so we write it into
-    // the generated dir as a checked-in-but-gitignored artifact. It also
-    // stays in OUT_DIR for pbjson-build.
+    // The file descriptor set feeds pbjson-build (the REST JSON codec). It
+    // stays in OUT_DIR: the public gRPC API — and its reflection service,
+    // the only other reader — was removed in 3.0.0.
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
     let descriptor_path = out_dir.join("proto_descriptor.bin");
-    let reflection_descriptor_path = generated.join("proto_descriptor.bin");
 
-    // Compile proto files with tonic_build (wraps prost). Emits both message
-    // types and service traits/clients. The file descriptor set is shared
-    // with pbjson below.
+    // Compile the proto messages with prost. The `service` blocks remain in
+    // the .proto files as the schema of the REST API (their google.api.http
+    // annotations), but no gRPC server or client code is generated.
     let proto_dir_str = proto_dir.to_str().expect("proto dir is valid UTF-8");
     let mut includes: Vec<String> = vec![proto_dir_str.to_string()];
 
@@ -113,8 +111,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tonic_prost_build::configure()
-        .build_server(true)
-        .build_client(true)
+        .build_server(false)
+        .build_client(false)
         .out_dir(&generated)
         .file_descriptor_set_path(&descriptor_path)
         .compile_protos(
@@ -129,7 +127,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Duplicate the descriptor set into the generated dir so tonic-reflection
     // can `include_bytes!` it at compile time without relying on OUT_DIR
     // layout leaking into source code.
-    std::fs::copy(&descriptor_path, &reflection_descriptor_path)?;
 
     // Generate serde (JSON) implementations from the descriptor set.
     let descriptor_set = std::fs::read(&descriptor_path)?;

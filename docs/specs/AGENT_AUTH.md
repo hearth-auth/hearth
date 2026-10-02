@@ -171,11 +171,10 @@ MCP clients need tokens scoped to a specific tool server. Hearth **MUST** suppor
 - Authorization requests and token requests **MUST** accept a `resource` parameter containing the URI of the target MCP server.
 - The `resource` value **MUST** match a registered protected resource (see [Section 2.5](#25-protected-resource-registration)).
   *Enforced on every surface:* the browser `/authorize` (plain query, JAR), PAR, and `/authorize`
-  over JSON or gRPC (which take a resource only through a pushed `request_uri`) canonicalize the
+  over JSON (which takes a resource only through a pushed `request_uri`) canonicalize the
   value (`core::Uri`) and refuse anything that is not a registered resource of the realm with RFC
   8707 `invalid_target` — the browser plain branch as an error redirect to the registered
-  `redirect_uri`, JAR/PAR errors as `400`, JSON as `400 {"error":"invalid_target"}`, gRPC as
-  `INVALID_ARGUMENT`. A pushed request whose resource was removed before the code is asked for is
+  `redirect_uri`, JAR/PAR errors as `400`, JSON as `400 {"error":"invalid_target"}`. A pushed request whose resource was removed before the code is asked for is
   refused the same way. The canonical form is what the code stores, what the consent record for
   the resource is keyed by, and what the token's `aud` carries, so every spelling of one resource
   is one resource.

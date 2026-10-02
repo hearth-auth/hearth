@@ -37,8 +37,6 @@ server:
     - "10.0.0.1"
   trust_forwarded_proto: true
   default_realm: "customer-portal"
-  grpc_port: 8421
-  grpc_bind_address: "127.0.0.1"
   assets_dir: "./src/protocol/web/assets"
 
 storage:
@@ -171,8 +169,6 @@ security:
   jwks_rps_limit: 60                        # /.well-known/jwks.json, per IP
   load_test_unthrottled: false              # NEVER true outside a private rig
 
-  grpc:
-    reflection_enabled: false               # keep the schema off the wire
   http2:
     max_concurrent_streams: 100             # CVE-2023-44487 rapid-reset caps
     max_pending_reset_streams: 10

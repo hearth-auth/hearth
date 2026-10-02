@@ -19,19 +19,17 @@ include those it holds only through an organization-scoped role or grant. The ru
 
 - modification: `PATCH`/`DELETE /admin/users/{id}`, `DELETE /admin/users/{id}/device-fingerprints`,
   the `disable` operation of `POST /admin/users/bulk` (a batch naming any such user is refused
-  whole), `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`, gRPC `UpdateUser` /
-  `DeleteUser`, SCIM `/scim/v2/Users`;
+  whole), `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`, SCIM `/scim/v2/Users`;
 - demotion: `DELETE /admin/assignments/{id}` (for a group assignment, every member of the group
   and of groups nested in it), `DELETE /admin/groups/{id}/members/{member_id}`,
-  `DELETE /admin/groups/{id}`, gRPC `UnassignUserRole`, `UnassignGroupRole`,
-  `RevokeUserPermission`, `RemoveAdditionalRole`, `RemoveGroupMember`, `DeleteGroup`;
+  `DELETE /admin/groups/{id}`, `DELETE /admin/users/{id}/permissions/{permission}`,
+  `DELETE /admin/organizations/{id}/members/{user_id}/roles/{role_name}`;
 - sign-out and consents: `DELETE /admin/sessions/{id}`, `POST /admin/sessions/{id}/sv-bump`,
-  `DELETE /admin/users/{id}/consents/{client_id}`, gRPC `RevokeConsent`;
-- organizations: gRPC `DeleteOrganization` and SCIM `DELETE /scim/v2/Groups/{id}` (every member
+  `DELETE /admin/users/{id}/consents/{client_id}`;
+- organizations: `DELETE /admin/organizations/{id}` and SCIM `DELETE /scim/v2/Groups/{id}` (every member
   of the organization), and SCIM `PUT`/`PATCH /scim/v2/Groups/{id}` (every member the change
   removes). Leaving an organization strips the admin permissions a user holds only in it;
-- role definitions: `PATCH /admin/roles/{id}`, `DELETE /admin/roles/{id}`, gRPC `UpdateRole` /
-  `DeleteRole`, when the change removes an admin permission from the role's effective set — by
+- role definitions: `PATCH /admin/roles/{id}`, `DELETE /admin/roles/{id}`, when the change removes an admin permission from the role's effective set — by
   replacing its permissions or parents, by deleting it, or by renaming it (an extra organization
   role is stored by name). Every holder is checked: users assigned the role or a role that
   inherits from it, members of groups assigned one, and users holding one as an extra
@@ -582,8 +580,7 @@ To provision a realm:
 3. To freeze a realm during an incident, suspend it with `POST /admin/realms/{id}/suspend`
    and reinstate it with `POST /admin/realms/{id}/unsuspend` (see [Suspend and unsuspend a
    realm](#suspend-and-unsuspend-a-realm)). Suspension is runtime state: `hearth.yaml` has no
-   realm `status:` key, and reconciliation never clears a suspension. gRPC `CreateRealm` /
-   `UpdateRealm` answer `FAILED_PRECONDITION` with the same message as the REST `405`.
+   realm `status:` key, and reconciliation never clears a suspension.
 4. To permanently delete a realm, remove it from `hearth.yaml` and restart. Hearth archives it automatically. Then call `DELETE /admin/realms/{id}` to purge the archived realm's data.
 
 → See [Configuration reference](../specs/CONFIGURATION.md#realmsname) for the full `realms.<name>` YAML schema.
@@ -708,7 +705,6 @@ new logins until it is reinstated. Unsuspend restores service; users sign in aga
 - **Audited** in the target realm as `realm_updated`, attributed to the caller, with
   `previous_status` and `status` in the metadata.
 - **Survives reloads:** YAML reconciliation (startup or `SIGHUP`) never clears a suspension.
-- gRPC twins: `IdentityAdminService/SuspendRealm` and `/UnsuspendRealm`.
 
 ```bash
 curl -s -X POST \
@@ -746,7 +742,7 @@ curl -s -X DELETE \
 | `404` | Realm not found |
 | `409` | Realm is not archived — remove it from `hearth.yaml` and restart first |
 
-`GET` and `DELETE /admin/realms/{realm_id}` and their gRPC twins (`GetRealm`, `DeleteRealm`)
+`GET` and `DELETE /admin/realms/{realm_id}`
 apply the same realm-scope rule, trust policies included.
 
 ---

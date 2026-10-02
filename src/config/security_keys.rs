@@ -229,10 +229,6 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "security.dpop_nonce_secret",
         "src/main.rs (DPoP nonce HMAC key)",
     ),
-    key(
-        "security.grpc.reflection_enabled",
-        "src/protocol/grpc/server.rs",
-    ),
     // Wired by 22.12: `main.rs` installs these through
     // `protocol::http::limits::init_server_limits`, and BOTH accept loops
     // (`serve_router_on` and `serve_tls_router`) read them. They were

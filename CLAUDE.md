@@ -222,7 +222,7 @@ Six modules with strict downward dependency flow:
 | Layer | Path | Role |
 |-------|------|------|
 | Core | `src/core/` | Shared types and traits only. No logic, no state, no I/O. |
-| Protocol | `src/protocol/` | Wire adapters (REST, gRPC, OIDC, SAML, SCIM). Stateless, thin. |
+| Protocol | `src/protocol/` | Wire adapters (REST, OIDC, SAML, SCIM). Stateless, thin. |
 | Identity | `src/identity/` | Domain logic. Users, credentials, sessions, realms, tokens. |
 | RBAC | `src/rbac/` | Claims-based RBAC. Resolves effective permissions for JWT claims. |
 | Cluster | `src/cluster/` | Raft consensus via `openraft`. Invisible in single-node mode. |
@@ -345,7 +345,7 @@ All UI code MUST comply with `docs/specs/THEME.md`. Read it before touching anyt
 
 ## Changelog Process
 
-Every PR that ships a user-visible change **MUST** include a `CHANGELOG.md` entry written at implementation time — not after review, not at release. "User-visible" means any new or changed HTTP endpoint, config key, CLI flag, gRPC method, SDK surface, or security fix.
+Every PR that ships a user-visible change **MUST** include a `CHANGELOG.md` entry written at implementation time — not after review, not at release. "User-visible" means any new or changed HTTP endpoint, config key, CLI flag, SDK surface, or security fix.
 
 ### Entry format
 

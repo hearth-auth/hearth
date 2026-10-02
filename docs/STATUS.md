@@ -25,7 +25,7 @@
 | Claims-based RBAC (roles, groups, permissions) | ✅ Shipped | `src/rbac/` |
 | Admin REST API | ✅ Shipped | `src/protocol/http.rs` (router), `src/protocol/http/admin.rs` (handlers) |
 | Admin UI (Axum-rendered templates) | ✅ Shipped | `src/protocol/web/`, `templates/ui/` |
-| gRPC service surface | ✅ Shipped | `src/protocol/grpc/`, `proto/` |
+| gRPC service surface (public gRPC API) | ❌ Removed in 3.0.0 | Scope trim (OpenSpec `scope-trim-trusted-core`); every admin operation is on the REST admin API under `/admin`; `server.grpc_port`, `server.grpc_bind_address`, `server.grpc_allow_plaintext` and `security.grpc` now stop startup. `proto/` remains as the REST message schema; Raft's internal peer transport still uses gRPC |
 | Raft consensus / cluster mode | ✅ Shipped | `src/cluster/` — see the caveat below |
 | Audit log with SHA-256 hash chain | ✅ Shipped | `src/audit/` |
 | Multi-tenancy (realms) | ✅ Shipped | `src/identity/` |

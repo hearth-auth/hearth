@@ -99,16 +99,9 @@ async fn a2_per_ip_rate_limit_exceeded_returns_429() {
 // empty realm to `shaper.check`), so the per-realm dimension is asserted at the
 // `RequestShaper` boundary rather than duplicated here.
 
-// A-15: gRPC rate-limit interceptor ──────────────────────────────────────────
-//
-// A-15: `grpc_rate_limit_interceptor` (src/protocol/grpc/server.rs) is a thin
-// wrapper that maps `ShaperOutcome::{IpLimited,RealmLimited}` to
-// `tonic::Status::resource_exhausted`. The limiter decision it delegates to is
-// covered adversarially in `tests/abuse_shaper.rs` (A-2/A-15 share the shaper).
-// The interceptor cannot be unit-driven through a hand-built `tonic::Request`
-// because it reads `remote_addr()`, which is `None` off a live transport and
-// fail-opens — so exercising the exhausted branch requires a real gRPC server
-// (out of scope for this black-box file).
+// A-15: the public gRPC API (and its rate-limit interceptor) was removed in
+// 3.0.0. Request shaping is enforced by the HTTP `RequestShaper` alone, whose
+// limiter decision is covered adversarially in `tests/abuse_shaper.rs`.
 
 // A-21: JSON parse-bomb guard ─────────────────────────────────────────────────
 

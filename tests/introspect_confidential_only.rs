@@ -8,8 +8,8 @@
 //! server about any user-session token — RFC 7662 §4 calls the endpoint a
 //! token-information oracle for exactly this reason, and §2.1 requires it to
 //! demand authorization. A public client is now refused with
-//! `401 invalid_client` (RFC 6749 §5.2) on the header-form route, the
-//! realm-scoped twin and the gRPC `Introspect` RPC.
+//! `401 invalid_client` (RFC 6749 §5.2) on the header-form route and the
+//! realm-scoped twin.
 //!
 //! A `private_key_jwt` client has no stored secret either, so the old code
 //! treated it as public and let its `client_id` alone through. It is
@@ -23,8 +23,6 @@
 
 mod common;
 
-use std::sync::Arc;
-
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use hearth::core::{ClientId, RealmId};
@@ -34,12 +32,6 @@ use hearth::identity::{
     RegisterClientRequest, SessionContext, SigningKey, TokenIntrospectionRequest,
     TokenIssuanceContext, UpdateClientRequest,
 };
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::oauth::OAuthSvc;
-use hearth::protocol::grpc::server::GrpcState;
-use hearth::protocol::proto::identity::v1 as id_pb;
-use hearth::protocol::proto::identity::v1::o_auth_service_server::OAuthService;
-use tonic::{Code, Request as TonicRequest};
 
 const SECRET: &str = "introspect-confidential-secret-1!";
 const CLIENT_ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
@@ -560,102 +552,21 @@ async fn discovery_does_not_advertise_none_for_introspection() {
     }
 }
 
-// ===== gRPC Introspect =====
+// ===== RFC 7662 audience gate =====
 
-fn grpc_state(h: &common::TestHarness) -> GrpcState {
-    GrpcState::new(
-        h.identity_arc(),
-        h.rbac_arc(),
-        h.audit_arc(),
-        Arc::new(AdminRateLimiter::new()),
-    )
-}
-
-fn grpc_introspect_request(
-    realm: &RealmId,
-    token: &str,
-    client: &ClientId,
-    secret: Option<&str>,
-) -> TonicRequest<id_pb::TokenIntrospectionRequest> {
-    let mut r = TonicRequest::new(id_pb::TokenIntrospectionRequest {
-        token: token.to_string(),
-        token_type_hint: None,
-    });
-    r.metadata_mut().insert(
-        "x-realm-id",
-        realm.as_uuid().to_string().parse().expect("realm meta"),
-    );
-    r.metadata_mut().insert(
-        "x-hearth-client-id",
-        client.as_uuid().to_string().parse().expect("client meta"),
-    );
-    if let Some(s) = secret {
-        r.metadata_mut()
-            .insert("x-hearth-client-secret", s.parse().expect("secret meta"));
-    }
-    r
-}
-
+/// Client A's machine token is readable by client A only: client B
+/// authenticates but is told the token is inactive. (The gRPC `Introspect`
+/// test that pinned this gate went with the public gRPC API.)
 #[tokio::test]
-async fn grpc_introspect_refuses_a_public_client() {
-    let h = common::TestHarness::embedded().await.expect("harness");
-    let realm = h.create_realm();
-    let public = register(&h, &realm, None);
-    let (token, _) = user_session_token(&h, &realm);
-    let svc = OAuthSvc::new(grpc_state(&h));
-
-    let err = svc
-        .introspect(grpc_introspect_request(&realm, &token, &public, None))
-        .await
-        .expect_err("a public client must not introspect over gRPC");
-    assert_eq!(err.code(), Code::Unauthenticated);
-
-    let err = svc
-        .introspect(grpc_introspect_request(
-            &realm,
-            &token,
-            &public,
-            Some("made-up"),
-        ))
-        .await
-        .expect_err("a made-up secret does not make a public client confidential");
-    assert_eq!(err.code(), Code::Unauthenticated);
-}
-
-#[tokio::test]
-async fn grpc_introspect_serves_a_confidential_client_and_applies_the_audience_gate() {
-    let h = common::TestHarness::embedded().await.expect("harness");
-    let realm = h.create_realm();
-    let a = register(&h, &realm, Some(SECRET));
-    let b = register(&h, &realm, Some(SECRET));
-    let svc = OAuthSvc::new(grpc_state(&h));
-
-    let err = svc
-        .introspect(grpc_introspect_request(&realm, "x", &a, Some("wrong")))
-        .await
-        .expect_err("a wrong secret must be refused");
-    assert_eq!(err.code(), Code::Unauthenticated);
-
-    let (user_token, _) = user_session_token(&h, &realm);
-    let ok = svc
-        .introspect(grpc_introspect_request(
-            &realm,
-            &user_token,
-            &a,
-            Some(SECRET),
-        ))
-        .await
-        .expect("confidential client with its secret")
-        .into_inner();
-    assert!(ok.active, "an authenticated confidential client is served");
-
-    // Client A's machine token must not be readable by client B: the gRPC
-    // path used to pass no introspecting client, which skipped the RFC 7662
-    // audience restriction the HTTP routes apply.
-    let a_token = h
+async fn introspect_applies_the_audience_gate_to_a_machine_token() {
+    let env = server_env().await;
+    let a = register(&env.h, &env.realm_id, Some(SECRET));
+    let b = register(&env.h, &env.realm_id, Some(SECRET));
+    let a_token = env
+        .h
         .identity()
         .client_credentials_token(
-            &realm,
+            &env.realm_id,
             &ClientCredentialsRequest {
                 client_id: a.clone(),
                 client_secret: Some(SECRET.to_string()),
@@ -668,19 +579,30 @@ async fn grpc_introspect_serves_a_confidential_client_and_applies_the_audience_g
         .expect("mint A's token")
         .access_token()
         .to_string();
-    let by_b = svc
-        .introspect(grpc_introspect_request(&realm, &a_token, &b, Some(SECRET)))
-        .await
-        .expect("B authenticates")
-        .into_inner();
-    assert!(
-        !by_b.active,
-        "client B must not read client A's machine token over gRPC"
+    let as_client = |c: &ClientId| {
+        serde_json::json!({
+            "token": a_token,
+            "client_id": c.as_uuid().to_string(),
+            "client_secret": SECRET,
+        })
+    };
+
+    // Control: the owning client reads its own token.
+    let (status, by_a) = introspect_header_form(&env, as_client(&a), None).await;
+    assert_eq!(status, 200, "A authenticates; got {by_a}");
+    assert_eq!(
+        by_a["active"], true,
+        "the owning client reads its own token"
     );
-    let by_a = svc
-        .introspect(grpc_introspect_request(&realm, &a_token, &a, Some(SECRET)))
-        .await
-        .expect("A authenticates")
-        .into_inner();
-    assert!(by_a.active, "the owning client reads its own token");
+
+    let (status, by_b) = introspect_header_form(&env, as_client(&b), None).await;
+    assert_eq!(status, 200, "B authenticates; got {by_b}");
+    assert_eq!(
+        by_b["active"], false,
+        "client B must not read client A's machine token; got {by_b}"
+    );
+    assert!(
+        by_b.get("sub").is_none(),
+        "nothing about the token leaks: {by_b}"
+    );
 }

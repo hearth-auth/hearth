@@ -143,8 +143,7 @@ OAuth client secrets are never stored in plaintext. How they are hashed depends 
   (`$hearth-sha256$v=1$…`). Against a 256-bit random preimage a single SHA-256 is already
   infeasible to invert, so a slow KDF adds nothing — and it would make every authenticated
   introspection cost a full Argon2id run. Verification is one SHA-256 plus a constant-time compare.
-- **Caller-chosen** secrets (gRPC `RegisterClient`/`CreateApplication`, `hearth.yaml`
-  `applications[].client_secret`, migration import) may be low-entropy, so they are stored as
+- **Caller-chosen** secrets (`hearth.yaml` `applications[].client_secret`, migration import) may be low-entropy, so they are stored as
   Argon2id hashes, like passwords. Secrets stored before the SHA-256 format existed are Argon2id
   too and keep verifying. They are never re-hashed automatically — Hearth cannot tell from the hash
   whether the secret was random. Regenerate the secret to move a client onto the fast format.
@@ -154,12 +153,12 @@ OAuth client secrets are never stored in plaintext. How they are hashed depends 
 **The remaining Argon2id cost is an amplification vector, bounded by the KDF gate.** Anyone who
 knows an Argon2id-hashed client's `client_id` can make the server run one Argon2id verification
 per request by presenting any secret at `/token`, `/as/par`, `/introspect`, `/revoke` or
-`/device_authorization` (their `/realms/{realm}/…` twins, and the gRPC OAuth service). Client ids are not secret: they
+`/device_authorization` (or their `/realms/{realm}/…` twins). Client ids are not secret: they
 travel in browser authorization requests, and a `hearth.yaml` application's id is a UUID v5 that
 anyone can compute from the realm and the application key. Every such verification therefore runs
 behind the same process-wide admission gate as password hashing
 (`security.password.kdf.max_in_flight`), on the blocking pool; when the gate is saturated the
-request is shed with `503` and `Retry-After` (gRPC: `UNAVAILABLE`), exactly like a login. The gate
+request is shed with `503` and `Retry-After`, exactly like a login. The gate
 caps the CPU and memory this can consume, but under such a flood legitimate Argon2id clients and
 password logins share the shed. Rotate config-managed and legacy clients to Hearth-generated
 secrets (*Regenerate secret* on the client's page in the admin console), after which their
@@ -512,7 +511,7 @@ startup.
 
 | Config key | Default | Effect |
 |---|---|---|
-| `admin_per_minute` | `100` | Requests/minute per admin user (REST + gRPC shared) |
+| `admin_per_minute` | `100` | Requests/minute per admin user |
 
 Requests beyond the cap receive `429 Too Many Requests`. Set to `0` to disable (logs a `WARN`
 at startup and emits `hearth_rate_limiters_disabled{reason="config_zero"} 1`; never set `0`
@@ -580,15 +579,15 @@ Hearth's audit log uses a per-realm HMAC-SHA256 hash chain for tamper evidence. 
 
 ## Auth-Boundary PR Review Checklist
 
-Any PR that touches `src/protocol/http/admin.rs`, `src/protocol/grpc/*.rs`, or the
-auth helpers (`src/protocol/http/auth.rs`, `src/protocol/grpc/auth.rs`) is an
+Any PR that touches `src/protocol/http/admin.rs`, `src/protocol/http/admin/*.rs`, or the
+auth helpers (`src/protocol/http/auth.rs`) is an
 **auth-boundary PR** and must pass the following checks before merge.
 
 ### Automated backstops (enforced in CI)
 
 | Check | Mechanism | Catches |
 |---|---|---|
-| `#[must_use]` on `extract_admin_auth` / `authenticate_admin` | Rust compiler + `clippy -D warnings` | Unbound calls (result dropped as statement) |
+| `#[must_use]` on `extract_admin_auth` | Rust compiler + `clippy -D warnings` | Unbound calls (result dropped as statement) |
 | `scripts/check-auth-discard.sh` | `filter` job, runs on every PR | `let _auth`, `let _ = auth-call(...)`, unbound calls |
 | `make auth-discard-check` | `ci-local-fast` | Same as above, runs pre-push |
 
@@ -604,7 +603,7 @@ Reviewers MUST verify the following for every handler in scope:
       these, but human review is the second line of defense.
 
 - [ ] **`?` or explicit error-return is used** immediately after the auth call.
-      The `Result` must be propagated so an auth failure returns an HTTP/gRPC error
+      The `Result` must be propagated so an auth failure returns an HTTP error
       rather than falling through to handler logic.
 
 - [ ] **`scoped_realm(auth, path_realm_id)` is called** for any handler that accepts a
@@ -613,14 +612,11 @@ Reviewers MUST verify the following for every handler in scope:
 
 - [ ] **No new handler omits the auth call entirely.** Grep for `async fn` in scope
       and confirm every handler body contains at least one of:
-      `extract_admin_auth`, `authenticate_admin`, or an explicit `scoped_realm` call.
-
-- [ ] **gRPC service methods return `?` on the auth result**, not just log/ignore it.
-      Tonic methods that return `Result<Response<_>, Status>` must propagate `Status::unauthenticated`.
+      `extract_admin_auth` or an explicit `scoped_realm` call.
 
 ### Why this matters
 
-The HEA-1629 audit found 11 REST handlers and 30+ gRPC handlers where the auth extractor
+The HEA-1629 audit found 11 REST handlers and 30+ gRPC handlers (the gRPC API was removed in 3.0.0) where the auth extractor
 was called but its `Result` was either silently dropped or the handler continued even on
 auth failure. This is Broken Object-Level Authorization (BOLA): an attacker in one realm
 could read or mutate resources in another realm by supplying a different `{realm_id}` path
