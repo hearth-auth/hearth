@@ -185,13 +185,6 @@ impl fmt::Display for IdentityError {
             Self::PasswordCompromised => {
                 write!(f, "password has appeared in a known data breach")
             }
-            Self::StepUpChallengeRequired => {
-                write!(f, "MFA challenge required: login from unrecognised device")
-            }
-            Self::EnrollMfaRequired => write!(
-                f,
-                "MFA enrollment required: login from unrecognised device with no enrolled factor"
-            ),
             Self::RequiredActionsBlocking { actions } => {
                 write!(f, "token blocked: pending required actions: {actions:?}")
             }

@@ -98,10 +98,9 @@ pub use oidc::{
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     GeneratedClientSecret, IdTokenSigningAlg, IntrospectionResponse, JarClaims, JwtBearerRequest,
     LiveTokenAuthority, OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse,
-    PasswordGrantResponse, PushedAuthorizationRequest, PushedAuthorizationResponse,
-    RefreshBindContext, RegisterClientRequest, ResponseMode, StepUpMfaGrantRequest,
-    TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
-    UserInfoResponse,
+    PushedAuthorizationRequest, PushedAuthorizationResponse, RefreshBindContext,
+    RegisterClientRequest, ResponseMode, TokenExchangeRequest, TokenIntrospectionRequest,
+    TokenRevocationRequest, UpdateClientRequest, UserInfoResponse,
 };
 pub use operator_token::{
     OperatorToken, OperatorTokenIssuer, OPERATOR_TOKEN_DEFAULT_TTL, OPERATOR_TOKEN_MAX_TTL,
@@ -898,18 +897,6 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<OidcDiscoveryDocument, IdentityError>;
 
     // ===== OAuth 2.0 Extended (Step 22) =====
-
-    /// Completes a step-up MFA challenge and issues tokens (HEA-836).
-    ///
-    /// Used with `grant_type = urn:hearth:params:grant-type:step-up-mfa`.
-    /// Re-verifies the user's password, validates the MFA code (TOTP or
-    /// recovery), records the device fingerprint as trusted, and returns a
-    /// full token pair.
-    fn step_up_mfa_grant_token(
-        &self,
-        realm_id: &RealmId,
-        request: &StepUpMfaGrantRequest,
-    ) -> Result<PasswordGrantResponse, IdentityError>;
 
     /// Issues an access token via the Client Credentials Grant (RFC 6749 §4.4).
     ///

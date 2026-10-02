@@ -59,8 +59,6 @@ impl IdentityError {
             Self::PasswordCompromised => Some("HEARTH_PASSWORD_COMPROMISED"),
             Self::AuthMethodNotAllowed { .. } => Some("HEARTH_AUTH_METHOD_NOT_ALLOWED"),
             Self::MfaMethodNotAllowed { .. } => Some("HEARTH_MFA_METHOD_NOT_ALLOWED"),
-            Self::StepUpChallengeRequired => Some("HEARTH_STEP_UP_CHALLENGE_REQUIRED"),
-            Self::EnrollMfaRequired => Some("HEARTH_ENROLL_MFA_REQUIRED"),
             Self::RequiredActionsBlocking { .. } => Some("HEARTH_REQUIRED_ACTIONS_PENDING"),
             Self::InvalidEmailOtp => Some("HEARTH_INVALID_EMAIL_OTP"),
 

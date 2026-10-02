@@ -893,8 +893,6 @@ pub(crate) fn identity_error_to_response(
         }
         IdentityError::AuditFailure { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         IdentityError::WebhookNotFound => (StatusCode::NOT_FOUND, "webhook not found"),
-        IdentityError::StepUpChallengeRequired => (StatusCode::UNAUTHORIZED, "mfa_required"),
-        IdentityError::EnrollMfaRequired => (StatusCode::FORBIDDEN, "mfa_enrollment_required"),
         // Handled by the early return above; this arm satisfies exhaustiveness.
         IdentityError::RequiredActionsBlocking { .. } => {
             (StatusCode::BAD_REQUEST, "required_actions_pending")

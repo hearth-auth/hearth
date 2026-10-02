@@ -21,9 +21,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use hearth::core::RealmId;
 use hearth::identity::{
-    CidrPolicy, CleartextPassword, CreateRealmRequest, CreateUserRequest, IdentityError,
-    RealmConfig, RegistrationOptions, RequiredAction, SessionContext, StepUpMfaGrantRequest,
-    UpdateUserRequest, User, UserStatus,
+    CidrPolicy, CleartextPassword, CreateRealmRequest, CreateUserRequest, RealmConfig,
+    RegistrationOptions, RequiredAction, SessionContext, UpdateUserRequest, User, UserStatus,
 };
 use tower::ServiceExt as _;
 
@@ -444,36 +443,6 @@ async fn magic_link_grant_enforces_pending_required_actions() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {text}");
     assert!(text.contains("required_actions_pending"), "body: {text}");
     assert!(!text.contains("access_token"), "no tokens: {text}");
-}
-
-/// The step-up MFA grant refuses a user with pending actions.
-#[tokio::test]
-async fn step_up_grant_enforces_pending_required_actions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
-    let (realm, _) = create_realm(&h, RealmConfig::default());
-    let user = create_user(&h, &realm);
-    let secret = enrol_totp(&h, &realm, &user);
-    require_password_change(&h, &realm, &user);
-
-    let err = h
-        .identity()
-        .step_up_mfa_grant_token(
-            &realm,
-            &StepUpMfaGrantRequest {
-                email: user.email().to_string(),
-                password: password(),
-                mfa_code: compute_totp_code(&secret, now_secs() + 30),
-                scope: None,
-                client_ip: None,
-                user_agent: None,
-                dpop_jkt: None,
-            },
-        )
-        .expect_err("pending actions must block the grant");
-    assert!(
-        matches!(err, IdentityError::RequiredActionsBlocking { .. }),
-        "got {err:?}"
-    );
 }
 
 // ─── M13: the realm's network policy ────────────────────────────────────────

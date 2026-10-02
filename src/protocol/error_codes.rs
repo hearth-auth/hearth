@@ -46,10 +46,6 @@ pub const MFA_INVALID_CODE: &str = "HEARTH_MFA_INVALID_CODE";
 pub const MFA_NOT_ENABLED: &str = "HEARTH_MFA_NOT_ENABLED";
 /// MFA is already enrolled; disable before re-enrolling.
 pub const MFA_ALREADY_ENABLED: &str = "HEARTH_MFA_ALREADY_ENABLED";
-/// Adaptive step-up: login from unrecognised device, enrolled factor must be presented.
-pub const STEP_UP_CHALLENGE_REQUIRED: &str = "HEARTH_STEP_UP_CHALLENGE_REQUIRED";
-/// Adaptive step-up: login from unrecognised device with no enrolled factor; enrollment required.
-pub const ENROLL_MFA_REQUIRED: &str = "HEARTH_ENROLL_MFA_REQUIRED";
 /// Token issuance blocked: user has one or more pending required actions.
 pub const REQUIRED_ACTIONS_PENDING: &str = "HEARTH_REQUIRED_ACTIONS_PENDING";
 
@@ -503,8 +499,6 @@ mod tests {
             DUPLICATE_SCIM_EXTERNAL_ID,
             FORBIDDEN,
             SYSTEM_REALM_PROTECTED,
-            STEP_UP_CHALLENGE_REQUIRED,
-            ENROLL_MFA_REQUIRED,
         ];
         for code in codes {
             assert!(

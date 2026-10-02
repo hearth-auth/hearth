@@ -141,9 +141,8 @@ Enforced for every authorization request in the realm:
    (a JARM response carries it as the JWT's `iss` claim). Hearth sends it in every realm, FAPI or not.
 
 Both profiles also require **sender-constrained tokens**: every token request in the realm — the
-`authorization_code`, `refresh_token`, `client_credentials`, `device_code`, `jwt-bearer` and the
-clientless `urn:hearth:params:grant-type:step-up-mfa` grants, and the refresh of a clientless grant
-family — MUST carry a valid `DPoP` proof (§3), whatever the client's own profile. A request without
+`authorization_code`, `refresh_token`, `client_credentials`, `device_code` and `jwt-bearer`
+grants, and the refresh of a clientless grant family — MUST carry a valid `DPoP` proof (§3), whatever the client's own profile. A request without
 one is refused with `400 invalid_request` before anything is consumed: an approved device code or
 a jwt-bearer assertion stays redeemable with a proof.
 
@@ -311,7 +310,7 @@ DPoP is required for FAPI 2.0 clients (§2.2) and RECOMMENDED for all public cli
 
 ### 3.1 Access Token Binding
 
-When a token request includes a `DPoP` proof header, the issued access token carries a `cnf.jkt` claim containing the SHA-256 JWK thumbprint of the DPoP public key, and the response's `token_type` is `DPoP`. This holds for every grant: `authorization_code`, `device_code`, `refresh_token`, `client_credentials`, `jwt-bearer` and `urn:hearth:params:grant-type:step-up-mfa`:
+When a token request includes a `DPoP` proof header, the issued access token carries a `cnf.jkt` claim containing the SHA-256 JWK thumbprint of the DPoP public key, and the response's `token_type` is `DPoP`. This holds for every grant: `authorization_code`, `device_code`, `refresh_token`, `client_credentials` and `jwt-bearer`:
 
 ```json
 {

@@ -80,11 +80,18 @@ The token endpoint SHALL refuse `grant_type=password` for every client.
 - **WHEN** a client fetches `/.well-known/openid-configuration`
 - **THEN** `grant_types_supported` does not contain `password`
 
+### Requirement: The step-up MFA grant is not supported
+The token endpoints SHALL refuse `grant_type=urn:hearth:params:grant-type:step-up-mfa`. A user proves a second factor only in a browser ceremony (browser login, the authorization endpoint, or device approval), where passkeys work; no grant accepts a password at the token endpoint.
+
+#### Scenario: Step-up grant request
+- **WHEN** a client calls `/token` or `/realms/{realm}/token` with `grant_type=urn:hearth:params:grant-type:step-up-mfa`, an email, a password and a valid TOTP code
+- **THEN** the server answers `400` with `unsupported_grant_type`, and issues no token
+
 ### Requirement: DPoP enforcement does not depend on FAPI
 A client or agent that requires DPoP SHALL still get DPoP-bound tokens on every grant, with no FAPI profile in place.
 
 #### Scenario: DPoP-required client without DPoP proof
-- **WHEN** a client configured to require DPoP calls the token endpoint with the authorization code, client credentials, refresh token, JWT bearer, or device code grant, and sends no `DPoP` header
+- **WHEN** a client configured to require DPoP (`dpop_bound_access_tokens: true`) calls the token endpoint with the authorization code, client credentials, refresh token, JWT bearer, or device code grant, and sends no `DPoP` header
 - **THEN** the server refuses the request with `invalid_dpop_proof` or `invalid_request`, and issues no token
 
 ### Requirement: Old backup archives still import

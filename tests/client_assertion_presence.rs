@@ -541,14 +541,6 @@ async fn token_grants_without_client_authentication() {
             vec![("assertion", "not-a-jwt".to_string())],
         ),
         (
-            "urn:hearth:params:grant-type:step-up-mfa",
-            vec![
-                ("username", "nobody@example.com".to_string()),
-                ("password", "wrong".to_string()),
-                ("mfa_code", "000000".to_string()),
-            ],
-        ),
-        (
             "urn:hearth:grant-type:magic-link",
             vec![("token", "not-a-magic-link".to_string())],
         ),

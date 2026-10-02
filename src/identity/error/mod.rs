@@ -353,10 +353,6 @@ pub enum IdentityError {
     WebhookNotFound,
     /// The new password has appeared in a known data breach (HIBP check).
     PasswordCompromised,
-    /// Adaptive step-up MFA required: login from unrecognised device.
-    StepUpChallengeRequired,
-    /// Adaptive step-up MFA enrollment required: login from unrecognised device with no factor.
-    EnrollMfaRequired,
     /// One or more required actions are pending for this user.
     RequiredActionsBlocking {
         /// The actions the user must complete.

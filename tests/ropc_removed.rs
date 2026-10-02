@@ -219,3 +219,34 @@ async fn dynamic_registration_refuses_the_password_grant() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["error"], "invalid_client_metadata", "{body}");
 }
+
+/// The step-up MFA grant is removed too (owner decision 2026-10-02): like
+/// ROPC it took the user's password at the token endpoint, and it could not
+/// use passkeys. Both endpoints refuse it on the grant type alone.
+#[tokio::test]
+async fn the_step_up_mfa_grant_is_refused_on_both_token_endpoints() {
+    let f = fixture().await;
+    let basic =
+        base64::engine::general_purpose::STANDARD.encode(format!("{}:{SECRET}", f.client_id));
+    for path in [
+        "/token".to_string(),
+        format!("/realms/{}/token", f.realm_name),
+    ] {
+        let form = format!(
+            "grant_type=urn%3Ahearth%3Aparams%3Agrant-type%3Astep-up-mfa\
+             &username={}&password={PASSWORD}&mfa_code=123456",
+            f.email.replace('@', "%40")
+        );
+        let req = Request::builder()
+            .method("POST")
+            .uri(&path)
+            .header("X-Realm-ID", &f.realm_id)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("Authorization", format!("Basic {basic}"))
+            .body(Body::from(form))
+            .expect("request");
+        let (status, body) = send(&f, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+        assert_eq!(body["error"], "unsupported_grant_type", "{path}: {body}");
+    }
+}

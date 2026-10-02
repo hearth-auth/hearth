@@ -64,6 +64,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `PasswordGrantRequest`, kept only for tests, are now removed too. Registering or updating a
   client with `password` in `grant_types` is refused (`400`; `invalid_client_metadata` on
   `POST /register`) instead of storing a grant no endpoint serves.
+- **BREAKING: the step-up MFA grant is removed.** Both token endpoints now answer
+  `grant_type=urn:hearth:params:grant-type:step-up-mfa` with `unsupported_grant_type`. Like ROPC
+  it took the user's password at the token endpoint, and it could not use passkeys; without ROPC
+  nothing sent a client to it. A user proves a second factor in a browser ceremony (login, the
+  authorization endpoint or device approval). Gone with it: the `username`, `password` and
+  `mfa_code` token-request fields and the `HEARTH_STEP_UP_CHALLENGE_REQUIRED` and
+  `HEARTH_ENROLL_MFA_REQUIRED` error codes.
 
 ### Security
 - **`GET /admin/users/{id}/effective-permissions?org_id=` no longer reports a suspended

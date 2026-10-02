@@ -20,7 +20,7 @@ Every code path that decides whether MFA is required SHALL use one resolver. The
 
 #### Scenario: Every entry point agrees
 - **WHEN** a realm requires MFA and a user has proved only a password
-- **THEN** the browser login, the authorization endpoint, the token endpoint (all grants that authenticate a user), and step-up each refuse to complete
+- **THEN** the browser login, the authorization endpoint, the token endpoint (all grants that authenticate a user), and device approval each refuse to complete
 
 #### Scenario: CI rejects a direct read
 - **WHEN** a change adds a direct read of `mfa_required` outside the resolver

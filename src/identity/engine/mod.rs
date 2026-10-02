@@ -9942,14 +9942,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
     // ===== OAuth 2.0 Extended (Step 22) =====
 
-    fn step_up_mfa_grant_token(
-        &self,
-        realm_id: &RealmId,
-        request: &crate::identity::oidc::StepUpMfaGrantRequest,
-    ) -> Result<crate::identity::oidc::PasswordGrantResponse, IdentityError> {
-        self.step_up_mfa_grant_token_inner(realm_id, request)
-    }
-
     #[tracing::instrument(
         level = "info",
         skip(self, request),
@@ -26944,77 +26936,6 @@ mod tests {
         assert!(
             matches!(err, IdentityError::RateLimited),
             "expected RateLimited after MFA lockout, got: {err:?}"
-        );
-    }
-
-    /// NEW-LOW-1: a failed MFA code in step_up_mfa_grant_token must increment
-    /// the IP login attempt counter so the IP-level rate limiter can act.
-    ///
-    /// Strategy: pre-seed the IP counter to (ip_max_attempts - 1) via the public
-    /// helper, then make one bad step-up request. If the step-up handler records
-    /// the attempt, the counter tips over and `check_ip_login_rate_limit` returns
-    /// `RateLimited`. If the handler does NOT record it, the counter stays below
-    /// the threshold and the check still returns `Ok`.
-    #[test]
-    #[allow(clippy::cast_sign_loss)]
-    fn step_up_mfa_bad_code_records_ip_attempt() {
-        let (_dir, engine, clock) = setup_engine();
-        let realm = create_test_realm(&engine);
-        let user = create_test_user(&engine, &realm);
-
-        // Enroll and activate TOTP.
-        let pw = CleartextPassword::from_string("valid-password1".to_string());
-        engine
-            .set_password(&realm, user.id(), &pw)
-            .expect("set password");
-
-        let enrollment = engine.enroll_totp(&realm, user.id()).expect("enroll");
-        let secret_bytes = data_encoding::BASE32_NOPAD
-            .decode(enrollment.secret_base32.as_bytes())
-            .expect("decode");
-        let now_secs = (clock.now().as_micros() / 1_000_000) as u64;
-        let code0 = crate::identity::totp::compute_totp(&secret_bytes, now_secs / 30);
-        engine
-            .verify_totp_enrollment(&realm, user.id(), &code0)
-            .expect("activate");
-
-        let test_ip = "10.0.0.1";
-
-        // Pre-seed the IP counter to (ip_max_attempts - 1).
-        let ip_max = engine.config.rate_limit.ip_max_attempts;
-        for _ in 0..(ip_max - 1) {
-            engine.record_ip_login_attempt(&realm, test_ip);
-        }
-        engine
-            .check_ip_login_rate_limit(&realm, test_ip)
-            .expect("IP should not yet be rate-limited");
-
-        // Submit one step-up request with a wrong MFA code.
-        let request = crate::identity::oidc::StepUpMfaGrantRequest {
-            email: user.email().to_string(),
-            password: "valid-password1".to_string(),
-            mfa_code: "000000".to_string(),
-            scope: None,
-            client_ip: Some(test_ip.to_string()),
-            user_agent: None,
-            dpop_jkt: None,
-        };
-        let err = engine
-            .step_up_mfa_grant_token(&realm, &request)
-            .expect_err("should fail on bad MFA code");
-        assert!(
-            matches!(
-                err,
-                IdentityError::InvalidMfaCode | IdentityError::RateLimited
-            ),
-            "unexpected error: {err:?}"
-        );
-
-        // The step-up handler must have pushed the counter over the threshold.
-        let ip_rate_result = engine.check_ip_login_rate_limit(&realm, test_ip);
-        assert!(
-            matches!(ip_rate_result, Err(IdentityError::RateLimited)),
-            "IP should be rate-limited after step-up MFA failure, got: {ip_rate_result:?}"
         );
     }
 

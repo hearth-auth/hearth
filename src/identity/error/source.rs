@@ -96,8 +96,6 @@ impl std::error::Error for IdentityError {
             | Self::AuthMethodNotAllowed { .. }
             | Self::MfaMethodNotAllowed { .. }
             | Self::WebhookNotFound
-            | Self::StepUpChallengeRequired
-            | Self::EnrollMfaRequired
             | Self::RequiredActionsBlocking { .. }
             | Self::InvalidEmailOtp
             | Self::InvalidPushedAuthorizationRequest

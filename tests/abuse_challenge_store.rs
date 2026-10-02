@@ -231,43 +231,6 @@ fn a16_adversarial_many_ips_independent() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// A-16: error code contract
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// `IdentityError::StepUpChallengeRequired` must have a wire error code
-/// that API callers can inspect to gate CAPTCHA / MFA prompts (A-16).
-#[test]
-fn a16_abuse_challenge_required_error_code() {
-    use hearth::identity::IdentityError;
-    let err = IdentityError::StepUpChallengeRequired;
-    let code = err.wire_error_code();
-    assert!(
-        code.is_some(),
-        "StepUpChallengeRequired must carry a wire error code"
-    );
-    let code_str = code.expect("wire error code must be Some");
-    assert!(
-        code_str.contains("CHALLENGE") || code_str.contains("STEP_UP") || code_str.contains("MFA"),
-        "wire error code must be challenge/step-up/mfa related: {code_str:?}"
-    );
-}
-
-/// `IdentityError::StepUpChallengeRequired` must have a non-empty Display.
-#[test]
-fn a16_abuse_challenge_required_display() {
-    use hearth::identity::IdentityError;
-    let display = format!("{}", IdentityError::StepUpChallengeRequired);
-    assert!(
-        !display.is_empty(),
-        "AbuseChallengeRequired must have a non-empty Display"
-    );
-    assert!(
-        display.to_lowercase().contains("challenge"),
-        "Display must mention 'challenge': {display}"
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // A-48 — Federation state↔session binding (MAC primitive tests)
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -13,7 +13,7 @@ use ring::rand::SecureRandom;
 use crate::audit::{Actor, AuditAction, AuditContext};
 use crate::core::{ClientId, RealmId, SessionId, Uri, UserId};
 use crate::identity::claims_config::ClaimTarget;
-use crate::identity::credentials::{self, CleartextPassword};
+use crate::identity::credentials;
 use crate::identity::error::IdentityError;
 use crate::identity::keys;
 use crate::identity::oidc::{
@@ -1337,123 +1337,6 @@ impl EmbeddedIdentityEngine {
     }
 
     // ===== OAuth 2.0 Extended (Step 22) =====
-
-    pub(super) fn step_up_mfa_grant_token_inner(
-        &self,
-        realm_id: &RealmId,
-        request: &crate::identity::oidc::StepUpMfaGrantRequest,
-    ) -> Result<crate::identity::oidc::PasswordGrantResponse, IdentityError> {
-        // 1. Look up user by email (timing-safe: dummy-hash on miss). The
-        //    dummy verify runs under the REALM's Argon2 parameters: the global
-        //    dummy is cheaper than a realm with a raised cost, so an unknown
-        //    address answered measurably faster (GA audit L14).
-        let user = match self.get_user_by_email(realm_id, &request.email)? {
-            Some(u) => u,
-            None => {
-                let dummy_pw = CleartextPassword::from_string(request.password.clone());
-                self.dummy_verify_for_realm(realm_id, &dummy_pw);
-                return Err(IdentityError::InvalidCredential {
-                    reason: "verification failed".to_string(),
-                });
-            }
-        };
-
-        // 2. Re-verify password to prevent session fixation.
-        let pw = CleartextPassword::from_string(request.password.clone());
-        let matches = self.verify_password(realm_id, user.id(), &pw)?;
-        if !matches {
-            return Err(IdentityError::InvalidCredential {
-                reason: "verification failed".to_string(),
-            });
-        }
-
-        // 3. Verify MFA code (TOTP first; fall through to recovery code on mismatch).
-        let mfa_result = match self.verify_totp(realm_id, user.id(), &request.mfa_code) {
-            Ok(()) => Ok(()),
-            Err(IdentityError::InvalidMfaCode) => {
-                // TOTP code didn't match — try as a recovery code.
-                self.verify_recovery_code(realm_id, user.id(), &request.mfa_code)
-            }
-            Err(e) => return Err(e),
-        };
-        if let Err(e) = mfa_result {
-            // MFA failure counts as a login failure for IP-level rate limiting.
-            if let Some(ip) = &request.client_ip {
-                self.record_ip_login_attempt(realm_id, ip);
-            }
-            return Err(e);
-        }
-
-        // 3a. Pending required actions block token issuance, exactly as they
-        //     do for the password grant (HEA-905). This grant skipped them, so
-        //     an operator-forced password change or enrolment could be walked
-        //     around by asking for tokens here (GA audit M11). Checked after
-        //     both factors, so only a caller who holds them learns of it.
-        if !user.required_actions().is_empty() {
-            return Err(IdentityError::RequiredActionsBlocking {
-                actions: user.required_actions().to_vec(),
-            });
-        }
-
-        // 3b. FAPI 2.0: in a realm with a `fapi_profile` this clientless grant
-        //     issues sender-constrained tokens only, as every other grant does.
-        //     Checked after both factors, like 3a.
-        self.require_fapi_sender_constraint(realm_id, None, request.dpop_jkt.as_deref())?;
-
-        // 4. Create session and issue token pair. Step 3 verified a TOTP or a
-        //    recovery code, so this ceremony proved a second factor. The
-        //    client address feeds the realm's `cidr_policy` (GA audit M13).
-        let session = self.create_session(
-            realm_id,
-            user.id(),
-            &crate::identity::SessionContext {
-                mfa_proof: crate::identity::MfaProof::Proved,
-                ip_address: request.client_ip.clone(),
-                user_agent_raw: request.user_agent.clone(),
-                ..Default::default()
-            },
-        )?;
-        // RFC 9449: a proof binds the access token, the refresh token and the
-        // grant family to its key.
-        let token_pair = self.issue_tokens_with_context(
-            realm_id,
-            user.id(),
-            session.id(),
-            &super::TokenIssuanceContext {
-                dpop_jkt: request.dpop_jkt.clone(),
-                ..Default::default()
-            },
-        )?;
-
-        // 5. Emit StepUpMfaCompleted so incident responders can correlate trigger → resolution.
-        let audit_ctx = AuditContext {
-            actor: Actor::User(user.id().clone()),
-            metadata: Some(serde_json::json!({
-                "user_id": user.id().as_uuid().to_string()
-            })),
-        };
-        if let Err(e) = self.record_audit(
-            realm_id,
-            Some(&audit_ctx),
-            AuditAction::StepUpMfaCompleted,
-            "user",
-            &user.id().as_uuid().to_string(),
-        ) {
-            tracing::warn!(error = %e, "StepUpMfaCompleted audit write failed — event lost");
-        }
-
-        Ok(crate::identity::oidc::PasswordGrantResponse {
-            access_token: token_pair.access_token().to_string(),
-            refresh_token: token_pair.refresh_token().to_string(),
-            token_type: if request.dpop_jkt.is_some() {
-                "DPoP"
-            } else {
-                "Bearer"
-            }
-            .to_string(),
-            expires_in: self.config.token.access_token_ttl_secs,
-        })
-    }
 
     #[tracing::instrument(
         level = "info",

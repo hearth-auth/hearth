@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::CreateAuditEvent;
 use crate::core::{ClientId, FormSecret, RealmId, UserId};
-use crate::identity::{JwtBearerRequest, StepUpMfaGrantRequest};
+use crate::identity::JwtBearerRequest;
 use crate::protocol::client_info::{extract_client_ip, PeerAddr};
 use crate::protocol::convert::oauth::{
     proto_authorize_to_domain, proto_client_creds_to_domain, proto_token_exchange_to_domain,
@@ -23,8 +23,7 @@ use super::now_micros;
 use super::{
     check_anonymous_token_rate_limit, check_token_rate_limit, extract_bearer_token,
     extract_realm_id, identity_error_response, identity_error_to_response, kdf_shed_json_response,
-    make_ip_rate_limit_response, proto_to_rest_json, resolve_realm_by_name,
-    validate_user_token_with_dpop, AppState,
+    proto_to_rest_json, resolve_realm_by_name, validate_user_token_with_dpop, AppState,
 };
 
 /// Registers global OAuth/OIDC routes.
@@ -413,14 +412,6 @@ struct HttpTokenRequest {
     // Device code field
     #[serde(default)]
     device_code: Option<FormSecret>,
-    // Step-up MFA grant: the user re-proves the password with the code.
-    #[serde(default)]
-    username: Option<String>,
-    #[serde(default)]
-    password: Option<FormSecret>,
-    // Step-up MFA completion (HEA-836)
-    #[serde(default)]
-    mfa_code: Option<FormSecret>,
     // JWT Bearer assertion (RFC 7523)
     #[serde(default)]
     assertion: Option<FormSecret>,
@@ -464,9 +455,6 @@ impl std::fmt::Debug for HttpTokenRequest {
             .field("client_secret", &self.client_secret)
             .field("scope", &self.scope)
             .field("device_code", &self.device_code)
-            .field("username", &self.username)
-            .field("password", &self.password)
-            .field("mfa_code", &self.mfa_code)
             .field("assertion", &self.assertion)
             .field("client_assertion_type", &self.client_assertion_type)
             .field("client_assertion", &self.client_assertion)
@@ -2690,8 +2678,8 @@ async fn token_exchange_impl(
 
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
 
-    // A grant that does not authenticate the client (step-up MFA, the
-    // jwt-bearer and magic-link grants) still never ignores a presented
+    // A grant that does not authenticate the client (the jwt-bearer and
+    // magic-link grants) still never ignores a presented
     // assertion: it must verify for the named client.
     if assertion_presented && !GRANTS_AUTHENTICATING_CLIENT.contains(&grant_type) {
         if let Err(resp) = verify_assertion_client(
@@ -2705,19 +2693,6 @@ async fn token_exchange_impl(
         ) {
             return resp;
         }
-    }
-
-    // Per-IP login rate limiting for the step-up-mfa grant.
-    if grant_type == "urn:hearth:params:grant-type:step-up-mfa"
-        && state
-            .identity
-            .check_ip_login_rate_limit(&realm_id, &client_ip)
-            .is_err()
-    {
-        let retry_after = state
-            .identity
-            .ip_login_retry_after_secs(&realm_id, &client_ip);
-        return make_ip_rate_limit_response(retry_after as u32);
     }
 
     // Extract and validate DPoP proof if present (RFC 9449).
@@ -3040,76 +3015,6 @@ async fn token_exchange_impl(
                         Json(proto_to_rest_json(&pb::OidcTokenResponse::from(&response))),
                     )
                         .into_response()
-                }
-                Err(e) => identity_error_to_response(&e).into_response(),
-            }
-        }
-        "urn:hearth:params:grant-type:step-up-mfa" => {
-            let (Some(email), Some(password), Some(mfa_code)) =
-                (body.username, body.password, body.mfa_code)
-            else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "username, password, and mfa_code required for step-up-mfa grant"})),
-                )
-                    .into_response();
-            };
-            let request = StepUpMfaGrantRequest {
-                email,
-                password: password.expose().to_string(),
-                mfa_code: mfa_code.expose().to_string(),
-                scope: body.scope,
-                client_ip: Some(client_ip.clone()),
-                user_agent: headers
-                    .get(axum::http::header::USER_AGENT)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string),
-                dpop_jkt: dpop_jkt.clone(),
-            };
-            let realm_str = realm_id.as_uuid().to_string();
-            let realm_id_clone = realm_id.clone();
-            let identity = Arc::clone(&state.identity);
-            // step_up_mfa_grant_token verifies Argon2id — route through the
-            // shared KDF admission gate (HEA-1910 / HEA-1889 F3) so this grant
-            // joins the permit pool rather than blocking Tokio workers directly.
-            let result = match super::run_kdf_gated_rest(
-                move || identity.step_up_mfa_grant_token(&realm_id_clone, &request),
-                |e| {
-                    tracing::error!(error = %e, "step_up_mfa_grant KDF task failed");
-                    Err(crate::identity::IdentityError::Storage(Box::new(e)))
-                },
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(shed) => return shed,
-            };
-            match result {
-                Ok(response) => {
-                    crate::metrics::metrics()
-                        .tokens_issued_total
-                        .with_label_values(&[realm_str.as_str(), "step_up_mfa"])
-                        .inc();
-                    crate::metrics::metrics().active_sessions.inc();
-                    (
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "access_token": response.access_token(),
-                            "refresh_token": response.refresh_token(),
-                            "token_type": response.token_type,
-                            "expires_in": response.expires_in,
-                        })),
-                    )
-                        .into_response()
-                }
-                Err(
-                    ref e @ (crate::identity::IdentityError::InvalidCredential { .. }
-                    | crate::identity::IdentityError::RateLimited),
-                ) => {
-                    state
-                        .identity
-                        .record_ip_login_attempt(&realm_id, &client_ip);
-                    identity_error_to_response(e).into_response()
                 }
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
@@ -3941,8 +3846,8 @@ async fn realm_token_exchange(
     };
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
 
-    // A grant that does not authenticate the client (step-up MFA, the
-    // jwt-bearer and magic-link grants) still never ignores a presented
+    // A grant that does not authenticate the client (the jwt-bearer and
+    // magic-link grants) still never ignores a presented
     // assertion: it must verify for the named client.
     if assertion_presented && !GRANTS_AUTHENTICATING_CLIENT.contains(&grant_type) {
         if let Err(resp) = verify_assertion_client(
@@ -3956,19 +3861,6 @@ async fn realm_token_exchange(
         ) {
             return resp;
         }
-    }
-
-    // Per-IP login rate limiting for the step-up-mfa grant.
-    if grant_type == "urn:hearth:params:grant-type:step-up-mfa"
-        && state
-            .identity
-            .check_ip_login_rate_limit(&realm_id, &client_ip)
-            .is_err()
-    {
-        let retry_after = state
-            .identity
-            .ip_login_retry_after_secs(&realm_id, &client_ip);
-        return make_ip_rate_limit_response(retry_after as u32);
     }
 
     // Extract and validate DPoP proof if present (RFC 9449).
@@ -4251,68 +4143,6 @@ async fn realm_token_exchange(
                     Json(proto_to_rest_json(&pb::OidcTokenResponse::from(&response))),
                 )
                     .into_response(),
-                Err(e) => identity_error_to_response(&e).into_response(),
-            }
-        }
-        "urn:hearth:params:grant-type:step-up-mfa" => {
-            let (Some(email), Some(password), Some(mfa_code)) =
-                (body.username, body.password, body.mfa_code)
-            else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "username, password, and mfa_code required for step-up-mfa grant"})),
-                )
-                    .into_response();
-            };
-            let request = StepUpMfaGrantRequest {
-                email,
-                password: password.expose().to_string(),
-                mfa_code: mfa_code.expose().to_string(),
-                scope: body.scope,
-                client_ip: Some(client_ip.clone()),
-                user_agent: headers
-                    .get(axum::http::header::USER_AGENT)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string),
-                dpop_jkt: dpop_jkt.clone(),
-            };
-            let realm_id_clone = realm_id.clone();
-            let identity = Arc::clone(&state.identity);
-            // step_up_mfa_grant_token verifies Argon2id — route through the
-            // shared KDF admission gate (HEA-1910 / HEA-1889 F3) so this grant
-            // joins the permit pool rather than blocking Tokio workers directly.
-            let result = match super::run_kdf_gated_rest(
-                move || identity.step_up_mfa_grant_token(&realm_id_clone, &request),
-                |e| {
-                    tracing::error!(error = %e, "realm_step_up_mfa_grant KDF task failed");
-                    Err(crate::identity::IdentityError::Storage(Box::new(e)))
-                },
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(shed) => return shed,
-            };
-            match result {
-                Ok(response) => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "access_token": response.access_token(),
-                        "refresh_token": response.refresh_token(),
-                        "token_type": response.token_type,
-                        "expires_in": response.expires_in,
-                    })),
-                )
-                    .into_response(),
-                Err(
-                    ref e @ (crate::identity::IdentityError::InvalidCredential { .. }
-                    | crate::identity::IdentityError::RateLimited),
-                ) => {
-                    state
-                        .identity
-                        .record_ip_login_attempt(&realm_id, &client_ip);
-                    identity_error_to_response(e).into_response()
-                }
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
@@ -4998,8 +4828,7 @@ mod secret_field_tests {
     fn token_request_credentials_are_zeroized_and_redacted() {
         let body: HttpTokenRequest = serde_urlencoded::from_str(&format!(
             "grant_type=password&code=CANARY-code&code_verifier=CANARY-ver\
-             &refresh_token=CANARY-rt&device_code=CANARY-dc&username=u&password=CANARY-pw\
-             &mfa_code=CANARY-mfa&assertion=CANARY-jwt&token=CANARY-ml\
+             &refresh_token=CANARY-rt&device_code=CANARY-dc&assertion=CANARY-jwt&token=CANARY-ml\
              &subject_token=CANARY-st&actor_token=CANARY-at&{CLIENT_AUTH}"
         ))
         .expect("form parses");
@@ -5008,17 +4837,11 @@ mod secret_field_tests {
         assert_zeroize_on_drop(&body.refresh_token);
         assert_zeroize_on_drop(&body.client_secret);
         assert_zeroize_on_drop(&body.device_code);
-        assert_zeroize_on_drop(&body.password);
-        assert_zeroize_on_drop(&body.mfa_code);
         assert_zeroize_on_drop(&body.assertion);
         assert_zeroize_on_drop(&body.client_assertion);
         assert_zeroize_on_drop(&body.token);
         assert_zeroize_on_drop(&body.subject_token);
         assert_zeroize_on_drop(&body.actor_token);
-        assert_eq!(
-            body.password.as_ref().map(crate::core::FormSecret::expose),
-            Some("CANARY-pw")
-        );
         assert_redacted(&format!("{body:?}"));
     }
 
