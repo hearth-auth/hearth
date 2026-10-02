@@ -5,7 +5,7 @@
 //!   the `issuer` of the discovery document the RP used — for a realm, the
 //!   realm document (`{base}/realms/{name}`), which is also the access
 //!   tokens' issuer. The same identifier is the RFC 9207 `iss` authorization
-//!   response parameter and a JARM response's `iss`. ID tokens carried the
+//!   response parameter. ID tokens carried the
 //!   bare base URL instead.
 //! * OIDC Back-Channel Logout §2.4 / §2.6: a logout token's `iss`, `sub` and
 //!   `sid` are compared with the ID tokens the RP holds for that session, so
@@ -139,7 +139,6 @@ impl Env {
                     amr_values: Vec::new(),
                     response_mode,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize")
@@ -187,12 +186,6 @@ async fn id_token_iss_is_the_realm_discovery_issuer() {
         response.iss(),
         issuer,
         "RFC 9207 iss == the realm discovery issuer"
-    );
-    let jarm = env.authorize(Some(ResponseMode::QueryJwt));
-    assert_eq!(
-        claims(jarm.jarm_jwt().expect("JARM response"))["iss"],
-        issuer.as_str(),
-        "JARM iss == the realm discovery issuer"
     );
 }
 

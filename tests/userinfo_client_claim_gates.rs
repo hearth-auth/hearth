@@ -107,7 +107,6 @@ fn access_token_for(
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize")

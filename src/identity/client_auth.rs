@@ -15,15 +15,11 @@
 //! calls one of the functions here instead of the engine method directly.
 //! When the caller presented a secret, each:
 //!
-//! 1. refuses it at once in a FAPI 2.0 Advanced realm, which accepts only
-//!    `private_key_jwt` — before any gate, so the answer (and its latency)
-//!    depends on the realm alone, never on whether the client exists or holds
-//!    an Argon2id hash;
-//! 2. if the client's stored hash is Argon2id, verifies the secret against it
+//! 1. if the client's stored hash is Argon2id, verifies the secret against it
 //!    inside [`KdfGate::run`] — which awaits a permit (bounded by
 //!    `max_queue_wait`, then shed) holding no thread — and runs ONLY that
 //!    verification under the permit;
-//! 3. runs the engine call synchronously on the caller's task inside a
+//! 2. runs the engine call synchronously on the caller's task inside a
 //!    *client-secret scope* carrying that pre-verified result. The engine's
 //!    Argon2id arm consumes it instead of hashing. Everything else the call
 //!    does (token signing, issuance, storage) runs without a permit.
@@ -199,15 +195,13 @@ async fn preverify(
 /// caller's own input: with none, nothing is hashed on any arm and the call
 /// just runs).
 ///
-/// See the module documentation: a FAPI 2.0 Advanced realm refuses a secret
-/// first; an Argon2id verification runs alone inside the gate; the engine call
+/// See the module documentation: an Argon2id verification runs alone inside the gate; the engine call
 /// runs on the caller's task and is re-run (at most
 /// [`MAX_SECRET_DISPATCHES`] times) if the stored hash changed under it.
 ///
 /// # Errors
 ///
-/// Whatever `call` returns; [`IdentityError::PrivateKeyJwtRequired`] in a
-/// FAPI 2.0 Advanced realm; [`IdentityError::KdfOverloaded`] when the gate
+/// Whatever `call` returns; [`IdentityError::KdfOverloaded`] when the gate
 /// shed the verification; [`IdentityError::Internal`] when the blocking task
 /// failed.
 pub async fn with_client_secret_gate<T, F>(
@@ -223,14 +217,8 @@ where
     let Some(secret) = secret else {
         return call(engine.as_ref());
     };
-    // 1. The realm decides before any gate (review L3).
-    if engine.get_realm(realm_id)?.is_some_and(|realm| {
-        realm.config().fapi_profile == Some(crate::identity::FapiProfile::Advanced)
-    }) {
-        return Err(IdentityError::PrivateKeyJwtRequired);
-    }
     let secret = zeroize::Zeroizing::new(secret.as_bytes().to_vec());
-    // 2. Pre-verify against a stored Argon2id hash, inside the gate.
+    // 1. Pre-verify against a stored Argon2id hash, inside the gate.
     let stored_argon2 = engine
         .get_client(realm_id, client_id)?
         .and_then(|client| client.client_secret_hash().map(str::to_string))
@@ -239,7 +227,7 @@ where
         Some(hash) => Some(preverify(&secret, hash).await?),
         None => None,
     };
-    // 3. The engine call, on this task, consuming the pre-verified result.
+    // 2. The engine call, on this task, consuming the pre-verified result.
     for _ in 0..MAX_SECRET_DISPATCHES {
         let (result, unverified) = run_scoped(preverified.take(), || call(engine.as_ref()));
         match unverified {

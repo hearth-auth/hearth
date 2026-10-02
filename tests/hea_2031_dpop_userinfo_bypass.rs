@@ -235,7 +235,6 @@ fn mint_bound_user_token(
                 amr_values: vec![],
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");

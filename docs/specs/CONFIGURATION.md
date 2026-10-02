@@ -694,8 +694,7 @@ asynchronously — it holds no worker or blocking-pool thread while it waits, so
 burst larger than the blocking pool is served or shed, never hung — for at most
 `max_queue_wait_ms`. The permit covers the Argon2id verification alone; the rest
 of the request (for `client_credentials`, token signing and issuance) runs after it
-is released. In a FAPI 2.0 Advanced realm a presented secret is refused before the
-gate. Hearth-generated client secrets are SHA-256 and never take a permit. See
+is released. Hearth-generated client secrets are SHA-256 and never take a permit. See
 `docs/guides/security-hardening.md` § OAuth client secrets.
 
 | Field | Type | Default | Description |
@@ -1215,7 +1214,6 @@ Each realm entry supports:
 | `auth` | object | — | Per-realm auth policy (MFA, password policy, rate limits, token TTLs, self-registration, and DCR). |
 | `applications` | map | — | Declarative OAuth 2.0 client definitions. |
 | `organizations` | map | — | Declarative organization definitions. |
-| `fapi_profile` | string | — | FAPI 2.0 Security Profile for the realm: `"baseline"` or `"advanced"`. When set, all clients in the realm must comply. `"baseline"` requires PAR + PKCE (S256). `"advanced"` adds JAR + JARM and accepts `private_key_jwt` client authentication only: an application of an `"advanced"` realm that is `confidential` or carries a `client_secret` fails `hearth config validate`, startup and reload, naming the realm and the application (declare `jwks` instead). Absent means standard OAuth 2.0 / OIDC rules apply. Can also be set at runtime via `PATCH /admin/realms/{id}/config`. |
 | `breach_check` | object | — | HIBP k-anonymity breach check on every password set/change. See below. |
 
 ### `realms.<name>.email`
@@ -1442,13 +1440,13 @@ Declarative OAuth 2.0 client definitions. Keyed by a **slug** (used to derive a 
 | `client_secret` | string | — | Client secret. Supports `${ENV_VAR}` substitution. **Required** when `confidential: true`. Hashed with Argon2id before storage: a configured secret is caller-chosen, so its entropy is unknown (Hearth-generated secrets use a fast SHA-256 format instead; see `docs/guides/security-hardening.md`). |
 | `access_token_authorization` | *not a YAML key* | `embedded` | **Admin API / admin UI only — not settable in `hearth.yaml`.** Controls how resource servers resolve RBAC permissions for tokens issued to this client. One of: `embedded`, `introspection`, `decision`. Set it via `POST /admin/applications` / `PATCH /admin/applications/{id}` or the client edit form. Putting it under `applications.<slug>` in a config file is rejected at startup by `deny_unknown_fields`. See [Token Authorization Modes](../guides/rbac.md#token-authorization-modes). |
 | `require_consent` | bool | `true` | Whether users must approve the OAuth consent screen before tokens are issued. Set `false` only for first-party clients you control. |
-| `profile` | string | `"standard"` | Security profile for this client: `"fapi2"` or `"standard"` (anything else fails `hearth config validate` and startup). Setting `"fapi2"` subjects this client to FAPI 2.0 constraints (DPoP sender-constrained tokens, PAR, PKCE S256, `private_key_jwt` client authentication) regardless of the realm-level `fapi_profile`. A `"fapi2"` application **requires** `jwks` and must not be `confidential` or carry a `client_secret`. |
-| `jwks` | mapping or string | — | The client's public JWK Set (RFC 7517), inline: a YAML mapping `{keys: [...]}` or the same object as a JSON string. Its keys verify the client's `private_key_jwt` assertions and signed request objects (JAR). **Required** with `profile: "fapi2"`. Public keys only. YAML is authoritative: removing the key removes the client's JWKS on the next reconcile — unless that would leave the client with no credential at all (no secret, no JWKS, not FAPI 2.0), which would make it a public client: that change is refused with a warning, reported in the reconcile report, and the application is left unchanged. The REST admin API refuses runtime changes to `jwks`, `assertion_public_key` and `profile` of a YAML-declared application (`409`). |
-| `id_token_signed_response_alg` | string | `"EdDSA"` | Algorithm this client's **ID tokens** are signed with: `"EdDSA"` or `"RS256"` (case-sensitive; anything else fails `hearth config validate` and startup). `RS256` is for relying parties that only verify the OpenID Connect default; it creates the realm's RSA-3072 ID-token key on first use and publishes it in the realm JWKS. Access and refresh tokens are always EdDSA. `RS256` is refused under FAPI 2.0 — with `profile: fapi2`, or in a realm with `fapi_profile` — since FAPI 2.0 permits only PS256, ES256 and EdDSA. Clients registered through Dynamic Client Registration default to `RS256` instead (`EdDSA` in a FAPI realm) — see [OIDC.md §1.2](OIDC.md#12-signing). |
+| `jwks` | mapping or string | — | The client's public JWK Set (RFC 7517), inline: a YAML mapping `{keys: [...]}` or the same object as a JSON string. Its keys verify the client's `private_key_jwt` assertions and signed request objects (JAR). Public keys only. YAML is authoritative: removing the key removes the client's JWKS on the next reconcile — unless that would leave the client with no credential at all (no secret, no JWKS), which would make it a public client: that change is refused with a warning, reported in the reconcile report, and the application is left unchanged. The REST admin API refuses runtime changes to `jwks`, `assertion_public_key` and `dpop_bound_access_tokens` of a YAML-declared application (`409`). |
+| `dpop_bound_access_tokens` | bool | `false` | RFC 9449 §5.2 client metadata. When `true`, every token request from this client — `authorization_code`, `refresh_token`, `client_credentials`, `jwt-bearer` and `device_code` — must carry a `DPoP` proof, or it is refused with `invalid_dpop_proof`; the issued tokens are bound to the proof key (`cnf.jkt`, `token_type: DPoP`). YAML is authoritative: the value is re-applied on every reconcile. |
+| `id_token_signed_response_alg` | string | `"EdDSA"` | Algorithm this client's **ID tokens** are signed with: `"EdDSA"` or `"RS256"` (case-sensitive; anything else fails `hearth config validate` and startup). `RS256` is for relying parties that only verify the OpenID Connect default; it creates the realm's RSA-3072 ID-token key on first use and publishes it in the realm JWKS. Access and refresh tokens are always EdDSA. Clients registered through Dynamic Client Registration default to `RS256` instead — see [OIDC.md §1.2](OIDC.md#12-signing). |
 
 Reconciliation:
 - New slug → client **created** with deterministic UUID
-- Existing slug → `name`, `redirect_uris`, `post_logout_redirect_uris`, `grant_types`, `id_token_signed_response_alg` **updated** if changed
+- Existing slug → `name`, `redirect_uris`, `post_logout_redirect_uris`, `grant_types`, `id_token_signed_response_alg`, `dpop_bound_access_tokens` **updated** if changed
 - Removed slug → client **archived**
 
 ```yaml
@@ -1594,6 +1592,19 @@ to start:
 
 ```
 configuration key 'realms.corp.saml_service_providers' is no longer supported: the SAML IdP side (Hearth issuing assertions to service providers) was removed in Hearth 3.0.0. Remove the key from the configuration. Instead: Hearth stays a SAML service provider; connect applications to Hearth over OpenID Connect.
+```
+
+---
+
+### `realms.<name>.fapi_profile`, `realms.<name>.applications.<app>.profile` — removed in 3.0.0
+
+The FAPI 2.0 profile was removed in 3.0.0. PAR, signed request objects (JAR), PKCE S256,
+`private_key_jwt` and DPoP remain available to every client; to require sender-constrained
+tokens for one client, set `dpop_bound_access_tokens: true` on the application. A
+configuration that still sets either key refuses to start:
+
+```
+configuration key 'realms.corp.fapi_profile' is no longer supported: the FAPI 2.0 profile was removed in Hearth 3.0.0. Remove the key from the configuration. Instead: to require sender-constrained tokens, set dpop_bound_access_tokens: true on the application.
 ```
 
 ---

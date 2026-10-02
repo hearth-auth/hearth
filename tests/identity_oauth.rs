@@ -355,7 +355,6 @@ fn refresh_token_rotation_issues_new_pair() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -449,7 +448,6 @@ fn refresh_token_rejects_forged_legacy_payload_without_fid() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -573,7 +571,6 @@ fn revoke_refresh_token_invalidates_family() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -767,7 +764,6 @@ fn adversarial_refresh_token_theft_detection() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -1028,7 +1024,6 @@ mod oauth_proptests {
                                         amr_values: Vec::new(),
                                     response_mode: None,
                                     request: None,
-                                    via_par: false,
                 }).expect("authorize");
 
                 let tokens = engine.exchange_authorization_code(&realm_id, &TokenExchangeRequest {
@@ -1195,7 +1190,6 @@ mod oauth_proptests {
                                 amr_values: Vec::new(),
                             response_mode: None,
                             request: None,
-                            via_par: false,
             }).expect("authorize");
 
             let tokens = engine.exchange_authorization_code(&realm_id, &TokenExchangeRequest {
@@ -1458,9 +1452,7 @@ fn pending_authorization_ticket_is_single_use() {
         code_challenge_method: Some("S256".to_string()),
         nonce: None,
         response_mode: None,
-        authorization_signed_response_alg: None,
         resource: None,
-        via_par: false,
         amr_values: Vec::new(),
         created_at: now,
         expires_at: now.add_micros(600_000_000),
@@ -1494,9 +1486,7 @@ fn pending_authorization_ticket_expires() {
         code_challenge_method: Some("S256".to_string()),
         nonce: None,
         response_mode: None,
-        authorization_signed_response_alg: None,
         resource: None,
-        via_par: false,
         amr_values: Vec::new(),
         created_at: now,
         expires_at: now.add_micros(600_000_000),
@@ -1586,7 +1576,6 @@ fn concurrent_refresh_of_one_token_yields_exactly_one_success() {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -1692,7 +1681,6 @@ fn deleting_a_client_revokes_its_outstanding_refresh_tokens() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");

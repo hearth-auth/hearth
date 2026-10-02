@@ -7,7 +7,7 @@
 //! and honour `prompt`; the others issued a code straight away — a
 //! third-party client got a code without the user ever approving it. The PAR
 //! branch and the interstitial resumes also dropped the requested
-//! `response_mode`, so a `fragment` / JARM request got a plain query-string
+//! `response_mode`, so a `fragment` request got a plain query-string
 //! redirect. (The SMS-challenge interstitial these tests also drove was
 //! removed in Hearth 3.0.0; its resume tests now run through a required
 //! action.)
@@ -382,18 +382,6 @@ async fn decide_consent(
         format!("ticket={ticket}&decision={decision}&scope=openid&_csrf={CSRF}"),
     )
     .await
-}
-
-/// The claims of a JWT, unverified (the signature is the engine's concern;
-/// these tests only check which values travelled where).
-fn jwt_claims(jwt: &str) -> serde_json::Value {
-    let payload = jwt.split('.').nth(1).expect("JWT payload");
-    serde_json::from_slice(
-        &data_encoding::BASE64URL_NOPAD
-            .decode(payload.as_bytes())
-            .expect("base64url payload"),
-    )
-    .expect("claims json")
 }
 
 /// A `private_key_jwt` assertion signed with the client's JWKS key: a
@@ -1003,7 +991,6 @@ async fn engine_authorize_honours_the_fragment_response_mode() {
                 amr_values: Vec::new(),
                 response_mode: Some(hearth::identity::ResponseMode::Fragment),
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -1016,12 +1003,11 @@ async fn engine_authorize_honours_the_fragment_response_mode() {
 // ===========================================================================
 // Error responses use the request's response mode
 //
-// OAuth Multiple Response Types §2.1 and JARM §2.3: the response mode governs
-// the error response too. Errors used to go to the query string, unsigned
-// unless the client had a registered signing alg, whatever mode was asked for
+// OAuth Multiple Response Types §2.1: the response mode governs the error
+// response too. Errors used to go to the query string, whatever mode was
+// asked for
 // — so a silent-auth SPA using `fragment` got its code in the fragment but
-// `consent_required` in the query, and a `query.jwt` request got an unsigned
-// error.
+// `consent_required` in the query.
 // ===========================================================================
 
 /// The error must be in the fragment, not the query, and carry the state.
@@ -1103,52 +1089,53 @@ async fn plain_request_error_uses_the_fragment_response_mode() {
     assert_fragment_error(&location(&resp), "invalid_request", "plain-state");
 }
 
-/// `query.jwt` asked by a client with no registered signing alg: the error
-/// is a signed `?response=` JWT, as the code would have been.
+/// A response mode Hearth does not support — an unknown one, or a JARM mode
+/// (removed in 3.0.0) — is refused with an error redirect, never a code.
 #[tokio::test]
-async fn jar_prompt_none_error_uses_the_query_jwt_response_mode() {
+async fn plain_unsupported_response_mode_is_refused() {
     let rig = rig().await;
-    let (client, pair) = jar_client(&rig, true);
-    assert!(client.authorization_signed_response_alg().is_none());
-    let uri = jar_uri(
-        &rig,
-        &client,
-        &pair,
-        &serde_json::json!({ "prompt": "none", "response_mode": "query.jwt" }),
-        "",
-    );
-    let resp = get(&rig, &uri, &session_cookie(&rig)).await;
-    let loc = location(&resp);
-    assert!(
-        redirect_param(&loc, "error", false).is_none(),
-        "a JARM request must not get a plain error; got {loc}"
-    );
-    let jwt = redirect_param(&loc, "response", false)
-        .unwrap_or_else(|| panic!("query.jwt must deliver ?response=<jwt>; got {loc}"));
-    let claims = jwt_claims(&jwt);
-    assert_eq!(claims["error"], "consent_required", "claims {claims}");
-    assert_eq!(claims["state"], "jar-state", "claims {claims}");
+    let client = register(&rig, false, None);
+    // The browser surface answers `error=invalid_request` and names the
+    // cause in `error_description`.
+    for mode in ["unknown_mode", "query.jwt", "fragment.jwt", "jwt"] {
+        let uri = plain_uri(&client, &format!("&response_mode={mode}"));
+        let resp = get(&rig, &uri, &session_cookie(&rig)).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER, "{mode}");
+        let loc = location(&resp);
+        assert_eq!(
+            redirect_param(&loc, "error", false).as_deref(),
+            Some("invalid_request"),
+            "{mode}: got {loc}"
+        );
+        assert_eq!(
+            redirect_param(&loc, "error_description", false).as_deref(),
+            Some("unsupported_response_mode"),
+            "{mode}: got {loc}"
+        );
+        assert!(
+            redirect_param(&loc, "code", false).is_none()
+                && redirect_param(&loc, "code", true).is_none(),
+            "{mode}: no code; got {loc}"
+        );
+    }
 }
 
+/// With no `response_mode`, the code travels in the query string.
 #[tokio::test]
-async fn par_prompt_none_error_uses_the_fragment_jwt_response_mode() {
+async fn plain_absent_response_mode_uses_the_query() {
     let rig = rig().await;
-    let client = register(&rig, true, None);
-    let mut request = par_request(&client);
-    request.prompt = Some("none".to_string());
-    request.response_mode = Some("fragment.jwt".to_string());
-    let resp = get(&rig, &push(&rig, &request), &session_cookie(&rig)).await;
+    let client = register(&rig, false, None);
+    let resp = get(&rig, &plain_uri(&client, ""), &session_cookie(&rig)).await;
     let loc = location(&resp);
+    assert!(loc.starts_with(REDIRECT), "got {loc}");
     assert!(
-        redirect_param(&loc, "response", false).is_none()
-            && redirect_param(&loc, "error", false).is_none(),
-        "nothing in the query string; got {loc}"
+        redirect_param(&loc, "code", false).is_some(),
+        "the code must travel in the query; got {loc}"
     );
-    let jwt = redirect_param(&loc, "response", true)
-        .unwrap_or_else(|| panic!("fragment.jwt must deliver #response=<jwt>; got {loc}"));
-    let claims = jwt_claims(&jwt);
-    assert_eq!(claims["error"], "consent_required", "claims {claims}");
-    assert_eq!(claims["state"], "par-state", "claims {claims}");
+    assert!(
+        redirect_param(&loc, "error", false).is_none(),
+        "no error; got {loc}"
+    );
 }
 
 // ===========================================================================

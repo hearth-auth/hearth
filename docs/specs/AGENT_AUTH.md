@@ -1,7 +1,7 @@
 # Agent Authentication & Authorization
 
 > **Implementation status (updated 2026-06-21 — all milestones shipped):**
-> - **M1 — Phase A:** Agent entity `AgentId` newtype, agent CRUD + lifecycle, API-key credentials, Agent Card (`/.well-known/agent.json`), DPoP/RFC 9449 sender-constrained tokens (`src/identity/dpop.rs`), FAPI 2.0 enforcement.
+> - **M1 — Phase A:** Agent entity `AgentId` newtype, agent CRUD + lifecycle, API-key credentials, Agent Card (`/.well-known/agent.json`), DPoP/RFC 9449 sender-constrained tokens (`src/identity/dpop.rs`), per-client `dpop_bound_access_tokens` enforcement.
 > - **M2 — Phase B:** MCP authorization server, RFC 8693 token exchange (`urn:ietf:params:oauth:grant-type:token-exchange`), RFC 8707 resource indicators, RFC 9728 Protected Resource Metadata, On-Behalf-Of extension, consent management, delegation chain depth enforcement.
 > - **M3 — Phase C:** Tool-level permission grammar (`tool.*`/`toolgroup.*`, deny-wins evaluation), scope intersection at delegation, approval request lifecycle (create/approve/deny/CAS/capability-token), durable at-least-once approval webhook notifications, HTTP approval REST API.
 > - **M4 — Phase D:** AAT issuance/derivation/validation (`src/identity/engine/aat.rs`), single-use transaction tokens with replay prevention (`txn.rs`), cross-realm trust policies (`cross_realm.rs`), SPIFFE/mTLS workload identity with SVID mapping (`spiffe.rs`).

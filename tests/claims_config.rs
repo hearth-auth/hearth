@@ -71,8 +71,7 @@ async fn default_profile_emits_roles_for_first_party() {
                 access_token_authorization: hearth::identity::AccessTokenAuthorization::Embedded,
                 jwks: None,
                 jwks_uri: None,
-                authorization_signed_response_alg: None,
-                profile: Default::default(),
+                dpop_bound_access_tokens: false,
                 mfa_required: None,
                 ..Default::default()
             },
@@ -147,8 +146,7 @@ async fn default_profile_suppresses_roles_for_third_party() {
                 access_token_authorization: hearth::identity::AccessTokenAuthorization::Embedded,
                 jwks: None,
                 jwks_uri: None,
-                authorization_signed_response_alg: None,
-                profile: Default::default(),
+                dpop_bound_access_tokens: false,
                 mfa_required: None,
                 ..Default::default()
             },
@@ -223,8 +221,7 @@ async fn required_scopes_gate_uses_granted_not_requested() {
                 access_token_authorization: hearth::identity::AccessTokenAuthorization::Embedded,
                 jwks: None,
                 jwks_uri: None,
-                authorization_signed_response_alg: None,
-                profile: Default::default(),
+                dpop_bound_access_tokens: false,
                 mfa_required: None,
                 ..Default::default()
             },
@@ -381,8 +378,7 @@ async fn yaml_override_fallback_to_default_when_gate_fails() {
                 access_token_authorization: hearth::identity::AccessTokenAuthorization::Embedded,
                 jwks: None,
                 jwks_uri: None,
-                authorization_signed_response_alg: None,
-                profile: Default::default(),
+                dpop_bound_access_tokens: false,
                 mfa_required: None,
                 ..Default::default()
             },
@@ -480,8 +476,7 @@ async fn omit_source_suppresses_default_claim() {
                 access_token_authorization: hearth::identity::AccessTokenAuthorization::Embedded,
                 jwks: None,
                 jwks_uri: None,
-                authorization_signed_response_alg: None,
-                profile: Default::default(),
+                dpop_bound_access_tokens: false,
                 mfa_required: None,
                 ..Default::default()
             },

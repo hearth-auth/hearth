@@ -719,33 +719,31 @@ Prevention Cheat Sheet.
 
 ### A-38a: DPoP sender-constraint enforcement on all access-token-issuing grants
 
-**Threat**: A FAPI 2.0 realm or FAPI 2.0 client calls `client_credentials` or
-`jwt-bearer` without a DPoP proof.  The issued token is sender-unconstrained
-(a bearer token any party can replay).  Previously only the authorization-code
-exchange path enforced the FAPI DPoP gate.
+**Threat**: A client registered with `dpop_bound_access_tokens: true` (RFC 9449
+§5.2) calls a token grant without a DPoP proof. The issued token would be
+sender-unconstrained (a bearer token any party can replay), defeating the
+client's declared binding.
 
 **Implementation**:
 
-Both `client_credentials_token_inner` and `jwt_bearer_token_inner` in
-`src/identity/engine/oauth.rs` now execute the same FAPI gate as
-`exchange_code_for_tokens`:
+Every access-token-issuing grant in `src/identity/engine/oauth.rs` and
+`src/identity/engine/mod.rs` — authorization code, refresh, client
+credentials, JWT bearer and device code — calls the same gate before issuing:
 
 ```
-if (client.profile().is_fapi2() || realm.config().fapi_profile.is_some())
-   && request.dpop_jkt.is_none()
-→ return Err(FapiViolation)
+require_dpop_for_bound_client(client, request.dpop_jkt)
+  if client.dpop_bound_access_tokens() && dpop_jkt.is_none()
+  → return Err(InvalidDPopProof)   // wire: invalid_dpop_proof
 ```
 
-The gate checks both the per-client `profile` field *and* the realm-level
-`fapi_profile` so a standard client cannot bypass a realm-wide FAPI
-enforcement.
+A token issued with a proof carries `cnf.jkt` and `token_type: DPoP`.
 
-**Fail mode**: Fail-closed for FAPI realms/clients; fail-open for non-FAPI
-(DPoP remains optional).
+**Fail mode**: Fail-closed for `dpop_bound_access_tokens` clients; for other
+clients DPoP remains optional (a proof, when sent, still binds the token).
 
-**RFC references**: FAPI 2.0 Security Profile §5.3.3 (sender-constrained
-tokens mandatory on all grant types); RFC 9449 (DPoP); RFC 6749 §4.4
-(client credentials grant).
+**RFC references**: RFC 9449 §5.2 (`dpop_bound_access_tokens` client
+metadata) and §5 (DPoP access token request); RFC 6749 §4.4 (client
+credentials grant).
 
 ### A-38b: RFC 8693 `act` delegation-chain depth cap
 

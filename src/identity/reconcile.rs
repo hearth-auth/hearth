@@ -29,7 +29,7 @@ use crate::identity::keys::{
     config_migration_history_key, config_migration_history_scan_prefix, config_orphan_key,
     config_orphan_scan_prefix, config_snapshot_key, prefix_end,
 };
-use crate::identity::oidc::{ApplicationStatus, ClientProfile, UpdateClientRequest};
+use crate::identity::oidc::{ApplicationStatus, UpdateClientRequest};
 use crate::identity::{
     CleartextPassword, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
     DemoSeedSpec, IdentityEngine, ImportClientRequest, OrganizationConfig, OrganizationStatus,
@@ -1111,22 +1111,9 @@ pub(crate) fn reconcile_applications(
                     .as_str()
                     .to_string()
             });
-        // YAML is authoritative for the inline JWKS too: absent clears it. A
-        // `profile: fapi2` client needs it (the engine refuses one without).
+        // YAML is authoritative for the inline JWKS too: absent clears it.
         let cfg_jwks = app_cfg.jwks_json();
-        let cfg_profile = match app_cfg.profile.as_deref() {
-            None | Some("standard") => ClientProfile::Standard,
-            Some("fapi2") => ClientProfile::Fapi2,
-            Some(other) => {
-                warn!(
-                    realm = realm_name,
-                    app = app_key,
-                    profile = other,
-                    "unknown client profile in YAML; treating as standard"
-                );
-                ClientProfile::Standard
-            }
-        };
+        let cfg_dpop = app_cfg.dpop_bound_access_tokens.unwrap_or(false);
 
         match engine.get_client(realm_id, &client_id) {
             Ok(Some(existing)) => {
@@ -1137,7 +1124,7 @@ pub(crate) fn reconcile_applications(
                 let grants_changed = existing.grant_types() != grant_types;
                 let consent_changed = existing.require_consent() != cfg_require_consent;
                 let logo_changed = existing.client_logo_url() != cfg_logo.as_deref();
-                let profile_changed = existing.profile() != cfg_profile;
+                let dpop_changed = existing.dpop_bound_access_tokens() != cfg_dpop;
                 let jwks_changed = existing.jwks() != cfg_jwks.as_deref();
                 let post_logout_changed = existing.post_logout_redirect_uris() != cfg_post_logout;
                 let id_token_alg_changed =
@@ -1145,8 +1132,7 @@ pub(crate) fn reconcile_applications(
 
                 // Reconcile never makes a client weaker than it is: a YAML
                 // change that would remove the last credential of a client
-                // that holds one (dropping `jwks`, or the FAPI 2.0 profile, of
-                // a secretless client) would turn it into a PUBLIC client that
+                // that holds one (dropping the `jwks` of a secretless client) would turn it into a PUBLIC client that
                 // anyone knowing its client_id can act as. Refuse it, report
                 // it, and leave the client unchanged.
                 let jwks_after = if jwks_changed {
@@ -1157,11 +1143,10 @@ pub(crate) fn reconcile_applications(
                 let public_after = existing.client_secret_hash().is_none()
                     && existing.assertion_public_key().is_none()
                     && existing.jwks_uri().is_none()
-                    && jwks_after.is_none()
-                    && !cfg_profile.is_fapi2();
+                    && jwks_after.is_none();
                 if !existing.is_public() && public_after {
                     let reason = "the change would remove the client's last credential \
-                                  (its jwks or FAPI 2.0 profile) and make it a public client; \
+                                  (its jwks) and make it a public client; \
                                   declare the jwks again, or give it a secret"
                         .to_string();
                     warn!(
@@ -1183,7 +1168,7 @@ pub(crate) fn reconcile_applications(
                     || grants_changed
                     || consent_changed
                     || logo_changed
-                    || profile_changed
+                    || dpop_changed
                     || jwks_changed
                     || post_logout_changed
                     || id_token_alg_changed
@@ -1217,11 +1202,7 @@ pub(crate) fn reconcile_applications(
                             } else {
                                 None
                             },
-                            profile: if profile_changed {
-                                Some(cfg_profile)
-                            } else {
-                                None
-                            },
+                            dpop_bound_access_tokens: dpop_changed.then_some(cfg_dpop),
                             jwks: jwks_changed.then(|| cfg_jwks.clone()),
                             post_logout_redirect_uris: if post_logout_changed {
                                 Some(cfg_post_logout.clone())
@@ -1276,13 +1257,13 @@ pub(crate) fn reconcile_applications(
                     None
                 };
 
-                // One write carrying the final profile, JWKS and consent
-                // settings. Creating a public Standard client first and
-                // applying the profile/JWKS in a second write left a public
-                // client behind whenever that second write failed.
+                // One write carrying the final DPoP, JWKS and consent
+                // settings. Creating a public client first and applying the
+                // JWKS in a second write left a public client behind whenever
+                // that second write failed.
                 let needs_consent_override = !cfg_require_consent
                     || cfg_logo.is_some()
-                    || cfg_profile != ClientProfile::Standard
+                    || cfg_dpop
                     || cfg_jwks.is_some()
                     || !cfg_post_logout.is_empty();
                 engine.import_client(
@@ -1307,7 +1288,7 @@ pub(crate) fn reconcile_applications(
                         require_consent: (needs_consent_override && app_cfg.trust_level.is_none())
                             .then_some(cfg_require_consent),
                         client_logo_url: cfg_logo.clone(),
-                        profile: cfg_profile,
+                        dpop_bound_access_tokens: cfg_dpop,
                         jwks: cfg_jwks.clone(),
                         post_logout_redirect_uris: cfg_post_logout.clone(),
                         ..Default::default()

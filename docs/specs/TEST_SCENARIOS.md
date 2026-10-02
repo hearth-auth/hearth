@@ -849,7 +849,7 @@ Phase 1 extends the Phase 0 RBAC engine with group nesting, role composition, or
 
 ### Agent DPoP — Phase A.5–A.6 (shipped M1–M5; verified HEA-1766 audit)
 
-<!-- HEA-1766 audit: un-gated (HEA-1410 shipped per AGENT_AUTH.md). Backed by tests/dpop.rs, tests/dpop_refresh_binding.rs, tests/fapi2_conformance.rs, src/identity/dpop.rs. -->
+<!-- HEA-1766 audit: un-gated (HEA-1410 shipped per AGENT_AUTH.md). Backed by tests/dpop.rs, tests/dpop_refresh_binding.rs, src/identity/dpop.rs. -->
 - [x] DPoP proof parsing, signature verification, nonce, replay (Unit)
 - [x] RFC 9449 test vector conformance (Conformance)
 - [x] DPoP-bound token issuance full flow (Integration)

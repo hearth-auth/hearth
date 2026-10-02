@@ -14,9 +14,9 @@ use crate::audit::{AuditEngine, AuditEvent};
 use crate::core::{ClientId, ImportOutcome, RealmId};
 use crate::identity::federation::IdpConfig;
 use crate::identity::{
-    AccessTokenAuthorization, AgentExport, ApplicationStatus, ClientProfile, ClientTrustLevel,
-    ConsentExport, CreateRealmRequest, FederationLinkExport, IdentityEngine, IdentityError,
-    ImportClientRequest, ImportUserRequest, MfaFactorExport, Organization, OrganizationInvitation,
+    AccessTokenAuthorization, AgentExport, ApplicationStatus, ClientTrustLevel, ConsentExport,
+    CreateRealmRequest, FederationLinkExport, IdentityEngine, IdentityError, ImportClientRequest,
+    ImportUserRequest, MfaFactorExport, Organization, OrganizationInvitation,
     OrganizationMembership, RawCredential, Realm, RetiringSigningKeyExport, RevocationExport,
     ScimMappingExport, User, Webhook,
 };
@@ -265,7 +265,7 @@ struct BackupCredential {
 /// (`clients.ndjson`). Field names match `OAuthClient`'s serde output.
 ///
 /// Every credential and security field is read: the stored secret hash, the
-/// assertion key, the JWKS / `jwks_uri`, the profile. A restore that dropped
+/// assertion key, the JWKS / `jwks_uri`, the DPoP requirement. A restore that dropped
 /// them re-created every confidential and `private_key_jwt` client as a
 /// PUBLIC client — one anyone knowing its `client_id` could act as.
 #[derive(Deserialize)]
@@ -321,9 +321,7 @@ struct BackupClient {
     #[serde(default)]
     jwks_uri: Option<String>,
     #[serde(default)]
-    authorization_signed_response_alg: Option<String>,
-    #[serde(default)]
-    profile: ClientProfile,
+    dpop_bound_access_tokens: bool,
     #[serde(default)]
     mfa_required: Option<bool>,
 }
@@ -339,14 +337,12 @@ const AUTHENTICATED_ONLY_GRANTS: [&str; 2] = [
 ];
 
 impl BackupClient {
-    /// Whether the record holds any client credential, or is FAPI 2.0 (which
-    /// is never public).
+    /// Whether the record holds any client credential.
     fn holds_a_credential(&self) -> bool {
         self.client_secret_hash.is_some()
             || self.assertion_public_key.is_some()
             || self.jwks.is_some()
             || self.jwks_uri.is_some()
-            || self.profile.is_fapi2()
     }
 
     /// Why this record must not be restored, if it cannot be restored as
@@ -1520,8 +1516,7 @@ impl BackupImporter {
                 access_token_authorization: client.access_token_authorization,
                 jwks: client.jwks,
                 jwks_uri: client.jwks_uri,
-                authorization_signed_response_alg: client.authorization_signed_response_alg,
-                profile: client.profile,
+                dpop_bound_access_tokens: client.dpop_bound_access_tokens,
                 mfa_required: client.mfa_required,
             };
 

@@ -98,7 +98,6 @@ fn authorize(
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .map(|r| r.code().to_string())

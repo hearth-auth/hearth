@@ -74,10 +74,6 @@ pub enum IdentityError {
     /// Intentionally vague — does not distinguish wrong vs. expired
     /// for enumeration resistance.
     InvalidClientSecret,
-    /// The client authenticated (or tried to) with a method its profile
-    /// forbids: a FAPI 2.0 Advanced realm, or a FAPI 2.0 client, accepts only
-    /// `private_key_jwt` (`docs/specs/OIDC.md` §2.1.2 item 6, §2.2).
-    PrivateKeyJwtRequired,
     /// The `private_key_jwt` client assertion is invalid (RFC 7523 §2.2).
     InvalidClientAssertion {
         /// Why the assertion was rejected.
@@ -380,11 +376,6 @@ pub enum IdentityError {
     /// A JWT bearer assertion (RFC 7523) is invalid.
     JwtBearerAssertionInvalid {
         /// Machine-readable reason string.
-        reason: String,
-    },
-    /// The request violates a FAPI 2.0 Security Profile constraint.
-    FapiViolation {
-        /// Human-readable description of the violated constraint.
         reason: String,
     },
     /// The requested email is under a 90-day post-deletion reservation (A-20).

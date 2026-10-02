@@ -93,8 +93,8 @@ pub use kdf_gate::{
 pub use magic_link::MagicLinkResponse;
 pub use oidc::{
     fuzz_parse_token_exchange, AccessTokenAuthorization, ApplicationStatus, AuthorizationRequest,
-    AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientProfile,
-    ClientTrustLevel, CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
+    AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel,
+    CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     GeneratedClientSecret, IdTokenSigningAlg, IntrospectionResponse, JarClaims, JwtBearerRequest,
     LiveTokenAuthority, OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse,
@@ -123,15 +123,15 @@ pub use types::{
     AttributeType, BreachCheckConfig, BulkResult, CidrPolicy, ConsentDecision, ConsentExport,
     ConsentListEntry, ConsentRecord, CreateInvitationRequest, CreateOrganizationRequest,
     CreateRealmRequest, CreateUserRequest, CreateWebhookRequest, CredentialExport, DcrPolicy,
-    DemoSeedOutcome, DemoSeedSpec, FapiProfile, FederationLinkExport, ImportClientRequest,
-    ImportUserRequest, InvitationStatus, MfaFactorExport, MfaProof, MigrationReport, Organization,
-    OrganizationConfig, OrganizationInvitation, OrganizationMembership, OrganizationRole,
-    OrganizationStatus, Page, PasswordPolicy, PendingAuthorizationRequest, PreTokenWebhookConfig,
-    PreTokenWebhookErrorPolicy, RawCredential, Realm, RealmConfig, RealmQuotaConfig, RealmStatus,
-    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
-    ScimMappingExport, ScimMappingKind, Session, SessionContext, SessionLimitPolicy,
-    SessionVersionConfig, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest,
-    UpdateWebhookRequest, User, UserStatus, VerificationOrigin, WebAuthnAttestationPolicy, Webhook,
+    DemoSeedOutcome, DemoSeedSpec, FederationLinkExport, ImportClientRequest, ImportUserRequest,
+    InvitationStatus, MfaFactorExport, MfaProof, MigrationReport, Organization, OrganizationConfig,
+    OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
+    PasswordPolicy, PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy,
+    RawCredential, Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest,
+    RegisterUserResponse, RegistrationPolicy, RequiredAction, ScimMappingExport, ScimMappingKind,
+    Session, SessionContext, SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest,
+    UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
+    VerificationOrigin, WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
     AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
@@ -773,8 +773,8 @@ pub trait IdentityEngine: Send + Sync {
     /// [`IdentityError::TokenRevoked`].
     ///
     /// `dpop_jkt` is the JWK thumbprint extracted from the DPoP proof header on
-    /// the current request (RFC 9449). FAPI 2.0 clients require it; the
-    /// refreshed access token will carry `cnf.jkt` bound to this thumbprint.
+    /// the current request (RFC 9449). A client registered with
+    /// `dpop_bound_access_tokens` requires it; the refreshed access token will carry `cnf.jkt` bound to this thumbprint.
     fn refresh_tokens(
         &self,
         realm_id: &RealmId,
@@ -1029,9 +1029,9 @@ pub trait IdentityEngine: Send + Sync {
     /// already validated on the token request. When present, the access and
     /// refresh tokens carry `cnf.jkt`, the grant family is bound to that key
     /// and the response's `token_type` is `DPoP` — as for the
-    /// authorization-code grant. In a realm with a `fapi_profile`, or for a
-    /// FAPI 2.0 client, `None` is refused with
-    /// [`IdentityError::FapiViolation`] and the approved code stays
+    /// authorization-code grant. For a client registered with
+    /// `dpop_bound_access_tokens`, `None` is refused with
+    /// [`IdentityError::InvalidDPopProof`] and the approved code stays
     /// redeemable.
     fn poll_device_token(
         &self,
@@ -2042,22 +2042,6 @@ pub trait IdentityEngine: Send + Sync {
         ticket: &str,
     ) -> Result<Option<PendingAuthorizationRequest>, IdentityError>;
 
-    /// Signs a JARM error response JWT for mandatory-JARM clients (JARM §4.3).
-    ///
-    /// Called from the authorization endpoint when an error must be returned to
-    /// a client whose `authorization_signed_response_alg` is set. The resulting
-    /// JWT carries `error` + `error_description` + `state` so the client can
-    /// verify the error with the same signature check it applies to success
-    /// responses. The `typ` header is `oauth-authz-resp+jwt`.
-    fn sign_jarm_error_jwt(
-        &self,
-        realm_id: &RealmId,
-        client_id: &str,
-        error: &str,
-        error_description: &str,
-        state_param: &str,
-    ) -> Result<String, IdentityError>;
-
     /// Issues an authorization code for a previously-approved authorization
     /// request. Unlike [`IdentityEngine::authorize`], this variant skips
     /// the consent gating and is called only after consent has been
@@ -2081,7 +2065,6 @@ pub trait IdentityEngine: Send + Sync {
         amr_values: Vec<String>,
         response_mode: Option<ResponseMode>,
         jar_request: Option<String>,
-        via_par: bool,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     // ===== External IdP federation (Phase 2: Gap #5) =====

@@ -162,7 +162,6 @@ fn make_dpop_bound_subject_token(
                 amr_values: vec![],
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");

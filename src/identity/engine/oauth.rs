@@ -18,9 +18,9 @@ use crate::identity::error::IdentityError;
 use crate::identity::keys;
 use crate::identity::oidc::{
     ApplicationStatus, AuthorizationRequest, AuthorizationResponse, BackchannelTarget,
-    ClientProfile, CodeChallengeMethod, FrontchannelTarget, OAuthClient, OidcDiscoveryDocument,
-    OidcTokenResponse, RegisterClientRequest, ResponseMode, RpLogoutRequest, RpLogoutResult,
-    StoredAuthorizationCode, StoredDeviceCode, StoredGrantFamily, TokenExchangeRequest,
+    CodeChallengeMethod, FrontchannelTarget, OAuthClient, OidcDiscoveryDocument, OidcTokenResponse,
+    RegisterClientRequest, ResponseMode, RpLogoutRequest, RpLogoutResult, StoredAuthorizationCode,
+    StoredDeviceCode, StoredGrantFamily, TokenExchangeRequest,
 };
 use crate::identity::tokens::{
     self, issued_client_id, parse_issued_client_id, Audience, LogoutTokenClaims, TokenClaims,
@@ -187,12 +187,6 @@ impl EmbeddedIdentityEngine {
             }
             validation::validate_redirect_uri(uri)?;
         }
-        // A FAPI 2.0 Advanced realm accepts private_key_jwt only, and the
-        // token endpoint refuses every secret there: a secret-based client
-        // could never authenticate. Refused before the secret is hashed.
-        if request.client_secret.is_some() || request.generated_client_secret.is_some() {
-            self.refuse_secret_client_in_fapi_advanced_realm(realm_id)?;
-        }
 
         let client_id = ClientId::generate();
         let now = self.clock.now();
@@ -260,20 +254,7 @@ impl EmbeddedIdentityEngine {
         }
         client.set_jwks(request.jwks.clone());
         client.set_jwks_uri(request.jwks_uri.clone());
-        if let Some(ref alg) = request.authorization_signed_response_alg {
-            if alg != "EdDSA" {
-                return Err(IdentityError::InvalidInput {
-                    reason: format!(
-                        "unsupported authorization_signed_response_alg '{alg}'; supported: EdDSA"
-                    ),
-                });
-            }
-            client.set_authorization_signed_response_alg(Some(alg.clone()));
-        }
-        client.set_profile(request.profile);
-        // FAPI 2.0 registration constraints: private_key_jwt only, with keys
-        // Hearth can verify (FAPI 2.0 Security Profile §5.3.2.1).
-        Self::check_fapi2_client_keys(&client)?;
+        client.set_dpop_bound_access_tokens(request.dpop_bound_access_tokens);
         if request.mfa_required.is_some() {
             client.set_mfa_required(request.mfa_required);
         }
@@ -283,15 +264,12 @@ impl EmbeddedIdentityEngine {
 
         // ID-token signing algorithm (task 26.55). `None` is the administrative
         // default, EdDSA; both Dynamic Client Registration handlers resolve an
-        // omitted value to RS256 (OIDC Registration §2) — EdDSA in a FAPI
-        // realm — before reaching here. Resolved last among the validations and
-        // persisted explicitly; RS256 is refused under FAPI 2.0 (§5.4.1) and
-        // otherwise provisions the realm's RSA key before the client exists.
-        let fapi = request.profile.is_fapi2() || self.realm_enforces_fapi(realm_id)?;
+        // omitted value to RS256 (OIDC Registration §2) before reaching here.
+        // Resolved last among the validations and persisted explicitly; RS256
+        // provisions the realm's RSA key before the client exists.
         client.set_id_token_signed_response_alg(self.resolve_client_id_token_alg(
             realm_id,
             request.id_token_signed_response_alg.as_deref(),
-            fapi,
         )?);
 
         // Serialize and persist
@@ -361,12 +339,7 @@ impl EmbeddedIdentityEngine {
         bearer: Option<&TokenClaims>,
         browser_proof: crate::identity::MfaProof,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        use crate::identity::oidc::{CodeChallengeMethod as CCM, JarmClaims};
-        use crate::identity::types::FapiProfile;
-
-        // Retained for potential future use; FAPI Advanced JAR enforcement
-        // moved to push_authorization_request where the JTI is not yet consumed.
-        let _jar_was_present = request.request.is_some();
+        use crate::identity::oidc::CodeChallengeMethod as CCM;
 
         // 0a. The bearer token of a non-interactive request (GA audit 3 B-1):
         //     it must be the requesting user's, and a token issued to a client
@@ -417,7 +390,6 @@ impl EmbeddedIdentityEngine {
                 amr_values: request.amr_values.clone(),
                 response_mode: request.response_mode.clone(),
                 request: None, // consumed — prevent re-entry
-                via_par: request.via_par,
             };
             &jar_override
         } else {
@@ -429,25 +401,6 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidInput {
                 reason: "response_type must be 'code'".to_string(),
             });
-        }
-
-        // 1b. Validate response_mode (if provided)
-        if let Some(mode) = &request.response_mode {
-            let supported = [
-                ResponseMode::Query,
-                ResponseMode::Fragment,
-                ResponseMode::QueryJwt,
-                ResponseMode::FragmentJwt,
-                ResponseMode::Jwt,
-            ];
-            if !supported.contains(mode) {
-                return Err(IdentityError::InvalidInput {
-                    reason: format!(
-                        "unsupported response_mode '{}'; supported: query, fragment, query.jwt, fragment.jwt, jwt",
-                        mode.as_str()
-                    ),
-                });
-            }
         }
 
         // 2. Validate state is non-empty (CSRF protection)
@@ -491,65 +444,6 @@ impl EmbeddedIdentityEngine {
             && client.trust_level() != crate::identity::oidc::ClientTrustLevel::FirstParty
         {
             return Err(IdentityError::ClientMismatch);
-        }
-
-        // 3b. FAPI 2.0: PAR is mandatory for FAPI2 clients (RFC 9126 §2.4).
-        if client.profile().is_fapi2() && !request.via_par {
-            return Err(IdentityError::FapiViolation {
-                reason: "FAPI 2.0 clients must use Pushed Authorization Requests (PAR); \
-                         obtain a request_uri via POST /as/par before calling /authorize"
-                    .to_string(),
-            });
-        }
-
-        // 3c. Realm-level FAPI 2.0 enforcement gate.
-        //
-        // When a realm has `fapi_profile` configured, ALL clients in the realm
-        // must comply with the corresponding profile constraints. This is additive
-        // to the per-client `ClientProfile::Fapi2` check above.
-        if let Some(profile) = realm.config().fapi_profile {
-            // Baseline + Advanced: PAR required.
-            if !request.via_par {
-                return Err(IdentityError::FapiViolation {
-                    reason: "FAPI 2.0 Baseline requires all authorization requests to go through \
-                             PAR (RFC 9126); use POST /as/par to obtain a request_uri"
-                        .to_string(),
-                });
-            }
-            // Baseline + Advanced: PKCE (S256) is always required.
-            if request.code_challenge.is_none() {
-                return Err(IdentityError::FapiViolation {
-                    reason: "FAPI 2.0 Baseline requires PKCE (code_challenge with S256)"
-                        .to_string(),
-                });
-            }
-            if profile == FapiProfile::Advanced {
-                // JAR is enforced at PAR time (push_authorization_request).
-                // When via_par = true the JAR was already validated there; no re-check here.
-                // Advanced: client must be configured for JARM
-                // (authorization_signed_response_alg must be set).
-                if client.authorization_signed_response_alg().is_none()
-                    && !request
-                        .response_mode
-                        .as_ref()
-                        .map_or(false, |m| m.is_jarm())
-                {
-                    return Err(IdentityError::FapiViolation {
-                        reason: "FAPI 2.0 Advanced requires JARM; register the client with \
-                                 `authorization_signed_response_alg` or pass a JWT response_mode"
-                            .to_string(),
-                    });
-                }
-                // Advanced: client must have a JWKS registered (required for
-                // private_key_jwt token endpoint authentication).
-                if client.jwks().is_none() {
-                    return Err(IdentityError::FapiViolation {
-                        reason: "FAPI 2.0 Advanced requires private_key_jwt client \
-                                 authentication; register a JWKS with the client"
-                            .to_string(),
-                    });
-                }
-            }
         }
 
         // 4. Validate redirect_uri matches a registered URI
@@ -783,58 +677,14 @@ impl EmbeddedIdentityEngine {
             .put(realm_id, &code_key, &code_bytes)
             .map_err(Self::storage_err)?;
 
-        // The realm's issuer identifier — its discovery document's `issuer`,
-        // the RFC 9207 `iss` parameter and the JARM `iss` (GA audit 3 round 6).
+        // The realm's issuer identifier — its discovery document's `issuer`
+        // and the RFC 9207 `iss` parameter (GA audit 3 round 6).
         let issuer = self.realm_issuer_url(realm_id);
+        let response_mode = ResponseMode::effective(request.response_mode.as_ref());
 
-        // 10. JARM — if a JWT response mode was requested OR the client enforces JARM,
-        //     sign the response. When the client has `authorization_signed_response_alg`
-        //     set, any plain response_mode is upgraded to query.jwt (JARM §4).
-        //     The web layer's error redirects use the same rule.
-        let response_mode = ResponseMode::effective(
-            request.response_mode.as_ref(),
-            client.authorization_signed_response_alg().is_some(),
-        );
-        if response_mode.is_jarm() {
-            let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
-            let now_secs = self.clock.now().as_micros() / 1_000_000;
-            // FAPI 2.0 §5.3.2.3: include s_hash when state is non-empty.
-            // s_hash = BASE64URL(LEFT(SHA-256(ASCII(state)), 16))
-            let s_hash = if client.profile().is_fapi2() && !request.state.is_empty() {
-                use data_encoding::BASE64URL_NOPAD;
-                use ring::digest;
-                let digest = digest::digest(&digest::SHA256, request.state.as_bytes());
-                Some(BASE64URL_NOPAD.encode(&digest.as_ref()[..16]))
-            } else {
-                None
-            };
-            let jarm_claims = JarmClaims {
-                iss: issuer.clone(),
-                aud: issued_client_id(&request.client_id),
-                // FAPI 2.0 §5.3.2.2 requires JARM JWT lifetime ≤ 5 minutes.
-                exp: now_secs + 300,
-                iat: now_secs,
-                jti: uuid::Uuid::new_v4().to_string(),
-                code: raw_code.clone(),
-                state: request.state.clone(),
-                s_hash,
-            };
-            // JARM spec §4.1 requires typ=oauth-authz-resp+jwt (RFC 9101 §2).
-            let jarm_jwt = signing_key.sign_jwt(&jarm_claims, "oauth-authz-resp+jwt")?;
-            return Ok(AuthorizationResponse::new_jarm(
-                raw_code,
-                request.state.clone(),
-                issuer,
-                jarm_jwt,
-                response_mode,
-                // 22.3: the JAR-effective, registration-validated URI.
-                request.redirect_uri.clone(),
-            ));
-        }
-
-        // A plain mode is `query` or `fragment`. `fragment` is advertised in
-        // discovery and accepted above, but the response used to be built as
-        // `query` regardless, so the code always travelled in the query string.
+        // `fragment` is advertised in discovery, but the response used to be
+        // built as `query` regardless, so the code always travelled in the
+        // query string.
         Ok(AuthorizationResponse::new(
             raw_code,
             request.state.clone(),
@@ -843,7 +693,7 @@ impl EmbeddedIdentityEngine {
             // caller's outer `redirect_uri`, which a JAR may have overridden.
             request.redirect_uri.clone(),
         )
-        .with_plain_response_mode(response_mode))
+        .with_response_mode(response_mode))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -995,12 +845,9 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::UnsupportedGrantType);
         }
 
-        // 8b. FAPI 2.0: DPoP sender-constrained tokens are mandatory.
-        // Check both per-client profile flag AND realm-level fapi_profile so that
-        // clients registered without `profile: fapi2` cannot bypass the realm gate.
-        // Use `.is_some()` (not a variant match) so both Baseline and Advanced are
-        // covered — FAPI 2.0 Baseline §5.3.3 requires sender-constrained tokens too.
-        self.require_fapi_sender_constraint(realm_id, Some(&client), request.dpop_jkt.as_deref())?;
+        // 8b. A client registered with `dpop_bound_access_tokens` gets tokens
+        //     only against a DPoP proof (RFC 9449 §5.2).
+        Self::require_dpop_for_bound_client(Some(&client), request.dpop_jkt.as_deref())?;
 
         let scope_value = stored_code.scope.trim().to_string();
         // Every permission-bearing scope of the grant narrows — the rule the
@@ -1322,7 +1169,7 @@ impl EmbeddedIdentityEngine {
     }
 
     pub(super) fn oidc_discovery_inner(&self) -> OidcDiscoveryDocument {
-        self.build_discovery_document(&self.config.oidc.issuer.clone(), None)
+        self.build_discovery_document(&self.config.oidc.issuer.clone())
     }
 
     pub(super) fn realm_oidc_discovery_inner(
@@ -1333,7 +1180,7 @@ impl EmbeddedIdentityEngine {
             .get_realm(realm_id)?
             .ok_or(IdentityError::RealmNotFound)?;
         let issuer = format!("{}/realms/{}", self.config.oidc.issuer, realm.name());
-        Ok(self.build_discovery_document(&issuer, Some(realm.config())))
+        Ok(self.build_discovery_document(&issuer))
     }
 
     // ===== OAuth 2.0 Extended (Step 22) =====
@@ -1383,7 +1230,6 @@ impl EmbeddedIdentityEngine {
         )? {
             self.verify_client_assertion(realm_id, &request.client_id, assertion)?;
         } else {
-            self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;
             let secret = request
                 .client_secret
                 .as_deref()
@@ -1391,9 +1237,6 @@ impl EmbeddedIdentityEngine {
             let stored_hash = existing.as_ref().and_then(OAuthClient::client_secret_hash);
             if !Self::verify_presented_client_secret(stored_hash, secret)? {
                 return Err(IdentityError::InvalidClientSecret);
-            }
-            if let Some(client) = existing.as_ref() {
-                Self::refuse_secret_for_fapi2_client(client)?;
             }
         }
         // A verified assertion or secret implies the client exists; the check
@@ -1417,8 +1260,8 @@ impl EmbeddedIdentityEngine {
 
         self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
 
-        // 3b. FAPI enforcement: realm-level AND per-client profile both gate DPoP (A-38).
-        self.require_fapi_sender_constraint(realm_id, Some(&client), request.dpop_jkt.as_deref())?;
+        // 3b. A `dpop_bound_access_tokens` client needs a DPoP proof (A-38).
+        Self::require_dpop_for_bound_client(Some(&client), request.dpop_jkt.as_deref())?;
 
         // 4. Issue access token (no session, no refresh token per RFC 6749 §4.4.3)
         let now = self.clock.now();
@@ -1568,10 +1411,11 @@ impl EmbeddedIdentityEngine {
             });
         }
 
-        // 5b. FAPI 2.0: sender-constrained tokens, as on every other grant
+        // 5b. A `dpop_bound_access_tokens` client needs a DPoP proof, as on
+        //     every other grant
         //     (GA audit 3 B-6). Before the jti is consumed, so a client that
         //     omitted the proof can retry with the same assertion.
-        self.require_fapi_sender_constraint(realm_id, Some(&client), request.dpop_jkt.as_deref())?;
+        Self::require_dpop_for_bound_client(Some(&client), request.dpop_jkt.as_deref())?;
 
         // 6. jti is mandatory — without it any intercepted assertion is replayable
         // for its full validity window.
@@ -1690,7 +1534,7 @@ impl EmbeddedIdentityEngine {
             });
         }
 
-        // exp MUST NOT be more than 5 minutes in the future (FAPI / RFC 7523 best practice).
+        // exp MUST NOT be more than 5 minutes in the future (RFC 7523 best practice).
         // Unbounded lifetimes defeat replay protection when jti is absent.
         const MAX_ASSERTION_LIFETIME_SECS: i64 = 300;
         if claims.exp - now_secs > MAX_ASSERTION_LIFETIME_SECS {
@@ -1699,18 +1543,12 @@ impl EmbeddedIdentityEngine {
             });
         }
 
-        // aud MUST name this realm's issuer. Under FAPI 2.0 — a FAPI 2.0
-        // client, or any client of a realm with a `fapi_profile` — it must BE
-        // the issuer, as a single string (FAPI 2.0 Security Profile
-        // §5.3.2.1); elsewhere RFC 7523 §3 lets the issuer be one value of an
-        // array.
+        // aud MUST name this realm's issuer: the issuer itself, or one value
+        // of an array that contains it (RFC 7523 §3).
         let expected_aud = self.realm_issuer_url(realm_id);
         let aud_ok = match &claims.aud {
             crate::identity::tokens::Audience::Single(aud) => *aud == expected_aud,
-            multi @ crate::identity::tokens::Audience::Multi(_) => {
-                !(client.profile().is_fapi2() || self.realm_enforces_fapi(realm_id)?)
-                    && multi.contains(&expected_aud)
-            }
+            multi @ crate::identity::tokens::Audience::Multi(_) => multi.contains(&expected_aud),
         };
         if !aud_ok {
             return Err(IdentityError::InvalidClientAssertion {
@@ -1766,9 +1604,8 @@ impl EmbeddedIdentityEngine {
     /// Two key sources, tried in order:
     ///
     /// 1. the dedicated `assertion_public_key` (raw Ed25519, `alg` EdDSA);
-    /// 2. the client's registered `jwks` — the keys FAPI 2.0 registration
-    ///    requires — with the key chosen by the JWS `kid` (or the only key) and
-    ///    `alg` one of PS256, ES256, EdDSA (FAPI 2.0 Security Profile §5.4).
+    /// 2. the client's registered `jwks`, with the key chosen by the JWS `kid`
+    ///    (or the only key) and `alg` one of PS256, ES256, EdDSA.
     ///
     /// A client registered with only a `jwks_uri` cannot be verified: Hearth
     /// does not fetch client key sets, so such a client must register its keys
@@ -2411,12 +2248,11 @@ impl EmbeddedIdentityEngine {
             DeviceCodeStatus::Denied => Err(IdentityError::DeviceCodeDenied),
             DeviceCodeStatus::Expired => Err(IdentityError::DeviceCodeExpired),
             DeviceCodeStatus::Approved { user_id } => {
-                // FAPI 2.0: sender-constrained tokens are mandatory for a
-                // FAPI 2.0 client and in a realm with a `fapi_profile`, on
-                // this grant as on the code and refresh grants (GA audit 3
+                // A `dpop_bound_access_tokens` client gets tokens only against
+                // a DPoP proof, on this grant as on every other (GA audit 3
                 // B-6). Checked BEFORE the code is consumed, so a device that
                 // polled without a proof can retry with one.
-                self.require_fapi_sender_constraint(realm_id, Some(&polling_client), dpop_jkt)?;
+                Self::require_dpop_for_bound_client(Some(&polling_client), dpop_jkt)?;
 
                 // Consume as the FIRST write, exactly as the authorization-code
                 // exchange does, and still under the lock — a second concurrent
@@ -2576,26 +2412,12 @@ impl EmbeddedIdentityEngine {
     ) -> Result<crate::identity::oidc::PushedAuthorizationResponse, IdentityError> {
         use crate::identity::keys;
         use crate::identity::oidc::{CodeChallengeMethod, StoredPushedAuthorizationRequest};
-        use crate::identity::types::FapiProfile;
 
         let realm = self
             .get_realm(realm_id)?
             .ok_or(IdentityError::RealmNotFound)?;
         if realm.status() != crate::identity::types::RealmStatus::Active {
             return Err(IdentityError::RealmSuspended);
-        }
-
-        // FAPI 2.0 pre-JAR gate: only the JAR-required check can safely fire here,
-        // because the PKCE check must use `effective_code_challenge` (which may come
-        // from inside the signed JAR per RFC 9101 §6.1).
-        if let Some(profile) = realm.config().fapi_profile {
-            // Advanced: JAR (signed request object) is mandatory.
-            if profile == FapiProfile::Advanced && request.request.is_none() {
-                return Err(IdentityError::FapiViolation {
-                    reason: "FAPI 2.0 Advanced requires a signed request object (JAR, RFC 9101)"
-                        .to_string(),
-                });
-            }
         }
 
         // JAR (RFC 9101): if a signed request object is present, verify it and
@@ -2654,18 +2476,6 @@ impl EmbeddedIdentityEngine {
                 request.prompt.clone(),
             )
         };
-
-        // FAPI 2.0 post-JAR gate: PKCE must be checked against `effective_code_challenge`
-        // so that clients who supply it only inside the JAR (RFC 9101 §6.1) are accepted.
-        if realm.config().fapi_profile.is_some() {
-            // Baseline + Advanced: PKCE (S256) is always required.
-            if effective_code_challenge.is_none() {
-                return Err(IdentityError::FapiViolation {
-                    reason: "FAPI 2.0 Baseline requires PKCE (code_challenge with S256)"
-                        .to_string(),
-                });
-            }
-        }
 
         if effective_response_type != "code" {
             return Err(IdentityError::InvalidInput {
@@ -3723,7 +3533,6 @@ impl EmbeddedIdentityEngine {
         client_id: &ClientId,
         client_secret: &str,
     ) -> Result<(), IdentityError> {
-        self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;
         let client_key = keys::encode_oauth_client(client_id);
         let client_bytes = self
             .storage
@@ -3754,59 +3563,6 @@ impl EmbeddedIdentityEngine {
         };
         if client.client_secret_hash().is_none() || !matched {
             return Err(IdentityError::InvalidClientSecret);
-        }
-        Self::refuse_secret_for_fapi2_client(client)
-    }
-
-    /// Refuses secret-based and public (`none`) client authentication in a
-    /// realm whose FAPI profile is Advanced (`docs/specs/OIDC.md` §2.1.2 item
-    /// 6: only `private_key_jwt`). Runs before any secret is hashed, on every
-    /// arm alike: the answer depends on the realm, never on the client.
-    pub(super) fn refuse_secrets_in_fapi_advanced_realm(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<(), IdentityError> {
-        use crate::identity::types::FapiProfile;
-        let advanced = self
-            .get_realm(realm_id)?
-            .is_some_and(|realm| realm.config().fapi_profile == Some(FapiProfile::Advanced));
-        if advanced {
-            return Err(IdentityError::PrivateKeyJwtRequired);
-        }
-        Ok(())
-    }
-
-    /// Refuses to create a secret-based client — or to mint a new secret for
-    /// one — in a FAPI 2.0 Advanced realm, where the token endpoint accepts
-    /// `private_key_jwt` only ([`Self::refuse_secrets_in_fapi_advanced_realm`]).
-    ///
-    /// # Errors
-    /// [`IdentityError::FapiViolation`] naming the required method.
-    fn refuse_secret_client_in_fapi_advanced_realm(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<(), IdentityError> {
-        if self
-            .refuse_secrets_in_fapi_advanced_realm(realm_id)
-            .is_err()
-        {
-            return Err(IdentityError::FapiViolation {
-                reason: "this realm uses the FAPI 2.0 Advanced profile: clients authenticate \
-                         with private_key_jwt only, so a client secret could never \
-                         authenticate; register the client's public keys in jwks instead"
-                    .to_string(),
-            });
-        }
-        Ok(())
-    }
-
-    /// Refuses a FAPI 2.0 client that authenticated with a secret (it may hold
-    /// none — registration refuses one — but a secret set by any other route
-    /// must not authenticate it). Called only AFTER the secret verified, so
-    /// the refusal tells nothing to a caller who does not hold it.
-    fn refuse_secret_for_fapi2_client(client: &OAuthClient) -> Result<(), IdentityError> {
-        if client.profile().is_fapi2() {
-            return Err(IdentityError::PrivateKeyJwtRequired);
         }
         Ok(())
     }
@@ -3966,37 +3722,25 @@ impl EmbeddedIdentityEngine {
         }
     }
 
-    /// FAPI 2.0 sender-constraint gate for the token endpoint.
+    /// DPoP gate for the token endpoint (RFC 9449 §5.2).
     ///
-    /// A FAPI 2.0 client, or anyone in a realm with a `fapi_profile`
-    /// (Baseline or Advanced — FAPI 2.0 Security Profile §5.3.3 requires
-    /// sender-constrained tokens in both), obtains tokens only against a DPoP
-    /// proof. Every grant that mints tokens calls this, so a new grant cannot
-    /// forget the rule (GA audit 3 B-6: the device grant did; the step-up-MFA
-    /// grant did too). `client` is `None` for a clientless grant, which only
-    /// the realm profile governs.
+    /// A client registered with `dpop_bound_access_tokens` obtains tokens only
+    /// against a DPoP proof. Every grant that mints tokens for a client calls
+    /// this, so a new grant cannot forget the rule (GA audit 3 B-6: the device
+    /// grant once did). `client` is `None` for a clientless grant, which has
+    /// no registration to require it.
     ///
     /// # Errors
-    /// [`IdentityError::FapiViolation`] when FAPI applies and `dpop_jkt` is
-    /// `None`; [`IdentityError::RealmNotFound`] when the realm is gone.
-    pub(super) fn require_fapi_sender_constraint(
-        &self,
-        realm_id: &RealmId,
+    /// [`IdentityError::InvalidDPopProof`] when the client requires DPoP and
+    /// `dpop_jkt` is `None`.
+    pub(super) fn require_dpop_for_bound_client(
         client: Option<&OAuthClient>,
         dpop_jkt: Option<&str>,
     ) -> Result<(), IdentityError> {
-        if dpop_jkt.is_some() {
-            return Ok(());
-        }
-        let realm_fapi = self
-            .get_realm(realm_id)?
-            .ok_or(IdentityError::RealmNotFound)?
-            .config()
-            .fapi_profile;
-        if client.is_some_and(|c| c.profile().is_fapi2()) || realm_fapi.is_some() {
-            return Err(IdentityError::FapiViolation {
-                reason: "FAPI 2.0 requires sender-constrained tokens; \
-                         include a DPoP proof and dpop_jkt in the token request"
+        if dpop_jkt.is_none() && client.is_some_and(OAuthClient::dpop_bound_access_tokens) {
+            return Err(IdentityError::InvalidDPopProof {
+                reason: "this client requires DPoP-bound tokens \
+                         (dpop_bound_access_tokens); send a DPoP proof"
                     .to_string(),
             });
         }
@@ -4175,10 +3919,7 @@ impl EmbeddedIdentityEngine {
         // Costing the no-secret case nothing keeps the public-client token path
         // — the common browser flow, which legitimately authenticates by
         // `client_id` alone — off every hash entirely.
-        //
-        // A FAPI 2.0 Advanced realm accepts neither a secret nor `none`: this
-        // path only ever authenticates one of the two, so it refuses first.
-        self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;
+
         let client = self.get_client(realm_id, client_id)?;
 
         // B9: an archived client authenticates as nothing. The flag is read
@@ -4211,9 +3952,7 @@ impl EmbeddedIdentityEngine {
         if !matched {
             return Err(IdentityError::InvalidClientSecret);
         }
-        client
-            .as_ref()
-            .map_or(Ok(()), Self::refuse_secret_for_fapi2_client)
+        Ok(())
     }
 
     /// Confidential-only twin of [`Self::authenticate_client_inner`] for the
@@ -4230,7 +3969,6 @@ impl EmbeddedIdentityEngine {
         client_id: &crate::core::ClientId,
         client_secret: Option<&str>,
     ) -> Result<(), IdentityError> {
-        self.refuse_secrets_in_fapi_advanced_realm(realm_id)?;
         let client = self.get_client(realm_id, client_id)?;
         // No secret: refuse on every arm without hashing. A public client has
         // nothing else to prove, so it cannot pass here.
@@ -4248,9 +3986,7 @@ impl EmbeddedIdentityEngine {
         if stored_hash.is_none() || !matched || archived {
             return Err(IdentityError::InvalidClientSecret);
         }
-        client
-            .as_ref()
-            .map_or(Ok(()), Self::refuse_secret_for_fapi2_client)
+        Ok(())
     }
 
     /// Refuses a client JWKS that is not a bounded set of public signing keys
@@ -4274,31 +4010,6 @@ impl EmbeddedIdentityEngine {
         if decoded.len() != 32 {
             return Err(IdentityError::InvalidInput {
                 reason: "assertion_public_key must be a 32-byte Ed25519 public key".to_string(),
-            });
-        }
-        Ok(())
-    }
-
-    /// FAPI 2.0 clients authenticate with `private_key_jwt` only, so a FAPI
-    /// 2.0 client must hold no secret and must hold a key Hearth can verify
-    /// an assertion with — an inline `jwks` or an assertion key; a `jwks_uri`
-    /// is never fetched. A no-op for any other profile.
-    pub(super) fn check_fapi2_client_keys(client: &OAuthClient) -> Result<(), IdentityError> {
-        if !client.profile().is_fapi2() {
-            return Ok(());
-        }
-        if client.client_secret_hash().is_some() {
-            return Err(IdentityError::FapiViolation {
-                reason: "FAPI 2.0 clients must not use a client secret; they authenticate with \
-                         private_key_jwt"
-                    .to_string(),
-            });
-        }
-        if !client.has_verifiable_assertion_keys() {
-            return Err(IdentityError::FapiViolation {
-                reason: "FAPI 2.0 clients authenticate with private_key_jwt and must register \
-                         their public keys inline (jwks); a jwks_uri is not fetched"
-                    .to_string(),
             });
         }
         Ok(())
@@ -4416,39 +4127,14 @@ impl EmbeddedIdentityEngine {
         if let Some(mode) = request.access_token_authorization {
             client.set_access_token_authorization(mode);
         }
-        if let Some(alg_opt) = &request.authorization_signed_response_alg {
-            if let Some(alg) = alg_opt {
-                if alg != "EdDSA" {
-                    return Err(IdentityError::InvalidInput {
-                        reason: format!(
-                            "unsupported authorization_signed_response_alg '{alg}'; supported: EdDSA"
-                        ),
-                    });
-                }
-            }
-            client.set_authorization_signed_response_alg(alg_opt.clone());
-        }
         if let Some(jwks) = &request.jwks {
             if let Some(jwks) = jwks.as_deref() {
                 Self::check_client_jwks(jwks)?;
             }
             client.set_jwks(jwks.clone());
         }
-        if let Some(profile) = request.profile {
-            client.set_profile(profile);
-        }
-        // Judged on the client as it will be written: turning FAPI 2.0 on for
-        // a client without keys (what `hearth.yaml` reconcile did for
-        // `profile: fapi2`), or removing a FAPI 2.0 client's last key, would
-        // leave a client that cannot authenticate. Only a change to the
-        // profile or the keys is judged, so an unrelated update (a rename) of
-        // a client stored before this rule still succeeds — and that client
-        // fails closed anyway (`OAuthClient::requires_client_assertion`).
-        if request.profile.is_some()
-            || request.jwks.is_some()
-            || request.assertion_public_key.is_some()
-        {
-            Self::check_fapi2_client_keys(&client)?;
+        if let Some(required) = request.dpop_bound_access_tokens {
+            client.set_dpop_bound_access_tokens(required);
         }
         if let Some(mfa_req) = request.mfa_required {
             client.set_mfa_required(mfa_req);
@@ -4457,19 +4143,11 @@ impl EmbeddedIdentityEngine {
             client.set_cors_origins(cors.clone());
         }
         // ID-token signing algorithm (task 26.55): validated, and the realm's
-        // RSA key provisioned, before the change is persisted. `client` already
-        // carries any profile change above, so FAPI 2.0 (§5.4.1: no RS256) is
-        // judged on the client as it will be written — which also refuses
-        // moving an RS256 client to the FAPI 2.0 profile.
-        let fapi = client.profile().is_fapi2() || self.realm_enforces_fapi(realm_id)?;
+        // RSA key provisioned, before the change is persisted.
         if let Some(alg) = request.id_token_signed_response_alg.as_deref() {
-            client.set_id_token_signed_response_alg(self.resolve_client_id_token_alg(
-                realm_id,
-                Some(alg),
-                fapi,
-            )?);
-        } else if request.profile.is_some_and(ClientProfile::is_fapi2) {
-            Self::refuse_rs256_under_fapi(client.id_token_signed_response_alg(), fapi)?;
+            client.set_id_token_signed_response_alg(
+                self.resolve_client_id_token_alg(realm_id, Some(alg))?,
+            );
         }
 
         let updated_bytes =
@@ -4511,19 +4189,11 @@ impl EmbeddedIdentityEngine {
                 reason: e.to_string(),
             })?;
 
-        if client.profile().is_fapi2() {
-            return Err(IdentityError::FapiViolation {
-                reason: "FAPI 2.0 clients must not use client_secret".to_string(),
-            });
-        }
-
         if !client.is_confidential() {
             return Err(IdentityError::InvalidInput {
                 reason: "cannot regenerate secret for a public client".to_string(),
             });
         }
-        self.refuse_secret_client_in_fapi_advanced_realm(realm_id)?;
-
         // A fresh 256-bit CSPRNG secret, stored in the fast format — rotation
         // is also how a client with a legacy Argon2id hash moves onto it.
         let secret = crate::identity::oidc::GeneratedClientSecret::generate();
@@ -4593,7 +4263,7 @@ impl EmbeddedIdentityEngine {
         // Cascade: revoke every outstanding grant family issued to this
         // client. Deleting only the client record left its families live
         // while removing the record `rotate_grant_family` reads its
-        // confidential-client and FAPI DPoP gates from, so a deleted client's
+        // confidential-client and DPoP gates from, so a deleted client's
         // refresh tokens kept rotating with LESS authentication than before
         // the deletion (audit 2026-08-28 §4.16#3).
         self.revoke_client_grants(realm_id, client_id)?;
@@ -5177,31 +4847,6 @@ impl EmbeddedIdentityEngine {
         Ok(pending)
     }
 
-    pub(super) fn sign_jarm_error_jwt_inner(
-        &self,
-        realm_id: &RealmId,
-        client_id: &str,
-        error: &str,
-        error_description: &str,
-        state_param: &str,
-    ) -> Result<String, IdentityError> {
-        use crate::identity::oidc::JarmErrorClaims;
-        let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
-        let now_secs = self.clock.now().as_micros() / 1_000_000;
-        let claims = JarmErrorClaims {
-            iss: self.realm_issuer_url(realm_id),
-            aud: client_id.to_string(),
-            // FAPI 2.0 §5.3.2.2 requires JARM JWT lifetime ≤ 5 minutes.
-            exp: now_secs + 300,
-            iat: now_secs,
-            jti: uuid::Uuid::new_v4().to_string(),
-            error: error.to_string(),
-            error_description: error_description.to_string(),
-            state: state_param.to_string(),
-        };
-        signing_key.sign_jwt(&claims, "oauth-authz-resp+jwt")
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) fn issue_authorization_code_inner(
         &self,
@@ -5217,7 +4862,6 @@ impl EmbeddedIdentityEngine {
         amr_values: Vec<String>,
         response_mode: Option<crate::identity::oidc::ResponseMode>,
         jar_request: Option<String>,
-        via_par: bool,
     ) -> Result<AuthorizationResponse, IdentityError> {
         let request = AuthorizationRequest {
             client_id: client_id.clone(),
@@ -5233,7 +4877,6 @@ impl EmbeddedIdentityEngine {
             amr_values,
             response_mode,
             request: jar_request,
-            via_par,
         };
         self.authorize(realm_id, &request)
     }

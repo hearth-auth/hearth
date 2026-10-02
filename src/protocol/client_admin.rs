@@ -29,9 +29,7 @@ pub(crate) fn created_client_record(
 ///
 /// # Errors
 /// [`IdentityError::ClientNotFound`] for an unknown client;
-/// [`IdentityError::InvalidInput`] for a public client;
-/// [`IdentityError::FapiViolation`] for a FAPI 2.0 client or in a FAPI 2.0
-/// Advanced realm.
+/// [`IdentityError::InvalidInput`] for a public client.
 pub(crate) fn regenerate_client_secret(
     identity: &dyn IdentityEngine,
     audit: &dyn AuditEngine,

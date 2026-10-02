@@ -14,8 +14,7 @@ use crate::identity::federation::oidc as fed_oidc;
 pub(super) const JAR_ALGS: &[&str] = &["EdDSA", "RS256", "PS256", "ES256"];
 
 /// Algorithms a `private_key_jwt` assertion verified against the client's
-/// JWKS may be signed with: the FAPI 2.0 Security Profile set (§5.4 — PS256,
-/// ES256, EdDSA). RS256 (PKCS#1 v1.5) is not accepted for client
+/// JWKS may be signed with: PS256, ES256 and EdDSA. RS256 (PKCS#1 v1.5) is not accepted for client
 /// authentication.
 pub(super) const CLIENT_ASSERTION_ALGS: &[&str] = &["PS256", "ES256", "EdDSA"];
 
@@ -257,7 +256,7 @@ pub(super) fn verify_with_client_jwks(
 #[cfg(test)]
 mod tests {
     //! Registration-time JWKS validation and the verify-time key rules
-    //! (FAPI review L-FAPI-2): a client JWKS holds public signing keys only,
+    //! (security review L-FAPI-2): a client JWKS holds public signing keys only,
     //! each consistent in `kty`/`crv`/`alg`, with unique `kid`s, bounded in
     //! size; the verifier refuses an encryption-only key, an EdDSA key that is
     //! not `kty: OKP`, and an ambiguous `kid`.

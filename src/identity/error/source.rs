@@ -25,7 +25,6 @@ impl std::error::Error for IdentityError {
             | Self::InvalidAuthorizationCode
             | Self::InvalidGrant { .. }
             | Self::InvalidClientSecret
-            | Self::PrivateKeyJwtRequired
             | Self::InvalidClientAssertion { .. }
             | Self::AuthorizationPending
             | Self::SlowDown
@@ -108,7 +107,6 @@ impl std::error::Error for IdentityError {
             | Self::InvalidJar { .. }
             | Self::SessionVersionDisabled
             | Self::SessionLimitExceeded { .. }
-            | Self::FapiViolation { .. }
             | Self::EmailReserved
             | Self::EmailChangeTokenInvalid
             | Self::SilentAuthRateLimited

@@ -56,7 +56,6 @@ const sidebars = {
       label: 'Security',
       items: [
         'security-model',
-        'fapi2',
       ],
     },
     {

@@ -1732,7 +1732,7 @@ async fn admin_patch_user_required_actions(
 /// created after this call. Unknown action strings return 400.
 ///
 /// Optional fields applied only when present: `mfa_methods`, `email_otp_expiry_seconds`,
-/// `email_otp_max_attempts`, `fapi_profile` (`"baseline"`/`"advanced"`/`null`),
+/// `email_otp_max_attempts`,
 /// and `dcr_policy` (`"disabled"`/`"open"`/`"authenticated"`/`null`) — the
 /// Dynamic Client Registration policy for `POST /register`.
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
@@ -1777,7 +1777,6 @@ async fn admin_patch_realm_config(
         "mfa_methods",
         "email_otp_expiry_seconds",
         "email_otp_max_attempts",
-        "fapi_profile",
         "dcr_policy",
     ];
     if let Some(obj) = body.as_object() {
@@ -1900,34 +1899,6 @@ async fn admin_patch_realm_config(
         #[allow(clippy::cast_possible_truncation)]
         {
             config.email_otp_max_attempts = Some(v as u32);
-        }
-    }
-    if let Some(v) = body.get("fapi_profile") {
-        use crate::identity::FapiProfile;
-        if v.is_null() {
-            config.fapi_profile = None;
-        } else if let Some(s) = v.as_str() {
-            match s {
-                "baseline" => config.fapi_profile = Some(FapiProfile::Baseline),
-                "advanced" => config.fapi_profile = Some(FapiProfile::Advanced),
-                other => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({
-                            "error": format!("unknown fapi_profile value {other:?}; expected \"baseline\", \"advanced\", or null")
-                        })),
-                    )
-                        .into_response();
-                }
-            }
-        } else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "fapi_profile must be a string or null"
-                })),
-            )
-                .into_response();
         }
     }
     if let Some(v) = body.get("dcr_policy") {
@@ -2512,9 +2483,9 @@ async fn admin_register_client(
         return e.into_response();
     }
 
-    // `jwks`, `jwks_uri`, `profile` and `authorization_signed_response_alg`
-    // ride beside the proto fields, so an operator can register a FAPI 2.0
-    // `private_key_jwt` client over REST.
+    // `jwks`, `jwks_uri` and `dpop_bound_access_tokens` ride beside the proto
+    // fields, so an operator can register a `private_key_jwt` or DPoP-bound
+    // client over REST.
     let request = match super::oauth::admin_registration_request(body) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -2548,8 +2519,8 @@ async fn admin_register_client(
 ///
 /// Answers `200` with the client record and the new `client_secret`, the
 /// only time it is returned; the old secret stops authenticating at once.
-/// Audited with the acting admin. `400` for a public or FAPI 2.0 client or in
-/// a FAPI 2.0 Advanced realm, `404` for an unknown client.
+/// Audited with the acting admin. `400` for a public client, `404` for an
+/// unknown client.
 async fn admin_regenerate_client_secret(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2667,8 +2638,8 @@ struct AdminUpdateClientBody {
     /// 22.15 (audit 2026-08-28 §4.22#7): the engine has read this key since
     /// those features shipped, and `UpdateClientRequest` has carried the field
     /// all along, but no protocol surface ever set it — every caller passed
-    /// `None`. Discovery advertised `private_key_jwt` and FAPI 2.0 Advanced
-    /// against a key an operator had no way to install.
+    /// `None`. Discovery advertised `private_key_jwt` against a key an operator
+    /// had no way to install.
     #[serde(default, deserialize_with = "deserialize_nullable_string")]
     assertion_public_key: Option<Option<String>>,
     /// ID-token signing algorithm: `"RS256"` or `"EdDSA"` (task 26.55).
@@ -2680,10 +2651,9 @@ struct AdminUpdateClientBody {
     /// the engine (public signing keys only).
     #[serde(default, deserialize_with = "deserialize_nullable_jwks")]
     jwks: Option<Option<String>>,
-    /// Security profile: `"standard"` or `"fapi2"`. Omit to leave unchanged.
-    /// A FAPI 2.0 client must hold keys (`jwks` or an assertion key) and no
-    /// secret; the engine refuses the change otherwise.
-    profile: Option<String>,
+    /// RFC 9449 §5.2 `dpop_bound_access_tokens`: `true` makes every token
+    /// request from this client need a DPoP proof. Omit to leave unchanged.
+    dpop_bound_access_tokens: Option<bool>,
 }
 
 /// Deserializes `jwks` for [`AdminUpdateClientBody`]: absent → `None`,
@@ -2758,18 +2728,6 @@ async fn admin_update_client(
         "first_party" => ClientTrustLevel::FirstParty,
         _ => ClientTrustLevel::ThirdParty,
     });
-    let profile = match body.profile.as_deref() {
-        None => None,
-        Some("standard") => Some(crate::identity::ClientProfile::Standard),
-        Some("fapi2") => Some(crate::identity::ClientProfile::Fapi2),
-        Some(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "profile must be \"standard\" or \"fapi2\""})),
-            )
-                .into_response()
-        }
-    };
     let request = crate::identity::UpdateClientRequest {
         client_name: body.client_name,
         redirect_uris: if body.redirect_uris.is_empty() {
@@ -2797,10 +2755,9 @@ async fn admin_update_client(
         // Validated (RS256 | EdDSA) by `update_client_inner`, which also
         // provisions the realm's RSA ID-token key on a switch to RS256.
         id_token_signed_response_alg: body.id_token_signed_response_alg,
-        // Validated by `update_client_inner` (public signing keys; a FAPI 2.0
-        // client keeps a key and holds no secret).
+        // Validated by `update_client_inner` (public signing keys only).
         jwks: body.jwks,
-        profile,
+        dpop_bound_access_tokens: body.dpop_bound_access_tokens,
         ..Default::default()
     };
 

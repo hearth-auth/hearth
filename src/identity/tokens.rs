@@ -25,7 +25,7 @@ use crate::identity::error::IdentityError;
 
 /// The algorithm of every token Hearth issues **and** validates.
 ///
-/// Access, refresh, required-action, logout and JARM tokens are Ed25519 and
+/// Access, refresh, required-action and logout tokens are Ed25519 and
 /// nothing else. The one exception is an ID token for a client that registered
 /// `id_token_signed_response_alg: RS256` — see [`RS256_ALGORITHM`] — and no
 /// Hearth validation path that consults this constant ever accepts RS256.
@@ -307,8 +307,8 @@ pub struct TokenClaims {
     /// Authorized Party (OIDC Core §2).
     ///
     /// The `client_id` of the OAuth 2.0 client to which the ID token was
-    /// issued. REQUIRED when the token has multiple audiences; SHOULD be
-    /// set on all ID tokens for FAPI 2.0 compliance.
+    /// issued. REQUIRED when the token has multiple audiences; Hearth sets
+    /// it on every ID token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azp: Option<String>,
     /// DPoP confirmation claim (RFC 7800 / RFC 9449).
@@ -408,8 +408,8 @@ impl TokenClaims {
 ///
 /// Every protocol field that names a client carries this form — an ID
 /// token's `aud`/`azp` (OIDC Core §2), an access token's `client_id` (RFC 9068
-/// §2.2), introspection's `client_id` (RFC 7662 §2.2), a JARM response's
-/// `aud`, a logout token's `aud`, an exchanged token's `act.sub` — and a
+/// §2.2), introspection's `client_id` (RFC 7662 §2.2), a logout token's
+/// `aud`, an exchanged token's `act.sub` — and a
 /// client-authored JWT must use it too (RFC 7523 §3, RFC 9101 §4).
 /// [`crate::core::ClientId`]'s `Display` (`client_<uuid>`) is Hearth's
 /// internal subject form and never appears in those fields (GA audit 3
@@ -771,7 +771,7 @@ impl SigningKey {
     /// responsible for using a value that does not collide with `"JWT"` or
     /// `"logout+JWT"`. Note: `issue_token()` legitimately produces `typ: "JWT"`
     /// for access/refresh tokens; the collision prohibition applies only to
-    /// direct callers of *this* function (e.g. JARM responses, client assertions).
+    /// direct callers of *this* function (e.g. client assertions).
     pub(crate) fn sign_jwt<T: serde::Serialize>(
         &self,
         claims: &T,

@@ -76,8 +76,6 @@ pub(super) struct AuthorizeParams {
     pub response_mode: Option<ResponseMode>,
     /// RFC 8707 resource indicator, from a verified JAR or PAR entry only.
     pub resource: Option<String>,
-    /// Whether the request came through PAR (RFC 9126).
-    pub via_par: bool,
     /// What the browser session authorizing the request proved about a
     /// second factor. The code records it, and the token session its exchange
     /// opens proves exactly that (GA audit round 3, D-7). Set from the
@@ -102,7 +100,6 @@ impl AuthorizeParams {
             prompt: self.prompt.clone(),
             mfa_proof: self.mfa_proof,
             resource: self.resource.clone(),
-            via_par: self.via_par,
         }
     }
 
@@ -123,7 +120,6 @@ impl AuthorizeParams {
             prompt: p.prompt.clone(),
             response_mode: parse_response_mode(p.response_mode.as_deref())?,
             resource: p.resource.clone(),
-            via_par: p.via_par,
             mfa_proof: p.mfa_proof,
         })
     }
@@ -247,14 +243,14 @@ pub(super) fn mfa_use_gate(
         }
     }
 
-    let client = match state.identity.get_client(realm, &params.client_id) {
-        Ok(Some(c)) => c,
+    match state.identity.get_client(realm, &params.client_id) {
+        Ok(Some(_)) => {}
         Ok(None) => return Some(handlers_common::bad_request("unknown client")),
         Err(e) => {
             tracing::warn!(error = %e, "authorize: get_client failed at the MFA-use gate");
             return Some(handlers_common::server_error());
         }
-    };
+    }
     // The unproved session must not be reused for this client: revoke it so
     // the client's retry reaches the login page and its factor challenge.
     if let Err(e) = state.identity.revoke_session(realm, &session.session_id) {
@@ -262,11 +258,9 @@ pub(super) fn mfa_use_gate(
         return Some(handlers_common::server_error());
     }
     let error_return = ErrorReturn {
-        client_id: &params.client_id,
         redirect_uri: &params.redirect_uri,
         state: &params.state,
         response_mode: params.response_mode.as_ref(),
-        jarm_alg: client.authorization_signed_response_alg(),
     };
     Some(authorization_error_redirect(
         state,
@@ -296,20 +290,18 @@ pub(super) fn refuse_if_silent(
     if params.prompt != "none" {
         return None;
     }
-    let client = match state.identity.get_client(realm, &params.client_id) {
-        Ok(Some(c)) => c,
+    match state.identity.get_client(realm, &params.client_id) {
+        Ok(Some(_)) => {}
         Ok(None) => return Some(handlers_common::bad_request("unknown client")),
         Err(e) => {
             tracing::warn!(error = %e, "authorize: get_client failed refusing a silent request");
             return Some(handlers_common::server_error());
         }
-    };
+    }
     let error_return = ErrorReturn {
-        client_id: &params.client_id,
         redirect_uri: &params.redirect_uri,
         state: &params.state,
         response_mode: params.response_mode.as_ref(),
-        jarm_alg: client.authorization_signed_response_alg(),
     };
     let client_id_str = params.client_id.to_string();
     if let Err(crate::identity::IdentityError::SilentAuthRateLimited) = state
@@ -360,13 +352,11 @@ fn consent_gate(
     };
     let client_id_str = params.client_id.to_string();
     // Errors go back the way the code would have: in the request's
-    // response mode, signed when that mode (or the client) calls for JARM.
+    // response mode.
     let error_return = ErrorReturn {
-        client_id: &params.client_id,
         redirect_uri: &params.redirect_uri,
         state: &params.state,
         response_mode: params.response_mode.as_ref(),
-        jarm_alg: client.authorization_signed_response_alg(),
     };
 
     let requested_scopes = canonicalize_scopes(
@@ -454,11 +444,7 @@ fn consent_gate(
             .response_mode
             .as_ref()
             .map(|m| m.as_str().to_string()),
-        authorization_signed_response_alg: client
-            .authorization_signed_response_alg()
-            .map(str::to_string),
         resource: params.resource.clone(),
-        via_par: params.via_par,
         amr_values,
         created_at: now,
         expires_at: now.add_micros(CONSENT_TICKET_TTL_SECS * 1_000_000),
@@ -504,7 +490,6 @@ pub(super) fn issue_code(
         amr_values,
         response_mode: params.response_mode.clone(),
         request: None,
-        via_par: params.via_par,
     };
     match state
         .identity
@@ -544,7 +529,6 @@ mod tests {
             prompt: "consent".to_string(),
             response_mode: Some(ResponseMode::Fragment),
             resource: Some("https://api.example.com".to_string()),
-            via_par: true,
             mfa_proof: MfaProof::Proved,
         }
     }
@@ -563,7 +547,6 @@ mod tests {
         assert_eq!(back.prompt, p.prompt);
         assert_eq!(back.response_mode, p.response_mode);
         assert_eq!(back.resource, p.resource);
-        assert_eq!(back.via_par, p.via_par);
     }
 
     #[test]

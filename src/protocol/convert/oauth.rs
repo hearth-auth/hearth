@@ -25,6 +25,7 @@ impl From<&domain::OAuthClient> for pb::OAuthClient {
             grant_types: c.grant_types().to_vec(),
             access_token_authorization: mode,
             id_token_signed_response_alg: c.id_token_signed_response_alg().as_str().to_string(),
+            dpop_bound_access_tokens: c.dpop_bound_access_tokens(),
             // The domain record holds only the secret's hash. The create
             // paths set the generated plaintext on their response, once.
             client_secret: None,
@@ -93,12 +94,11 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             access_token_authorization,
             jwks: None,
             jwks_uri: None,
-            authorization_signed_response_alg: None,
             // Passed through verbatim: the engine validates it, and the
             // dynamic-registration handler resolves an omitted value to RS256
             // before calling the engine (task 26.55).
             id_token_signed_response_alg: r.id_token_signed_response_alg,
-            profile: domain::ClientProfile::Standard,
+            dpop_bound_access_tokens: false,
             mfa_required: None,
         }
     }
@@ -154,9 +154,8 @@ impl From<pb::UpdateClientRequest> for domain::UpdateClientRequest {
                     _ => AccessTokenAuthorization::Embedded,
                 }
             }),
-            authorization_signed_response_alg: None,
             id_token_signed_response_alg: r.id_token_signed_response_alg,
-            profile: None,
+            dpop_bound_access_tokens: None,
             jwks: None,
             mfa_required: None,
         }
@@ -204,7 +203,6 @@ pub(crate) fn proto_authorize_to_domain(
         amr_values: Vec::new(),
         response_mode: None,
         request: None,
-        via_par: false,
     })
 }
 

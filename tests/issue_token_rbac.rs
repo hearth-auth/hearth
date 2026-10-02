@@ -621,7 +621,6 @@ async fn oauth_path_permissions_cap_refuses_issuance() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -748,7 +747,6 @@ async fn refresh_re_resolves_claims_instead_of_copying() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");

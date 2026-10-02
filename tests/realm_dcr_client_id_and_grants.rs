@@ -142,7 +142,6 @@ async fn realm_dcr_client_id_is_accepted_by_the_token_endpoint() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize")

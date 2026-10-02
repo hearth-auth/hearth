@@ -5,8 +5,7 @@
 //! OIDC Core §2 / §3.1.3.7: an ID token's `aud` contains the relying party's
 //! `client_id` and `azp`, when present, equals it. RFC 9068 §2.2: an access
 //! token's `client_id` claim is the client identifier. RFC 7662 §2.2: the
-//! introspection `client_id` is the client identifier. JARM §2.1: the
-//! authorization response JWT's `aud` is the client_id. Hearth wrote its
+//! introspection `client_id` is the client identifier. Hearth wrote its
 //! internal display form `client_<uuid>` into all of them, so a standard
 //! relying party comparing `aud` with its own client_id refused every Hearth
 //! ID token.
@@ -130,7 +129,6 @@ impl Env {
                     amr_values: Vec::new(),
                     response_mode,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize")
@@ -196,17 +194,6 @@ async fn access_token_and_introspection_client_id_are_the_issued_client_id() {
         Some(issued(&env.client).as_str()),
         "RFC 7662 §2.2: introspection names the client the token was issued to"
     );
-}
-
-#[tokio::test]
-async fn jarm_response_aud_is_the_issued_client_id() {
-    let env = env().await;
-    let response = env.authorize(Some(ResponseMode::QueryJwt));
-    let jarm = response
-        .jarm_jwt()
-        .expect("a JARM response for response_mode=query.jwt");
-    let jarm_claims = claims(jarm);
-    assert_audience_is_the_client("JARM response", &jarm_claims, &issued(&env.client));
 }
 
 /// OIDC RP-Initiated Logout §2: when `client_id` accompanies an

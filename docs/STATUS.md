@@ -7,8 +7,8 @@
 > repository. Aspirational or planned features are listed under **Roadmap** at the bottom
 > and are explicitly marked as not yet implemented.
 >
-> The 2026-06-02 revision of this file had rotted badly: it listed SAML 2.0, SCIM 2.0, the
-> whole agent-identity surface and FAPI 2.0 as unimplemented roadmap items when all four were
+> The 2026-06-02 revision of this file had rotted badly: it listed SAML 2.0, SCIM 2.0 and the
+> whole agent-identity surface as unimplemented roadmap items when all three were
 > already in `src/`. Every row below was re-checked against a named path at
 > [`333c74e6`](https://github.com/hearth-auth/hearth/commit/333c74e6); rows whose evidence
 > could not be produced were deleted rather than restated.
@@ -64,16 +64,16 @@
 | OAuth 2.0 Token Revocation (RFC 7009) | ✅ Shipped | |
 | Refresh token rotation | ✅ Shipped | Theft detection via family tracking |
 | Dynamic Client Registration (RFC 7591) | ✅ Shipped | RFC 7592 management endpoints (`GET/PUT/DELETE /register/{client_id}`) are roadmap — zero implementation in `src/` |
-| DPoP sender-constrained tokens (RFC 9449) | ✅ Shipped | `src/identity/dpop.rs` |
+| DPoP sender-constrained tokens (RFC 9449) | ✅ Shipped | `src/identity/dpop.rs`; per-client `dpop_bound_access_tokens` (RFC 9449 §5.2) requires a proof on every token request (`src/identity/oidc.rs`) |
 | TOTP / MFA | ✅ Shipped | Enrollment, recovery codes, brute-force lockout |
 | WebAuthn / Passkeys | ✅ Shipped | Registration, authentication, multi-credential |
 | Magic link / Passwordless | ✅ Shipped | Rate limited, enumeration resistant |
 | TLS termination (Rustls, TLS 1.3) | ✅ Shipped | HTTP→HTTPS redirect, mTLS |
 | Pushed Authorization Requests (PAR, RFC 9126) | ✅ Shipped | `POST /as/par`, `POST /realms/{realm}/as/par` (`src/protocol/http/oauth.rs`) |
 | JWT Authorization Requests (JAR, RFC 9101) | ✅ Shipped | `verify_jar` consumed on `/authorize` and PAR (`src/identity/engine/oauth.rs`) |
-| JWT Authorization Response Mode (JARM) | ✅ Shipped | `authorization_signed_response_alg` per client; `sign_jarm_error_jwt` (`src/identity/mod.rs`) |
+| JWT Authorization Response Mode (JARM) | ❌ Removed in 3.0.0 | `response_mode` is `query` or `fragment`; `*.jwt` modes answer `unsupported_response_mode` |
 | RS256 ID tokens | ✅ Shipped | `id_token_signed_response_alg` per client (`RS256`/`EdDSA`; DCR defaults to RS256); per-realm RSA-3072 key, rotated with the realm key, published in the realm JWKS (`src/identity/engine/id_token_keys.rs`). Access tokens stay EdDSA-only |
-| FAPI 2.0 Security Profile (per-client + per-realm) | ✅ Shipped | `ClientProfile::Fapi2`, `RealmConfig::fapi_profile` (`src/identity/oidc.rs`); normative spec [docs/specs/OIDC.md](specs/OIDC.md) |
+| FAPI 2.0 Security Profile | ❌ Removed in 3.0.0 | `realms.<name>.fapi_profile` and application `profile` now stop startup |
 | RFC 8693 token exchange / RFC 8707 resource indicators | ✅ Shipped | `src/identity/engine/oauth.rs`; see [docs/specs/AGENT_AUTH.md](specs/AGENT_AUTH.md) |
 | SAML 2.0 — SP (inbound federation) | ✅ Shipped | `src/identity/federation/saml/sp.rs`; spec [docs/specs/SAML.md](specs/SAML.md) |
 | SAML 2.0 — IdP (Hearth asserts to third-party SPs) | ❌ Removed in 3.0.0 | Scope trim (OpenSpec `scope-trim-trusted-core`); `realms.<name>.saml_service_providers` now stops startup |
@@ -133,7 +133,7 @@
 ## Roadmap (not yet implemented)
 
 Every row below was re-checked at `333c74e6`: the named symbol or route does not exist in
-`src/`. Rows that previously sat here — FAPI 2.0, the whole agent-identity surface, SAML 2.0
+`src/`. Rows that previously sat here — the whole agent-identity surface, SAML 2.0
 and SCIM 2.0 — were **already implemented** when they were listed as roadmap and have been
 moved into the shipped tables above.
 

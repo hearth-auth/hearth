@@ -355,7 +355,6 @@ fn revoking_consent_kills_the_applications_refresh_chain() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");

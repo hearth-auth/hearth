@@ -59,7 +59,7 @@ pub struct OidcParams {
     pub state: Option<String>,
     /// Response type (e.g., `"code"`).
     pub response_type: String,
-    /// JARM response mode wire string (`query.jwt`, `fragment.jwt`, `jwt`).
+    /// Response mode wire string (`query` or `fragment`).
     ///
     /// `None` means default `query` mode. Preserved so that, after all
     /// required actions complete, the authorization code redirect uses the
@@ -81,13 +81,6 @@ pub struct OidcParams {
     /// audience the client asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
-    /// Whether the originating request went through PAR (RFC 9126).
-    ///
-    /// Preserved here so that `resume_oidc_flow` can pass `via_par = true`
-    /// to `issue_authorization_code` — FAPI Baseline/Advanced realms reject
-    /// code issuance when this flag is `false`.
-    #[serde(default)]
-    pub via_par: bool,
 }
 
 /// Claims embedded in a Required-Action session JWT.
@@ -426,7 +419,6 @@ mod tests {
             prompt: String::new(),
             mfa_proof: MfaProof::None,
             resource: None,
-            via_par: false,
         }
     }
 

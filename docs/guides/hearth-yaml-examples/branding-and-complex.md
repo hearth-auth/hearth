@@ -111,31 +111,31 @@ observability:
 - Registering an application for this realm? Set `require_consent: false` only for
   first-party apps; all third-party integrations must go through consent.
 
-### FAPI 2.0 with this configuration
+### A sender-constrained client for this realm
 
-The `hearth.yaml` above sets the server-side prerequisites for FAPI 2.0 compliance (TLS required,
-short-lived tokens, MFA, no self-registration). FAPI 2.0 client registration and realm-level FAPI
-profile enforcement are configured via the Admin API — not via `hearth.yaml` today.
-
-After bringing up the server with this config, register a FAPI 2.0 client:
+For a high-assurance relying party, register a client that authenticates with
+`private_key_jwt` (no shared secret) and must present a DPoP proof on every token request:
 
 ```bash
-# Register a FAPI 2.0 client (no client_secret; JWKS required)
+# Register a private_key_jwt client whose tokens are always DPoP-bound
 curl -s -X POST "https://auth.example.com/admin/applications" \
   -H "Authorization: Bearer <admin-token>" \
   -H "X-Realm-ID: <realm-uuid>" \
   -H "Content-Type: application/json" \
   -d '{
     "client_name": "Open Banking Client",
-    "profile": "fapi2",
     "redirect_uris": ["https://tpp.example.com/callback"],
     "grant_types": ["authorization_code"],
-    "jwks": "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"alg\":\"EdDSA\",\"kid\":\"k1\",\"x\":\"<base64url-public-key>\"}]}",
-    "authorization_signed_response_alg": "EdDSA"
+    "token_endpoint_auth_method": "private_key_jwt",
+    "jwks": {"keys":[{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","kid":"k1","x":"<base64url-public-key>"}]},
+    "dpop_bound_access_tokens": true
   }'
 ```
 
-See [fapi2.md](../fapi2.md) for the complete FAPI 2.0 flow (PAR, JAR, JARM, DPoP).
+The same client can be declared in `hearth.yaml` with `jwks:` and
+`dpop_bound_access_tokens: true` under `realms.<realm>.applications.<app>`. Pair it with PAR
+(`/as/par`), signed request objects (JAR) and PKCE S256 — see
+[OIDC.md](../../specs/OIDC.md) for each.
 
 ---
 

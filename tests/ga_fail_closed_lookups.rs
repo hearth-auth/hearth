@@ -87,7 +87,6 @@ async fn code_exchange_fails_closed_when_the_client_lookup_errors() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .unwrap()

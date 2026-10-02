@@ -90,6 +90,30 @@ pub const REMOVED_KEYS: &[RemovedKey] = &[
         feature: "SMS one-time codes",
         replacement: Some("use a passkey, TOTP or recovery codes as the second factor"),
     },
+    RemovedKey {
+        path: "realms.*.fapi_profile",
+        feature: "the FAPI 2.0 profile",
+        replacement: Some(
+            "to require sender-constrained tokens, set dpop_bound_access_tokens: true on the \
+             application",
+        ),
+    },
+    RemovedKey {
+        path: "realms.*.applications.*.profile",
+        feature: "the FAPI 2.0 profile",
+        replacement: Some(
+            "to require sender-constrained tokens, set dpop_bound_access_tokens: true on the \
+             application",
+        ),
+    },
+    RemovedKey {
+        path: "realms.*.oauth_clients.*.profile",
+        feature: "the FAPI 2.0 profile",
+        replacement: Some(
+            "to require sender-constrained tokens, set dpop_bound_access_tokens: true on the \
+             application",
+        ),
+    },
 ];
 
 /// Returns the error for the first removed key present in `yaml`.

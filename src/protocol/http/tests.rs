@@ -885,43 +885,27 @@ async fn host_allowlist_empty_allows_any_host() {
     );
 }
 
-/// PAR with a signed JAR JWT in the request body is accepted under FAPI Advanced.
+/// PAR with a signed JAR JWT in the request body is accepted.
 ///
 /// Regression for HEA-1019: `HttpParRequest` was missing the `request` field,
-/// so the JAR was silently dropped and Advanced realms always rejected with
-/// `FapiViolation`.  This test exercises the full HTTP deserialisation path and
-/// MUST return 201 with the fix applied.
+/// so the JAR was silently dropped. This test exercises the full HTTP
+/// deserialisation path and MUST return 201 with the fix applied.
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
-async fn par_jar_accepted_under_fapi_advanced() {
-    use crate::identity::{
-        CreateRealmRequest, FapiProfile, RegisterClientRequest, UpdateRealmRequest,
-    };
+async fn par_accepts_a_signed_request_object() {
+    use crate::identity::{CreateRealmRequest, RegisterClientRequest};
     use base64::Engine as _;
 
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let state = test_state(temp_dir.path());
 
-    // Create an Advanced FAPI realm.
     let realm_rec = state
         .identity
         .create_realm(&CreateRealmRequest {
-            name: format!("fapi-adv-jar-{}", uuid::Uuid::new_v4()),
+            name: format!("par-jar-{}", uuid::Uuid::new_v4()),
             config: None,
         })
         .expect("create realm");
-    let mut config = realm_rec.config().clone();
-    config.fapi_profile = Some(FapiProfile::Advanced);
-    state
-        .identity
-        .update_realm(
-            realm_rec.id(),
-            &UpdateRealmRequest {
-                config: Some(config),
-                ..Default::default()
-            },
-        )
-        .expect("set FAPI Advanced");
 
     // Generate Ed25519 key pair and register a JARM-capable JWKS client.
     let rng = ring::rand::SystemRandom::new();
@@ -941,13 +925,12 @@ async fn par_jar_accepted_under_fapi_advanced() {
         .register_client(
             realm_rec.id(),
             &RegisterClientRequest {
-                client_name: "FAPI-A JAR HTTP Client".to_string(),
+                client_name: "JAR HTTP Client".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
                 client_secret: None,
                 grant_types: vec!["authorization_code".to_string()],
                 require_consent: false,
                 jwks: Some(jwks),
-                authorization_signed_response_alg: Some("EdDSA".to_string()),
                 ..Default::default()
             },
         )
@@ -1002,7 +985,7 @@ async fn par_jar_accepted_under_fapi_advanced() {
         "nonce": "hea1019-nonce",
         "request": jar_jwt,
         "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-        "client_assertion": advanced_realm_client_assertion(
+        "client_assertion": jwks_client_assertion(
             pkcs8.as_ref(), "hea1019", client.client_id(), &issuer
         ),
     }))
@@ -1024,7 +1007,7 @@ async fn par_jar_accepted_under_fapi_advanced() {
     assert_eq!(
         resp.status(),
         StatusCode::CREATED,
-        "JAR in HTTP PAR body must be accepted under FAPI Advanced (HEA-1019 regression)"
+        "JAR in HTTP PAR body must be accepted (HEA-1019 regression)"
     );
     let resp_body = axum::body::to_bytes(resp.into_body(), 4_096)
         .await
@@ -1040,7 +1023,7 @@ async fn par_jar_accepted_under_fapi_advanced() {
 ///
 /// A pushed request had no `prompt` field, so a `request_uri` authorization
 /// could never ask for `prompt=none` (silent authentication) or
-/// `prompt=consent` — and PAR is the only way in on a FAPI 2.0 realm.
+/// `prompt=consent`.
 #[tokio::test]
 async fn par_endpoint_stores_the_pushed_prompt() {
     use crate::identity::{CreateRealmRequest, RegisterClientRequest};
@@ -1100,9 +1083,8 @@ async fn par_endpoint_stores_the_pushed_prompt() {
 }
 
 /// A `private_key_jwt` client assertion (RFC 7523 §2.2) signed with an
-/// Ed25519 key from the client's JWKS (`kid`), for a FAPI 2.0 Advanced realm,
-/// which authenticates clients with nothing else (OIDC.md §2.1.2 item 6).
-fn advanced_realm_client_assertion(
+/// Ed25519 key from the client's JWKS (`kid`).
+fn jwks_client_assertion(
     pkcs8: &[u8],
     kid: &str,
     client: &crate::core::ClientId,
@@ -1129,112 +1111,6 @@ fn advanced_realm_client_assertion(
         .expect("pair")
         .sign(input.as_bytes());
     format!("{input}.{}", b64.encode(sig.as_ref()))
-}
-
-/// PAR without a JAR JWT is rejected under FAPI Advanced.
-///
-/// Counterpart to `par_jar_accepted_under_fapi_advanced`: confirms the
-/// negative case still returns 400 / `invalid_request` when the `request`
-/// field is absent.
-#[tokio::test]
-async fn par_without_jar_rejected_under_fapi_advanced() {
-    use base64::Engine as _;
-
-    use crate::identity::{
-        CreateRealmRequest, FapiProfile, RegisterClientRequest, UpdateRealmRequest,
-    };
-
-    let temp_dir = tempfile::tempdir().expect("tempdir");
-    let state = test_state(temp_dir.path());
-
-    let realm_rec = state
-        .identity
-        .create_realm(&CreateRealmRequest {
-            name: format!("fapi-adv-nojar-{}", uuid::Uuid::new_v4()),
-            config: None,
-        })
-        .expect("create realm");
-    let mut config = realm_rec.config().clone();
-    config.fapi_profile = Some(FapiProfile::Advanced);
-    state
-        .identity
-        .update_realm(
-            realm_rec.id(),
-            &UpdateRealmRequest {
-                config: Some(config),
-                ..Default::default()
-            },
-        )
-        .expect("set FAPI Advanced");
-
-    // An Advanced realm authenticates clients with private_key_jwt only, so
-    // the client holds a JWKS key and authenticates with it; the refusal
-    // below is then the JAR rule's.
-    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
-        .expect("keygen");
-    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("pair");
-    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(ring::signature::KeyPair::public_key(&pair).as_ref());
-    let client = state
-        .identity
-        .register_client(
-            realm_rec.id(),
-            &RegisterClientRequest {
-                client_name: "FAPI-A No-JAR Client".to_string(),
-                redirect_uris: vec!["https://app.example.com/callback".to_string()],
-                grant_types: vec!["authorization_code".to_string()],
-                require_consent: false,
-                jwks: Some(format!(
-                    r#"{{"keys":[{{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","kid":"nojar","x":"{x}"}}]}}"#
-                )),
-                ..Default::default()
-            },
-        )
-        .expect("register client");
-    let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
-
-    let body = serde_json::to_vec(&serde_json::json!({
-        "client_id": client.client_id().as_uuid().to_string(),
-        "redirect_uri": "https://app.example.com/callback",
-        "scope": "openid",
-        "state": "par-state",
-        "response_type": "code",
-        "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
-        "code_challenge_method": "S256",
-        "nonce": "test-nonce",
-        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-        "client_assertion": advanced_realm_client_assertion(
-            pkcs8.as_ref(), "nojar", client.client_id(), &issuer
-        ),
-    }))
-    .expect("body json");
-
-    let app = router(state);
-    let resp = app
-        .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri(format!("/realms/{}/as/par", realm_rec.name()))
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(body))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(
-        resp.status(),
-        StatusCode::BAD_REQUEST,
-        "PAR without JAR must be rejected (FapiViolation) under FAPI Advanced"
-    );
-    let resp_body = axum::body::to_bytes(resp.into_body(), 4_096)
-        .await
-        .expect("body bytes");
-    let json: serde_json::Value = serde_json::from_slice(&resp_body).expect("json");
-    assert_eq!(
-        json["error"], "invalid_request",
-        "error must be invalid_request for FAPI violation"
-    );
 }
 
 /// HEA-2117: POST /authorize must accept a request that omits `user_id` from the
@@ -3509,12 +3385,12 @@ async fn a_kdf_shed_rest_response_carries_the_rate_limited_error_code() {
 
 /// The admin registration surfaces (`POST /admin/applications`, `POST
 /// /clients`) and `PATCH /admin/applications/{id}` accept `jwks` (the RFC 7591
-/// object or a JSON string holding one) and `profile`, as the FAPI 2.0 guide
-/// documents. They used to refuse or drop both, so an operator had no REST
-/// path to a `private_key_jwt` client.
+/// object or a JSON string holding one) and `dpop_bound_access_tokens`. They
+/// used to refuse or drop `jwks`, so an operator had no REST path to a
+/// `private_key_jwt` client.
 #[cfg(feature = "dev-endpoints")]
 #[tokio::test]
-async fn admin_registration_accepts_jwks_and_profile() {
+async fn admin_registration_accepts_jwks_and_the_dpop_flag() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let state = test_state_dev(temp_dir.path());
     let (realm_id, token) = bootstrap_dev(&state).await;
@@ -3571,37 +3447,25 @@ async fn admin_registration_accepts_jwks_and_profile() {
             "POST",
             uri.to_string(),
             serde_json::json!({
-                "client_name": "FAPI RP",
+                "client_name": "Key RP",
                 "redirect_uris": ["https://rp.example.com/cb"],
                 "grant_types": ["authorization_code"],
                 "response_types": ["code"],
-                "profile": "fapi2",
+                "dpop_bound_access_tokens": true,
                 "jwks": jwks_value,
             }),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{uri}: {body}");
         let client = stored(body["client_id"].as_str().expect("client_id"));
-        assert!(client.profile().is_fapi2(), "{uri}: profile stored");
+        assert!(client.dpop_bound_access_tokens(), "{uri}: DPoP flag stored");
         assert!(
             client.jwks().is_some_and(|j| j.contains("admin-k1")),
             "{uri}: jwks stored"
         );
     }
 
-    // A FAPI 2.0 registration without keys is refused, not stored public.
-    let (status, body) = send(
-        "POST",
-        "/admin/applications".to_string(),
-        serde_json::json!({
-            "client_name": "keyless", "redirect_uris": ["https://rp.example.com/cb"],
-            "profile": "fapi2",
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "keyless fapi2: {body}");
-
-    // PATCH: a standard client becomes FAPI 2.0 by adding its keys.
+    // PATCH: a client gains keys and the DPoP requirement.
     let (status, body) = send(
         "POST",
         "/admin/applications".to_string(),
@@ -3613,12 +3477,12 @@ async fn admin_registration_accepts_jwks_and_profile() {
     let (status, body) = send(
         "PATCH",
         format!("/admin/applications/{id}"),
-        serde_json::json!({"profile": "fapi2", "jwks": jwks}),
+        serde_json::json!({"dpop_bound_access_tokens": true, "jwks": jwks}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "patch profile + jwks: {body}");
+    assert_eq!(status, StatusCode::OK, "patch DPoP flag + jwks: {body}");
     let client = stored(&id);
-    assert!(client.profile().is_fapi2());
+    assert!(client.dpop_bound_access_tokens());
     assert!(client.jwks().is_some());
 }
 

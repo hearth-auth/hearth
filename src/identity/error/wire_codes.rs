@@ -20,9 +20,7 @@ impl IdentityError {
             Self::InvalidCredential { .. } | Self::CredentialNotFound => {
                 Some("HEARTH_INVALID_CREDENTIAL")
             }
-            Self::InvalidClient | Self::InvalidClientSecret | Self::PrivateKeyJwtRequired => {
-                Some("HEARTH_INVALID_CLIENT")
-            }
+            Self::InvalidClient | Self::InvalidClientSecret => Some("HEARTH_INVALID_CLIENT"),
             Self::InvalidClientAssertion { .. } => Some("HEARTH_INVALID_CLIENT_ASSERTION"),
             Self::InvalidAuthorizationCode | Self::InvalidGrant { .. } => {
                 Some("HEARTH_INVALID_GRANT")
@@ -140,7 +138,6 @@ impl IdentityError {
 
             Self::InvalidPushedAuthorizationRequest => Some("invalid_request"),
             Self::InvalidJar { .. } => Some("invalid_request_object"),
-            Self::FapiViolation { .. } => Some("fapi_violation"),
 
             Self::InvalidDPopProof { .. } => Some("invalid_dpop_proof"),
             Self::DPopProofReplay | Self::DPopNonceInvalid => Some("use_dpop_nonce"),

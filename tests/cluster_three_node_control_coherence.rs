@@ -2056,7 +2056,6 @@ async fn an_authorization_code_is_redeemed_once_across_a_leader_change() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .unwrap()
@@ -2258,7 +2257,6 @@ fn issue_refresh_token(
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .unwrap()

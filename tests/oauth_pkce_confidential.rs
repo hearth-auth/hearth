@@ -126,7 +126,6 @@ fn confidential_client_without_pkce_always_rejected() {
             amr_values: Vec::new(),
             response_mode: None,
             request: None,
-            via_par: false,
         },
     );
 
@@ -176,7 +175,6 @@ fn public_client_without_pkce_always_rejected() {
             amr_values: Vec::new(),
             response_mode: None,
             request: None,
-            via_par: false,
         },
     );
 

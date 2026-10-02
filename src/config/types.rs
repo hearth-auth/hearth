@@ -2421,17 +2421,14 @@ pub struct ApplicationYamlConfig {
     /// Whether a realm-level consent row covers all org contexts.
     #[serde(default)]
     pub consent_spans_orgs: Option<bool>,
-    /// FAPI 2.0 Security Profile for this client.
-    ///
-    /// Accepted values: `"fapi2"`. Absent means standard profile.
-    /// Setting this flag subjects the client to FAPI 2.0 constraints
-    /// (DPoP, PAR, PKCE S256) regardless of the realm-level `fapi_profile`.
+    /// RFC 9449 §5.2 `dpop_bound_access_tokens`: when `true`, every token
+    /// request from this client must carry a `DPoP` proof. Default: `false`.
     #[serde(default)]
-    pub profile: Option<String>,
+    pub dpop_bound_access_tokens: Option<bool>,
     /// The client's public JWK Set (RFC 7517), inline: a YAML mapping
     /// `{keys: [...]}` or the same object as a JSON string. Its keys verify
     /// the client's `private_key_jwt` assertions and signed request objects.
-    /// Required with `profile: fapi2`. Public keys only.
+    /// Public keys only.
     #[serde(default)]
     pub jwks: Option<serde_json::Value>,
     /// Algorithm this client's ID tokens are signed with
@@ -2880,13 +2877,6 @@ pub struct RealmYamlConfig {
     /// instead of setting this flag.
     #[serde(default)]
     pub rotate_signing_key: Option<bool>,
-    /// FAPI 2.0 Security Profile enforcement for this realm.
-    ///
-    /// Accepted values: `"baseline"` (PAR + PKCE required for all clients),
-    /// `"advanced"` (Baseline + JAR + JARM required). Absent or `null` means
-    /// standard OAuth 2.0 / OIDC rules apply with no FAPI constraints.
-    #[serde(default)]
-    pub fapi_profile: Option<String>,
     /// Declarative seed users for this realm.
     ///
     /// Each entry is created at startup if the email does not already exist.
@@ -3655,22 +3645,6 @@ impl RealmYamlConfig {
             })
             .collect();
 
-        // --- FAPI profile --------------------------------------------------
-
-        let fapi_profile = match self.fapi_profile.as_deref() {
-            None => None,
-            Some("baseline") => Some(crate::identity::FapiProfile::Baseline),
-            Some("advanced") => Some(crate::identity::FapiProfile::Advanced),
-            Some(other) => {
-                errors.push(RegistryError::InvalidRealmConfigField {
-                    field: "fapi_profile".to_string(),
-                    value: other.to_string(),
-                    reason: "expected \"baseline\" or \"advanced\"".to_string(),
-                });
-                None
-            }
-        };
-
         // --- Structural validation (cross-references, cycles, Tier 1) ------
         //
         // Bail early on grammar errors before running the structural checks
@@ -3819,7 +3793,6 @@ impl RealmYamlConfig {
             session_over_limit_policy,
             idle_timeout_secs: None,
             absolute_timeout_secs: None,
-            fapi_profile,
             // A-9 (§4.17#9): `realms.<name>.security.cidr_policy`. There was no
             // field to land in, so the documented block refused to boot and the
             // `CidrFilter` guard had no per-realm input.
@@ -4298,55 +4271,6 @@ mod tests {
         // Inherited from global
         assert_eq!(merged.password_memory_cost, Some(65536));
         assert_eq!(merged.password_time_cost, Some(3));
-    }
-
-    #[test]
-    fn fapi_profile_baseline_parsed() {
-        let yaml = RealmYamlConfig {
-            fapi_profile: Some("baseline".to_string()),
-            ..RealmYamlConfig::default()
-        };
-        let cfg = yaml
-            .to_realm_config(&AuthConfig::default(), None)
-            .expect("baseline is valid");
-        assert_eq!(
-            cfg.fapi_profile,
-            Some(crate::identity::FapiProfile::Baseline)
-        );
-    }
-
-    #[test]
-    fn fapi_profile_advanced_parsed() {
-        let yaml = RealmYamlConfig {
-            fapi_profile: Some("advanced".to_string()),
-            ..RealmYamlConfig::default()
-        };
-        let cfg = yaml
-            .to_realm_config(&AuthConfig::default(), None)
-            .expect("advanced is valid");
-        assert_eq!(
-            cfg.fapi_profile,
-            Some(crate::identity::FapiProfile::Advanced)
-        );
-    }
-
-    #[test]
-    fn fapi_profile_absent_yields_none() {
-        let yaml = RealmYamlConfig::default();
-        let cfg = yaml
-            .to_realm_config(&AuthConfig::default(), None)
-            .expect("no fapi_profile is valid");
-        assert!(cfg.fapi_profile.is_none());
-    }
-
-    #[test]
-    fn fapi_profile_unknown_value_is_error() {
-        let yaml = RealmYamlConfig {
-            fapi_profile: Some("enterprise".to_string()),
-            ..RealmYamlConfig::default()
-        };
-        let result = yaml.to_realm_config(&AuthConfig::default(), None);
-        assert!(result.is_err(), "unknown fapi_profile must fail validation");
     }
 }
 

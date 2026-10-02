@@ -25,6 +25,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   always the caller, and an `org_id` that does not exist answers `404`. Direct permission grants
   and revocations are now audited.
 
+- **`dpop_bound_access_tokens` client metadata (RFC 9449 §5.2).** A client with the flag set
+  gets tokens only against a `DPoP` proof, on every grant (authorization code, refresh, client
+  credentials, JWT bearer, device code); without one the token request answers
+  `invalid_dpop_proof`. Set it in `hearth.yaml` (`applications.<id>.dpop_bound_access_tokens`),
+  in dynamic registration (echoed in the response), or through the admin API; the client record
+  returns it. This replaces the FAPI profile as the way to require sender-constrained tokens.
+
 ### Removed
 - **BREAKING: Hearth no longer acts as a SAML Identity Provider.** The routes
   `/ui/realms/{realm}/saml/metadata`, `/saml/sso` (GET and POST), `/saml/sso/init` and
@@ -70,6 +77,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   authorization endpoint or device approval). Gone with it: the `username`, `password` and
   `mfa_code` token-request fields and the `HEARTH_STEP_UP_CHALLENGE_REQUIRED` and
   `HEARTH_ENROLL_MFA_REQUIRED` error codes.
+- **BREAKING: JARM and the FAPI 2.0 profile are removed.** Gone: the realm `fapi_profile`
+  (`baseline`/`advanced`), the application `profile: fapi2`, every FAPI-only rule (PAR, PKCE and
+  JAR made mandatory, `private_key_jwt`-only realms, RS256 refused, the single-string assertion
+  `aud`), the JARM response modes (`query.jwt`, `fragment.jwt`, `jwt` now answer
+  `unsupported_response_mode`), the client `authorization_signed_response_alg`, the discovery
+  fields `fapi_profile` and `authorization_signing_alg_values_supported`, and the
+  `fapi_violation` error. PAR, JAR, PKCE, `private_key_jwt` and DPoP stay, for every client. The
+  removed config keys stop startup and point at `dpop_bound_access_tokens`.
 
 ### Security
 - **`GET /admin/users/{id}/effective-permissions?org_id=` no longer reports a suspended

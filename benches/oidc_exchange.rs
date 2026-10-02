@@ -102,7 +102,6 @@ fn bench_auth_code_exchange(c: &mut Criterion) {
                         amr_values: vec![],
                         response_mode: None,
                         request: None,
-                        via_par: false,
                     },
                 )
                 .expect("authorize");

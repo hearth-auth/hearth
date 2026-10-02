@@ -55,7 +55,7 @@ All example URLs use `auth.example.com`.
 | 37 | Production observability | [Enterprise](./enterprise.md#example-37--production-observability) |
 | 38 | Storage tuning | [Enterprise](./enterprise.md#example-38--storage-tuning) |
 | 39 | Custom branding | [Branding & Complex](./branding-and-complex.md#example-39--custom-branding) |
-| 40 | High-security / financial services (+ FAPI 2.0 client setup) | [Branding & Complex](./branding-and-complex.md#example-40--high-security--financial-services) |
+| 40 | High-security / financial services (+ sender-constrained client setup) | [Branding & Complex](./branding-and-complex.md#example-40--high-security--financial-services) |
 | 41 | Full enterprise kitchen sink | [Branding & Complex](./branding-and-complex.md#example-41--full-enterprise-kitchen-sink) |
 
 ---

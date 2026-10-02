@@ -90,7 +90,6 @@ async fn oidc_authorization_code_flow_roundtrip() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -458,7 +457,6 @@ async fn oidc_pkce_s256_flow() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize with PKCE");
@@ -505,7 +503,6 @@ async fn oidc_pkce_s256_flow() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize with PKCE again");
@@ -550,7 +547,6 @@ async fn oidc_pkce_s256_flow() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize with PKCE third time");
@@ -793,7 +789,6 @@ async fn conformance_token_endpoint_rfc6749() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -918,7 +913,6 @@ async fn conformance_token_endpoint_rfc6749() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize again");

@@ -591,7 +591,6 @@ fn email_scope_token(h: &common::TestHarness, realm: &RealmId, user: &UserId) ->
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize")

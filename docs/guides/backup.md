@@ -335,15 +335,14 @@ band. `verify` passing does not establish it (see
 
 Every backup includes an AES-256-GCM encrypted copy of each realm's Ed25519 signing key, protected by a random 32-byte **DEK** (Data Encryption Key). The DEK itself is stored base64-encoded in `manifest.json`.
 
-A realm in which any client selected RS256 ID tokens (`id_token_signed_response_alg: RS256`) also has an RSA ID-token signing key. It travels the same way — `id_token_signing_key.json`, plus `retiring_id_token_signing_keys.json` for keys still inside a rotation grace window — and is re-sealed under the destination's KEK on restore, so ID tokens issued before the backup keep verifying against the restored JWKS. An archive whose clients receive RS256 ID tokens but which carries no restorable RSA key fails closed exactly like a missing Ed25519 key, with the same `--allow-missing-signing-key` override. An RS256 client comes back RS256 even in a realm with a `fapi_profile` (one that turned FAPI on after the client registered); there, as in the source, its ID-token grants are refused until it is switched to `EdDSA`.
+A realm in which any client selected RS256 ID tokens (`id_token_signed_response_alg: RS256`) also has an RSA ID-token signing key. It travels the same way — `id_token_signing_key.json`, plus `retiring_id_token_signing_keys.json` for keys still inside a rotation grace window — and is re-sealed under the destination's KEK on restore, so ID tokens issued before the backup keep verifying against the restored JWKS. An archive whose clients receive RS256 ID tokens but which carries no restorable RSA key fails closed exactly like a missing Ed25519 key, with the same `--allow-missing-signing-key` override.
 
 ### Client credentials
 
 Each client record carries everything the client authenticates with: the
 stored client-secret **hash** (never a plaintext secret), the assertion public
-key, the inline `jwks` / `jwks_uri`, and the security `profile` (for example
-FAPI 2.0), together with its consent, logout, CORS, MFA, JARM and lifecycle
-settings. A restore writes them back in the same single write that re-creates
+key, the inline `jwks` / `jwks_uri`, and its `dpop_bound_access_tokens` flag,
+together with its consent, logout, CORS, MFA and lifecycle settings. A restore writes them back in the same single write that re-creates
 the client, so a confidential or `private_key_jwt` client comes back exactly
 as strong as it was: it authenticates with the same secret or key, and is
 still refused without it. The secret hash is restored verbatim — only the two
@@ -357,8 +356,7 @@ refuses such a hash too (the secret does not match, and the KDF never runs).
 A restore never re-creates a client weaker than its source. A client whose
 record does not restore — a secret hash in an unknown format or above the
 cost ceilings, a JWKS or
-assertion key that no longer validates, or a FAPI 2.0 client without a
-verifiable key — is **not restored** and is listed, with the reason, in the
+assertion key that no longer validates — is **not restored** and is listed, with the reason, in the
 restore report (`errors` in the HTTP response, `conflicts` in the CLI output),
 and counted as `errored`. So is a record that carries no credential at all
 although its grants (`client_credentials`, `jwt-bearer`) are only ever issued

@@ -1349,7 +1349,6 @@ async fn id_token_on_introspect_returns_inactive() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -1445,7 +1444,6 @@ async fn concurrent_auth_code_exchange_only_one_succeeds() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");

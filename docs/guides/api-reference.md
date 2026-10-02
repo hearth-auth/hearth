@@ -292,10 +292,19 @@ Regenerate secret**. A public client answers `400`, an unknown one `404`.
 - A caller-chosen `client_secret` is refused with `422`. The REST
   routes used to drop it silently and register a **public** client.
 - Any other `token_endpoint_auth_method` value is a `422`.
-- A realm with `fapi_profile: advanced` accepts `private_key_jwt` only, so creating a
-  `client_secret_*` client there — or regenerating a secret — is refused with `400
-  invalid_request` naming `private_key_jwt`, rather than creating a
-  client the token endpoint would never authenticate.
+
+### DPoP-bound clients (`dpop_bound_access_tokens`)
+
+`POST /admin/applications`, `POST /clients` and `PATCH /admin/applications/{id}` accept the
+RFC 9449 §5.2 client metadata `dpop_bound_access_tokens` (boolean, default `false`); so do
+`POST /register` and `POST /realms/<realm-name>/register`, which echo it in the registration
+response when it is `true`. The client JSON returned by the admin routes always carries it.
+When `true`, every token request from that client — `authorization_code`, `refresh_token`,
+`client_credentials`, `jwt-bearer` and `device_code` — must carry a `DPoP` proof header, or it is
+refused with `400 invalid_dpop_proof`. The issued tokens are bound to the proof key
+(`cnf.jkt`, `token_type: DPoP`). A non-boolean value is refused (`422` on the admin create routes). The same
+setting is available in `hearth.yaml` as
+`realms.<name>.applications.<app>.dpop_bound_access_tokens`.
 
 ### Unauthenticated dynamic client registration
 
@@ -326,10 +335,7 @@ Every registration surface above — and `PATCH /admin/applications/{id}` — ac
 `400` on the admin routes. When the field is omitted, **dynamic registration defaults to
 `RS256`** (OpenID Connect Registration §2) and the admin routes default to `EdDSA`; the
 registration response and the client record always report the resolved value. The setting
-affects ID tokens only — access and refresh tokens are EdDSA for every client. Under FAPI 2.0 —
-a client with the `fapi2` profile, or any client of a realm with a `fapi_profile` — RS256 is
-refused (FAPI 2.0 permits only PS256, ES256 and EdDSA), and dynamic registration in such a realm
-defaults to `EdDSA`. See [OIDC.md §1.2](../specs/OIDC.md#12-signing).
+affects ID tokens only — access and refresh tokens are EdDSA for every client. See [OIDC.md §1.2](../specs/OIDC.md#12-signing).
 
 ---
 
@@ -412,14 +418,14 @@ clients only** (RFC 7662 §2.1). Authenticate with `client_secret_basic`,
 public. Register a confidential client for each resource server that introspects.
 `POST /revoke` continues to accept public clients by `client_id` (RFC 7009 §2.1). A
 confidential client authenticates with its secret, or — for a `private_key_jwt` client
-such as a FAPI 2.0 client — with `client_assertion_type` + `client_assertion`; such a
+— with `client_assertion_type` + `client_assertion`; such a
 client presenting only its `client_id` receives `401 invalid_client`. `/revoke` revokes
 only a token **issued to the calling client**: for a token-exchange token, the client that
 performed the exchange (its `act.sub`); otherwise the client in the token's `azp`, the client
 that owns its grant family (access and refresh tokens from the `authorization_code` and `device_code`
 grants), or — for a `client_credentials` or `jwt-bearer` token — the client itself. Any
 other token, including a Hearth first-party session token issued to no OAuth client
-(step-up-MFA and magic-link grants, console logins), is left untouched and the
+(magic-link grants, console logins), is left untouched and the
 endpoint still answers `200` (RFC 7009 §2.2), so the response reveals nothing about the
 token. Revoking a token-exchange token blocklists that token alone; the subject's
 session stays live. Being named in a token's `aud` does not make a resource server its owner. To end

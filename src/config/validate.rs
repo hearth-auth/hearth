@@ -1940,15 +1940,11 @@ fn validate_realm_auth_configs_all(
 
 /// Validates an application's `id_token_signed_response_alg` (task 26.55).
 ///
-/// The engine refuses anything but RS256/EdDSA, and RS256 wherever FAPI 2.0
-/// applies (FAPI 2.0 Security Profile §5.4.1 permits only PS256, ES256 and
-/// EdDSA), at reconcile time; `hearth config validate` must say so first, not
-/// after a boot that already failed. `realm_fapi` is whether the realm has a
-/// `fapi_profile`.
+/// The engine refuses anything but RS256/EdDSA at reconcile time; `hearth config validate` must say so first, not
+/// after a boot that already failed.
 fn validate_app_id_token_alg(
     prefix: &str,
     app: &super::types::ApplicationYamlConfig,
-    realm_fapi: bool,
     issues: &mut Vec<ValidationIssue>,
 ) {
     let Some(alg) = &app.id_token_signed_response_alg else {
@@ -1959,12 +1955,6 @@ fn validate_app_id_token_alg(
             "must be \"RS256\" or \"EdDSA\" (case-sensitive); \"none\" and symmetric HS* \
              algorithms are never supported"
         }
-        Ok(crate::identity::IdTokenSigningAlg::Rs256)
-            if realm_fapi || app.profile.as_deref() == Some("fapi2") =>
-        {
-            "RS256 is not permitted under FAPI 2.0 (a `profile: fapi2` application or a realm \
-             with `fapi_profile`); use \"EdDSA\""
-        }
         Ok(_) => return,
     };
     issues.push(ValidationIssue {
@@ -1973,15 +1963,9 @@ fn validate_app_id_token_alg(
     });
 }
 
-/// Validates an application's `profile` and `jwks`.
-///
-/// Only `standard` and `fapi2` exist (anything else used to be read as
-/// standard with a warning). A `fapi2` application authenticates with
-/// `private_key_jwt` only, so it must declare the public keys it signs
-/// assertions with (`jwks`) and must not hold a secret — without keys,
-/// reconcile made it a client that counted as PUBLIC. The engine refuses the
-/// same at reconcile; `hearth config validate` must say so first.
-fn validate_app_profile_keys(
+/// Validates an application's inline `jwks`: the engine refuses an invalid
+/// set at reconcile, so `hearth config validate` must say so first.
+fn validate_app_jwks(
     prefix: &str,
     app: &super::types::ApplicationYamlConfig,
     issues: &mut Vec<ValidationIssue>,
@@ -1993,62 +1977,6 @@ fn validate_app_profile_keys(
                 reason,
             });
         }
-    }
-    let fapi2 = match app.profile.as_deref() {
-        None | Some("standard") => false,
-        Some("fapi2") => true,
-        Some(_) => {
-            issues.push(ValidationIssue {
-                field: format!("{prefix}.profile"),
-                reason: "must be \"standard\" or \"fapi2\"".to_string(),
-            });
-            false
-        }
-    };
-    if !fapi2 {
-        return;
-    }
-    if app.jwks_json().is_none() {
-        issues.push(ValidationIssue {
-            field: format!("{prefix}.jwks"),
-            reason: "a `profile: fapi2` application authenticates with private_key_jwt only and \
-                     must declare its public keys inline (`jwks: {keys: [...]}`)"
-                .to_string(),
-        });
-    }
-    if app.confidential == Some(true) || app.client_secret.is_some() {
-        issues.push(ValidationIssue {
-            field: format!("{prefix}.client_secret"),
-            reason: "a `profile: fapi2` application must not hold a client secret; it \
-                     authenticates with private_key_jwt"
-                .to_string(),
-        });
-    }
-}
-
-/// A FAPI 2.0 Advanced realm accepts `private_key_jwt` only: the token
-/// endpoint refuses every client secret there, and the admin API refuses to
-/// create a secret-based client. A YAML application with a secret was
-/// accepted here and reconciled into a client that could never authenticate.
-fn validate_app_no_secret_in_fapi_advanced_realm(
-    prefix: &str,
-    realm_name: &str,
-    app_key: &str,
-    realm_fapi_profile: Option<&str>,
-    app: &super::types::ApplicationYamlConfig,
-    issues: &mut Vec<ValidationIssue>,
-) {
-    let advanced = realm_fapi_profile.is_some_and(|p| p.eq_ignore_ascii_case("advanced"));
-    if advanced && (app.confidential == Some(true) || app.client_secret.is_some()) {
-        issues.push(ValidationIssue {
-            field: format!("{prefix}.client_secret"),
-            reason: format!(
-                "application '{app_key}' in realm '{realm_name}' uses a client secret, but the \
-                 realm's fapi_profile is advanced, which accepts private_key_jwt only: a secret \
-                 could never authenticate. Remove `confidential`/`client_secret` and declare \
-                 the client's public keys in `jwks`"
-            ),
-        });
     }
 }
 
@@ -2088,16 +2016,8 @@ fn validate_realm_applications_all(
                     }
                 }
             }
-            validate_app_id_token_alg(&prefix, app, cfg.fapi_profile.is_some(), issues);
-            validate_app_profile_keys(&prefix, app, issues);
-            validate_app_no_secret_in_fapi_advanced_realm(
-                &prefix,
-                realm_name,
-                app_key,
-                cfg.fapi_profile.as_deref(),
-                app,
-                issues,
-            );
+            validate_app_id_token_alg(&prefix, app, issues);
+            validate_app_jwks(&prefix, app, issues);
             // A confidential client whose `client_secret` is present but empty
             // authenticates with `Authorization: Basic base64("<client_id>:")`,
             // which any caller who knows the client id can send. The `is_none()`
@@ -3637,186 +3557,6 @@ realms:
                 "{bad:?} must be refused by `hearth config validate`, not first at reconcile"
             );
         }
-    }
-
-    /// FAPI 2.0 Security Profile §5.4.1 permits only PS256, ES256 and EdDSA, so
-    /// `hearth config validate` refuses RS256 for a `profile: fapi2`
-    /// application and for any application of a realm with a `fapi_profile` —
-    /// the engine refuses both at reconcile, and the operator should hear first.
-    #[test]
-    fn config_refuses_rs256_id_tokens_under_fapi() {
-        let yaml = |realm_fapi: &str, app_profile: &str, alg: &str| {
-            format!(
-                r#"
-oidc:
-  issuer: "https://auth.example.com"
-server:
-  trust_forwarded_proto: true
-  trusted_proxies: ["127.0.0.1"]
-security:
-  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
-realms:
-  myrealm:
-{realm_fapi}
-    applications:
-      my-app:
-        name: "My App"
-        redirect_uris: ["https://app.example.com/cb"]
-{app_profile}
-        id_token_signed_response_alg: "{alg}"
-"#
-            )
-        };
-        let alg_issues = |realm_fapi: &str, app_profile: &str, alg: &str| {
-            Config::from_yaml_str_unchecked(&yaml(realm_fapi, app_profile, alg))
-                .expect("fixture parses")
-                .validate_all()
-                .into_iter()
-                .filter(|issue| {
-                    issue.field == "realms.myrealm.applications.my-app.id_token_signed_response_alg"
-                })
-                .count()
-        };
-        let fapi_realm = "    fapi_profile: baseline";
-        let fapi_app = "        profile: fapi2";
-        assert_eq!(alg_issues(fapi_realm, "", "RS256"), 1, "FAPI realm + RS256");
-        assert_eq!(alg_issues("", fapi_app, "RS256"), 1, "FAPI 2.0 app + RS256");
-        assert_eq!(alg_issues(fapi_realm, "", "EdDSA"), 0, "FAPI realm + EdDSA");
-        assert_eq!(alg_issues("", fapi_app, "EdDSA"), 0, "FAPI 2.0 app + EdDSA");
-        assert_eq!(alg_issues("", "", "RS256"), 0, "no FAPI + RS256");
-    }
-
-    /// Both loaders a config reload (SIGHUP / `POST /admin/api/config/reload`)
-    /// and startup go through refuse a secret-based application in a realm
-    /// whose `fapi_profile` is advanced, naming realm and application: the
-    /// runtime refuses every client secret there.
-    #[test]
-    fn loaders_refuse_a_secret_application_in_a_fapi_advanced_realm() {
-        let yaml = r#"
-oidc:
-  issuer: "https://auth.example.com"
-server:
-  trust_forwarded_proto: true
-  trusted_proxies: ["127.0.0.1"]
-storage:
-  data_dir: "/tmp/hearth-test"
-security:
-  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
-email:
-  transport: smtp
-  from: "auth@example.com"
-  smtp:
-    host: "mail.example.com"
-    port: 587
-realms:
-  bank:
-    fapi_profile: advanced
-    applications:
-      ledger:
-        name: "Ledger"
-        redirect_uris: ["https://ledger.example.com/cb"]
-        confidential: true
-        client_secret: "a-long-enough-secret-value-123"
-"#;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("hearth.yaml");
-        std::fs::write(&path, yaml).expect("write");
-        for (loader, result) in [
-            ("from_file", Config::from_file(&path)),
-            ("from_file_as_dev", Config::from_file_as_dev(&path)),
-        ] {
-            match result {
-                Err(ConfigError::ValidationError { field, reason }) => {
-                    assert_eq!(
-                        field, "realms.bank.applications.ledger.client_secret",
-                        "{loader}"
-                    );
-                    assert!(
-                        reason.contains("'ledger'") && reason.contains("'bank'"),
-                        "{loader}: {reason}"
-                    );
-                }
-                other => panic!("{loader}: expected the FAPI Advanced refusal, got {other:?}"),
-            }
-        }
-    }
-
-    /// A `profile: fapi2` application authenticates with `private_key_jwt`
-    /// only, so it must declare the keys it signs assertions with (`jwks`) and
-    /// no secret; an unknown profile is refused rather than read as standard.
-    /// Before, reconcile set `profile = Fapi2` on a keyless client that then
-    /// counted as PUBLIC.
-    #[test]
-    fn config_requires_keys_and_no_secret_for_a_fapi2_application() {
-        let yaml = |app: &str| {
-            format!(
-                r#"
-oidc:
-  issuer: "https://auth.example.com"
-server:
-  trust_forwarded_proto: true
-  trusted_proxies: ["127.0.0.1"]
-security:
-  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
-realms:
-  myrealm:
-    applications:
-      my-app:
-        name: "My App"
-        redirect_uris: ["https://app.example.com/cb"]
-{app}
-"#
-            )
-        };
-        let issues = |app: &str| -> Vec<String> {
-            Config::from_yaml_str_unchecked(&yaml(app))
-                .expect("fixture parses")
-                .validate_all()
-                .into_iter()
-                .filter(|i| i.field.starts_with("realms.myrealm.applications.my-app"))
-                .map(|i| format!("{}: {}", i.field, i.reason))
-                .collect()
-        };
-        let jwks = r"        jwks:
-          keys:
-            - kty: OKP
-              crv: Ed25519
-              kid: k1
-              alg: EdDSA
-              use: sig
-              x: 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo";
-
-        let keyless = issues("        profile: fapi2");
-        assert!(
-            keyless
-                .iter()
-                .any(|i| i.contains(".jwks") && i.contains("private_key_jwt")),
-            "a keyless fapi2 application must be refused, naming jwks: {keyless:?}"
-        );
-        let with_secret = issues(&format!(
-            "        profile: fapi2\n        confidential: true\n        client_secret: \"s3cret-s3cret-s3cret\"\n{jwks}"
-        ));
-        assert!(
-            with_secret.iter().any(|i| i.contains("client_secret")),
-            "a fapi2 application with a secret must be refused: {with_secret:?}"
-        );
-        let unknown = issues("        profile: fapi3");
-        assert!(
-            unknown.iter().any(|i| i.contains(".profile")),
-            "an unknown profile must be refused: {unknown:?}"
-        );
-        let private = issues(&format!(
-            "        profile: fapi2\n{jwks}\n              d: nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A"
-        ));
-        assert!(
-            private
-                .iter()
-                .any(|i| i.contains(".jwks") && i.contains("private")),
-            "a JWKS carrying private key material must be refused: {private:?}"
-        );
-        let ok = issues(&format!("        profile: fapi2\n{jwks}"));
-        assert!(ok.is_empty(), "fapi2 with an inline JWKS is valid: {ok:?}");
-        assert!(issues("").is_empty(), "control: a standard application");
     }
 
     #[test]

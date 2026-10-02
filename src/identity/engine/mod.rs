@@ -3980,22 +3980,14 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::TokenRevoked);
         }
 
-        // FAPI 2.0: DPoP sender-constrained tokens are mandatory on the refresh
-        // path, mirroring the gate at exchange_authorization_code (§5.3.3).
-        // Check both per-client profile AND realm-level fapi_profile so that
-        // standard-profile clients in a Baseline/Advanced realm cannot bypass
-        // the sender-constraint requirement on refresh (mirrors HEA-1022 fix).
-        // A clientless family (step-up-MFA grant, first-party session
-        // tokens) is governed by the realm profile alone. Only a family with
-        // a client was checked, so such refresh tokens rotated without a
-        // proof in a FAPI realm.
-        if family.client_id.is_none() {
-            self.require_fapi_sender_constraint(realm_id, None, dpop_jkt)?;
-        }
+        // A client registered with `dpop_bound_access_tokens` refreshes only
+        // with a DPoP proof (checked below). A clientless family has no
+        // registration to require one; its DPoP binding, if any, is enforced
+        // above by `bound_jkt`.
         if let Some(ref client_id) = family.client_id {
             // Fail closed when the owning client no longer exists. Skipping
             // this arm on a missing client stripped the confidential-client
-            // authentication and FAPI DPoP gates below, so a deleted client's
+            // authentication and DPoP gates below, so a deleted client's
             // refresh tokens kept rotating with LESS authentication than
             // before the deletion (audit 2026-08-28 §4.16#3).
             let Some(client) = self.get_client(realm_id, client_id)? else {
@@ -4010,7 +4002,7 @@ impl EmbeddedIdentityEngine {
             if !client.allows_refresh_token() {
                 return Err(IdentityError::UnsupportedGrantType);
             }
-            self.require_fapi_sender_constraint(realm_id, Some(&client), dpop_jkt)?;
+            Self::require_dpop_for_bound_client(Some(&client), dpop_jkt)?;
 
             // O1 (HEA-1755): confidential-client refresh binding.
             //
@@ -5795,15 +5787,7 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    fn build_discovery_document(
-        &self,
-        issuer: &str,
-        realm_config: Option<&crate::identity::types::RealmConfig>,
-    ) -> OidcDiscoveryDocument {
-        let fapi_profile = realm_config.and_then(|c| c.fapi_profile).map(|p| match p {
-            crate::identity::types::FapiProfile::Baseline => "baseline".to_string(),
-            crate::identity::types::FapiProfile::Advanced => "advanced".to_string(),
-        });
+    fn build_discovery_document(&self, issuer: &str) -> OidcDiscoveryDocument {
         OidcDiscoveryDocument {
             issuer: issuer.to_string(),
             authorization_endpoint: format!("{issuer}/authorize"),
@@ -5811,13 +5795,7 @@ impl EmbeddedIdentityEngine {
             jwks_uri: format!("{issuer}/.well-known/jwks.json"),
             userinfo_endpoint: format!("{issuer}/userinfo"),
             response_types_supported: vec!["code".to_string()],
-            response_modes_supported: vec![
-                "query".to_string(),
-                "fragment".to_string(),
-                "query.jwt".to_string(),
-                "fragment.jwt".to_string(),
-                "jwt".to_string(),
-            ],
+            response_modes_supported: vec!["query".to_string(), "fragment".to_string()],
             subject_types_supported: vec!["public".to_string()],
             // OIDC Discovery 1.0 §3: RS256 MUST be listed. It signs ID tokens
             // only, for clients that registered it (task 26.55); every other
@@ -5887,8 +5865,6 @@ impl EmbeddedIdentityEngine {
                 "ES256".to_string(),
                 "EdDSA".to_string(),
             ],
-            authorization_signing_alg_values_supported: vec!["EdDSA".to_string()],
-            fapi_profile,
         }
     }
 
@@ -7362,35 +7338,13 @@ impl EmbeddedIdentityEngine {
             });
         }
         client.set_jwks_uri(request.jwks_uri.clone());
-        if let Some(alg) = request.authorization_signed_response_alg.as_deref() {
-            if alg != "EdDSA" {
-                return Err(IdentityError::InvalidInput {
-                    reason: format!(
-                        "unsupported authorization_signed_response_alg '{alg}'; supported: EdDSA"
-                    ),
-                });
-            }
-        }
-        client.set_authorization_signed_response_alg(
-            request.authorization_signed_response_alg.clone(),
-        );
-        client.set_profile(request.profile);
-        Self::check_fapi2_client_keys(&client)?;
+        client.set_dpop_bound_access_tokens(request.dpop_bound_access_tokens);
         // ID-token signing algorithm (task 26.55), parsed as a registration
-        // parses it (`import_client` then provisions the RSA key), but not
-        // refused under a REALM's
-        // FAPI 2.0 profile: an import records the algorithm the source held
-        // rather than choosing one. A realm that turned `fapi_profile` on after
-        // an RS256 client registered still holds that client, so its backup
-        // carries it, and a restore must not drop it. FAPI still governs what
-        // is issued: `id_token_signer` refuses the client's ID-token grants
-        // while FAPI applies to it. A backup restore installs the archived RSA
-        // key first, so an RS256 client finds that key rather than minting a
-        // new one. A client whose OWN profile is FAPI 2.0 can never hold RS256
-        // (registration and update refuse it, §5.4.1), so that is refused.
+        // parses it (`import_client` then provisions the RSA key). A backup
+        // restore installs the archived RSA key first, so an RS256 client finds
+        // that key rather than minting a new one.
         client.set_id_token_signed_response_alg(Self::parse_client_id_token_alg(
             request.id_token_signed_response_alg.as_deref(),
-            request.profile.is_fapi2(),
         )?);
         Ok(client)
     }
@@ -9810,7 +9764,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             // This used to fall through to `refresh_session` + `issue_tokens`,
             // which minted a brand-new pair without consuming the presented
             // token. That branch had no rotation, no reuse detection and none
-            // of the client-authentication, FAPI DPoP or consent gates
+            // of the client-authentication, DPoP or consent gates
             // `rotate_grant_family` applies, so a family-less refresh token
             // replayed forever and could never raise a theft event
             // (audit 2026-08-28 §4.16#6).
@@ -12244,7 +12198,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // secretless client that makes it public.
         let touches_credentials = request.jwks.is_some()
             || request.assertion_public_key.is_some()
-            || request.profile.is_some();
+            || request.dpop_bound_access_tokens.is_some();
         if touches_credentials {
             if let Some(client) = self.get_client(realm_id, client_id)? {
                 if client.is_yaml_managed() {
@@ -12398,17 +12352,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.take_pending_authorization_inner(realm_id, ticket)
     }
 
-    fn sign_jarm_error_jwt(
-        &self,
-        realm_id: &RealmId,
-        client_id: &str,
-        error: &str,
-        error_description: &str,
-        state_param: &str,
-    ) -> Result<String, IdentityError> {
-        self.sign_jarm_error_jwt_inner(realm_id, client_id, error, error_description, state_param)
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn issue_authorization_code(
         &self,
@@ -12424,7 +12367,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         amr_values: Vec<String>,
         response_mode: Option<crate::identity::oidc::ResponseMode>,
         jar_request: Option<String>,
-        via_par: bool,
     ) -> Result<AuthorizationResponse, IdentityError> {
         self.issue_authorization_code_inner(
             realm_id,
@@ -12439,7 +12381,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             amr_values,
             response_mode,
             jar_request,
-            via_par,
         )
     }
 
@@ -18941,7 +18882,7 @@ mod tests {
 
     /// Every spelling of a resource reads the one consent record (G6).
     mod authorize_resource_consent;
-    /// Under FAPI 2.0 an assertion's `aud` is the issuer as a single string.
+    /// A client assertion's `aud` must name the realm's issuer.
     mod client_assertion_audience;
     /// `private_key_jwt` assertion-JTI replay markers carry an expiry and are swept.
     mod client_assertion_jti;
@@ -18953,8 +18894,6 @@ mod tests {
     mod control_epoch;
     /// Control-cache reloads: lock-free validation, retries, ordering, coverage.
     mod control_reload;
-    /// A FAPI 2.0 client is never public and always holds verifiable keys.
-    mod fapi2_client_keys;
     /// Login abuse resistance: realm-cost dummy verify, breach check before
     /// registration writes, single-use required-action tokens (GA audit).
     mod ga_login_hardening;
@@ -21975,7 +21914,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize should succeed");
@@ -22012,7 +21950,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -22077,7 +22014,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -22142,7 +22078,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -22222,7 +22157,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -22288,7 +22222,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         );
         assert!(
@@ -22323,7 +22256,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         );
         assert!(
@@ -22944,7 +22876,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         );
         assert!(result.is_ok(), "first use of nonce should succeed");
@@ -22966,7 +22897,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         );
         assert!(
@@ -22991,7 +22921,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         );
         assert!(result.is_ok(), "different nonce should succeed");
@@ -23020,7 +22949,6 @@ mod tests {
             amr_values: Vec::new(),
             response_mode: None,
             request: None,
-            via_par: false,
         };
 
         // Use the nonce at t=0.
@@ -23081,7 +23009,6 @@ mod tests {
             amr_values: Vec::new(),
             response_mode: None,
             request: None,
-            via_par: false,
         };
 
         // Client A burns the nonce.
@@ -23139,7 +23066,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             };
             assert!(engine.authorize(&realm, &req).is_ok());
         }
@@ -23168,7 +23094,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             };
             assert!(engine.authorize(&realm, &req).is_ok());
         }
@@ -25957,7 +25882,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -26526,7 +26450,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect_err("must reject public client with no PKCE");
@@ -26562,7 +26485,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect_err("must reject challenge without S256 method");
@@ -26610,7 +26532,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         );
         assert!(
@@ -26744,7 +26665,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect_err("invalid scope chars must be rejected");
@@ -26779,7 +26699,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize must succeed");

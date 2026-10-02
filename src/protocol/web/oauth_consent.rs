@@ -117,7 +117,7 @@ pub struct AuthorizeQuery {
     /// OIDC `prompt` parameter. Supported: `none`, `consent`, or empty.
     #[serde(default)]
     pub prompt: String,
-    /// JARM response mode (`query.jwt`, `fragment.jwt`, `jwt`).
+    /// Response mode (`query` or `fragment`).
     ///
     /// Absent means default `query` mode (plain code redirect).
     #[serde(default)]
@@ -128,8 +128,7 @@ pub struct AuthorizeQuery {
     #[serde(default)]
     pub request: Option<String>,
     /// PAR `request_uri` (RFC 9126). When present, this handler calls
-    /// `consume_par` to expand the pre-validated stored parameters and
-    /// sets `via_par = true` on the resulting authorization request.
+    /// `consume_par` to expand the pre-validated stored parameters.
     #[serde(default)]
     pub request_uri: Option<String>,
     /// RFC 8707 resource indicator (plain requests; a JAR or PAR request
@@ -324,22 +323,18 @@ fn plain_params(
             state,
             realm,
             &ErrorReturn {
-                client_id,
                 redirect_uri: &q.redirect_uri,
                 state: &q.state,
                 response_mode: None,
-                jarm_alg: client.authorization_signed_response_alg(),
             },
             "invalid_request",
             "unsupported_response_mode",
         ));
     };
     let error_return = ErrorReturn {
-        client_id,
         redirect_uri: &q.redirect_uri,
         state: &q.state,
         response_mode: response_mode.as_ref(),
-        jarm_alg: client.authorization_signed_response_alg(),
     };
 
     let Some(code_challenge_method) = parse_method(&q.code_challenge_method) else {
@@ -395,7 +390,6 @@ fn plain_params(
         prompt: q.prompt.clone(),
         response_mode,
         resource,
-        via_par: false,
         // Set from the session by `authorize_get_impl`.
         mfa_proof: MfaProof::None,
     })
@@ -463,7 +457,6 @@ fn par_params(
         prompt: stored.prompt.unwrap_or_default(),
         response_mode,
         resource,
-        via_par: true,
         // Set from the session by `authorize_get_impl`.
         mfa_proof: MfaProof::None,
     })
@@ -708,11 +701,9 @@ pub async fn consent_submit(
                     &state,
                     &session.realm_id,
                     &ErrorReturn {
-                        client_id: &pending.client_id,
                         redirect_uri: &pending.redirect_uri,
                         state: &pending.state,
                         response_mode: None,
-                        jarm_alg: pending.authorization_signed_response_alg.as_deref(),
                     },
                     "invalid_request",
                     "unsupported_response_mode",
@@ -721,9 +712,9 @@ pub async fn consent_submit(
                 return err_response;
             };
             // Everything the request carried to the consent gate — its
-            // response mode, RFC 8707 resource, PAR origin and the factors
-            // already proved — reaches the code. This used to issue with no
-            // resource, `via_par = false` and no `amr`.
+            // response mode, RFC 8707 resource and the factors already
+            // proved — reaches the code. This used to issue with no resource
+            // and no `amr`.
             let params = AuthorizeParams {
                 client_id: pending.client_id.clone(),
                 redirect_uri: pending.redirect_uri.clone(),
@@ -735,7 +726,6 @@ pub async fn consent_submit(
                 prompt: String::new(),
                 response_mode,
                 resource: pending.resource.clone(),
-                via_par: pending.via_par,
                 // The approving session's proof (GA audit round 3, D-7).
                 mfa_proof: session.mfa_proof,
             };
@@ -768,11 +758,9 @@ pub async fn consent_submit(
                 &state,
                 &session.realm_id,
                 &ErrorReturn {
-                    client_id: &pending.client_id,
                     redirect_uri: &pending.redirect_uri,
                     state: &pending.state,
                     response_mode: response_mode.as_ref(),
-                    jarm_alg: pending.authorization_signed_response_alg.as_deref(),
                 },
                 "access_denied",
                 "user denied authorization",
@@ -990,7 +978,6 @@ fn jar_params(
         prompt: jar.prompt.unwrap_or_else(|| q.prompt.clone()),
         response_mode,
         resource,
-        via_par: false,
         // Set from the session by `authorize_get_impl`.
         mfa_proof: MfaProof::None,
     })
@@ -1018,11 +1005,7 @@ fn registered_resource_or_refusal(
 
 /// Builds the redirect location string from an `AuthorizationResponse`.
 ///
-/// JARM modes wrap all response parameters in a signed JWT (RFC 9207 §4.3):
-/// * `query.jwt` / `jwt` → `redirect_uri?response=<jwt>`
-/// * `fragment.jwt` → `redirect_uri#response=<jwt>`
-///
-/// Plain modes send individual parameters per RFC 6749 §4.1.2 + RFC 9207 §4.1:
+/// Parameters travel per RFC 6749 §4.1.2 + RFC 9207 §4.1:
 /// * `fragment` → hash-fragment delivery of `code`, `state`, `iss`
 /// * `query` (default) → query-string delivery of `code`, `state`, `iss`
 pub(super) fn build_authorization_redirect(
@@ -1030,14 +1013,6 @@ pub(super) fn build_authorization_redirect(
     resp: &crate::identity::AuthorizationResponse,
 ) -> String {
     match resp.response_mode() {
-        ResponseMode::QueryJwt | ResponseMode::Jwt => append_query(
-            redirect_uri,
-            &[("response", resp.jarm_jwt().unwrap_or_default())],
-        ),
-        ResponseMode::FragmentJwt => append_fragment(
-            redirect_uri,
-            &[("response", resp.jarm_jwt().unwrap_or_default())],
-        ),
         ResponseMode::Fragment => append_fragment(
             redirect_uri,
             &[
@@ -1062,36 +1037,26 @@ pub(super) fn build_authorization_redirect(
 /// Only ever built from a redirect URI already confirmed against the
 /// client's registration (RFC 6749 §4.1.2.1).
 pub(super) struct ErrorReturn<'a> {
-    /// The client the error is for (the `aud` of a JARM error).
-    pub client_id: &'a ClientId,
     /// The registration-checked redirect URI.
     pub redirect_uri: &'a str,
     /// The request's `state`, echoed back.
     pub state: &'a str,
     /// The request's `response_mode` (`None` = default).
     pub response_mode: Option<&'a ResponseMode>,
-    /// The client's registered `authorization_signed_response_alg`.
-    pub jarm_alg: Option<&'a str>,
 }
 
 /// Redirects an authorization error to the client in the mode its code
 /// would have been delivered in ([`ResponseMode::effective`]): `fragment`
-/// errors travel in the fragment, JARM errors as a signed `response` JWT in
-/// the query (`query.jwt`, `jwt`) or the fragment (`fragment.jwt`).
+/// errors travel in the fragment.
 ///
-/// OAuth Multiple Response Types §2.1 and JARM §2.3 make the response mode
-/// govern error responses too. This used to put every error in the query
-/// string, signed only when the client had a registered signing alg — so a
+/// OAuth Multiple Response Types §2.1 makes the response mode govern error
+/// responses too. This used to put every error in the query string — so a
 /// `fragment` request got its code in the fragment but `consent_required`
-/// in the query, and a `query.jwt` request got an unsigned error.
+/// in the query.
 ///
-/// If signing a JARM error fails, the error is sent unsigned, in the same
-/// place (it carries no code).
-///
-/// RFC 9207 §2: a plain error carries the realm issuer as `iss`, exactly as a
+/// RFC 9207 §2: an error carries the realm issuer as `iss`, exactly as a
 /// successful response does, whenever the realm's discovery document
-/// advertises `authorization_response_iss_parameter_supported`. A JARM error
-/// carries it as the JWT's `iss` claim (RFC 9207 §2.4).
+/// advertises `authorization_response_iss_parameter_supported`.
 pub(super) fn authorization_error_redirect(
     state: &Arc<WebState>,
     realm: &RealmId,
@@ -1099,29 +1064,12 @@ pub(super) fn authorization_error_redirect(
     error: &str,
     description: &str,
 ) -> Response {
-    let mode = ResponseMode::effective(to.response_mode, to.jarm_alg.is_some());
+    let mode = ResponseMode::effective(to.response_mode);
     let place: fn(&str, &[(&str, &str)]) -> String = if mode.uses_fragment() {
         append_fragment
     } else {
         append_query
     };
-    if mode.is_jarm() {
-        match state.identity.sign_jarm_error_jwt(
-            realm,
-            &crate::identity::tokens::issued_client_id(to.client_id),
-            error,
-            description,
-            to.state,
-        ) {
-            Ok(jwt) => {
-                let location = place(to.redirect_uri, &[("response", &jwt)]);
-                return Redirect::to(&location).into_response();
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "sign_jarm_error_jwt failed, falling back to plain redirect");
-            }
-        }
-    }
     // The issuer the realm's discovery document names — the value the
     // success path sends. A realm whose document cannot be built gets no
     // `iss` rather than a wrong one.
@@ -1167,7 +1115,7 @@ pub(super) fn append_query(base: &str, params: &[(&str, &str)]) -> String {
 
 /// Appends parameters to the fragment (hash) portion of a URI.
 ///
-/// Used for `response_mode=fragment` and `response_mode=fragment.jwt`. The
+/// Used for `response_mode=fragment`. The
 /// fragment is always appended after any existing query string, using `#`
 /// as separator.  Per RFC 3986, the fragment is the last component and a URI
 /// may have at most one `#`, so we always use `#` then `&` for subsequent params.
@@ -1325,43 +1273,6 @@ mod tests {
     }
 
     #[test]
-    fn build_redirect_query_jwt_produces_response_param() {
-        use crate::identity::oidc::{AuthorizationResponse, ResponseMode};
-        let resp = AuthorizationResponse::new_jarm(
-            "authcode".to_string(),
-            "mystate".to_string(),
-            "https://as.example.com".to_string(),
-            "eyJhbGci.payload.sig".to_string(),
-            ResponseMode::QueryJwt,
-            "https://app/cb".to_string(),
-        );
-        let location = build_authorization_redirect("https://app/cb", &resp);
-        assert!(
-            location.starts_with("https://app/cb?response="),
-            "query.jwt must use ?response=, got: {location}"
-        );
-        assert!(!location.contains("code="), "must not expose code=");
-    }
-
-    #[test]
-    fn build_redirect_fragment_jwt_uses_hash() {
-        use crate::identity::oidc::{AuthorizationResponse, ResponseMode};
-        let resp = AuthorizationResponse::new_jarm(
-            "authcode".to_string(),
-            "mystate".to_string(),
-            "https://as.example.com".to_string(),
-            "eyJhbGci.payload.sig".to_string(),
-            ResponseMode::FragmentJwt,
-            "https://app/cb".to_string(),
-        );
-        let location = build_authorization_redirect("https://app/cb", &resp);
-        assert!(
-            location.starts_with("https://app/cb#response="),
-            "fragment.jwt must use #response=, got: {location}"
-        );
-    }
-
-    #[test]
     fn build_redirect_plain_query_has_code_state_iss() {
         use crate::identity::oidc::AuthorizationResponse;
         let resp = AuthorizationResponse::new(
@@ -1378,25 +1289,6 @@ mod tests {
         assert!(
             location.contains('?'),
             "must use query string, got: {location}"
-        );
-    }
-
-    #[test]
-    fn build_redirect_jwt_mode_uses_query() {
-        use crate::identity::oidc::{AuthorizationResponse, ResponseMode};
-        // response_mode=jwt defaults to query delivery for code flow
-        let resp = AuthorizationResponse::new_jarm(
-            "code".to_string(),
-            "st".to_string(),
-            "https://as.example.com".to_string(),
-            "jwt.tok.en".to_string(),
-            ResponseMode::Jwt,
-            "https://app/cb".to_string(),
-        );
-        let location = build_authorization_redirect("https://app/cb", &resp);
-        assert!(
-            location.contains("?response="),
-            "jwt mode must use query delivery, got: {location}"
         );
     }
 }

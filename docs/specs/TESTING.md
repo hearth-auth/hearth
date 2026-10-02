@@ -143,8 +143,9 @@ the certifying bodies' own harnesses:
 | Suite | File |
 |---|---|
 | OIDC Core / Discovery | `tests/oidc_conformance.rs` |
-| FAPI 2.0, realm-level (Baseline + Advanced) | `tests/fapi_conformance.rs` |
-| FAPI 2.0, per-client `ClientProfile::Fapi2` | `tests/fapi2_conformance.rs` |
+| PAR (RFC 9126) | `tests/par.rs`, `tests/par_client_auth.rs` |
+| JAR (RFC 9101) | `tests/jar.rs` |
+| DPoP (RFC 9449), incl. `dpop_bound_access_tokens` | `tests/dpop.rs`, `tests/dpop_refresh_binding.rs` |
 | RFC 8693 token exchange | `tests/rfc8693_conformance.rs` |
 | RFC 8707 resource indicators | `tests/rfc8707_conformance.rs` |
 | RFC 9728 Protected Resource Metadata | `tests/rfc9728_conformance.rs` |
@@ -164,7 +165,6 @@ followed. What follows is the state after the first real run. Full write-up:
 |---|---|
 | **OpenID Foundation conformance suite** (`gitlab.com/openid/conformance-suite`, `release-v5.3.1`) | **Run 2026-09-21.** `oidcc-config-certification-test-plan` (the **Config OP** certification profile) executed against a production-mode Hearth — `serve -c`, TLS on, real KEK, **not** `--dev`. Run twice, against the global and the realm-scoped discovery documents; identical both times. **Result: 38 conditions passed, 1 failed, 1 warned — the plan FAILED.** |
 | OIDF authorization-flow profiles (Basic / Implicit / Hybrid OP) | **Not run.** They would fail on the same single defect below, which every OP profile checks. |
-| OIDF FAPI plans | **Not run.** `tests/fapi_conformance.rs` / `tests/fapi2_conformance.rs` remain self-assessment. |
 | SCIM compliance suite | **Not run — and none exists to run.** The IETF operates no SCIM certification programme. The available options are Microsoft's hosted Entra SCIM Validator (needs a publicly reachable endpoint) and third-party checkers such as `scim2-tester`; neither is a certifying body's harness. |
 | SAML interop suite | **Not run.** The OASIS interop programme is dormant; the practical options are hosted services requiring public ingress. |
 

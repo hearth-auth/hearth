@@ -28,11 +28,6 @@ impl fmt::Display for IdentityError {
             Self::InvalidAuthorizationCode => write!(f, "invalid authorization code"),
             Self::InvalidGrant { reason } => write!(f, "invalid grant: {reason}"),
             Self::InvalidClientSecret => write!(f, "invalid client secret"),
-            Self::PrivateKeyJwtRequired => write!(
-                f,
-                "FAPI 2.0 requires private_key_jwt client authentication; \
-                 client_secret_basic, client_secret_post and none are not accepted"
-            ),
             Self::InvalidClientAssertion { reason } => {
                 write!(f, "invalid client assertion: {reason}")
             }
@@ -202,7 +197,6 @@ impl fmt::Display for IdentityError {
             Self::JwtBearerAssertionInvalid { reason } => {
                 write!(f, "invalid JWT bearer assertion: {reason}")
             }
-            Self::FapiViolation { reason } => write!(f, "FAPI 2.0 violation: {reason}"),
             Self::EmailReserved => write!(
                 f,
                 "a user with this email already exists or was recently deleted"

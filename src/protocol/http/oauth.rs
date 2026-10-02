@@ -710,48 +710,15 @@ async fn verify_endpoint_client(
 }
 
 /// The response for a failed client authentication: a shed Argon2id
-/// verification is `503` + `Retry-After`; a FAPI auth-method refusal is `401
-/// invalid_client` saying `private_key_jwt` is required; anything else is the
-/// uniform `401 invalid_client` (RFC 6749 §5.2), which reveals nothing about
-/// the client.
+/// verification is `503` + `Retry-After`; anything else is the uniform `401
+/// invalid_client` (RFC 6749 §5.2), which reveals nothing about the client.
 fn client_auth_refusal(err: &crate::identity::IdentityError) -> Response {
     match err {
         crate::identity::IdentityError::KdfOverloaded { retry_after } => {
             kdf_shed_json_response(*retry_after)
         }
-        crate::identity::IdentityError::PrivateKeyJwtRequired => {
-            let mut resp = identity_error_to_response(err).into_response();
-            resp.headers_mut().insert(
-                axum::http::header::WWW_AUTHENTICATE,
-                axum::http::HeaderValue::from_static("Basic realm=\"hearth\""),
-            );
-            resp
-        }
         _ => invalid_client_response(),
     }
-}
-
-/// Refuses a request that carries no `private_key_jwt` assertion in a FAPI
-/// 2.0 Advanced realm (`docs/specs/OIDC.md` §2.1.2 item 6) — for the paths
-/// that would otherwise accept a public client (`none`) without asking the
-/// engine. The answer depends on the realm alone.
-fn refuse_none_in_fapi_advanced_realm(
-    state: &AppState,
-    realm_id: &RealmId,
-) -> Result<(), Response> {
-    let advanced = state
-        .identity
-        .get_realm(realm_id)
-        .map_err(|e| identity_error_to_response(&e).into_response())?
-        .is_some_and(|realm| {
-            realm.config().fapi_profile == Some(crate::identity::FapiProfile::Advanced)
-        });
-    if advanced {
-        return Err(client_auth_refusal(
-            &crate::identity::IdentityError::PrivateKeyJwtRequired,
-        ));
-    }
-    Ok(())
 }
 
 /// Which per-client budget an endpoint draws on.
@@ -912,8 +879,8 @@ async fn verify_introspection_client(
 /// does. A `private_key_jwt` client authenticates with its assertion — and,
 /// because its `client_id` is as public as anyone's, is REFUSED when it
 /// presents no assertion: [`verify_endpoint_client`] treats any client with no
-/// stored secret as public, so a FAPI 2.0 client (which may not hold a secret)
-/// could otherwise be impersonated here by anyone who knew its identifier.
+/// stored secret as public, so a `private_key_jwt` client (which holds no
+/// secret) could otherwise be impersonated here by anyone who knew its identifier.
 async fn verify_revocation_client(
     state: &AppState,
     realm_id: &RealmId,
@@ -1116,8 +1083,7 @@ fn non_empty_credential(field: &str) -> Option<&str> {
 ///   surfaces `invalid_grant` for the (bad) code rather than leaking client
 ///   existence via a differing error;
 /// - public clients (no secret, no assertion key, no JWKS) → `Ok(())`, since
-///   PKCE alone authenticates them (RFC 9700 §2.1.1) — except in a FAPI 2.0
-///   Advanced realm, which accepts only `private_key_jwt`;
+///   PKCE alone authenticates them (RFC 9700 §2.1.1);
 /// - every other client → the secret (HTTP Basic Auth preferred, body
 ///   `client_secret` fallback) must verify, else `Err` with a 401. A client
 ///   that holds keys instead of a secret authenticates only with its
@@ -1180,9 +1146,6 @@ pub(super) async fn enforce_confidential_client_auth(
             .map(|_| ()),
         };
     }
-    // No assertion: this request authenticates with a secret or with `none`,
-    // neither of which a FAPI 2.0 Advanced realm accepts.
-    refuse_none_in_fapi_advanced_realm(state, realm_id)?;
 
     // RFC 6749 §2.3.1: a request must not use more than one client
     // authentication mechanism. If a Basic header is present, its username
@@ -1238,13 +1201,8 @@ pub(super) async fn enforce_confidential_client_auth(
     };
 
     // A shed Argon2id verification answers 503 on every arm: the caller's
-    // own request cost the gate a slot either way. A FAPI auth-method refusal
-    // (the realm is Advanced, or a FAPI 2.0 client proved a secret) says so.
-    if let Some(Err(
-        e @ (crate::identity::IdentityError::KdfOverloaded { .. }
-        | crate::identity::IdentityError::PrivateKeyJwtRequired),
-    )) = &verified
-    {
+    // own request cost the gate a slot either way.
+    if let Some(Err(e @ crate::identity::IdentityError::KdfOverloaded { .. })) = &verified {
         return Err(client_auth_refusal(e));
     }
     let Some(client) = client else {
@@ -1555,10 +1513,8 @@ struct RegistrationExtras {
     jwks: Option<String>,
     /// `jwks_uri` (RFC 7591 §2).
     jwks_uri: Option<String>,
-    /// `profile`: `"standard"` or `"fapi2"`.
-    profile: Option<crate::identity::ClientProfile>,
-    /// `authorization_signed_response_alg` (JARM).
-    authorization_signed_response_alg: Option<String>,
+    /// `dpop_bound_access_tokens` (RFC 9449 §5.2); absent means `false`.
+    dpop_bound_access_tokens: bool,
     /// `token_endpoint_auth_method` (RFC 7591 §2).
     token_endpoint_auth_method: Option<String>,
 }
@@ -1585,22 +1541,17 @@ fn split_registration_body(
         Some(_) => return Err("jwks must be a JSON Web Key Set object".to_string()),
     };
     let jwks_uri = optional_string(map.remove("jwks_uri"), "jwks_uri")?;
-    let profile = match optional_string(map.remove("profile"), "profile")?.as_deref() {
-        None => None,
-        Some("standard") => Some(crate::identity::ClientProfile::Standard),
-        Some("fapi2") => Some(crate::identity::ClientProfile::Fapi2),
-        Some(_) => return Err("profile must be \"standard\" or \"fapi2\"".to_string()),
+    let dpop_bound_access_tokens = match map.remove("dpop_bound_access_tokens") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(b)) => b,
+        Some(_) => return Err("dpop_bound_access_tokens must be a boolean".to_string()),
     };
-    let authorization_signed_response_alg = optional_string(
-        map.remove("authorization_signed_response_alg"),
-        "authorization_signed_response_alg",
-    )?;
     let token_endpoint_auth_method = optional_string(
         map.remove("token_endpoint_auth_method"),
         "token_endpoint_auth_method",
     )?;
-    // RFC 7591 `response_types`: only `code` is served; accept it (the FAPI
-    // guide's example sends it) and refuse anything else.
+    // RFC 7591 `response_types`: only `code` is served; accept it and refuse
+    // anything else.
     if let Some(types) = map.remove("response_types") {
         let only_code = types
             .as_array()
@@ -1616,8 +1567,7 @@ fn split_registration_body(
         RegistrationExtras {
             jwks,
             jwks_uri,
-            profile,
-            authorization_signed_response_alg,
+            dpop_bound_access_tokens,
             token_endpoint_auth_method,
         },
     ))
@@ -1625,9 +1575,8 @@ fn split_registration_body(
 
 /// Decodes an administrative registration body (`POST /clients`, `POST
 /// /admin/applications`) into the domain request, including `jwks`,
-/// `jwks_uri`, `profile` and `authorization_signed_response_alg` — without
-/// which an operator could not register a FAPI 2.0 (`private_key_jwt`) client
-/// over REST.
+/// `jwks_uri` and `dpop_bound_access_tokens` — without which an operator
+/// could not register a `private_key_jwt` or DPoP-bound client over REST.
 ///
 /// `token_endpoint_auth_method` `client_secret_basic` / `client_secret_post`
 /// makes Hearth generate the client's secret: it is in the returned request's
@@ -1662,10 +1611,7 @@ pub(super) fn admin_registration_request(
     let mut request = crate::identity::RegisterClientRequest::from(body);
     request.jwks = extras.jwks;
     request.jwks_uri = extras.jwks_uri;
-    if let Some(profile) = extras.profile {
-        request.profile = profile;
-    }
-    request.authorization_signed_response_alg = extras.authorization_signed_response_alg;
+    request.dpop_bound_access_tokens = extras.dpop_bound_access_tokens;
     request
         .apply_token_endpoint_auth_method(extras.token_endpoint_auth_method.as_deref())
         .map_err(|e| match e {
@@ -1686,22 +1632,9 @@ pub(super) fn admin_created_client_json(
     ))
 }
 
-/// The response for an identity error on an admin client route. A FAPI
-/// refusal names the rule (e.g. that an Advanced realm takes
-/// `private_key_jwt` only) in `error_description`; the rest map as usual.
+/// The response for an identity error on an admin client route.
 pub(super) fn admin_client_error(err: &crate::identity::IdentityError) -> Response {
-    match err {
-        crate::identity::IdentityError::FapiViolation { reason } => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "invalid_request",
-                "error_description": reason,
-                "error_code": crate::protocol::error_codes::for_identity_error(err),
-            })),
-        )
-            .into_response(),
-        e => identity_error_to_response(e).into_response(),
-    }
+    identity_error_to_response(err).into_response()
 }
 
 /// How a dynamically registered client authenticates at the token endpoint
@@ -1740,16 +1673,12 @@ impl DcrAuthMethod {
 /// - an omitted method is `private_key_jwt` when the client registered a
 ///   `jwks`, else `default`;
 /// - `private_key_jwt` needs an inline `jwks` — a `jwks_uri` is never
-///   fetched, so such a client could never authenticate;
-/// - a FAPI 2.0 Advanced realm accepts `private_key_jwt` only
-///   (`docs/specs/OIDC.md` §2.1.2 item 6): a secret or public client
-///   registered there could never authenticate.
+///   fetched, so such a client could never authenticate.
 ///
 /// `Err` is the RFC 7591 §3.2.2 `invalid_client_metadata` response.
 fn resolve_dcr_auth_method(
     extras: &RegistrationExtras,
     default: DcrAuthMethod,
-    fapi_advanced: bool,
 ) -> Result<DcrAuthMethod, Response> {
     if extras.jwks.is_some() && extras.jwks_uri.is_some() {
         return Err(dcr_invalid_metadata(
@@ -1781,22 +1710,15 @@ fn resolve_dcr_auth_method(
              jwks_uri is not fetched",
         ));
     }
-    if fapi_advanced && method != DcrAuthMethod::PrivateKeyJwt {
-        return Err(dcr_invalid_metadata(
-            "this realm uses the FAPI 2.0 Advanced profile and accepts only \
-             token_endpoint_auth_method private_key_jwt with jwks",
-        ));
-    }
     Ok(method)
 }
 
 /// Maps an engine refusal of a dynamic registration: metadata the engine
-/// will not accept (invalid input, a FAPI rule) is RFC 7591 §3.2.2
+/// will not accept (invalid input) is RFC 7591 §3.2.2
 /// `invalid_client_metadata`; anything else keeps its usual response.
 fn dcr_engine_refusal(err: &crate::identity::IdentityError) -> Response {
     match err {
-        crate::identity::IdentityError::InvalidInput { reason }
-        | crate::identity::IdentityError::FapiViolation { reason } => dcr_invalid_metadata(reason),
+        crate::identity::IdentityError::InvalidInput { reason } => dcr_invalid_metadata(reason),
         _ => identity_error_to_response(err).into_response(),
     }
 }
@@ -1867,6 +1789,9 @@ struct DcrResponse {
     /// The registered key set, echoed (RFC 7591 §3.2.1).
     #[serde(skip_serializing_if = "Option::is_none")]
     jwks: Option<serde_json::Value>,
+    /// RFC 9449 §5.2: echoed when `true` (omitted means `false`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    dpop_bound_access_tokens: bool,
     client_id_issued_at: i64,
     /// The registered ID-token algorithm — RFC 7591 §3.2.1 returns every
     /// registered value, including one the server defaulted (task 26.55).
@@ -1877,33 +1802,19 @@ struct DcrResponse {
 /// honour. The rejected value is deliberately not echoed.
 const DCR_UNSUPPORTED_ID_TOKEN_ALG: &str = "id_token_signed_response_alg must be RS256 or EdDSA";
 
-/// Error description for RS256 requested in a FAPI realm.
-const DCR_FAPI_FORBIDS_RS256: &str =
-    "id_token_signed_response_alg RS256 is not permitted in a FAPI 2.0 realm; use EdDSA";
-
 /// Resolves a dynamic registration's `id_token_signed_response_alg`.
 ///
 /// Omitted means RS256 — the default OpenID Connect Dynamic Client
 /// Registration 1.0 §2 prescribes, and what a certification client registering
-/// without the parameter expects (task 26.55) — except in a realm with a FAPI
-/// profile (`fapi_realm`): FAPI 2.0 Security Profile §5.4.1 permits only
-/// PS256, ES256 and EdDSA, so there it means EdDSA and an explicit RS256 is
-/// refused. Anything but `RS256`/`EdDSA` (notably `none` and every `HS*`) is
-/// refused too. `Err` carries the `error_description` for RFC 7591 §3.2.2
+/// without the parameter expects (task 26.55). Anything but `RS256`/`EdDSA`
+/// (notably `none` and every `HS*`) is refused. `Err` carries the `error_description` for RFC 7591 §3.2.2
 /// `invalid_client_metadata`.
-fn resolve_dcr_id_token_alg(
-    requested: Option<&str>,
-    fapi_realm: bool,
-) -> Result<String, &'static str> {
+fn resolve_dcr_id_token_alg(requested: Option<&str>) -> Result<String, &'static str> {
     use crate::identity::IdTokenSigningAlg;
     let alg = match requested {
-        None if fapi_realm => IdTokenSigningAlg::EdDsa,
         None => IdTokenSigningAlg::Rs256,
         Some(alg) => IdTokenSigningAlg::parse(alg).map_err(|_| DCR_UNSUPPORTED_ID_TOKEN_ALG)?,
     };
-    if fapi_realm && alg == IdTokenSigningAlg::Rs256 {
-        return Err(DCR_FAPI_FORBIDS_RS256);
-    }
     Ok(alg.as_str().to_string())
 }
 
@@ -2033,11 +1944,7 @@ async fn register_client_dynamic(
     };
     // RFC 7591 §2: the client says how it will authenticate; the default
     // (no keys, no method) stays `client_secret_basic` on this route.
-    let auth_method = match resolve_dcr_auth_method(
-        &extras,
-        DcrAuthMethod::SecretBasic,
-        realm.config().fapi_profile == Some(crate::identity::FapiProfile::Advanced),
-    ) {
+    let auth_method = match resolve_dcr_auth_method(&extras, DcrAuthMethod::SecretBasic) {
         Ok(m) => m,
         Err(resp) => return resp,
     };
@@ -2056,17 +1963,10 @@ async fn register_client_dynamic(
     request.trust_level = crate::identity::ClientTrustLevel::ThirdParty;
     request.jwks = extras.jwks.clone();
     request.jwks_uri = extras.jwks_uri.clone();
-    if let Some(profile) = extras.profile {
-        request.profile = profile;
-    }
-    request.authorization_signed_response_alg = extras.authorization_signed_response_alg.clone();
+    request.dpop_bound_access_tokens = extras.dpop_bound_access_tokens;
 
-    // OIDC Registration §2: omitted means RS256 — EdDSA in a FAPI realm,
-    // where FAPI 2.0 forbids RS256 (task 26.55).
-    match resolve_dcr_id_token_alg(
-        request.id_token_signed_response_alg.as_deref(),
-        realm.config().fapi_profile.is_some(),
-    ) {
+    // OIDC Registration §2: omitted means RS256 (task 26.55).
+    match resolve_dcr_id_token_alg(request.id_token_signed_response_alg.as_deref()) {
         Ok(alg) => request.id_token_signed_response_alg = Some(alg),
         Err(description) => return dcr_invalid_metadata(description),
     }
@@ -2116,6 +2016,7 @@ async fn register_client_dynamic(
                 grant_types: client.grant_types().to_vec(),
                 token_endpoint_auth_method: auth_method.as_str().to_string(),
                 jwks: client.jwks().and_then(|j| serde_json::from_str(j).ok()),
+                dpop_bound_access_tokens: client.dpop_bound_access_tokens(),
                 #[allow(clippy::cast_possible_truncation)]
                 client_id_issued_at: client.created_at().as_micros() / 1_000_000,
                 id_token_signed_response_alg: client
@@ -2189,7 +2090,7 @@ async fn authorize_browser_redirect(uri: axum::http::Uri) -> impl IntoResponse {
 /// cannot drift (the realm twin ignored `request_uri`, GA audit 3 round 2).
 ///
 /// With `request_uri` (RFC 9126 PAR) the pushed entry is consumed —
-/// single-use — and supplies every parameter (`via_par = true`); a `client_id`
+/// single-use — and supplies every parameter; a `client_id`
 /// in the body must match it. Otherwise the body is the request. Either way
 /// `user_id` is the authenticated caller, never the body's (HEA-1721).
 fn non_interactive_authorization_request(
@@ -2261,7 +2162,6 @@ fn non_interactive_authorization_request(
             amr_values: Vec::new(),
             response_mode: None,
             request: None,
-            via_par: true,
         }
     } else {
         let r = match proto_authorize_to_domain(body) {
@@ -2371,7 +2271,7 @@ struct HttpParRequest {
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
     nonce: Option<String>,
-    /// Signed JAR JWT (RFC 9101) — required for FAPI Advanced.
+    /// Signed JAR JWT (RFC 9101).
     request: Option<String>,
     response_mode: Option<String>,
     /// OIDC `prompt` (`none`, `consent`). The authorize endpoint ignores a
@@ -2492,9 +2392,7 @@ async fn verify_par_client(
     }
 
     // No credential (`none`): only a public client — no secret, no assertion
-    // key, no JWKS — may push on its `client_id` alone, and never in a FAPI
-    // 2.0 Advanced realm.
-    refuse_none_in_fapi_advanced_realm(state, realm_id)?;
+    // key, no JWKS — may push on its `client_id` alone.
     match state.identity.get_client(realm_id, &client_id) {
         Ok(Some(client)) if client.is_public() => Ok(client_id),
         Ok(_) => Err(invalid_client_response()),
@@ -4630,8 +4528,7 @@ async fn realm_register_client_dynamic(
                 "jwks",
                 "jwks_uri",
                 "token_endpoint_auth_method",
-                "profile",
-                "authorization_signed_response_alg",
+                "dpop_bound_access_tokens",
             ] {
                 if let Some(v) = map.remove(field) {
                     keys_only.insert(field.to_string(), v);
@@ -4643,11 +4540,7 @@ async fn realm_register_client_dynamic(
             Err(description) => return dcr_invalid_metadata(&description),
         }
     };
-    let auth_method = match resolve_dcr_auth_method(
-        &extras,
-        DcrAuthMethod::None,
-        realm.config().fapi_profile == Some(crate::identity::FapiProfile::Advanced),
-    ) {
+    let auth_method = match resolve_dcr_auth_method(&extras, DcrAuthMethod::None) {
         Ok(m) => m,
         Err(resp) => return resp,
     };
@@ -4700,18 +4593,14 @@ async fn realm_register_client_dynamic(
         }
         Some(_) => return dcr_invalid_metadata("grant_types must be an array of strings"),
     };
-    // OIDC Registration §2: omitted (or null) means RS256 — EdDSA in a FAPI
-    // realm, where FAPI 2.0 forbids RS256; anything but RS256/EdDSA is refused
-    // rather than narrowed (task 26.55).
+    // OIDC Registration §2: omitted (or null) means RS256; anything but
+    // RS256/EdDSA is refused rather than narrowed (task 26.55).
     let requested_id_token_alg = match body.get("id_token_signed_response_alg") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(alg)) => Some(alg.as_str()),
         Some(_) => return dcr_invalid_metadata(DCR_UNSUPPORTED_ID_TOKEN_ALG),
     };
-    let id_token_signed_response_alg = match resolve_dcr_id_token_alg(
-        requested_id_token_alg,
-        realm.config().fapi_profile.is_some(),
-    ) {
+    let id_token_signed_response_alg = match resolve_dcr_id_token_alg(requested_id_token_alg) {
         Ok(alg) => alg,
         Err(description) => return dcr_invalid_metadata(description),
     };
@@ -4741,11 +4630,8 @@ async fn realm_register_client_dynamic(
         access_token_authorization: crate::identity::AccessTokenAuthorization::Embedded,
         jwks: extras.jwks.clone(),
         jwks_uri: extras.jwks_uri.clone(),
-        authorization_signed_response_alg: extras.authorization_signed_response_alg.clone(),
         id_token_signed_response_alg: Some(id_token_signed_response_alg),
-        profile: extras
-            .profile
-            .unwrap_or(crate::identity::ClientProfile::Standard),
+        dpop_bound_access_tokens: extras.dpop_bound_access_tokens,
         mfa_required: None,
     };
     match state.identity.register_client(&realm_id, &request) {
@@ -4767,6 +4653,9 @@ async fn realm_register_client_dynamic(
             if let Some(secret) = generated_secret {
                 resp["client_secret"] = serde_json::json!(secret);
                 resp["client_secret_expires_at"] = serde_json::json!(0);
+            }
+            if client.dpop_bound_access_tokens() {
+                resp["dpop_bound_access_tokens"] = serde_json::json!(true);
             }
             if let Some(jwks) = client
                 .jwks()

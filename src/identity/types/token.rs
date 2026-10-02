@@ -304,26 +304,16 @@ pub struct PendingAuthorizationRequest {
     pub code_challenge_method: Option<String>,
     /// OIDC nonce echoed into the ID token.
     pub nonce: Option<String>,
-    /// JARM response mode wire string (`query.jwt`, `fragment.jwt`, `jwt`).
+    /// Response mode wire string (`query` or `fragment`).
     ///
     /// `None` means the client used the default `query` mode. Preserved here
     /// so it can be threaded through the consent redirect path.
     pub response_mode: Option<String>,
-    /// JARM signing algorithm from `OAuthClient.authorization_signed_response_alg`.
-    ///
-    /// Carried forward so that error redirects in consent_post can be
-    /// JWT-wrapped without an extra client lookup (JARM §4.3).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authorization_signed_response_alg: Option<String>,
     /// RFC 8707 resource indicator from a verified request object (JAR) or
     /// PAR entry. Carried so the code issued on approval is bound to the
     /// audience the client asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
-    /// Whether the originating request went through PAR (RFC 9126). FAPI 2.0
-    /// realms refuse code issuance without it, so approval must keep it.
-    #[serde(default)]
-    pub via_par: bool,
     /// Authentication methods already proved on the way here, carried into
     /// the issued code.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
