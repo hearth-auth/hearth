@@ -812,8 +812,6 @@ async fn fapi2_token04_refresh_with_dpop_accepted() {
             initial_tokens.refresh_token(),
             Some(REFRESH_THUMBPRINT),
             Some(&hearth::identity::RefreshBindContext {
-                user_agent: None,
-                asn: None,
                 authenticated_client_id: Some(client_id.clone()),
             }),
         )
@@ -891,7 +889,6 @@ async fn fapi2_std02_standard_refresh_without_dpop_succeeds() {
     // refresh, so bind the call to the issuing client. DPoP remains optional.
     let refresh_bind = hearth::identity::RefreshBindContext {
         authenticated_client_id: Some(client_id.clone()),
-        ..Default::default()
     };
     let refreshed = h
         .identity()

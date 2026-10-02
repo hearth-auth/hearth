@@ -330,7 +330,6 @@ async fn refresh_token_rotation_e2e() {
     // the refresh call to the client the grant family was issued to.
     let refresh_bind = hearth::identity::RefreshBindContext {
         authenticated_client_id: Some(client.client_id().clone()),
-        ..Default::default()
     };
     let refreshed = harness
         .identity()

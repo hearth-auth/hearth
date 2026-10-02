@@ -907,22 +907,6 @@ paths:
         "200":
           description: Exported users
 
-  /admin/users/{id}/device-fingerprints:
-    delete:
-      summary: Delete all device fingerprints for a user
-      operationId: adminDeleteUserDeviceFingerprints
-      tags: [Admin]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "204":
-          description: Fingerprints deleted
-
-  # ── Admin — webhooks ──────────────────────────────────────────────────────
   /admin/webhooks:
     get:
       summary: List webhooks

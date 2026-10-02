@@ -1,12 +1,13 @@
-//! The phone-OTP enrolment surface must verify its RA session cookie
-//! (audit 2026-08-28 §4.19#7).
+//! A `/required-action/*` OTP-enrolment surface must verify its RA session
+//! cookie before it acts on it (audit 2026-08-28 §4.19#7).
 //!
-//! `enroll_phone_otp_send` only checked that the cookie was *present*, then
-//! read the realm out of the unverified payload and issued an SMS OTP against
-//! it. Anyone could therefore mint a cookie naming any realm and make Hearth
-//! send SMS on that realm's account. Its email twin
-//! (`enroll_email_otp_send`) has always verified the token signature first;
-//! these tests hold the phone surface to the same rule.
+//! These tests were first written against the phone-OTP enrolment surface,
+//! whose `send` handler only checked that the cookie was *present*, then read
+//! the realm out of the unverified payload and sent a one-time code on that
+//! realm's account. SMS one-time codes were removed in Hearth 3.0.0, so the
+//! property is now held on the surviving OTP-enrolment surface,
+//! `ENROLL_EMAIL_OTP`: a forged cookie naming a real realm must neither render
+//! the enrolment page nor spend a delivery, while a genuine cookie still works.
 
 use std::sync::{Arc, Mutex};
 
@@ -15,13 +16,14 @@ use axum::http::{header, Request, StatusCode};
 use data_encoding::BASE64URL_NOPAD;
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::core::{Clock, RealmId, SessionId, SystemClock};
-use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
+use hearth::identity::email::{
+    EmailBranding, EmailError, EmailMessage, EmailSender, EmailService, LoggingEmailSender,
+};
 use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::{
     CleartextPassword, ClientTrustLevel, CreateRealmRequest, CreateUserRequest, CredentialConfig,
     EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, OAuthClient, RealmConfig,
-    RegisterClientRequest, RequiredAction, SessionContext, SmsError, SmsMessage, SmsSender,
-    UpdateUserRequest, UserStatus,
+    RegisterClientRequest, RequiredAction, SessionContext, UpdateUserRequest, UserStatus,
 };
 use hearth::protocol::web::{self, CookieSecret, WebState};
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
@@ -32,42 +34,42 @@ const COOKIE_SECRET: [u8; 32] = [23u8; 32];
 
 /// Appends the `_csrf` form token a `/required-action/*` page embeds for the RA
 /// session cookie `ra_token` (bound to the cookie, not a `/ui` CSRF cookie).
-fn with_ra_csrf(ra_token: &str, body: impl std::fmt::Display) -> String {
+fn with_ra_csrf(ra_token: &str) -> String {
     let token = hearth::protocol::web::required_action::ra_form_token_for(
         &hearth::protocol::web::CookieSecret::from_bytes(COOKIE_SECRET),
         ra_token,
     );
-    format!("{body}&_csrf={token}")
+    format!("_csrf={token}")
 }
-const PASSWORD: &str = "test-password-hearth-ra-phone";
+const PASSWORD: &str = "test-password-hearth-ra-email";
 const PKCE_VERIFIER: &str = "dGVzdC12ZXJpZmllci10aGlzLWlzLTQzLWNoYXJhY3RlcnM";
-const TEST_PHONE: &str = "+15555550188";
 
 // ---------------------------------------------------------------------------
-// Test-only capturing SMS sender
+// Test-only capturing email sender
 // ---------------------------------------------------------------------------
 
-struct CapturingSmsSender {
-    messages: Mutex<Vec<SmsMessage>>,
+struct CapturingEmailSender {
+    messages: Mutex<usize>,
 }
 
-impl CapturingSmsSender {
+impl CapturingEmailSender {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            messages: Mutex::new(Vec::new()),
+            messages: Mutex::new(0),
         })
     }
 
     fn sent_count(&self) -> usize {
-        #[allow(clippy::unwrap_used)]
-        self.messages.lock().unwrap().len()
+        #[allow(clippy::unwrap_used)] // INVARIANT: test-only mutex, never poisoned.
+        *self.messages.lock().unwrap()
     }
 }
 
-impl SmsSender for CapturingSmsSender {
-    fn send(&self, message: &SmsMessage) -> Result<(), SmsError> {
-        #[allow(clippy::unwrap_used)]
-        self.messages.lock().unwrap().push(message.clone());
+impl EmailSender for CapturingEmailSender {
+    fn send(&self, _message: &EmailMessage) -> Result<(), EmailError> {
+        #[allow(clippy::unwrap_used)] // INVARIANT: test-only mutex, never poisoned.
+        let mut count = self.messages.lock().unwrap();
+        *count += 1;
         Ok(())
     }
 }
@@ -81,13 +83,13 @@ struct Rig {
     identity: Arc<dyn IdentityEngine>,
     realm_id: RealmId,
     client: OAuthClient,
-    sms: Arc<CapturingSmsSender>,
+    mail: Arc<CapturingEmailSender>,
 }
 
-fn null_email() -> Arc<EmailService> {
+fn email_service(sender: Arc<dyn EmailSender>) -> Arc<EmailService> {
     Arc::new(
         EmailService::new(
-            Arc::new(LoggingEmailSender::new()),
+            sender,
             "Hearth".to_string(),
             None,
             EmailBranding::default(),
@@ -130,9 +132,9 @@ fn build_rig() -> Rig {
 
     let realm = identity
         .create_realm(&CreateRealmRequest {
-            name: format!("ra-phone-{}", uuid::Uuid::new_v4()),
+            name: format!("ra-email-{}", uuid::Uuid::new_v4()),
             config: Some(RealmConfig {
-                mfa_methods: Some(vec!["sms".to_string()]),
+                mfa_methods: Some(vec!["email_otp".to_string()]),
                 ..Default::default()
             }),
         })
@@ -142,7 +144,7 @@ fn build_rig() -> Rig {
         .register_client(
             realm.id(),
             &RegisterClientRequest {
-                client_name: "RA Phone Test App".to_string(),
+                client_name: "RA Email Test App".to_string(),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
                 require_consent: false,
                 grant_types: vec!["authorization_code".to_string()],
@@ -155,32 +157,31 @@ fn build_rig() -> Rig {
     let onboarding = Arc::new(OnboardingService::new(
         Arc::clone(&identity),
         Arc::clone(&rbac),
-        null_email(),
+        email_service(Arc::new(LoggingEmailSender::new())),
         data_dir,
     ));
 
-    let sms = CapturingSmsSender::new();
+    let mail = CapturingEmailSender::new();
     let state = WebState::new(
         Arc::clone(&identity),
         rbac,
         Arc::clone(&audit),
         onboarding,
         CookieSecret::from_bytes(COOKIE_SECRET),
-        Some(null_email()),
+        Some(email_service(Arc::clone(&mail) as _)),
     )
-    .with_dev_mode(true)
-    .with_sms(Arc::clone(&sms) as _, Some(b"test-sms-hmac-key".to_vec()));
+    .with_dev_mode(true);
 
     Rig {
         app: web::router(state),
         identity,
         realm_id: realm.id().clone(),
         client,
-        sms,
+        mail,
     }
 }
 
-fn create_user_needing_phone_enrolment(rig: &Rig, email: &str) -> String {
+fn create_user_needing_email_otp_enrolment(rig: &Rig, email: &str) -> String {
     let user = rig
         .identity
         .create_user(
@@ -207,7 +208,7 @@ fn create_user_needing_phone_enrolment(rig: &Rig, email: &str) -> String {
             user.id(),
             &UpdateUserRequest {
                 status: Some(UserStatus::Active),
-                required_actions: Some(vec![RequiredAction::EnrollPhoneOtp]),
+                required_actions: Some(vec![RequiredAction::EnrollEmailOtp]),
                 ..Default::default()
             },
         )
@@ -287,7 +288,7 @@ fn forged_ra_token(realm: &RealmId) -> String {
     let claims = serde_json::json!({
         "sub": uuid::Uuid::new_v4().to_string(),
         "realm": realm.as_uuid().to_string(),
-        "pending_actions": ["ENROLL_PHONE_OTP"],
+        "pending_actions": ["ENROLL_EMAIL_OTP"],
         "iat": exp - 900,
         "exp": exp,
     });
@@ -297,11 +298,11 @@ fn forged_ra_token(realm: &RealmId) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// A forged cookie must not drive an SMS send
+// A forged cookie must not drive a one-time-code send
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn phone_otp_send_refuses_a_forged_ra_cookie() {
+async fn email_otp_send_refuses_a_forged_ra_cookie() {
     let rig = build_rig();
     let token = forged_ra_token(&rig.realm_id);
 
@@ -311,13 +312,10 @@ async fn phone_otp_send_refuses_a_forged_ra_cookie() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/required-action/ENROLL_PHONE_OTP/send")
+                .uri("/required-action/ENROLL_EMAIL_OTP/send")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={token}"))
-                .body(Body::from(with_ra_csrf(
-                    &token,
-                    format!("phone={}", urlencode(TEST_PHONE)),
-                )))
+                .body(Body::from(with_ra_csrf(&token)))
                 .expect("req"),
         )
         .await
@@ -329,14 +327,14 @@ async fn phone_otp_send_refuses_a_forged_ra_cookie() {
         "a forged RA cookie must not reach the code-entry page"
     );
     assert_eq!(
-        rig.sms.sent_count(),
+        rig.mail.sent_count(),
         0,
-        "a forged RA cookie must not spend the named realm's SMS budget"
+        "a forged RA cookie must not make Hearth send a code on the named realm"
     );
 }
 
 #[tokio::test]
-async fn phone_otp_page_refuses_a_forged_ra_cookie() {
+async fn email_otp_page_refuses_a_forged_ra_cookie() {
     let rig = build_rig();
     let token = forged_ra_token(&rig.realm_id);
 
@@ -346,7 +344,7 @@ async fn phone_otp_page_refuses_a_forged_ra_cookie() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/required-action/ENROLL_PHONE_OTP")
+                .uri("/required-action/ENROLL_EMAIL_OTP")
                 .header(header::COOKIE, format!("hearth_ra_session={token}"))
                 .body(Body::empty())
                 .expect("req"),
@@ -366,9 +364,9 @@ async fn phone_otp_page_refuses_a_forged_ra_cookie() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn phone_otp_send_still_works_with_a_genuine_ra_cookie() {
+async fn email_otp_send_still_works_with_a_genuine_ra_cookie() {
     let rig = build_rig();
-    let ui_cookie = create_user_needing_phone_enrolment(&rig, "phone-enrol@example.com");
+    let ui_cookie = create_user_needing_email_otp_enrolment(&rig, "email-enrol@example.com");
 
     let resp = rig
         .app
@@ -392,13 +390,10 @@ async fn phone_otp_send_still_works_with_a_genuine_ra_cookie() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/required-action/ENROLL_PHONE_OTP/send")
+                .uri("/required-action/ENROLL_EMAIL_OTP/send")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
-                .body(Body::from(with_ra_csrf(
-                    &ra_token,
-                    format!("phone={}", urlencode(TEST_PHONE)),
-                )))
+                .body(Body::from(with_ra_csrf(&ra_token)))
                 .expect("req"),
         )
         .await
@@ -410,8 +405,8 @@ async fn phone_otp_send_still_works_with_a_genuine_ra_cookie() {
         "a genuine RA cookie must still reach the code-entry page"
     );
     assert_eq!(
-        rig.sms.sent_count(),
+        rig.mail.sent_count(),
         1,
-        "the genuine flow must still send exactly one SMS"
+        "the genuine flow must still send exactly one code"
     );
 }

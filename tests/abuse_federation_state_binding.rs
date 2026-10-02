@@ -1,19 +1,16 @@
 #![allow(clippy::unwrap_used)]
-// Score boundary assertions use exact 0.0 comparisons intentionally.
-#![allow(clippy::float_cmp)]
-//! Adversarial tests for A-48 (OAuth state↔session binding) and
-//! A-49 (refresh-context UA/ASN binding + risk scoring).
+//! Adversarial tests for A-48 (OAuth state↔session binding).
 //!
 //! D-4 taxonomy:
 //! - **A-48 adversarial (HTTP)**: three attack scenarios against the
 //!   `hearth_fed_bind` cookie guard — missing cookie, wrong state,
 //!   garbled cookie — all must redirect to the login-error page.
-//! - **A-49 adversarial (scorer integration)**: confirms the risk-scorer
-//!   integration correctly handles both the adversarial case (token
-//!   replayed from a different UA) and the fail-open guarantee (disabled
-//!   scorer never blocks).
 //!
-//! Closes: HEA-1200 §A-48, §A-49.
+//! Closes: HEA-1200 §A-48.
+//!
+//! Origin: split out of the former `tests/abuse_a48_a49.rs` when the A-49
+//! refresh-context drift scoring was removed in Hearth 3.0.0. Its removal is
+//! covered by `tests/abuse_risk_and_sms_removed.rs`.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // A-48 — OAuth state↔session binding (adversarial HTTP tests)
@@ -291,115 +288,4 @@ fn a48_callback_with_cookie_signed_by_wrong_secret_is_rejected() {
         location, "/ui/login?error=federation_failed",
         "cookie signed with wrong secret must be rejected"
     );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// A-49: adversarial — risk scorer integration
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// When a refresh token is replayed from a DIFFERENT UA (and scorer enabled),
-/// the scorer must flag this as requiring step-up MFA.  Verifies the
-/// `RefreshContextDelta` signal and weight calculation.
-///
-/// This is a direct adversarial test of the scoring pathway for the "stolen
-/// refresh token replayed from a different device" scenario.
-#[test]
-fn a49_stolen_refresh_token_ua_change_triggers_step_up_when_enabled() {
-    use hearth::identity::risk::{
-        DefaultRiskScorer, RiskContext, RiskScorer, RiskScorerConfig, RiskSignal,
-    };
-    let scorer = DefaultRiskScorer::new(RiskScorerConfig {
-        enabled: true,
-        // Low threshold — single UA change (0.35) is enough to force step-up.
-        step_up_threshold: 0.3,
-        ..RiskScorerConfig::default()
-    });
-    let ctx = RiskContext {
-        signals: vec![RiskSignal::RefreshContextDelta {
-            ua_changed: true,
-            asn_changed: false,
-        }],
-    };
-    let result = scorer.score(&ctx);
-    assert!(
-        result.step_up_required,
-        "UA change from attacker device must require step-up; score = {}",
-        result.score
-    );
-}
-
-/// When scorer is disabled (fail-open default), even a token replayed from a
-/// wholly different UA + ASN must NOT block the refresh — legitimate clients
-/// that don't send consistent UA headers must not be locked out.
-#[test]
-fn a49_refresh_context_delta_fail_open_when_scorer_disabled() {
-    use hearth::identity::risk::{DefaultRiskScorer, RiskContext, RiskScorer, RiskSignal};
-    let scorer = DefaultRiskScorer::disabled();
-    let ctx = RiskContext {
-        signals: vec![RiskSignal::RefreshContextDelta {
-            ua_changed: true,
-            asn_changed: true,
-        }],
-    };
-    let result = scorer.score(&ctx);
-    assert!(
-        !result.step_up_required,
-        "disabled scorer must never block refresh; score = {}",
-        result.score
-    );
-    assert_eq!(
-        result.score, 0.0,
-        "disabled scorer must always return score 0.0"
-    );
-}
-
-/// An attacker changing both UA and ASN (full context replacement — e.g.
-/// using a VPN + a different browser) scores 0.70 with default weights.
-/// This is above the default `step_up_threshold = 0.5`.
-#[test]
-fn a49_full_context_replacement_exceeds_default_threshold() {
-    use hearth::identity::risk::{
-        DefaultRiskScorer, RiskContext, RiskScorer, RiskScorerConfig, RiskSignal,
-    };
-    let scorer = DefaultRiskScorer::new(RiskScorerConfig {
-        enabled: true,
-        ..RiskScorerConfig::default()
-    });
-    let ctx = RiskContext {
-        signals: vec![RiskSignal::RefreshContextDelta {
-            ua_changed: true,
-            asn_changed: true,
-        }],
-    };
-    let result = scorer.score(&ctx);
-    // Default weight is 0.35 per dim → 0.70 total; threshold is 0.50.
-    assert!(
-        result.score >= 0.5,
-        "both dimensions changed should exceed default threshold; score = {}",
-        result.score
-    );
-    assert!(
-        result.step_up_required,
-        "full context replacement must require step-up"
-    );
-}
-
-/// Confirms the `RefreshBindContext` type is exported and has the expected
-/// `user_agent` field — guards against accidental API breakage on the
-/// binding interface that the HTTP layer uses to pass UA context down.
-#[test]
-fn a49_refresh_bind_context_struct_has_expected_fields() {
-    use hearth::identity::RefreshBindContext;
-    // Compile-only: exercises the `RefreshBindContext` field API (user_agent /
-    // asn / authenticated_client_id) that the HTTP layer populates to pass UA
-    // context down. There is no production transform to assert on here — the
-    // struct is a plain data carrier; a field-round-trip check would only read
-    // back what this test wrote. The runtime effect of a changed UA/ASN on the
-    // step-up decision is covered by
-    // a49_full_context_replacement_exceeds_default_threshold.
-    let _ctx = RefreshBindContext {
-        user_agent: Some("Mozilla/5.0 (Attacker)".to_string()),
-        asn: None,
-        authenticated_client_id: None,
-    };
 }

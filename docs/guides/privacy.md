@@ -20,7 +20,7 @@ with the owning `RealmId`, except signing keys which live in the **system realm*
 | Category | Storage Key | Format | Notes |
 |----------|-------------|--------|-------|
 | Email address | `usr:email:{normalized_email}` | Normalized UTF-8 string (in the key itself) | Index maps email → `UserId` |
-| Full user record | `usr:id:{user_uuid}` | JSON | Contains: `email`, `display_name`, `first_name`, `last_name`, `status`, `email_verified`, `phone_verified`, `attributes`, `created_at`, `updated_at` |
+| Full user record | `usr:id:{user_uuid}` | JSON | Contains: `email`, `display_name`, `first_name`, `last_name`, `status`, `email_verified`, `attributes`, `created_at`, `updated_at` |
 | Custom attributes | inside `usr:id:…` value | JSON map (`BTreeMap<String,String>`) | Operator-defined key/value pairs per realm |
 
 ### 1.2 Credentials
@@ -45,8 +45,8 @@ with the owning `RealmId`, except signing keys which live in the **system realm*
 | TOTP secret + recovery codes | `mfa:totp:{user_uuid}` | JSON | Contains base32 TOTP shared secret and recovery-code **hashes** (Argon2id); plaintext codes returned once at enrollment, never persisted |
 | WebAuthn credential | `webauthn:cred:{user_uuid}:{credential_id_b64url}` | JSON | Credential ID, public key (COSE), counter, AAGUID, attestation statement, `rp_id`, `user_handle`, created_at |
 | WebAuthn discoverable index | `webauthn:disc:{credential_id_b64url}` | JSON (`UserId`) | Maps credential ID → user; supports username-less assertion |
-| SMS OTP (in-flight) | `sms:pending_otp:{nonce_hex}` | JSON | Hashed OTP code + expiry; nonce is 128-bit CSPRNG; short-lived (minutes) |
-| SMS resend throttle | `sms:resend_count:{phone_number}` | count/expiry | Phone number appears in key for throttling; 15-min sliding window |
+| Email OTP (in-flight) | `email:pending_otp:{nonce_hex}` | JSON | HMAC of recipient + code, expiry, attempt count; nonce is 128-bit CSPRNG; 10-min lifetime |
+| Email OTP resend throttle | `email:resend_count:{suffix}` | count/expiry | Suffix is the first 8 hex chars of SHA-256 of the recipient — no plaintext address in the key; 15-min window |
 
 ### 1.5 OAuth / OIDC Artifacts
 
@@ -73,13 +73,7 @@ with the owning `RealmId`, except signing keys which live in the **system realm*
 In every case, only the hash is persisted.  The plaintext token is returned to
 the user once via email, then discarded.
 
-### 1.7 Device Fingerprints
-
-| Category | Storage Key | Format | Notes |
-|----------|-------------|--------|-------|
-| Device fingerprint | `dfp:user:{user_uuid}:{hmac_sha256_hex}` | 8-byte i64 (Unix-seconds expiry) | Key is HMAC-SHA256 of raw signals (IP + UA); **raw IP and user-agent are never written to storage** |
-
-### 1.8 Organizations and Memberships
+### 1.7 Organizations and Memberships
 
 | Category | Storage Key | Format | Notes |
 |----------|-------------|--------|-------|
@@ -90,7 +84,7 @@ the user once via email, then discarded.
 | Invitation token index | `orgi:token:{sha256_hex}` | JSON (`InvitationId`) | Hash-only; plaintext token delivered by email |
 | Invitation email dedup | `orgi:org:{org_uuid}:email:{email}` | empty | Email appears in key for idempotency; no additional data |
 
-### 1.9 Realm Signing Keys
+### 1.8 Realm Signing Keys
 
 | Category | Storage Key | Scope | Notes |
 |----------|-------------|-------|-------|
@@ -102,7 +96,7 @@ the user once via email, then discarded.
 Signing keys are **never realm-scoped** — they live in the system realm
 (`RealmId::nil()`) and are inaccessible to tenant realm scans.
 
-### 1.10 Audit Events
+### 1.9 Audit Events
 
 Stored as a SHA-256 hash chain under `audit:evt:{realm_uuid}:{seq}:{idx}` (see
 [§6](#6-audit-log-data) for field details).
@@ -218,7 +212,6 @@ All admin endpoints require a valid `Authorization: Bearer <token>` with
 | Plaintext OAuth / OIDC tokens | Bearer tokens are JWTs validated by signature + WAL-side counter; refresh tokens, auth codes, and one-time tokens stored as SHA-256 hashes only |
 | Plaintext TOTP recovery codes | Returned once at enrollment, then discarded; only Argon2id hashes stored |
 | Plaintext invitation tokens | SHA-256 hash stored; plaintext delivered by email only |
-| Raw IP address or user-agent in device fingerprint | HMAC-SHA256 of `(IP + UA)` stored; the raw strings are not written to storage |
 | Signing key material outside the system realm | Signing keys are scoped exclusively to the system realm WAL; tenant realm scans cannot reach them |
 | Secrets in log output | `tracing` instrumentation is explicitly forbidden from logging passwords, tokens, keys, or PII at any log level |
 
@@ -297,9 +290,8 @@ Two other post-delete reservation records exist and are handled symmetrically:
 |------------|-----------|---------|-----------|
 | `slug:org:{realm}:{slug}` | `delete_organization` | Org slug string (A-5 cooldown) | `delete_realm` cascade |
 | `slug:realm:{slug}` | `delete_realm` | Realm name string (A-5 cooldown) | Stays in system realm |
-| `dfp:user:{uuid}:{hmac}` | Login / `record_device_fingerprint` | HMAC-SHA256 of IP+UA — **no raw PII** | `delete_user` + `delete_realm` cascade |
 
-Neither org-slug reservations nor device fingerprint entries contain plaintext
+Slug reservations contain no plaintext
 PII and do not require a separate lawful basis.  They are documented here for
 completeness so operators can verify storage cleanliness via prefix scans.
 
@@ -393,7 +385,6 @@ redact metadata.
 | OAuth client secret | Yes | SHA-256 (Hearth-generated) or Argon2id (caller-chosen) hash | `oauth:client:…` |
 | OAuth bearer / refresh tokens | **No** | — | Only SHA-256 hash of refresh stored |
 | Auth codes, magic links, reset tokens | Yes (hash only) | SHA-256 | Key-addressed |
-| Device fingerprint (raw IP/UA) | **No** | — | Only HMAC-SHA256 stored |
 | Deleted-user email tombstone | Yes | Plaintext (in key + value) | `email:reserved:…` — 90 days |
 | Audit events | Yes | JSON | `audit:evt:…` — configurable retention (default 90 days) |
 | Org membership | Yes | JSON | `orgm:…` (bidirectional indexes) |

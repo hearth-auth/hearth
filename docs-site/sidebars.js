@@ -45,7 +45,6 @@ const sidebars = {
         'client-scoped-roles',
         'organizations',
         'required-actions',
-        'sms-mfa-deployment',
         'session-version-revocation',
         'webhooks',
         'federation',

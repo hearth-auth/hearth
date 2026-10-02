@@ -296,39 +296,6 @@ email:
   # Directory containing Tera templates that override the compiled defaults.
   # templates_dir: "./templates/email"
 
-# --- SMS (OTP / transactional) ----------------------------------------------
-# Outbound SMS for OTP codes and transactional messages.
-# Supported: log | twilio | awssns
-#
-# REQUIRED env var: HEARTH_SMS_OTP_HMAC_KEY
-#   Must be set in the environment (not here), at least 32 bytes. Startup fails
-#   without it when transport is not 'log'. There is no fallback key: under
-#   --dev with no key a random per-process key is generated; outside --dev with
-#   no key every SMS OTP fails closed (no code is issued, an SMS second factor
-#   cannot be passed). Outside --dev, 'sms' MFA cannot be enabled at all while
-#   transport is 'log'. Generate with:
-#     openssl rand -hex 32
-
-sms:
-  transport: log        # default: log (no network I/O)
-
-  # --- Twilio -----------------------------------------------------------------
-  # sms:
-  #   transport: twilio
-  #   twilio:
-  #     account_sid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  #     auth_token: "${TWILIO_AUTH_TOKEN}"   # loaded from the environment
-  #     from: "+15550001111"                 # E.164 or Messaging Service SID
-
-  # --- AWS SNS ----------------------------------------------------------------
-  # sms:
-  #   transport: awssns
-  #   aws_sns:
-  #     region: "us-east-1"
-  #     access_key_id: "${AWS_ACCESS_KEY_ID}"
-  #     secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
-  #     sender_id: "MyBrand"    # optional, up to 11 alphanumeric chars
-
 # --- OIDC / OAuth 2.0 -------------------------------------------------------
 # Controls the OIDC Discovery document and authorization code behaviour.
 
@@ -594,17 +561,6 @@ oidc:
 #       rate_limit:
 #         max_failed_logins: 5
 #         lockout_duration: "15m"
-#       # Adaptive (risk-based) step-up MFA — see HEA-836.
-#       # When enabled, unrecognised device/IP combinations trigger an extra
-#       # MFA challenge. The HMAC secret derives device fingerprints and MUST
-#       # be supplied from the environment — never commit a plaintext value.
-#       # See docs/guides/security-hardening.md#device-fingerprint-hmac-secret
-#       # for generation, storage, and rotation procedures.
-#       adaptive_mfa:
-#         enabled: true
-#         recognition_window_days: 30                                       # default: 30
-#         fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
-#
 #   internal-tools:
 #     session_ttl: "8h"
 #     password_memory_cost: 131072      # stricter for internal use

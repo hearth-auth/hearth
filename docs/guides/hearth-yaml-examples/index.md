@@ -27,7 +27,7 @@ All example URLs use `auth.example.com`.
 | 10 | MFA required — TOTP | [MFA](./mfa.md#example-10--mfa-required-globally-totp) |
 | 11 | MFA — TOTP + WebAuthn | [MFA](./mfa.md#example-11--mfa-required-totp--webauthn) |
 | 12 | Passkey + TOTP backup | [MFA](./mfa.md#example-12--passkey--totp-backup) |
-| 42 | Risk-based step-up MFA (adaptive) | [MFA](./mfa.md#example-42--risk-based-step-up-mfa-adaptive) |
+| 42 | Removed in 3.0.0 (was risk-based step-up MFA) | [MFA](./mfa.md#example-42--removed) |
 | 13 | Google Sign In | [Federation](./federation.md#example-13--google-sign-in) |
 | 14 | Google + GitHub | [Federation](./federation.md#example-14--google--github-two-providers) |
 | 15 | Microsoft Azure AD (tenant) | [Federation](./federation.md#example-15--microsoft-azure-ad-tenant-specific) |
@@ -66,7 +66,7 @@ All example URLs use `auth.example.com`.
 |------|----------|-------------|
 | [Basics](./basics.md) | 1–6 | Dev quickstart, production baseline, password policy, rate limiting, invite-only |
 | [Passwordless](./passwordless.md) | 7–9 | Magic link, passkey-only, combined passwordless |
-| [MFA](./mfa.md) | 10–12, 42 | TOTP, WebAuthn, passkey + MFA, adaptive/risk-based step-up |
+| [MFA](./mfa.md) | 10–12 | TOTP, WebAuthn, passkey + MFA |
 | [Social Login & Federation](./federation.md) | 13–18 | Google, GitHub, Azure AD, Apple, generic OIDC, account linking |
 | [Email Transports](./email.md) | 19–22 | SMTP, SendGrid, Postmark, Mailgun (EU) |
 | [TLS](./tls.md) | 23–24 | HTTPS termination, mutual TLS |

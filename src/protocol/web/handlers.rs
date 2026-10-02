@@ -576,8 +576,6 @@ impl MfaOtpChallengeTemplate {
 /// Which OTP second factor a realm offers *and* this user actually holds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum OtpFactor {
-    /// SMS OTP to the user's verified phone number.
-    Sms,
     /// Email OTP to the user's address.
     Email,
 }
@@ -586,14 +584,12 @@ impl OtpFactor {
     /// The wire name, matching the `mfa_methods` vocabulary.
     fn as_str(self) -> &'static str {
         match self {
-            Self::Sms => "sms",
             Self::Email => "email_otp",
         }
     }
 
     fn parse(s: &str) -> Option<Self> {
         match s {
-            "sms" => Some(Self::Sms),
             "email_otp" => Some(Self::Email),
             _ => None,
         }
@@ -619,16 +615,11 @@ pub(super) fn otp_factor_for(
     // simply never configured the key could never route to an OTP challenge.
     let methods = realm.config().mfa_methods.clone();
     let offers = |name: &str| methods.as_ref().is_none_or(|m| m.iter().any(|x| x == name));
-    let holds_sms = offers("sms") && user.phone_verified();
     // An email OTP proves the inbox a magic link already proved: after a
     // magic link it is not a second factor at all (GA audit round 3, D-4).
     let holds_email = offers("email_otp") && user.email_otp_enabled() && first.allows_email_otp();
-    let sms_deliverable = state.sms.is_some() && state.sms_otp_hmac_key.is_some();
     let email_deliverable = state.email.is_some();
     // Prefer a factor we can actually send a code for.
-    if holds_sms && sms_deliverable {
-        return Some(OtpFactor::Sms);
-    }
     if holds_email && email_deliverable {
         return Some(OtpFactor::Email);
     }
@@ -637,9 +628,6 @@ pub(super) fn otp_factor_for(
     // Returning `None` here used to let the login issue the session on the
     // password alone, i.e. an unreachable transport or a missing OTP HMAC key
     // silently removed the user's second factor.
-    if holds_sms {
-        return Some(OtpFactor::Sms);
-    }
     if holds_email {
         return Some(OtpFactor::Email);
     }
@@ -658,22 +646,6 @@ fn issue_login_otp(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     match factor {
-        OtpFactor::Sms => {
-            let sender = state.sms.as_ref().ok_or(IdentityError::MfaNotEnabled)?;
-            let phone = user.phone_number().ok_or(IdentityError::MfaNotEnabled)?;
-            // No key ⇒ no code: fail closed rather than HMAC under a
-            // guessable key. The caller renders an error; no session issues.
-            let key = super::required_action::sms_otp_hmac_key_bytes(state)
-                .ok_or(IdentityError::MfaNotEnabled)?;
-            let nonce =
-                state
-                    .identity
-                    .issue_sms_otp(realm_id, phone, &key, sender.as_ref(), now_ts)?;
-            let masked = user
-                .masked_phone_number()
-                .unwrap_or_else(|| "your phone".to_string());
-            Ok((nonce, format!("We sent a 6-digit code to {masked}.")))
-        }
         OtpFactor::Email => {
             let email_service = state.email.as_ref().ok_or(IdentityError::MfaNotEnabled)?;
             let key = super::required_action::email_otp_hmac_key_bytes(state);
@@ -702,13 +674,8 @@ pub struct MfaOtpChallengeQuery {
 }
 
 /// The prompt for a code already sent for `factor`.
-fn otp_sent_prompt(user: &crate::identity::User, factor: OtpFactor) -> String {
+fn otp_sent_prompt(factor: OtpFactor) -> String {
     match factor {
-        OtpFactor::Sms => format!(
-            "Enter the 6-digit code we sent to {}.",
-            user.masked_phone_number()
-                .unwrap_or_else(|| "your phone".to_string())
-        ),
         OtpFactor::Email => "Enter the 6-digit code we sent to your email address.".to_string(),
     }
 }
@@ -766,7 +733,7 @@ pub async fn mfa_otp_challenge_form(
     if outstanding {
         let mut tmpl = MfaOtpChallengeTemplate::new(
             None,
-            otp_sent_prompt(&user, factor),
+            otp_sent_prompt(factor),
             state.product_name.clone(),
             state.logo_url.clone(),
         );
@@ -794,7 +761,7 @@ pub async fn mfa_otp_challenge_form(
     };
     let (nonce, prompt) = match issued {
         Ok(v) => v,
-        Err(IdentityError::RateLimited | IdentityError::SmsResendLimitExceeded) => {
+        Err(IdentityError::RateLimited) => {
             let mut tmpl = MfaOtpChallengeTemplate::new(
                 Some(
                     "Too many codes were requested. Wait a few minutes, then ask for a new one."
@@ -1031,8 +998,8 @@ pub async fn mfa_otp_challenge_submit(
 /// `otp_nonce` and `factor` MUST come from the server-signed challenge cookie,
 /// never from the request body. Each verify also names the recipient the
 /// user's code must have been sent to: the OTP record itself names nobody, so
-/// without that a genuine nonce + code someone obtained for THEIR OWN phone or
-/// inbox passed this user's challenge.
+/// without that a genuine nonce + code someone obtained for THEIR OWN inbox
+/// passed this user's challenge.
 fn verify_login_otp(
     state: &Arc<WebState>,
     realm_id: &RealmId,
@@ -1043,17 +1010,6 @@ fn verify_login_otp(
     now_ts: u64,
 ) -> Result<(), IdentityError> {
     match factor {
-        OtpFactor::Sms => match (
-            user.phone_number(),
-            super::required_action::sms_otp_hmac_key_bytes(state),
-        ) {
-            (Some(phone), Some(key)) => state
-                .identity
-                .verify_sms_otp(realm_id, otp_nonce, phone, code, &key, now_ts),
-            // No number or no key: nothing can verify, so the factor is not
-            // proved.
-            _ => Err(IdentityError::MfaNotEnabled),
-        },
         OtpFactor::Email => state.identity.verify_email_otp(
             realm_id,
             otp_nonce,
@@ -6183,19 +6139,6 @@ pub async fn device_approve_submit(
     ) {
         return ra_response;
     }
-    // 2. The SMS factor. Fails closed (no transport, no key, lookup error)
-    //    exactly like the authorize intercept; on success the challenge POST
-    //    approves the code via `finish_device_approval`.
-    if let Some(sms_response) = super::sms_challenge::sms_mfa_device_gate(
-        &state,
-        &session.realm_id,
-        &session.user_id,
-        &code,
-        state.is_secure_request(&headers),
-    ) {
-        return sms_response;
-    }
-
     finish_device_approval(
         &state,
         &session.realm_id,
@@ -6209,8 +6152,7 @@ pub async fn device_approve_submit(
 /// charging a wrong code to the brute-force guard, and redirects to the
 /// device page with the outcome.
 ///
-/// Called by `device_approve_submit` and, when the realm requires the SMS
-/// factor, by `POST /ui/sms-challenge` after the OTP verifies.
+/// Called by `device_approve_submit`.
 pub(super) fn finish_device_approval(
     state: &Arc<WebState>,
     realm: &RealmId,

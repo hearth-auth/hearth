@@ -55,10 +55,6 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
                 .patch(admin_update_user)
                 .delete(admin_delete_user),
         )
-        .route(
-            "/users/{id}/device-fingerprints",
-            delete(admin_delete_user_device_fingerprints),
-        )
         .route("/realms", get(admin_list_realms).post(admin_create_realm))
         .route(
             "/realms/{id}",
@@ -1176,66 +1172,6 @@ async fn admin_delete_user(
     }
 }
 
-/// Admin: erase all device fingerprints for a user (GDPR Art. 17 / AC-11).
-///
-/// `DELETE /admin/users/{id}/device-fingerprints`
-///
-/// Satisfies DSAR erasure requests for biometric/device-signal data without
-/// requiring deletion of the entire user account.  Returns `{ "erased": N }`.
-async fn admin_delete_user_device_fingerprints(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let auth = match extract_admin_auth(&headers, &state) {
-        Ok(a) => a,
-        Err(e) => return e.into_response(),
-    };
-    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
-        return e.into_response();
-    }
-
-    let user_uuid: uuid::Uuid = match id.parse() {
-        Ok(u) => u,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid user ID"})),
-            )
-                .into_response()
-        }
-    };
-
-    let user_id = UserId::new(user_uuid);
-    if let Err(e) = require_user_admin_ceiling(&state, &auth, &auth.realm_id, &user_id) {
-        return e.into_response();
-    }
-
-    match state
-        .identity
-        .delete_user_device_fingerprints(&auth.realm_id, &user_id)
-    {
-        Ok(erased) => {
-            crate::protocol::audit_log::record(
-                state.audit.as_ref(),
-                &CreateAuditEvent {
-                    realm_id: auth.realm_id.clone(),
-                    actor: auth.user_id.as_uuid().to_string(),
-                    action: crate::audit::AuditAction::DeviceFingerprintsErased,
-                    resource_type: "user".to_string(),
-                    resource_id: user_uuid.to_string(),
-                    metadata: Some(serde_json::json!({
-                        "via": "admin_api",
-                        "count": erased,
-                    })),
-                },
-            );
-            (StatusCode::OK, Json(serde_json::json!({"erased": erased}))).into_response()
-        }
-        Err(e) => identity_error_to_response(&e).into_response(),
-    }
-}
-
 /// HTTP request body for bulk user operations.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1795,8 +1731,7 @@ async fn admin_patch_user_required_actions(
 /// Replaces the realm's default required-actions list. Only affects users
 /// created after this call. Unknown action strings return 400.
 ///
-/// Optional fields applied only when present: `mfa_methods`,
-/// `sms_otp_expiry_seconds`, `sms_otp_max_attempts`, `email_otp_expiry_seconds`,
+/// Optional fields applied only when present: `mfa_methods`, `email_otp_expiry_seconds`,
 /// `email_otp_max_attempts`, `fapi_profile` (`"baseline"`/`"advanced"`/`null`),
 /// and `dcr_policy` (`"disabled"`/`"open"`/`"authenticated"`/`null`) — the
 /// Dynamic Client Registration policy for `POST /register`.
@@ -1840,8 +1775,6 @@ async fn admin_patch_realm_config(
     const KNOWN_KEYS: &[&str] = &[
         "default_required_actions",
         "mfa_methods",
-        "sms_otp_expiry_seconds",
-        "sms_otp_max_attempts",
         "email_otp_expiry_seconds",
         "email_otp_max_attempts",
         "fapi_profile",
@@ -1942,11 +1875,8 @@ async fn admin_patch_realm_config(
                 };
                 strs.push(s.to_string());
             }
-            // The same rule the YAML validator applies: known names only, and
-            // no `sms` on a transport that cannot deliver the code.
-            if let Err(reason) =
-                crate::config::check_mfa_methods(&strs, state.sms_transport, state.dev_mode)
-            {
+            // The same rule the YAML validator applies: known names only.
+            if let Err(reason) = crate::config::check_mfa_methods(&strs) {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "error": reason })),
@@ -1961,15 +1891,6 @@ async fn admin_patch_realm_config(
                 Json(serde_json::json!({"error": "mfa_methods must be an array of strings"})),
             )
                 .into_response();
-        }
-    }
-    if let Some(v) = body["sms_otp_expiry_seconds"].as_u64() {
-        config.sms_otp_expiry_seconds = Some(v);
-    }
-    if let Some(v) = body["sms_otp_max_attempts"].as_u64() {
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            config.sms_otp_max_attempts = Some(v as u32);
         }
     }
     if let Some(v) = body["email_otp_expiry_seconds"].as_u64() {

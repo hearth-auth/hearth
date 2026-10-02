@@ -20,7 +20,7 @@
 //! Their documented config keys compounded it: `SecurityYaml` carries
 //! `#[serde(deny_unknown_fields)]`, and none of `security.tarpit`,
 //! `security.distributed_attack_detector`, `security.outbound_volume_shield`,
-//! `security.cross_realm_aggregation_cap`, `security.risk_scorer`,
+//! `security.cross_realm_aggregation_cap`,
 //! `security.adaptive_backoff`, `security.providers.*`,
 //! `security.captcha.challenge_threshold` or
 //! `realms.<name>.security.cidr_policy` existed as fields — so an operator who
@@ -36,8 +36,8 @@
 //! The pre-auth entry point is [`AbuseGuards::pre_auth_login`], consulted by
 //! the login form's pre-gate phase before any Argon2 work is admitted, and
 //! [`AbuseGuards::record_login_failure`] / [`AbuseGuards::record_login_success`]
-//! feed the per-IP counters afterwards. Outbound mail and SMS go through
-//! [`AbuseGuards::check_outbound_email`] / [`AbuseGuards::check_outbound_sms`].
+//! feed the per-IP counters afterwards. Outbound mail goes through
+//! [`AbuseGuards::check_outbound_email`].
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -388,35 +388,6 @@ impl AbuseGuards {
             },
         }
     }
-
-    /// A-4 + A-50 — the same two checks for one SMS recipient.
-    #[must_use]
-    pub fn check_outbound_sms(&self, realm_id: &str, recipient: &str) -> OutboundVerdict {
-        let shield = match self.volume_shield.check_sms(realm_id, recipient) {
-            VolumeShieldOutcome::HardCap => {
-                return OutboundVerdict::Deny {
-                    reason: "a4_sms_hard_cap",
-                }
-            }
-            VolumeShieldOutcome::SoftCap => Some("a4_sms_soft_cap"),
-            VolumeShieldOutcome::Allow => None,
-        };
-        match self.agg_cap.check_sms(realm_id, recipient) {
-            CrossRealmOutcome::HardCap { .. } => OutboundVerdict::Deny {
-                reason: "a50_sms_hard_cap",
-            },
-            CrossRealmOutcome::SoftCap { .. } => OutboundVerdict::Warn {
-                reason: "a50_sms_soft_cap",
-            },
-            CrossRealmOutcome::MultiRealmAlert { .. } => OutboundVerdict::Warn {
-                reason: "a50_multi_realm_alert",
-            },
-            CrossRealmOutcome::Allow => match shield {
-                Some(reason) => OutboundVerdict::Warn { reason },
-                None => OutboundVerdict::Allow,
-            },
-        }
-    }
 }
 
 /// A-17 tarpit. An absent `threshold` is the disabled form.
@@ -466,8 +437,6 @@ fn build_volume_shield(security: &SecurityYaml) -> OutboundVolumeShield {
         window: parse_window(&yaml.window, Duration::from_secs(3_600)),
         email_soft_cap: yaml.email_soft_cap,
         email_hard_cap: yaml.email_hard_cap,
-        sms_soft_cap: yaml.sms_soft_cap,
-        sms_hard_cap: yaml.sms_hard_cap,
     })
 }
 
@@ -482,8 +451,6 @@ fn build_agg_cap(security: &SecurityYaml) -> CrossRealmAggregationCap {
         alert_threshold: yaml.alert_threshold,
         email_realm_soft_cap: yaml.email_realm_soft_cap,
         email_realm_hard_cap: yaml.email_realm_hard_cap,
-        sms_realm_soft_cap: yaml.sms_realm_soft_cap,
-        sms_realm_hard_cap: yaml.sms_realm_hard_cap,
     })
 }
 
@@ -584,20 +551,12 @@ mod tests {
             (
                 "outbound_volume_shield",
                 "outbound_volume_shield:\n  window: 3600s\n  email_soft_cap: 1000\n  \
-                 email_hard_cap: 5000\n  sms_soft_cap: 100\n  sms_hard_cap: 500\n",
+                 email_hard_cap: 5000\n",
             ),
             (
                 "cross_realm_aggregation_cap",
                 "cross_realm_aggregation_cap:\n  window: 3600s\n  alert_threshold: 3\n  \
-                 email_realm_soft_cap: 5\n  email_realm_hard_cap: 10\n  \
-                 sms_realm_soft_cap: 3\n  sms_realm_hard_cap: 6\n",
-            ),
-            (
-                "risk_scorer",
-                "risk_scorer:\n  enabled: true\n  step_up_threshold: 0.5\n  \
-                 new_device_weight: 0.3\n  new_country_weight: 0.4\n  \
-                 password_age_weight: 0.2\n  password_age_days_threshold: 365\n  \
-                 breach_corpus_weight: 1.0\n  refresh_context_delta_weight: 0.35\n",
+                 email_realm_soft_cap: 5\n  email_realm_hard_cap: 10\n",
             ),
             (
                 "adaptive_backoff",
@@ -833,7 +792,7 @@ mod tests {
     fn outbound_volume_shield_is_constructed_from_config() {
         let guards = AbuseGuards::from_security(&security_yaml(
             "outbound_volume_shield:\n  enabled: true\n  window: 3600s\n  \
-             email_soft_cap: 1\n  email_hard_cap: 2\n  sms_soft_cap: 1\n  sms_hard_cap: 2\n",
+             email_soft_cap: 1\n  email_hard_cap: 2\n",
         ));
         assert_eq!(
             guards.check_outbound_email("realm-a", "one@example.com"),
@@ -856,8 +815,7 @@ mod tests {
     fn cross_realm_aggregation_cap_is_constructed_from_config() {
         let guards = AbuseGuards::from_security(&security_yaml(
             "cross_realm_aggregation_cap:\n  enabled: true\n  window: 3600s\n  \
-             alert_threshold: 100\n  email_realm_soft_cap: 100\n  email_realm_hard_cap: 2\n  \
-             sms_realm_soft_cap: 100\n  sms_realm_hard_cap: 100\n",
+             alert_threshold: 100\n  email_realm_soft_cap: 100\n  email_realm_hard_cap: 2\n",
         ));
         assert_eq!(
             guards.check_outbound_email("realm-a", "victim@example.com"),

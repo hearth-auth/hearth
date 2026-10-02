@@ -473,8 +473,6 @@ pub async fn replace_user(
         }),
         attributes: None,
         required_actions: None,
-        phone_number: None,
-        phone_verified: None,
         email_otp_enabled: None,
     };
 
@@ -602,8 +600,6 @@ pub async fn patch_user(
         status: Some(status),
         attributes: None,
         required_actions: None,
-        phone_number: None,
-        phone_verified: None,
         email_otp_enabled: None,
     };
     // `display_name` Some("") would clear it — but `validate_display_name`

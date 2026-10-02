@@ -31,7 +31,7 @@ pub enum MfaProof {
     #[default]
     None,
     /// A second factor was proved in this authentication by a factor that is
-    /// **not** phishing-resistant: a TOTP code, a recovery code, an SMS or an
+    /// **not** phishing-resistant: a TOTP code, a recovery code or an
     /// email OTP.
     ///
     /// This satisfies `mfa_required`. It does not satisfy `webauthn_required`
@@ -55,7 +55,7 @@ pub enum MfaProof {
     /// from [`MfaProof::None`] in one respect: the factor the account holds —
     /// the passkey — is the one this ceremony used, so a user whose only
     /// second factor is a passkey is not refused for "holding a factor they
-    /// did not prove". A user who also holds TOTP, SMS or email OTP still owes
+    /// did not prove". A user who also holds TOTP or email OTP still owes
     /// that factor (GA audit B5).
     PasskeyPossession,
 }
@@ -78,12 +78,11 @@ impl MfaProof {
         matches!(self, Self::ProvedWebAuthn)
     }
 
-    /// This proof raised by a second factor (a TOTP code, a recovery code,
-    /// an SMS or an email OTP) that was just verified on top of it.
+    /// This proof raised by a second factor (a TOTP code, a recovery code
+    /// or an email OTP) that was just verified on top of it.
     ///
     /// Every second-factor challenge records [`MfaProof::Proved`] for what it
-    /// verified. A challenge that runs inside an existing authentication —
-    /// the SMS interstitial in front of code issuance or device approval —
+    /// verified. A challenge that runs inside an existing authentication
     /// raises that authentication's proof the same way: `None` and a UV-less
     /// passkey ([`MfaProof::PasskeyPossession`]) become `Proved`, and a
     /// proof already stronger than an OTP ([`MfaProof::ProvedWebAuthn`]) is

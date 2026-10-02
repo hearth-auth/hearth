@@ -4,10 +4,8 @@
 //! A login that hit a pending required action used to resume with
 //! `MfaProof::Inherited`, which satisfies both `mfa_required` and
 //! `webauthn_required`. So password + TOTP (or a UV-less passkey, or the
-//! password alone) plus ANY pending action — and a realm listing `sms` in
-//! `mfa_methods` makes `ENROLL_PHONE_OTP` pending for every user without a
-//! verified phone — opened a session the same login was refused without the
-//! detour. The detour now carries what the login proved, raised only by a
+//! password alone) plus ANY pending action opened a session the same login
+//! was refused without the detour. The detour now carries what the login proved, raised only by a
 //! factor the flow itself proves, and a flow that cannot end in a session is
 //! not started at all.
 //!
@@ -30,8 +28,7 @@ use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::{
     CleartextPassword, CreateRealmRequest, CreateUserRequest, CredentialConfig,
     EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, MfaProof, RealmConfig,
-    RegistrationOptions, RequiredAction, SmsError, SmsMessage, SmsSender, UpdateUserRequest,
-    UserStatus,
+    RegistrationOptions, RequiredAction, UpdateUserRequest, UserStatus,
 };
 use hearth::protocol::web::{self, CookieSecret, WebState};
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
@@ -43,15 +40,6 @@ const PASSWORD: &str = "ra-proof-password-1";
 const ORIGIN: &str = "http://localhost";
 const RP_ID: &str = "localhost";
 const PASSKEY_CHALLENGE: &str = "/ui/mfa-passkey-challenge";
-
-/// An SMS transport that delivers nothing: these flows never get as far as
-/// sending one once the fix is in place, and must not need to.
-struct DroppedSms;
-impl SmsSender for DroppedSms {
-    fn send(&self, _message: &SmsMessage) -> Result<(), SmsError> {
-        Ok(())
-    }
-}
 
 struct Rig {
     app: axum::Router,
@@ -122,11 +110,7 @@ fn build_rig(config: RealmConfig) -> Rig {
         CookieSecret::from_bytes(COOKIE_SECRET),
         Some(email),
     )
-    .with_dev_mode(false)
-    .with_sms(
-        Arc::new(DroppedSms) as _,
-        Some(b"ra-proof-sms-key".to_vec()),
-    );
+    .with_dev_mode(false);
     Rig {
         app: web::router(state),
         identity,
@@ -277,27 +261,22 @@ fn session_proof(rig: &Rig, browser: &Browser) -> MfaProof {
         .mfa_proof()
 }
 
-fn phone_verified(rig: &Rig, user: &UserId) -> bool {
-    rig.identity
-        .get_user(&rig.realm_id, user)
-        .expect("lookup")
-        .expect("user")
-        .phone_verified()
-}
-
-/// D-1: a passkey realm, a user holding a passkey AND TOTP, and `sms` offered
-/// (so `ENROLL_PHONE_OTP` is pending for this phone-less user). The password
-/// login owes the passkey; whoever relays the password and one TOTP code must
-/// not reach a session — nor enrol a phone of their own on the way — by
-/// answering the TOTP challenge instead.
+/// D-1: a passkey realm, a user holding a passkey AND TOTP, and a pending
+/// `UPDATE_PASSWORD`. The password login owes the passkey; whoever relays the
+/// password and one TOTP code must not reach a session — nor run the pending
+/// action on the way — by answering the TOTP challenge instead.
 #[tokio::test]
 async fn a_totp_code_cannot_detour_a_passkey_login_through_a_required_action() {
     let rig = build_rig(RealmConfig {
-        mfa_methods: methods(&["webauthn", "totp", "sms"]),
+        mfa_methods: methods(&["webauthn", "totp"]),
         webauthn_required: Some(true),
         ..Default::default()
     });
-    let user = create_user(&rig, "d1-victim@example.com", vec![]);
+    let user = create_user(
+        &rig,
+        "d1-victim@example.com",
+        vec![RequiredAction::UpdatePassword],
+    );
     let secret = enrol_totp(&rig, &user);
     enrol_passkey(&rig, &user, true);
 
@@ -324,10 +303,6 @@ async fn a_totp_code_cannot_detour_a_passkey_login_through_a_required_action() {
         !browser.has_cookie("hearth_ui_session"),
         "no session is issued"
     );
-    assert!(
-        !phone_verified(&rig, &user),
-        "and no phone is enrolled on the account"
-    );
 }
 
 /// I-2 (A): a UV-less passkey proves possession only. On a passkey realm it
@@ -339,11 +314,15 @@ async fn a_uv_less_passkey_cannot_detour_a_login_through_a_required_action() {
     use base64::Engine as _;
 
     let rig = build_rig(RealmConfig {
-        mfa_methods: methods(&["webauthn", "sms"]),
+        mfa_methods: methods(&["webauthn"]),
         webauthn_required: Some(true),
         ..Default::default()
     });
-    let user = create_user(&rig, "i2-uvless@example.com", vec![]);
+    let user = create_user(
+        &rig,
+        "i2-uvless@example.com",
+        vec![RequiredAction::UpdatePassword],
+    );
     let authenticator = enrol_passkey(&rig, &user, false);
 
     let mut browser = Browser::new(rig.app.clone());
@@ -385,7 +364,6 @@ async fn a_uv_less_passkey_cannot_detour_a_login_through_a_required_action() {
     );
     assert!(!browser.has_cookie("hearth_ra_session"));
     assert!(!browser.has_cookie("hearth_ui_session"));
-    assert!(!phone_verified(&rig, &user));
 }
 
 /// I-2 (B): an `mfa_required` realm whose only method is a passkey, and a
@@ -591,7 +569,7 @@ async fn assert_no_required_action_flow(rig: &Rig, email: &str) {
 }
 
 /// GA audit round 3, D-11: a disabled account holder who knows the password
-/// could still run required actions (change the password, bind a phone).
+/// could still run required actions (change the password, enrol a factor).
 #[tokio::test]
 async fn a_disabled_account_is_not_handed_a_required_action_flow() {
     let rig = build_rig(RealmConfig::default());

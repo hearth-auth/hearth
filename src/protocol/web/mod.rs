@@ -67,7 +67,6 @@ pub mod saml;
 pub mod second_factor;
 pub mod secret_reveal;
 pub mod security;
-pub mod sms_challenge;
 pub(crate) mod templates;
 pub mod themes;
 
@@ -193,18 +192,6 @@ pub struct WebState {
     /// Whether to trust `X-Forwarded-Proto: https` for Secure-cookie
     /// decisions. Derived from `server.trust_forwarded_proto`.
     pub trust_forwarded_proto: bool,
-    /// SMS sender for OTP delivery. `None` when SMS is not configured.
-    pub sms: Option<crate::identity::sms::SharedSmsSender>,
-    /// Raw bytes of the HMAC-SHA256 key used to sign/verify SMS OTP codes.
-    /// Derived from `HEARTH_SMS_OTP_HMAC_KEY` (or, in dev mode only, a random
-    /// per-process key). `None` means no key is loaded, and every SMS OTP
-    /// surface then fails closed: no code is issued and no challenge passes.
-    pub sms_otp_hmac_key: Option<Vec<u8>>,
-    /// The configured `sms.transport`. Together with [`Self::dev_mode`] it
-    /// decides whether SMS MFA can deliver a code, which the realm config
-    /// PATCH checks before enabling `sms` in `mfa_methods`. Defaults to the
-    /// fail-closed [`crate::config::SmsTransport::Log`].
-    pub sms_transport: crate::config::SmsTransport,
     /// CAPTCHA provider for challenge-gated forms (P-1 — HEA-1202).
     ///
     /// Defaults to [`crate::abuse::challenge::NoopCaptchaProvider`] (fail-open).
@@ -325,9 +312,6 @@ impl WebState {
             app_css_etag: etag_for_bytes(APP_CSS_FALLBACK),
             tls_enabled: false,
             trust_forwarded_proto: false,
-            sms: None,
-            sms_otp_hmac_key: None,
-            sms_transport: crate::config::SmsTransport::Log,
             captcha_provider: Arc::new(crate::abuse::challenge::NoopCaptchaProvider),
             dev_mode: false, // fail-closed default; tests must call .with_dev_mode(true) explicitly
             abuse_guards: Arc::new(crate::abuse::runtime::AbuseGuards::disabled()),
@@ -528,30 +512,6 @@ impl WebState {
     #[must_use]
     pub fn with_trust_forwarded_proto(mut self, trust: bool) -> Self {
         self.trust_forwarded_proto = trust;
-        self
-    }
-
-    /// Configures the SMS transport and HMAC key for OTP delivery.
-    ///
-    /// `hmac_key` is the raw bytes derived from `HEARTH_SMS_OTP_HMAC_KEY` (or,
-    /// in dev mode only, a random per-process key). There is no substitute
-    /// when it is `None`: every SMS OTP surface then fails closed — no code is
-    /// issued, nothing verifies, and a user whose factor is SMS cannot pass it.
-    #[must_use]
-    pub fn with_sms(
-        mut self,
-        sender: crate::identity::sms::SharedSmsSender,
-        hmac_key: Option<Vec<u8>>,
-    ) -> Self {
-        self.sms = Some(sender);
-        self.sms_otp_hmac_key = hmac_key;
-        self
-    }
-
-    /// Records the configured `sms.transport` (see [`Self::sms_transport`]).
-    #[must_use]
-    pub fn with_sms_transport(mut self, transport: crate::config::SmsTransport) -> Self {
-        self.sms_transport = transport;
         self
     }
 
@@ -851,7 +811,7 @@ fn web_civil_from_days(z: i64) -> (i64, i64, i64) {
 /// | `/ui/login` | GET/POST | Login form + submit |
 /// | `/ui` | GET | Signed-in dashboard (redirects to login when unauthenticated) |
 /// | `/ui/logout` | POST | Revoke session + clear cookies |
-/// | `/ui/mfa-otp-challenge` | GET/POST | SMS / email-OTP second factor after the password step |
+/// | `/ui/mfa-otp-challenge` | GET/POST | Email-OTP second factor after the password step |
 /// | `/ui/mfa-passkey-challenge` | GET | Passkey second factor after a first factor that is not a passkey |
 /// | `/ui/mfa-passkey-challenge/begin` | POST | Passkey second factor: mint a challenge for the pending user |
 /// | `/ui/mfa-passkey-challenge/complete` | POST | Passkey second factor: verify the assertion and sign in |
@@ -919,7 +879,7 @@ pub fn router(state: WebState) -> Router {
             axum::routing::get(handlers::mfa_challenge_form).post(handlers::mfa_challenge_submit),
         )
         .route(
-            // SMS / email-OTP second factor for the direct browser login. The
+            // Email-OTP second factor for the direct browser login. The
             // TOTP-only `/mfa-challenge` cannot render either one, which is
             // why those factors were invisible here (audit 2026-08-28
             // §4.18#6).
@@ -1253,12 +1213,6 @@ pub fn router(state: WebState) -> Router {
             "/oauth/consent",
             axum::routing::get(oauth_consent::consent_page).post(oauth_consent::consent_submit),
         )
-        // --- SMS MFA challenge interstitial ---
-        .route(
-            "/sms-challenge",
-            axum::routing::get(sms_challenge::sms_challenge_get)
-                .post(sms_challenge::sms_challenge_post),
-        )
         // --- First-run onboarding wizard ---
         .route(
             "/admin/onboarding",
@@ -1362,10 +1316,6 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/realms/{realm}/users/{id}/disable-mfa",
             axum::routing::post(admin::admin_user_disable_mfa),
-        )
-        .route(
-            "/admin/realms/{realm}/users/{id}/remove-phone",
-            axum::routing::post(admin::admin_user_remove_phone),
         )
         .route(
             "/admin/realms/{realm}/users/{id}/reset-mfa-codes",
@@ -1856,18 +1806,6 @@ pub fn router(state: WebState) -> Router {
             "/required-action/UPDATE_PASSWORD",
             axum::routing::get(required_action::update_password_page)
                 .post(required_action::update_password_submit),
-        )
-        .route(
-            "/required-action/ENROLL_PHONE_OTP",
-            axum::routing::get(required_action::enroll_phone_otp_page),
-        )
-        .route(
-            "/required-action/ENROLL_PHONE_OTP/send",
-            axum::routing::post(required_action::enroll_phone_otp_send),
-        )
-        .route(
-            "/required-action/ENROLL_PHONE_OTP/verify",
-            axum::routing::post(required_action::enroll_phone_otp_verify_submit),
         )
         .route(
             "/required-action/ENROLL_EMAIL_OTP",

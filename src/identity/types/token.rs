@@ -324,8 +324,8 @@ pub struct PendingAuthorizationRequest {
     /// realms refuse code issuance without it, so approval must keep it.
     #[serde(default)]
     pub via_par: bool,
-    /// Authentication methods already proved on the way here (e.g. `["sms"]`
-    /// after the SMS MFA challenge), carried into the issued code.
+    /// Authentication methods already proved on the way here, carried into
+    /// the issued code.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub amr_values: Vec<String>,
     /// When the ticket was created.

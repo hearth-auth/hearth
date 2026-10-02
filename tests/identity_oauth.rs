@@ -1714,7 +1714,6 @@ fn deleting_a_client_revokes_its_outstanding_refresh_tokens() {
     // Sanity: while the client exists, an authenticated refresh rotates.
     let bind = RefreshBindContext {
         authenticated_client_id: Some(client.client_id().clone()),
-        ..Default::default()
     };
     clock.advance(1_000_000);
     let rotated = engine

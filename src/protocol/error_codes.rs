@@ -120,13 +120,6 @@ pub const SESSION_NOT_FOUND: &str = "HEARTH_SESSION_NOT_FOUND";
 /// The requested session version is disabled by realm policy.
 pub const SESSION_VERSION_DISABLED: &str = "HEARTH_SESSION_VERSION_DISABLED";
 
-// ── SMS / OTP ─────────────────────────────────────────────────────────────────
-
-/// SMS OTP code is invalid or expired.
-pub const INVALID_SMS_OTP: &str = "HEARTH_INVALID_SMS_OTP";
-/// SMS OTP resend rate limit exceeded; must wait before requesting another.
-pub const SMS_RESEND_LIMIT_EXCEEDED: &str = "HEARTH_SMS_RESEND_LIMIT_EXCEEDED";
-
 // ── Realm ──────────────────────────────────────────────────────────────────────
 
 /// The realm is suspended; operations are denied.
@@ -472,8 +465,6 @@ mod tests {
             SESSION_NOT_FOUND,
             SESSION_VERSION_DISABLED,
             SESSION_LIMIT_EXCEEDED,
-            INVALID_SMS_OTP,
-            SMS_RESEND_LIMIT_EXCEEDED,
             REALM_SUSPENDED,
             INVALID_INPUT,
             DUPLICATE_EMAIL,

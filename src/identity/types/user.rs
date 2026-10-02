@@ -70,11 +70,6 @@ pub enum RequiredAction {
     /// Injected automatically by the adaptive-MFA engine when a login arrives
     /// from an unrecognised device and the user has no enrolled factor.
     EnrollMfa,
-    /// User must enroll a verified phone number via SMS OTP before proceeding.
-    ///
-    /// Injected automatically when a realm has `mfa_methods: ["sms"]` and the
-    /// user has no verified phone number on record.
-    EnrollPhoneOtp,
     /// User must enroll email OTP (6-digit code) as an MFA factor before proceeding.
     ///
     /// Injected automatically when a realm has `mfa_methods: ["email_otp"]` and the
@@ -85,15 +80,14 @@ pub enum RequiredAction {
 impl RequiredAction {
     /// Canonical execution priority. Lower numbers run first.
     ///
-    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`, `ENROLL_MFA=3`, `ENROLL_PHONE_OTP=4`,
-    /// `ENROLL_EMAIL_OTP=5`.
+    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`, `ENROLL_MFA=3`, `ENROLL_EMAIL_OTP=5`.
+    /// (4 was `ENROLL_PHONE_OTP`, removed in 3.0.0 with SMS one-time codes.)
     #[must_use]
     pub fn priority(self) -> u8 {
         match self {
             Self::VerifyEmail => 1,
             Self::UpdatePassword => 2,
             Self::EnrollMfa => 3,
-            Self::EnrollPhoneOtp => 4,
             Self::EnrollEmailOtp => 5,
         }
     }
@@ -105,7 +99,6 @@ impl RequiredAction {
             Self::VerifyEmail => "VERIFY_EMAIL",
             Self::UpdatePassword => "UPDATE_PASSWORD",
             Self::EnrollMfa => "enroll-mfa",
-            Self::EnrollPhoneOtp => "ENROLL_PHONE_OTP",
             Self::EnrollEmailOtp => "ENROLL_EMAIL_OTP",
         }
     }
@@ -116,11 +109,68 @@ impl RequiredAction {
             "VERIFY_EMAIL" => Some(Self::VerifyEmail),
             "UPDATE_PASSWORD" => Some(Self::UpdatePassword),
             "enroll-mfa" => Some(Self::EnrollMfa),
-            "ENROLL_PHONE_OTP" => Some(Self::EnrollPhoneOtp),
             "ENROLL_EMAIL_OTP" => Some(Self::EnrollEmailOtp),
             _ => None,
         }
     }
+}
+
+/// Wire form of [`RequiredAction`] in stored and exported user records.
+///
+/// Postcard writes an enum by variant position and the JSON export by name,
+/// so a removed action keeps its slot here: never reorder these variants.
+/// A retired action decodes, and [`Self::into_current`] drops it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum StoredRequiredAction {
+    /// [`RequiredAction::VerifyEmail`].
+    VerifyEmail,
+    /// [`RequiredAction::UpdatePassword`].
+    UpdatePassword,
+    /// [`RequiredAction::EnrollMfa`].
+    EnrollMfa,
+    /// `ENROLL_PHONE_OTP`, retired in 3.0.0 with SMS one-time codes.
+    #[serde(rename = "ENROLL_PHONE_OTP")]
+    RetiredEnrollPhoneOtp,
+    /// [`RequiredAction::EnrollEmailOtp`].
+    EnrollEmailOtp,
+}
+
+impl StoredRequiredAction {
+    /// The current action, or `None` for a retired one.
+    pub(crate) fn into_current(self) -> Option<RequiredAction> {
+        match self {
+            Self::VerifyEmail => Some(RequiredAction::VerifyEmail),
+            Self::UpdatePassword => Some(RequiredAction::UpdatePassword),
+            Self::EnrollMfa => Some(RequiredAction::EnrollMfa),
+            Self::RetiredEnrollPhoneOtp => None,
+            Self::EnrollEmailOtp => Some(RequiredAction::EnrollEmailOtp),
+        }
+    }
+}
+
+impl From<RequiredAction> for StoredRequiredAction {
+    fn from(a: RequiredAction) -> Self {
+        match a {
+            RequiredAction::VerifyEmail => Self::VerifyEmail,
+            RequiredAction::UpdatePassword => Self::UpdatePassword,
+            RequiredAction::EnrollMfa => Self::EnrollMfa,
+            RequiredAction::EnrollEmailOtp => Self::EnrollEmailOtp,
+        }
+    }
+}
+
+/// Deserializes a required-action list and drops retired actions, so a user
+/// exported before 3.0.0 with `ENROLL_PHONE_OTP` still imports.
+fn deserialize_current_actions<'de, D>(deserializer: D) -> Result<Vec<RequiredAction>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let stored = Vec::<StoredRequiredAction>::deserialize(deserializer)?;
+    Ok(stored
+        .into_iter()
+        .filter_map(StoredRequiredAction::into_current)
+        .collect())
 }
 
 /// A user record within a realm.
@@ -138,17 +188,15 @@ pub struct User {
     attributes: BTreeMap<String, String>,
     status: UserStatus,
     /// Pending actions the user must complete. Absent in old records = [].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_current_actions"
+    )]
     required_actions: Vec<RequiredAction>,
     /// Whether the user's email address has been verified. Absent in old records = false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     email_verified: bool,
-    /// E.164 phone number. `None` when no phone has been enrolled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    phone_number: Option<String>,
-    /// Whether the stored phone number has been verified via OTP.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    phone_verified: bool,
     /// Whether the user has enrolled email OTP as an MFA factor.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     email_otp_enabled: bool,
@@ -179,8 +227,6 @@ impl User {
             status,
             required_actions,
             email_verified: false,
-            phone_number: None,
-            phone_verified: false,
             email_otp_enabled: false,
             created_at,
             updated_at,
@@ -282,38 +328,6 @@ impl User {
         self.email_verified = verified;
     }
 
-    /// Returns the user's enrolled phone number in E.164 format, or `None` if not set.
-    pub fn phone_number(&self) -> Option<&str> {
-        self.phone_number.as_deref()
-    }
-
-    /// Returns the phone number masked for display in admin UIs (e.g. `+1***-***-1234`).
-    ///
-    /// Shows the `+` sign and the first country-code digit, then `***-***-`, then the
-    /// last four digits. Returns `None` when no phone is enrolled. Phone numbers shorter
-    /// than 6 E.164 characters return `"****"` instead of a structured mask.
-    ///
-    /// The raw number is never included — callers MUST NOT log or trace the return value
-    /// as it still conveys partial PII.
-    pub fn masked_phone_number(&self) -> Option<String> {
-        self.phone_number.as_deref().map(mask_phone_number)
-    }
-
-    /// Sets (or clears) the user's phone number. Used internally by the identity engine.
-    pub(crate) fn set_phone_number(&mut self, phone: Option<String>) {
-        self.phone_number = phone;
-    }
-
-    /// Returns whether the stored phone number has been verified via OTP.
-    pub fn phone_verified(&self) -> bool {
-        self.phone_verified
-    }
-
-    /// Marks the user's phone number as verified (or unverified). Used internally.
-    pub(crate) fn set_phone_verified(&mut self, verified: bool) {
-        self.phone_verified = verified;
-    }
-
     /// Returns whether the user has email OTP enrolled as an MFA factor.
     pub fn email_otp_enabled(&self) -> bool {
         self.email_otp_enabled
@@ -343,10 +357,15 @@ impl User {
             last_name: self.last_name.clone(),
             attributes: self.attributes.clone(),
             status: self.status,
-            required_actions: self.required_actions.clone(),
+            required_actions: self
+                .required_actions
+                .iter()
+                .copied()
+                .map(StoredRequiredAction::from)
+                .collect(),
             email_verified: self.email_verified,
-            phone_number: self.phone_number.clone(),
-            phone_verified: self.phone_verified,
+            retired_phone_number: None,
+            retired_phone_verified: false,
             email_otp_enabled: self.email_otp_enabled,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -363,10 +382,12 @@ impl User {
             last_name: r.last_name,
             attributes: r.attributes,
             status: r.status,
-            required_actions: r.required_actions,
+            required_actions: r
+                .required_actions
+                .into_iter()
+                .filter_map(StoredRequiredAction::into_current)
+                .collect(),
             email_verified: r.email_verified,
-            phone_number: r.phone_number,
-            phone_verified: r.phone_verified,
             email_otp_enabled: r.email_otp_enabled,
             created_at: r.created_at,
             updated_at: r.updated_at,
@@ -387,28 +408,17 @@ pub(crate) struct UserStorageRecord {
     pub(crate) last_name: String,
     pub(crate) attributes: BTreeMap<String, String>,
     pub(crate) status: UserStatus,
-    pub(crate) required_actions: Vec<RequiredAction>,
+    pub(crate) required_actions: Vec<StoredRequiredAction>,
     pub(crate) email_verified: bool,
-    pub(crate) phone_number: Option<String>,
-    pub(crate) phone_verified: bool,
+    /// Retired in 3.0.0 with SMS one-time codes: written `None`, ignored on
+    /// read. The slot stays because postcard is positional.
+    pub(crate) retired_phone_number: Option<String>,
+    /// Retired in 3.0.0 with SMS one-time codes: written `false`, ignored on
+    /// read.
+    pub(crate) retired_phone_verified: bool,
     pub(crate) email_otp_enabled: bool,
     pub(crate) created_at: Timestamp,
     pub(crate) updated_at: Timestamp,
-}
-
-/// Masks an E.164 phone number for admin display.
-///
-/// Shows `+{first digit}***-***-{last 4}`. For numbers shorter than 6 chars,
-/// returns `"****"`. This function is intentionally not public — go through
-/// `User::masked_phone_number()`.
-pub(super) fn mask_phone_number(phone: &str) -> String {
-    let chars: Vec<char> = phone.chars().collect();
-    if chars.len() < 6 {
-        return "****".to_string();
-    }
-    let prefix: String = chars[..2].iter().collect();
-    let suffix: String = chars[chars.len() - 4..].iter().collect();
-    format!("{prefix}***-***-{suffix}")
 }
 
 /// Request to create a new user.
@@ -492,10 +502,6 @@ pub struct UpdateUserRequest {
     pub attributes: Option<BTreeMap<String, String>>,
     /// Replace the required actions list. `Some([])` clears all actions; `None` leaves unchanged.
     pub required_actions: Option<Vec<RequiredAction>>,
-    /// Set the user's phone number in E.164 format. `Some(None)` clears the field; `None` leaves unchanged.
-    pub phone_number: Option<Option<String>>,
-    /// Set the phone-verified flag. `None` leaves unchanged.
-    pub phone_verified: Option<bool>,
     /// Set the email OTP enrolled flag. `None` leaves unchanged.
     pub email_otp_enabled: Option<bool>,
 }
@@ -523,13 +529,13 @@ mod tests {
         ]
     }
 
-    fn arb_required_action() -> impl Strategy<Value = RequiredAction> {
+    fn arb_required_action() -> impl Strategy<Value = StoredRequiredAction> {
         prop_oneof![
-            Just(RequiredAction::VerifyEmail),
-            Just(RequiredAction::UpdatePassword),
-            Just(RequiredAction::EnrollMfa),
-            Just(RequiredAction::EnrollPhoneOtp),
-            Just(RequiredAction::EnrollEmailOtp),
+            Just(StoredRequiredAction::VerifyEmail),
+            Just(StoredRequiredAction::UpdatePassword),
+            Just(StoredRequiredAction::EnrollMfa),
+            Just(StoredRequiredAction::RetiredEnrollPhoneOtp),
+            Just(StoredRequiredAction::EnrollEmailOtp),
         ]
     }
 
@@ -561,8 +567,8 @@ mod tests {
                     (
                         required_actions,
                         email_verified,
-                        phone_number,
-                        phone_verified,
+                        retired_phone_number,
+                        retired_phone_verified,
                         email_otp_enabled,
                         created_at,
                         updated_at,
@@ -577,8 +583,8 @@ mod tests {
                     status,
                     required_actions,
                     email_verified,
-                    phone_number,
-                    phone_verified,
+                    retired_phone_number,
+                    retired_phone_verified,
                     email_otp_enabled,
                     created_at,
                     updated_at,
@@ -594,5 +600,77 @@ mod tests {
             let decoded: UserStorageRecord = crate::codec::decode(&bytes).expect("decode");
             prop_assert_eq!(rec, decoded);
         }
+    }
+
+    /// Postcard writes enum variants by position. The retired SMS action keeps
+    /// slot 3, so a stored `ENROLL_EMAIL_OTP` still reads as itself.
+    #[test]
+    fn stored_action_positions_are_pinned() {
+        let pos = |a: StoredRequiredAction| crate::codec::encode(&a).expect("encode");
+        assert_eq!(pos(StoredRequiredAction::VerifyEmail), vec![0]);
+        assert_eq!(pos(StoredRequiredAction::UpdatePassword), vec![1]);
+        assert_eq!(pos(StoredRequiredAction::EnrollMfa), vec![2]);
+        assert_eq!(pos(StoredRequiredAction::RetiredEnrollPhoneOtp), vec![3]);
+        assert_eq!(pos(StoredRequiredAction::EnrollEmailOtp), vec![4]);
+    }
+
+    /// A user stored before 3.0.0 with a phone and a pending
+    /// `ENROLL_PHONE_OTP` still decodes; the retired data is dropped.
+    #[test]
+    fn a_pre_3_0_record_with_sms_data_decodes_without_it() {
+        let ts = Timestamp::from_micros(1_000);
+        let record = UserStorageRecord {
+            id: UserId::new(uuid::Uuid::new_v4()),
+            email: "old@example.com".to_string(),
+            display_name: "Old".to_string(),
+            first_name: String::new(),
+            last_name: String::new(),
+            attributes: BTreeMap::new(),
+            status: UserStatus::Active,
+            required_actions: vec![
+                StoredRequiredAction::RetiredEnrollPhoneOtp,
+                StoredRequiredAction::EnrollEmailOtp,
+            ],
+            email_verified: true,
+            retired_phone_number: Some("+15555550100".to_string()),
+            retired_phone_verified: true,
+            email_otp_enabled: false,
+            created_at: ts,
+            updated_at: ts,
+        };
+        let bytes = crate::codec::encode(&record).expect("encode");
+        let decoded: UserStorageRecord = crate::codec::decode(&bytes).expect("decode");
+        let user = User::from_storage_record(decoded);
+        assert_eq!(user.required_actions(), &[RequiredAction::EnrollEmailOtp]);
+
+        let rewritten = user.to_storage_record();
+        assert_eq!(rewritten.retired_phone_number, None, "never written again");
+        assert!(!rewritten.retired_phone_verified);
+        assert_eq!(
+            rewritten.required_actions,
+            vec![StoredRequiredAction::EnrollEmailOtp]
+        );
+    }
+
+    /// The JSON form (backup export) drops the retired action by name.
+    #[test]
+    fn json_with_enroll_phone_otp_imports_without_it() {
+        let user = User::new(
+            UserId::new(uuid::Uuid::new_v4()),
+            "j@example.com".to_string(),
+            "J".to_string(),
+            String::new(),
+            String::new(),
+            UserStatus::Active,
+            vec![RequiredAction::VerifyEmail],
+            Timestamp::from_micros(1),
+            Timestamp::from_micros(1),
+        );
+        let mut json = serde_json::to_value(&user).expect("to json");
+        json["required_actions"] = serde_json::json!(["ENROLL_PHONE_OTP", "VERIFY_EMAIL"]);
+        json["phone_number"] = serde_json::json!("+15555550100");
+        json["phone_verified"] = serde_json::json!(true);
+        let back: User = serde_json::from_value(json).expect("old export must import");
+        assert_eq!(back.required_actions(), &[RequiredAction::VerifyEmail]);
     }
 }

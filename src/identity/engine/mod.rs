@@ -22,7 +22,6 @@ use crate::identity::claims_config::{
     resolve_claims_for_target, ClaimEvaluationContext, ClaimTarget,
 };
 use crate::identity::credentials::{self, CleartextPassword, CredentialConfig, StoredCredential};
-use crate::identity::device_fp::{DeviceFingerprintOutcome, DeviceFingerprintStore};
 use crate::identity::error::IdentityError;
 use crate::identity::federation::saml::SamlError;
 use crate::identity::keys;
@@ -549,8 +548,6 @@ impl Default for IdentityConfig {
 struct HeldSecondFactors {
     /// An enabled TOTP enrolment.
     totp: bool,
-    /// A verified phone number on a realm that offers `sms`.
-    sms: bool,
     /// An email-OTP enrolment on a realm that offers `email_otp`.
     email_otp: bool,
     /// A registered passkey on a realm that offers `webauthn`.
@@ -560,12 +557,12 @@ struct HeldSecondFactors {
 impl HeldSecondFactors {
     /// Whether the user holds any second factor at all.
     fn any(self) -> bool {
-        self.totp || self.sms || self.email_otp || self.webauthn
+        self.totp || self.email_otp || self.webauthn
     }
 
     /// Whether the user holds a factor other than a passkey.
     fn any_besides_webauthn(self) -> bool {
-        self.totp || self.sms || self.email_otp
+        self.totp || self.email_otp
     }
 }
 
@@ -925,11 +922,6 @@ pub struct EmbeddedIdentityEngine {
     /// Injectable via `with_approval_transport` so tests capture deliveries
     /// in-process without a real HTTP server.
     approval_client: Arc<crate::identity::approval_notifier::ApprovalWebhookClient>,
-    /// Device fingerprint store for adaptive (risk-based) MFA.
-    ///
-    /// Holds HMAC-SHA256 digests of `(user_id, ip/24, user_agent)` with expiry
-    /// timestamps. Shared across all realms — storage is realm-scoped internally.
-    device_fp: Arc<DeviceFingerprintStore>,
     /// Session-version store for the `sv` claim (HEA-930).
     ///
     /// Provides bump, delta-feed, and snapshot operations on the `ssv:` key
@@ -1454,7 +1446,6 @@ impl EmbeddedIdentityEngine {
         // paths refuse unenveloped material (audit 2026-08-28 §4.15#7).
         Self::enroll_store_in_key_encryption(&storage, kek)?;
         let signing_key = Arc::new(Self::load_or_persist_global_signing_key(&storage, kek)?);
-        let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
         let sv_store = Arc::new(SessionVersionStore::new(
             Arc::clone(&storage),
             Arc::clone(&clock),
@@ -1529,7 +1520,6 @@ impl EmbeddedIdentityEngine {
             approval_client: Arc::new(
                 crate::identity::approval_notifier::ApprovalWebhookClient::new(),
             ),
-            device_fp,
             sv_store,
             session_cache: Arc::clone(&caches.sessions),
             session_cache_gen: Arc::clone(&caches.session_gen),
@@ -1886,7 +1876,6 @@ impl EmbeddedIdentityEngine {
         audit: Arc<dyn AuditEngine>,
     ) -> Self {
         let dummy_hash = credentials::compute_dummy_hash(&config.credential);
-        let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
         let sv_store = Arc::new(SessionVersionStore::new(
             Arc::clone(&storage),
             Arc::clone(&clock),
@@ -1961,7 +1950,6 @@ impl EmbeddedIdentityEngine {
             approval_client: Arc::new(
                 crate::identity::approval_notifier::ApprovalWebhookClient::new(),
             ),
-            device_fp,
             sv_store,
             session_cache: Arc::clone(&caches.sessions),
             session_cache_gen: Arc::clone(&caches.session_gen),
@@ -2675,7 +2663,7 @@ impl EmbeddedIdentityEngine {
         now_unix_ts: u64,
         limit_err: IdentityError,
     ) -> Result<(), IdentityError> {
-        use crate::identity::sms::otp::StoredResendCount;
+        use crate::identity::otp::StoredResendCount;
 
         let current = match self
             .storage
@@ -2814,7 +2802,6 @@ impl EmbeddedIdentityEngine {
         };
         Ok(HeldSecondFactors {
             totp,
-            sms: offers("sms") && user.phone_verified(),
             email_otp: offers("email_otp") && user.email_otp_enabled(),
             webauthn,
         })
@@ -4108,55 +4095,6 @@ impl EmbeddedIdentityEngine {
         if let Some(ref required_jkt) = family.bound_jkt {
             if dpop_jkt != Some(required_jkt.as_str()) {
                 return Err(IdentityError::DPopBindingMismatch);
-            }
-        }
-
-        // A-49: detect refresh-context drift (UA hash / ASN change) and score.
-        // Fail-open: no bind_ctx or no stored hash → skip check.
-        if let Some(ctx) = bind_ctx {
-            let current_ua_hash = ctx
-                .user_agent
-                .as_deref()
-                .map(|ua| Self::sha256_hex(ua.as_bytes()));
-
-            let ua_changed = match (&current_ua_hash, &family.ua_hash) {
-                (Some(cur), Some(stored)) => cur != stored,
-                _ => false,
-            };
-            let asn_changed = match (ctx.asn, family.bound_asn) {
-                (Some(cur), Some(stored)) => cur != stored,
-                _ => false,
-            };
-
-            if ua_changed || asn_changed {
-                use crate::identity::risk::{
-                    DefaultRiskScorer, RiskContext, RiskScorer, RiskSignal,
-                };
-                let realm_risk_cfg = self
-                    .get_realm(realm_id)?
-                    .ok_or(IdentityError::RealmNotFound)?
-                    .config()
-                    .risk_scorer_config
-                    .clone()
-                    .unwrap_or_default();
-                let scorer = DefaultRiskScorer::new(realm_risk_cfg);
-                let risk_ctx = RiskContext {
-                    signals: vec![RiskSignal::RefreshContextDelta {
-                        ua_changed,
-                        asn_changed,
-                    }],
-                };
-                if scorer.score(&risk_ctx).step_up_required {
-                    return Err(IdentityError::StepUpChallengeRequired);
-                }
-            }
-
-            // Record UA hash on first refresh so subsequent exchanges can compare.
-            if family.ua_hash.is_none() {
-                family.ua_hash = current_ua_hash;
-            }
-            if family.bound_asn.is_none() {
-                family.bound_asn = ctx.asn;
             }
         }
 
@@ -6828,16 +6766,6 @@ impl EmbeddedIdentityEngine {
             user.set_required_actions(actions);
         }
 
-        // 4c. Apply phone_number change if requested.
-        if let Some(ref phone) = request.phone_number {
-            user.set_phone_number(phone.clone());
-        }
-
-        // 4d. Apply phone_verified change if requested.
-        if let Some(verified) = request.phone_verified {
-            user.set_phone_verified(verified);
-        }
-
         // 4e. Apply email_otp_enabled change if requested.
         if let Some(enabled) = request.email_otp_enabled {
             user.set_email_otp_enabled(enabled);
@@ -7165,7 +7093,7 @@ impl EmbeddedIdentityEngine {
         Ok(found_any)
     }
 
-    /// Removes the user's federation and SCIM links, device fingerprints, RBAC
+    /// Removes the user's federation and SCIM links, RBAC
     /// rows and owned agents.
     ///
     /// Part of [`cascade_user_rows`]; see it for the `bool` contract.
@@ -7231,12 +7159,6 @@ impl EmbeddedIdentityEngine {
                 .delete(realm_id, &scim_fwd_key)
                 .map_err(Self::storage_err)?;
         }
-
-        // 11. Cascade: delete all device fingerprints (GDPR Art. 17, AC-11).
-        //     Failures here must not block the deletion — fingerprints are
-        //     advisory risk signals, not authoritative data.  The UserDeleted
-        //     audit event already records that erasure happened.
-        let _ = self.device_fp.delete_all_for_user(realm_id, user_id);
 
         // 12. Cascade: purge RBAC role assignments and group memberships.
         self.rbac
@@ -8620,17 +8542,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.delete_user_impl(realm_id, user_id, None)
     }
 
-    fn delete_user_device_fingerprints(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-    ) -> Result<usize, IdentityError> {
-        // Archival is a freeze: refuse mutations on a non-active realm
-        // (audit 2026-08-28 §4.20#5).
-        self.require_active_realm(realm_id)?;
-        self.device_fp.delete_all_for_user(realm_id, user_id)
-    }
-
     fn create_user_attributed(
         &self,
         realm_id: &RealmId,
@@ -9566,8 +9477,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             client_id: ctx.client_id.clone(),
             resources: ctx.resource.iter().cloned().collect(),
             amr_values: Vec::new(),
-            ua_hash: None,
-            bound_asn: None,
             // RFC 9449 §5: the refresh path refuses a proof by any other key.
             bound_jkt: ctx.dpop_jkt.clone(),
         };
@@ -16634,17 +16543,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(stats)
     }
 
-    fn sweep_expired_fingerprints(
-        &self,
-        realm_id: &RealmId,
-        now_secs: i64,
-    ) -> Result<(u64, u64), IdentityError> {
-        let stats =
-            crate::identity::cleanup::sweep_fingerprints(realm_id, self.storage.as_ref(), now_secs)
-                .map_err(|e| IdentityError::Storage(Box::new(e)))?;
-        Ok((stats.evicted, stats.active))
-    }
-
     fn flush_approval_webhook_outbox(&self, realm_id: &RealmId) -> (u64, u64) {
         self.flush_approval_webhook_outbox_inner(realm_id)
     }
@@ -17067,251 +16965,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.initiate_logout_inner(realm_id, request)
     }
 
-    fn check_device_fingerprint(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-        ip: &str,
-        user_agent: &str,
-    ) -> Result<DeviceFingerprintOutcome, IdentityError> {
-        // Load realm config to check if adaptive MFA is enabled.
-        let realm = self
-            .get_realm(realm_id)?
-            .ok_or(IdentityError::RealmNotFound)?;
-        let cfg = &realm.config().adaptive_mfa;
-
-        if !cfg.enabled {
-            return Ok(DeviceFingerprintOutcome::Skipped);
-        }
-        // Fail-secure (BLK-2): enabled=true with empty or short HMAC secret is a
-        // misconfiguration that must surface as an error — silently skipping would issue
-        // tokens without the intended fingerprint gate (fail-open).
-        // NIST SP 800-107 recommends HMAC keys ≥ hash output length (32 bytes for SHA-256).
-        if cfg.fingerprint_hmac_secret.expose_secret().len() < 32 {
-            return Err(IdentityError::Internal {
-                reason: format!(
-                    "adaptive_mfa.enabled=true but fingerprint_hmac_secret is too short ({} bytes, minimum 32)",
-                    cfg.fingerprint_hmac_secret.expose_secret().len()
-                ),
-            });
-        }
-
-        let hmac = crate::identity::device_fp::DeviceFingerprintStore::derive_hmac(
-            cfg.fingerprint_hmac_secret.expose_secret(),
-            user_id,
-            ip,
-            user_agent,
-        );
-
-        match self.device_fp.check_and_refresh(
-            realm_id,
-            user_id,
-            &hmac,
-            cfg.recognition_window_days,
-        )? {
-            crate::identity::device_fp::FingerprintResult::Recognised => {
-                Ok(DeviceFingerprintOutcome::Recognised)
-            }
-            crate::identity::device_fp::FingerprintResult::Unrecognised => {
-                // Emit step-up audit event (LogOnly — login continues with challenge).
-                let metadata = Some(serde_json::json!({
-                    "user_id": user_id.as_uuid().to_string(),
-                    "reason": "unrecognised_device"
-                }));
-                let ctx = AuditContext {
-                    actor: Actor::User(user_id.clone()),
-                    metadata,
-                };
-                if let Err(e) = self.record_audit(
-                    realm_id,
-                    Some(&ctx),
-                    AuditAction::StepUpMfaTriggered,
-                    "user",
-                    &user_id.as_uuid().to_string(),
-                ) {
-                    tracing::warn!(error = %e, "StepUpMfaTriggered audit write failed — event lost");
-                }
-
-                // AC-6 vs AC-8: check whether user has an enrolled MFA factor.
-                let has_mfa = self.mfa_enabled(realm_id, user_id).unwrap_or(false)
-                    || self
-                        .list_webauthn_credentials(realm_id, user_id)
-                        .map(|creds| !creds.is_empty())
-                        .unwrap_or(false);
-
-                if has_mfa {
-                    Ok(DeviceFingerprintOutcome::StepUpRequired)
-                } else {
-                    Ok(DeviceFingerprintOutcome::EnrollMfaRequired)
-                }
-            }
-        }
-    }
-
-    fn record_device_fingerprint(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-        ip: &str,
-        user_agent: &str,
-    ) -> Result<(), IdentityError> {
-        let realm = self
-            .get_realm(realm_id)?
-            .ok_or(IdentityError::RealmNotFound)?;
-        let cfg = &realm.config().adaptive_mfa;
-        if !cfg.enabled {
-            return Ok(());
-        }
-        // Misconfiguration guard: skip recording silently when secret is empty.
-        if cfg.fingerprint_hmac_secret.expose_secret().is_empty() {
-            return Ok(());
-        }
-        let hmac = crate::identity::device_fp::DeviceFingerprintStore::derive_hmac(
-            cfg.fingerprint_hmac_secret.expose_secret(),
-            user_id,
-            ip,
-            user_agent,
-        );
-        self.device_fp
-            .record(realm_id, user_id, &hmac, cfg.recognition_window_days)
-    }
-
-    fn issue_sms_otp(
-        &self,
-        realm_id: &RealmId,
-        phone: &str,
-        otp_hmac_key_bytes: &[u8],
-        sender: &dyn crate::identity::sms::SmsSender,
-        now_unix_ts: u64,
-    ) -> Result<String, IdentityError> {
-        use crate::identity::sms::otp as otp_mod;
-
-        // 0. The realm must offer SMS as a factor (audit 2026-08-28 §4.18#10).
-        self.require_mfa_method(realm_id, "sms")?;
-
-        // 1. Per-phone resend throttle check.
-        let resend_suffix = otp_mod::phone_resend_key_suffix(phone);
-        let resend_key = keys::encode_sms_resend_count(&resend_suffix);
-        self.count_otp_resend(
-            realm_id,
-            &resend_key,
-            now_unix_ts,
-            IdentityError::SmsResendLimitExceeded,
-        )?;
-
-        // 2. Look up per-realm OTP config, falling back to module defaults.
-        use crate::identity::sms::otp::{OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS};
-        let (expiry_secs, max_attempts) = match self.get_realm(realm_id) {
-            Ok(Some(realm)) => {
-                let cfg = realm.config();
-                (
-                    cfg.sms_otp_expiry_seconds.unwrap_or(OTP_EXPIRY_SECS),
-                    cfg.sms_otp_max_attempts.unwrap_or(OTP_MAX_ATTEMPTS),
-                )
-            }
-            _ => (OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS),
-        };
-
-        // 3. Generate nonce + OTP, persist, send.
-        self.do_issue_sms_otp_inner(
-            realm_id,
-            phone,
-            otp_hmac_key_bytes,
-            sender,
-            now_unix_ts,
-            expiry_secs,
-            max_attempts,
-        )
-    }
-
-    fn verify_sms_otp(
-        &self,
-        realm_id: &RealmId,
-        nonce: &str,
-        phone: &str,
-        candidate_code: &str,
-        otp_hmac_key_bytes: &[u8],
-        now_unix_ts: u64,
-    ) -> Result<(), IdentityError> {
-        use crate::identity::sms::otp::StoredOtp;
-
-        self.require_mfa_method(realm_id, "sms")?;
-        let otp_key = keys::encode_sms_pending_otp(nonce);
-
-        // 0. Single-use under concurrency: hold the per-nonce lock across the
-        //    load → verify → delete window (audit 2026-08-28 §4.18#4).
-        let redemption_lock =
-            self.otp_redemption_lock(&Self::pending_otp_lock_key(realm_id, "sms", nonce));
-        // INVARIANT: sync window only — no `.await` between here and return.
-        let _redemption_guard = redemption_lock
-            .lock()
-            .expect("otp redemption lock poisoned");
-
-        // 1. Load the OTP record.
-        let bytes = self
-            .storage
-            .get(realm_id, &otp_key)
-            .map_err(Self::storage_err)?
-            .ok_or(IdentityError::InvalidSmsOtp)?;
-
-        let stored: StoredOtp =
-            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
-
-        // 2. Check expiry (delete stale record and fail vaguely).
-        if stored.is_expired(now_unix_ts) {
-            let _ = self.storage.delete(realm_id, &otp_key);
-            return Err(IdentityError::InvalidSmsOtp);
-        }
-
-        // 3-4. Spend one guess of the code's budget BEFORE checking it. The
-        //    budget is replicated guess slots, not a count in the record: a
-        //    node whose read of the record was stale wrote back a count that
-        //    had not seen the other nodes' guesses, so every node granted the
-        //    full budget (G6). Exhausted: delete the record and fail vaguely.
-        let Some(slot) = self.claim_guess_slot(
-            realm_id,
-            &keys::encode_guess_slot_prefix("sms-otp", nonce),
-            stored.max_attempts,
-            Self::otp_expiry(&stored),
-        )?
-        else {
-            let _ = self.storage.delete(realm_id, &otp_key);
-            return Err(IdentityError::InvalidSmsOtp);
-        };
-
-        // 5. Constant-time HMAC verification, bound to the expected phone.
-        let result = stored.verify(candidate_code, phone, otp_hmac_key_bytes);
-
-        match result {
-            Ok(()) => {
-                // 6a. Claim the code's single use, then delete the record.
-                //     The lock above is node-local and the record read is
-                //     local, so across a cluster only the replicated claim
-                //     can refuse the same code at a second node (G4).
-                if !self.claim_single_use(
-                    realm_id,
-                    &keys::encode_consumed_otp("sms", nonce),
-                    Self::otp_expiry(&stored),
-                )? {
-                    return Err(IdentityError::InvalidSmsOtp);
-                }
-                self.storage
-                    .delete(realm_id, &otp_key)
-                    .map_err(Self::storage_err)?;
-                Ok(())
-            }
-            Err(e) => {
-                // 6b. If that was the last guess, delete the record.
-                if slot >= stored.max_attempts {
-                    let _ = self.storage.delete(realm_id, &otp_key);
-                }
-                Err(e)
-            }
-        }
-    }
-
     fn issue_email_otp(
         &self,
         realm_id: &RealmId,
@@ -17321,9 +16974,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_branding: Option<&crate::identity::email::EmailBranding>,
         now_unix_ts: u64,
     ) -> Result<String, IdentityError> {
-        use crate::identity::sms::otp::{
-            self as otp_mod, StoredOtp, OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS,
-        };
+        use crate::identity::otp::{self as otp_mod, StoredOtp, OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS};
 
         // The realm must offer email OTP (audit 2026-08-28 §4.18#10).
         self.require_mfa_method(realm_id, "email_otp")?;
@@ -17332,7 +16983,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // (GA audit M12). Without it every render of the login challenge
         // mailed a fresh code, each good for five guesses: an unbounded
         // guessing budget, and a flood of the victim's inbox.
-        let resend_suffix = otp_mod::phone_resend_key_suffix(&email.to_ascii_lowercase());
+        let resend_suffix = otp_mod::recipient_resend_key_suffix(&email.to_ascii_lowercase());
         self.count_otp_resend(
             realm_id,
             &keys::encode_email_resend_count(&resend_suffix),
@@ -17394,7 +17045,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         otp_hmac_key_bytes: &[u8],
         now_unix_ts: u64,
     ) -> Result<(), IdentityError> {
-        use crate::identity::sms::otp::StoredOtp;
+        use crate::identity::otp::StoredOtp;
 
         self.require_mfa_method(realm_id, "email_otp")?;
         let otp_key = keys::encode_email_pending_otp(nonce);
@@ -18597,57 +18248,7 @@ impl EmbeddedIdentityEngine {
 }
 
 /// Generates and stores a new OTP then dispatches the SMS.
-impl EmbeddedIdentityEngine {
-    fn do_issue_sms_otp_inner(
-        &self,
-        realm_id: &RealmId,
-        phone: &str,
-        otp_hmac_key_bytes: &[u8],
-        sender: &dyn crate::identity::sms::SmsSender,
-        now_unix_ts: u64,
-        expiry_secs: u64,
-        max_attempts: u32,
-    ) -> Result<String, IdentityError> {
-        use crate::identity::sms::otp::{self as otp_mod, StoredOtp};
-        use crate::identity::sms::SmsMessage;
-
-        let rng = ring::rand::SystemRandom::new();
-        let nonce = otp_mod::generate_otp_nonce(&rng)?;
-        let expiry_unix_ts = now_unix_ts.saturating_add(expiry_secs);
-        let (digits, stored) = StoredOtp::create(
-            &rng,
-            otp_hmac_key_bytes,
-            phone,
-            expiry_unix_ts,
-            max_attempts,
-        )?;
-
-        let otp_key = keys::encode_sms_pending_otp(&nonce);
-        let otp_bytes = serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(realm_id, &otp_key, &otp_bytes)
-            .map_err(Self::storage_err)?;
-
-        sender
-            .send(&SmsMessage {
-                to: phone.to_string(),
-                body: format!("Your verification code is: {}", digits.as_str()),
-            })
-            // The transport's text can name the recipient; the reason is
-            // logged, so the number is masked in it (GA audit L21).
-            .map_err(|e| IdentityError::Internal {
-                reason: format!(
-                    "SMS delivery failed: {}",
-                    e.to_string()
-                        .replace(phone, &crate::identity::sms::mask_phone(phone))
-                ),
-            })?;
-
-        Ok(nonce)
-    }
-}
+impl EmbeddedIdentityEngine {}
 
 /// Classifies a PHC-formatted hash string into a [`PasswordAlgorithm`].
 ///
@@ -26077,59 +25678,6 @@ mod tests {
         assert!(
             matches!(err, IdentityError::MagicLinkTokenInvalid),
             "should be MagicLinkTokenInvalid, got: {err:?}"
-        );
-    }
-
-    // ===== Delete cascades to device fingerprints (GDPR Art.17 / AC-11) =====
-
-    #[test]
-    fn delete_user_cascades_device_fingerprints() {
-        let (_dir, engine, _clock) = setup_engine();
-        let realm = create_test_realm(&engine);
-        let user = create_test_user(&engine, &realm);
-
-        // Record two fingerprints for the user.
-        let secret = "test-secret-at-least-32-bytes-long!!";
-        let hmac1 = DeviceFingerprintStore::derive_hmac(secret, user.id(), "10.0.1.1", "UA/1");
-        let hmac2 = DeviceFingerprintStore::derive_hmac(secret, user.id(), "10.0.2.1", "UA/1");
-        engine
-            .device_fp
-            .record(&realm, user.id(), &hmac1, 30)
-            .expect("record fp1");
-        engine
-            .device_fp
-            .record(&realm, user.id(), &hmac2, 30)
-            .expect("record fp2");
-
-        // Confirm both are recognised before deletion.
-        assert_eq!(
-            engine
-                .device_fp
-                .check_and_refresh(&realm, user.id(), &hmac1, 30)
-                .expect("check1"),
-            crate::identity::device_fp::FingerprintResult::Recognised,
-            "fp1 must be recognised before delete"
-        );
-
-        // Delete the user — cascade must erase both fingerprints.
-        engine.delete_user(&realm, user.id()).expect("delete user");
-
-        // Both fingerprints must now be gone.
-        assert_eq!(
-            engine
-                .device_fp
-                .check_and_refresh(&realm, user.id(), &hmac1, 30)
-                .expect("check1-after"),
-            crate::identity::device_fp::FingerprintResult::Unrecognised,
-            "fp1 must be erased after delete_user"
-        );
-        assert_eq!(
-            engine
-                .device_fp
-                .check_and_refresh(&realm, user.id(), &hmac2, 30)
-                .expect("check2-after"),
-            crate::identity::device_fp::FingerprintResult::Unrecognised,
-            "fp2 must be erased after delete_user"
         );
     }
 

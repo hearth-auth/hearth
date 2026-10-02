@@ -60,6 +60,36 @@ pub const REMOVED_KEYS: &[RemovedKey] = &[
         feature: "the public gRPC API",
         replacement: Some("use the REST admin API under /admin"),
     },
+    RemovedKey {
+        path: "security.risk_scorer",
+        feature: "risk scoring and adaptive step-up MFA",
+        replacement: Some("MFA is a realm policy; set auth.mfa_required"),
+    },
+    RemovedKey {
+        path: "sms",
+        feature: "SMS one-time codes",
+        replacement: Some("use a passkey, TOTP or recovery codes as the second factor"),
+    },
+    RemovedKey {
+        path: "security.outbound_volume_shield.sms_soft_cap",
+        feature: "SMS one-time codes",
+        replacement: Some("use a passkey, TOTP or recovery codes as the second factor"),
+    },
+    RemovedKey {
+        path: "security.outbound_volume_shield.sms_hard_cap",
+        feature: "SMS one-time codes",
+        replacement: Some("use a passkey, TOTP or recovery codes as the second factor"),
+    },
+    RemovedKey {
+        path: "security.cross_realm_aggregation_cap.sms_realm_soft_cap",
+        feature: "SMS one-time codes",
+        replacement: Some("use a passkey, TOTP or recovery codes as the second factor"),
+    },
+    RemovedKey {
+        path: "security.cross_realm_aggregation_cap.sms_realm_hard_cap",
+        feature: "SMS one-time codes",
+        replacement: Some("use a passkey, TOTP or recovery codes as the second factor"),
+    },
 ];
 
 /// Returns the error for the first removed key present in `yaml`.

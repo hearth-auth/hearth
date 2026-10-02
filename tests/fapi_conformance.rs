@@ -9,7 +9,6 @@
 //! - FAPI-B-02: Direct authorize without PAR rejected under Baseline
 //! - FAPI-B-03: Valid Baseline request (PAR + PKCE) accepted
 //! - FAPI-B-04: Discovery advertises `fapi_profile = "baseline"`
-//! - FAPI-B-05: FAPI Baseline + SMS MFA preserves `via_par` through MFA resume
 //! - FAPI-B-06: Standard-profile client in FAPI Baseline realm must be DPoP-constrained
 //! - FAPI-B-07: HTTP server — PAR→authorize flow succeeds end-to-end (HEA-1025)
 //! - FAPI-B-08: HTTP server — direct authorize (no PAR) fails with FAPI error (HEA-1025)
@@ -803,105 +802,6 @@ async fn fapi_a07_realm_advanced_enforces_dpop_for_standard_profile_client() {
     );
 }
 
-/// FAPI-B-05 (regression HEA-1020): FAPI Baseline realm + SMS MFA — code must be
-/// issued when `via_par = true` is passed after OTP verification.
-///
-/// The old code hardcoded `via_par = false` in `sms_challenge_post` (and
-/// `resume_oidc_flow`), causing the FAPI gate to reject code issuance even when
-/// the original request went through PAR.  The negative half of the test
-/// (via_par=false rejected) ensures this test fails on the unfixed code.
-#[tokio::test]
-async fn fapi_b05_sms_mfa_resume_via_par_preserved() {
-    use hearth::identity::UpdateUserRequest;
-
-    let env = setup_with_profile(FapiProfile::Baseline).await;
-
-    // Enable SMS MFA on the FAPI Baseline realm.
-    let realm_rec = env
-        .harness
-        .identity()
-        .get_realm(&env.realm)
-        .expect("get realm")
-        .unwrap();
-    let mut config = realm_rec.config().clone();
-    config.mfa_methods = Some(vec!["sms".to_string()]);
-    env.harness
-        .identity()
-        .update_realm(
-            &env.realm,
-            &UpdateRealmRequest {
-                config: Some(config),
-                ..Default::default()
-            },
-        )
-        .expect("update realm with SMS MFA");
-
-    // Give the test user a verified phone so SMS MFA applies to their session.
-    env.harness
-        .identity()
-        .update_user(
-            &env.realm,
-            &env.user_id,
-            &UpdateUserRequest {
-                phone_number: Some(Some("+15555550101".to_string())),
-                phone_verified: Some(true),
-                ..UpdateUserRequest::default()
-            },
-        )
-        .expect("set verified phone");
-
-    // Positive: after successful OTP verification the web layer calls
-    // issue_authorization_code with via_par=true (the fixed behaviour).
-    let resp = env
-        .harness
-        .identity()
-        .issue_authorization_code(
-            &env.realm,
-            &env.user_id,
-            &env.client_id,
-            REDIRECT_URI,
-            "openid",
-            "sms-fapi-state",
-            Some(PKCE_CHALLENGE.to_string()),
-            Some(CodeChallengeMethod::S256),
-            Some("sms-nonce".to_string()),
-            vec!["sms".to_string()],
-            None, // response_mode
-            None, // jar_request
-            true, // via_par = true — what the fixed code passes
-        )
-        .expect("FAPI Baseline + SMS MFA: issue_authorization_code(via_par=true) must succeed");
-    assert!(!resp.code().is_empty(), "auth code must be non-empty");
-
-    // Negative: the old code hardcoded via_par=false in sms_challenge_post.
-    // The FAPI gate must reject it — this assertion fails on the unfixed code.
-    let err = env
-        .harness
-        .identity()
-        .issue_authorization_code(
-            &env.realm,
-            &env.user_id,
-            &env.client_id,
-            REDIRECT_URI,
-            "openid",
-            "sms-fapi-state-2",
-            Some(PKCE_CHALLENGE.to_string()),
-            Some(CodeChallengeMethod::S256),
-            Some("sms-nonce-2".to_string()),
-            vec!["sms".to_string()],
-            None,  // response_mode
-            None,  // jar_request
-            false, // via_par=false — what old code passed; FAPI gate must reject
-        )
-        .expect_err(
-            "FAPI Baseline + SMS MFA: issue_authorization_code(via_par=false) must be rejected",
-        );
-    assert!(
-        matches!(err, IdentityError::FapiViolation { .. }),
-        "expected FapiViolation, got: {err:?}"
-    );
-}
-
 /// FAPI-B-06 (regression [HEA-1022]): realm-level FAPI Baseline must enforce DPoP
 /// at token exchange even for clients without `profile: Fapi2`.
 ///
@@ -1480,7 +1380,6 @@ async fn fapi_b11_realm_baseline_enforces_dpop_on_refresh_for_standard_profile_c
     // must authenticate on refresh, so bind the call to the issuing client.
     let refresh_bind = hearth::identity::RefreshBindContext {
         authenticated_client_id: Some(client.client_id().clone()),
-        ..Default::default()
     };
     env.harness
         .identity()

@@ -395,7 +395,6 @@ async fn o1_refresh_token_bound_to_issuing_client() {
     // must not be able to redeem client_a's refresh token.
     let bind = RefreshBindContext {
         authenticated_client_id: Some(client_b.client_id().clone()),
-        ..Default::default()
     };
     let cross = h
         .identity()
@@ -409,7 +408,6 @@ async fn o1_refresh_token_bound_to_issuing_client() {
     // Sanity: authenticating as the correct client succeeds.
     let bind_ok = RefreshBindContext {
         authenticated_client_id: Some(client_a.client_id().clone()),
-        ..Default::default()
     };
     let ok = h
         .identity()

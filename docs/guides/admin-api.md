@@ -17,8 +17,7 @@ call answers `403` with `"error_description": "the target user holds admin permi
 lacks"`, and `503` when the target's permissions cannot be resolved. A user's admin permissions
 include those it holds only through an organization-scoped role or grant. The rule covers:
 
-- modification: `PATCH`/`DELETE /admin/users/{id}`, `DELETE /admin/users/{id}/device-fingerprints`,
-  the `disable` operation of `POST /admin/users/bulk` (a batch naming any such user is refused
+- modification: `PATCH`/`DELETE /admin/users/{id}`, the `disable` operation of `POST /admin/users/bulk` (a batch naming any such user is refused
   whole), `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`, SCIM `/scim/v2/Users`;
 - demotion: `DELETE /admin/assignments/{id}` (for a group assignment, every member of the group
   and of groups nested in it), `DELETE /admin/groups/{id}/members/{member_id}`,
@@ -150,7 +149,7 @@ Returns a single user record by UUID.
 }
 ```
 
-`required_actions` is omitted from the response when the array is empty. Possible values: `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `ENROLL_MFA`, `ENROLL_PHONE_OTP`.
+`required_actions` is omitted from the response when the array is empty. Possible values: `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `ENROLL_MFA`, `ENROLL_EMAIL_OTP`.
 
 ---
 
@@ -222,7 +221,7 @@ Adds or removes required actions on a specific user. The body uses a diff model 
 }
 ```
 
-Both `add` and `remove` accept any combination of `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `ENROLL_MFA`, and `ENROLL_PHONE_OTP`. Unknown action strings return `400`. Duplicates in `add` are silently ignored.
+Both `add` and `remove` accept any combination of `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `ENROLL_MFA`, and `ENROLL_EMAIL_OTP`. Unknown action strings return `400`. Duplicates in `add` are silently ignored.
 
 **Response (200 OK):** The updated user object (same shape as `GET /admin/users/{id}`).
 

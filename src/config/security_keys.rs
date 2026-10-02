@@ -182,14 +182,6 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
     ),
     key(
-        "security.cross_realm_aggregation_cap.sms_realm_hard_cap",
-        "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
-    ),
-    key(
-        "security.cross_realm_aggregation_cap.sms_realm_soft_cap",
-        "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
-    ),
-    key(
         "security.cross_realm_aggregation_cap.window",
         "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
     ),
@@ -290,14 +282,6 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
     ),
     key(
-        "security.outbound_volume_shield.sms_hard_cap",
-        "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
-    ),
-    key(
-        "security.outbound_volume_shield.sms_soft_cap",
-        "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
-    ),
-    key(
         "security.outbound_volume_shield.window",
         "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
     ),
@@ -388,38 +372,6 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/identity/engine/mod.rs (slug reservation)",
     ),
     key(
-        "security.risk_scorer.breach_corpus_weight",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.enabled",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.new_country_weight",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.new_device_weight",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.password_age_days_threshold",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.password_age_weight",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.refresh_context_delta_weight",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.step_up_threshold",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
         "security.slug_cooldown_days",
         "src/identity/keys.rs (slug reservation key TTL), src/main.rs",
     ),
@@ -455,8 +407,6 @@ pub(crate) const SECRET_KEYS_OUTSIDE_SECURITY: &[&str] = &[
     "email.mailgun.api_key",
     "email.postmark.server_token",
     "email.mailtrap.api_token",
-    "sms.twilio.auth_token",
-    "sms.sns.secret_access_key",
     "realms.*.scim.bearer_token",
     // `applications` and `federation.providers` are YAML *maps* keyed by client
     // id, so their leaf paths are `realms.<realm>.applications.<id>.<field>`.

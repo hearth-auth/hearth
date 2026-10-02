@@ -288,6 +288,10 @@ pub enum AuditAction {
     /// the MFA check after an unrecognised-device trigger.
     /// Metadata carries `user_id`.
     StepUpMfaCompleted,
+    // The seven SMS and device-fingerprint actions below are no longer
+    // emitted: SMS one-time codes and device fingerprinting were removed in
+    // 3.0.0. They stay so audit events written before 3.0.0 still decode and
+    // the audit chain still verifies. Never reuse or reorder them.
     /// An SMS OTP was generated and sent to a user's phone to begin
     /// phone-number enrollment. Metadata carries `phone_suffix` (last 4 digits,
     /// never full number).

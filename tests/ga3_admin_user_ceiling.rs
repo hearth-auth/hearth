@@ -239,8 +239,7 @@ async fn rest_users_admin_cannot_reemail_or_delete_superuser() {
     assert_eq!(f.email(&superuser), before, "email must be untouched");
 }
 
-/// Forcing a required action (e.g. `UPDATE_PASSWORD`) and erasing device
-/// fingerprints are user modifications too.
+/// Forcing a required action (e.g. `UPDATE_PASSWORD`) is a user modification too.
 #[tokio::test]
 async fn rest_users_admin_cannot_reset_superuser_state() {
     let f = Fixture::new().await;
@@ -259,17 +258,8 @@ async fn rest_users_admin_cannot_reset_superuser_state() {
             Some(json!({"add": ["UPDATE_PASSWORD"]})),
         )
         .await;
-    let fingerprints = f
-        .admin(
-            "DELETE",
-            &format!("/admin/users/{}/device-fingerprints", superuser.as_uuid()),
-            &token,
-            None,
-        )
-        .await;
 
     assert_eq!(actions, StatusCode::FORBIDDEN, "required-actions");
-    assert_eq!(fingerprints, StatusCode::FORBIDDEN, "device-fingerprints");
     let stored =
         f.h.identity()
             .get_user(&f.realm, &superuser)

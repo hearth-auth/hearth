@@ -8,9 +8,7 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::config::{
-    Config, EmailTransport, SmsTransport, StorageSection, TlsMinVersionYaml, ValidationIssue,
-};
+use hearth::config::{Config, EmailTransport, StorageSection, TlsMinVersionYaml, ValidationIssue};
 use hearth::core::{Clock, SystemClock};
 use hearth::identity::email::mailcatcher::{
     generate_password, MailcatcherSender, MailcatcherState,
@@ -21,9 +19,6 @@ use hearth::identity::email::{
     MailtrapEmailSender, PostmarkEmailSender, SendgridEmailSender, SharedEmailSender,
 };
 use hearth::identity::onboarding::{self, OnboardingService};
-use hearth::identity::sms::{
-    LoggingSmsSender, SharedSmsSender, SmsSecret, SnsSmsSender, TwilioSmsSender,
-};
 use hearth::identity::{
     CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, OidcConfig,
     RateLimitConfig, TokenConfig,
@@ -949,60 +944,6 @@ fn loadtest_unthrottle_decision(enabled: bool, dev: bool, http_bind: &str) -> Lo
     }
 }
 
-/// Resolves the SMS OTP HMAC key from `HEARTH_SMS_OTP_HMAC_KEY` at startup.
-///
-/// The key cryptographically binds OTP codes to the server. It is required
-/// **only when SMS is actually enabled** — i.e. `sms.transport` is a real
-/// transport (Twilio, AWS SNS). The `log` transport dispatches no real SMS, so
-/// the key is optional there (HEA-2105/H).
-///
-/// When the key is absent:
-/// * in dev mode a fresh random 32-byte key is generated for this process, so
-///   SMS MFA works out of the box against the (body-logging) dev transport;
-/// * otherwise the result is `None`, and every SMS OTP surface fails closed —
-///   no code is issued and no SMS challenge can pass. There is no fallback
-///   key: the handlers used to substitute an all-zero one, which made every
-///   stored OTP digest brute-forceable offline by anyone.
-///
-/// Pure apart from the OS RNG (no env access, no other I/O) so the startup gate
-/// is unit tested; the caller reads the env var and maps the `Err` message onto
-/// the fatal-startup path.
-fn resolve_sms_otp_hmac_key(
-    env_value: Option<&str>,
-    sms_transport: SmsTransport,
-    dev_mode: bool,
-) -> Result<Option<Vec<u8>>, String> {
-    match env_value {
-        Some(key) if !key.is_empty() => {
-            if key.len() < 32 {
-                return Err(
-                    "HEARTH_SMS_OTP_HMAC_KEY must be at least 32 bytes for adequate \
-                     HMAC-SHA256 security; use a 32+ byte random value"
-                        .into(),
-                );
-            }
-            Ok(Some(key.as_bytes().to_vec()))
-        }
-        // Missing or empty: only a hard error when a real SMS transport needs it.
-        _ => {
-            if sms_transport != SmsTransport::Log {
-                return Err("HEARTH_SMS_OTP_HMAC_KEY environment variable is required \
-                     when sms.transport is not 'log' (a real SMS transport is configured)"
-                    .into());
-            }
-            if dev_mode {
-                use ring::rand::SecureRandom as _;
-                let mut key = vec![0u8; 32];
-                ring::rand::SystemRandom::new()
-                    .fill(&mut key)
-                    .map_err(|_| "failed to generate a dev-mode SMS OTP HMAC key".to_string())?;
-                return Ok(Some(key));
-            }
-            Ok(None)
-        }
-    }
-}
-
 /// Outcome of the dev-mode loopback startup gate (HEA-1980).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DevBindCheck {
@@ -1659,7 +1600,6 @@ async fn run_serve(
     // Extract cleanup config before identity_config is consumed by the engine.
     let cleanup_enabled = identity_config.cleanup.enabled;
     let cleanup_interval_secs = identity_config.cleanup.interval_secs;
-    let dfp_sweeper_interval_secs = identity_config.cleanup.dfp_sweeper_interval_secs;
 
     // Build the RBAC engine before the identity engine — identity depends on rbac.
     let raw_rbac_engine = Arc::new(EmbeddedRbacEngine::new(
@@ -1817,23 +1757,6 @@ async fn run_serve(
     // Email sender + service (default: log transport — stderr at WARN level).
     let email_sender: SharedEmailSender = build_email_sender(&config, mailcatcher_state.as_ref())?;
     let email_service = Arc::new(build_email_service(email_sender, &config)?);
-
-    // SMS sender (default: log transport).
-    // HEARTH_SMS_OTP_HMAC_KEY cryptographically binds OTP codes to the server.
-    // It is required only when a real SMS transport is configured; the Log
-    // transport needs no key because no real SMS is sent (HEA-2105/H). Without
-    // one, dev mode generates a per-process key and production SMS OTP fails
-    // closed.
-    let sms_env = std::env::var("HEARTH_SMS_OTP_HMAC_KEY").ok();
-    let sms_hmac_key_bytes: Option<Vec<u8>> =
-        resolve_sms_otp_hmac_key(sms_env.as_deref(), config.sms.transport, config.dev_mode)?;
-    let sms_sender: SharedSmsSender = build_sms_sender(&config)?;
-    if config.sms.transport == SmsTransport::Log && !config.dev_mode {
-        warn!(
-            "sms.transport = log is active outside dev mode — no real SMS messages will be \
-             sent, SMS MFA cannot be enabled, and SMS OTP challenges fail closed"
-        );
-    }
 
     // Ensure a first-run setup token exists BEFORE realm reconciliation.
     // Reconciliation may auto-create realms from YAML config, which would
@@ -2200,78 +2123,6 @@ async fn run_serve(
                     }
                     offset += n;
                 }
-            }
-        });
-    }
-
-    // Background device-fingerprint TTL sweeper (GDPR proactive eviction).
-    if cleanup_enabled && dfp_sweeper_interval_secs > 0 {
-        let dfp_engine = Arc::clone(&identity_engine);
-        tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(Duration::from_secs(dfp_sweeper_interval_secs));
-            // Skip the immediate first tick so the server finishes warm-up.
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let batch = hearth::core::MAX_PAGE_LIMIT;
-                let mut total_evicted: u64 = 0;
-                let mut total_active: u64 = 0;
-                let mut offset = 0u64;
-                loop {
-                    let page = match dfp_engine
-                        .list_realms(&hearth::core::PageRequest::new(offset, batch))
-                    {
-                        Ok(p) => p,
-                        Err(e) => {
-                            warn!(error = %e, "dfp_sweeper: realm enumeration failed, retrying next tick");
-                            break;
-                        }
-                    };
-                    let n = page.items.len() as u64;
-                    let now_secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    for realm in &page.items {
-                        match dfp_engine.sweep_expired_fingerprints(realm.id(), now_secs) {
-                            Ok((evicted, active)) => {
-                                total_evicted += evicted;
-                                total_active += active;
-                                if evicted > 0 {
-                                    info!(
-                                        realm = %realm.name(),
-                                        evicted,
-                                        active,
-                                        "dfp_sweeper: evicted expired fingerprints",
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                warn!(
-                                    realm = %realm.name(),
-                                    error = %e,
-                                    "dfp_sweeper: sweep failed for realm",
-                                );
-                            }
-                        }
-                    }
-                    if n == 0 || offset + n >= page.total {
-                        break;
-                    }
-                    offset += n;
-                }
-                // Realistic eviction/active counts never approach 2^53, so the
-                // u64 → f64 conversion is lossless in practice. Prometheus
-                // counter/gauge APIs accept f64 only.
-                #[allow(clippy::cast_precision_loss)]
-                let evicted_f64 = total_evicted as f64;
-                #[allow(clippy::cast_precision_loss)]
-                let active_f64 = total_active as f64;
-                hearth::metrics::metrics()
-                    .dfp_sweeper_evicted_total
-                    .inc_by(evicted_f64);
-                hearth::metrics::metrics().dfp_keys_active.set(active_f64);
             }
         });
     }
@@ -2795,7 +2646,6 @@ async fn run_serve(
         bot_signal = config.security.providers.bot_signal.enabled,
         email_reputation = config.security.providers.email_reputation.enabled,
         ip_reputation = config.security.ip_reputation.enabled,
-        risk_scorer = config.security.risk_scorer.enabled,
         "abuse-prevention guards installed"
     );
 
@@ -2825,7 +2675,6 @@ async fn run_serve(
             .with_agent_advanced(true)
             .with_email(Some(Arc::clone(&email_service)))
             .with_public_base_url(public_base_url.clone())
-            .with_sms_transport(config.sms.transport)
             .with_abuse_guards(Arc::clone(&abuse_guards)),
         )
     } else {
@@ -2851,7 +2700,6 @@ async fn run_serve(
             .with_agent_advanced(config.agent_auth.capabilities.advanced)
             .with_email(Some(Arc::clone(&email_service)))
             .with_public_base_url(public_base_url.clone())
-            .with_sms_transport(config.sms.transport)
             .with_abuse_guards(Arc::clone(&abuse_guards)),
         )
     };
@@ -2885,8 +2733,6 @@ async fn run_serve(
     .with_logo_url(web_logo_url)
     .with_default_realm(config.server.default_realm.clone())
     .with_config(Arc::new(config.clone()))
-    .with_sms(sms_sender, sms_hmac_key_bytes)
-    .with_sms_transport(config.sms.transport)
     .with_abuse_guards(Arc::clone(&abuse_guards))
     .with_dev_mode(config.dev_mode);
 
@@ -3654,47 +3500,6 @@ fn build_email_sender(
                 ApiKey::new(mt.api_key.clone()),
                 from.clone(),
                 mt.inbox_id,
-            ))
-        }
-    })
-}
-
-/// Builds the outbound SMS sender from configuration.
-///
-/// Returns the appropriate transport adapter based on the configured
-/// `sms.transport`. Fails if the transport config is structurally invalid.
-fn build_sms_sender(config: &Config) -> Result<SharedSmsSender, Box<dyn std::error::Error>> {
-    use hearth::identity::sms::http::UreqSmsTransport;
-
-    Ok(match config.sms.transport {
-        // Only dev mode may log the body: it carries the one-time code.
-        SmsTransport::Log if config.dev_mode => Arc::new(LoggingSmsSender::new_dev()),
-        SmsTransport::Log => Arc::new(LoggingSmsSender::new()),
-        SmsTransport::Twilio => {
-            let tw = config
-                .sms
-                .twilio
-                .as_ref()
-                .ok_or("sms.twilio block is required for twilio transport")?;
-            Arc::new(TwilioSmsSender::new(
-                UreqSmsTransport,
-                tw.account_sid.clone(),
-                SmsSecret::new(tw.auth_token.clone()),
-                tw.from.clone(),
-            ))
-        }
-        SmsTransport::AwsSns => {
-            let sns = config
-                .sms
-                .aws_sns
-                .as_ref()
-                .ok_or("sms.aws_sns block is required for awssns transport")?;
-            Arc::new(SnsSmsSender::new(
-                UreqSmsTransport,
-                sns.region.clone(),
-                sns.access_key_id.clone(),
-                SmsSecret::new(sns.secret_access_key.clone()),
-                sns.sender_id.clone(),
             ))
         }
     })
@@ -7305,99 +7110,6 @@ mod tests {
             "init_cli_tracing must no-op when a dispatcher is already set"
         );
         drop(first);
-    }
-
-    // ── resolve_sms_otp_hmac_key (HEA-2105/H startup gate) ────────────────
-
-    #[test]
-    fn sms_key_optional_for_log_transport_in_production() {
-        // Production deploy (dev_mode is not a factor), Log transport, no key:
-        // the server must start with no HMAC key rather than refusing to boot.
-        // This is the fail-then-pass case for HEA-2105/H — before the fix the
-        // `|| !dev_mode` clause forced the key on every non-dev deployment.
-        let decision = resolve_sms_otp_hmac_key(None, SmsTransport::Log, false);
-        assert_eq!(decision, Ok(None));
-    }
-
-    #[test]
-    fn sms_key_optional_for_log_transport_when_empty() {
-        // An empty env var is treated the same as absent under Log transport.
-        let decision = resolve_sms_otp_hmac_key(Some(""), SmsTransport::Log, false);
-        assert_eq!(decision, Ok(None));
-    }
-
-    #[test]
-    fn sms_key_required_for_real_transport_when_missing() {
-        // SMS actually enabled (Twilio) but no key → hard startup error.
-        let err = resolve_sms_otp_hmac_key(None, SmsTransport::Twilio, false)
-            .expect_err("real transport without a key must be rejected");
-        assert!(
-            err.contains("HEARTH_SMS_OTP_HMAC_KEY environment variable is required"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[test]
-    fn sms_key_required_for_real_transport_when_empty() {
-        let err = resolve_sms_otp_hmac_key(Some(""), SmsTransport::AwsSns, false)
-            .expect_err("real transport with an empty key must be rejected");
-        assert!(
-            err.contains("HEARTH_SMS_OTP_HMAC_KEY environment variable is required"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[test]
-    fn sms_key_too_short_is_rejected_for_real_transport() {
-        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Twilio, false)
-            .expect_err("a sub-32-byte key must be rejected");
-        assert!(
-            err.contains("at least 32 bytes"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[test]
-    fn sms_key_too_short_is_rejected_even_under_log_transport() {
-        // A supplied-but-malformed key is always an error, even for Log — the
-        // operator clearly intended to set one, so surface the mistake.
-        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Log, false)
-            .expect_err("a sub-32-byte key must be rejected");
-        assert!(
-            err.contains("at least 32 bytes"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[test]
-    fn sms_key_accepted_when_valid() {
-        let key = "0123456789abcdef0123456789abcdef"; // exactly 32 bytes
-        let decision = resolve_sms_otp_hmac_key(Some(key), SmsTransport::Twilio, false);
-        assert_eq!(decision, Ok(Some(key.as_bytes().to_vec())));
-    }
-
-    // ── fix/ga-sms: no all-zero key, random per-process key in dev only ──
-
-    #[test]
-    fn dev_mode_without_a_key_gets_a_random_non_zero_key() {
-        let a = resolve_sms_otp_hmac_key(None, SmsTransport::Log, true)
-            .expect("dev mode must start without a key")
-            .expect("dev mode must get a generated key, not none");
-        let b = resolve_sms_otp_hmac_key(Some(""), SmsTransport::Log, true)
-            .expect("dev mode must start without a key")
-            .expect("dev mode must get a generated key, not none");
-        assert_eq!(a.len(), 32, "a 32-byte HMAC-SHA256 key");
-        assert!(a.iter().any(|&x| x != 0), "never the all-zero key");
-        assert_ne!(a, b, "generated per call from the OS RNG, not a constant");
-    }
-
-    #[test]
-    fn dev_mode_keeps_an_operator_supplied_key() {
-        let key = "0123456789abcdef0123456789abcdef";
-        assert_eq!(
-            resolve_sms_otp_hmac_key(Some(key), SmsTransport::Log, true),
-            Ok(Some(key.as_bytes().to_vec()))
-        );
     }
 
     // ── loadtest_unthrottle_decision (HEA-1796 prod-safety gate) ──────────

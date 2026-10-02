@@ -43,6 +43,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   load-test unthrottle gate now consider only the HTTP bind. Cluster nodes still talk to each
   other over the internal Raft peer transport (`cluster.peer_address`); that is not a public API.
   The `proto/` message definitions stay as the schema of the REST API.
+- **BREAKING: SMS one-time codes are removed.** The `sms:` config block (`log`, `twilio`,
+  `awssns`), the `HEARTH_SMS_OTP_HMAC_KEY` variable, `sms` as an `mfa_methods` value, the
+  `ENROLL_PHONE_OTP` required action, `/ui/sms-challenge`, the `/required-action/ENROLL_PHONE_OTP`
+  pages, the console's "Remove phone" action, user phone numbers, the realm-config fields
+  `sms_otp_expiry_seconds` / `sms_otp_max_attempts`, the error codes `HEARTH_INVALID_SMS_OTP` /
+  `HEARTH_SMS_RESEND_LIMIT_EXCEEDED` and the SMS caps of the outbound volume shield and the
+  cross-realm aggregation cap are gone. Second factors are TOTP (with recovery codes), passkeys
+  and security keys, and email OTP. A user stored before 3.0.0 with a phone number or a pending
+  `ENROLL_PHONE_OTP` still loads; both are dropped.
+- **BREAKING: risk scoring, adaptive MFA and device fingerprinting are removed.** MFA is a
+  policy (`mfa_required`), never a score. Gone: `security.risk_scorer`, the refresh-token
+  User-Agent/ASN drift check that fed it, per-realm `adaptive_mfa`, device-fingerprint records
+  and their TTL sweeper (with the metrics `hearth_dfp_sweeper_evicted_total` and
+  `hearth_dfp_keys_active`), and `DELETE /admin/users/{id}/device-fingerprints`. Refresh tokens
+  keep their DPoP-key and confidential-client binding. The email OTP key is now always derived
+  from the process cookie secret, like the login cookie it belongs to.
 
 ### Security
 - **`GET /admin/users/{id}/effective-permissions?org_id=` no longer reports a suspended
@@ -61,7 +77,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 - **BREAKING: a configuration key of a removed feature now stops startup with a named
   error.** Instead of serde's generic "unknown field", the message names the key, the removed
   feature, the release that removed it (3.0.0) and what to use instead. The check runs in every
-  loader, `serve --dev` included. First key covered: `realms.<name>.saml_service_providers`.
+  loader, `serve --dev` included. Keys covered: `realms.<name>.saml_service_providers`, the
+  gRPC keys, `sms`, `security.risk_scorer` and the four SMS shield caps.
 - Backups no longer contain `saml_service_providers.ndjson`. Restoring an older archive that
   does skips that member with a warning and lists it in the restore summary
   (`ImportReport::retired_members`); the rest of the realm restores as before.

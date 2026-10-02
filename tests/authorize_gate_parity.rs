@@ -2,19 +2,21 @@
 //!
 //! `GET /ui/oauth/authorize` has four ways to reach code issuance: a plain
 //! request, a signed request object (JAR, RFC 9101), a pushed request
-//! (`request_uri`, RFC 9126) and the resumes at the end of the
-//! required-action and SMS-challenge interstitials. Only the plain branch
-//! used to run the consent interstitial and honour `prompt`; the others
-//! issued a code straight away — a third-party client got a code without
-//! the user ever approving it. The PAR branch and the SMS resume also
-//! dropped the requested `response_mode`, so a `fragment` / JARM request
-//! got a plain query-string redirect.
+//! (`request_uri`, RFC 9126) and the resume at the end of the required-action
+//! interstitial. Only the plain branch used to run the consent interstitial
+//! and honour `prompt`; the others issued a code straight away — a
+//! third-party client got a code without the user ever approving it. The PAR
+//! branch and the interstitial resumes also dropped the requested
+//! `response_mode`, so a `fragment` / JARM request got a plain query-string
+//! redirect. (The SMS-challenge interstitial these tests also drove was
+//! removed in Hearth 3.0.0; its resume tests now run through a required
+//! action.)
 //!
 //! And the required-action intercept read a user-lookup *error* as "no
 //! required actions", so a storage fault skipped a forced password change —
 //! one call deeper, a client or RBAC lookup error skipped the MFA enrolment a
 //! client or role mandates. A `prompt=none` request was redirected into the
-//! required-action and SMS interstitials instead of being refused.
+//! required-action interstitial instead of being refused.
 //!
 //! Each branch is driven through the public web router.
 
@@ -32,8 +34,7 @@ use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::{
     CleartextPassword, CreateRealmRequest, CreateUserRequest, CredentialConfig,
     EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, OAuthClient, RealmConfig,
-    RegisterClientRequest, RequiredAction, SessionContext, SmsError, SmsMessage, SmsSender,
-    UpdateUserRequest, UserStatus,
+    RegisterClientRequest, RequiredAction, SessionContext, UpdateUserRequest, UserStatus,
 };
 use hearth::protocol::web::{self, CookieSecret, WebState};
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
@@ -45,9 +46,7 @@ use tower::ServiceExt as _;
 const COOKIE_SECRET: [u8; 32] = [73u8; 32];
 const CSRF: &str = "authorize-gate-parity-csrf";
 const USER_EMAIL: &str = "gate-user@parity.test";
-const PHONE: &str = "+15555550163";
 const REDIRECT: &str = "https://app.example.com/cb";
-const SMS_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 const PKCE_VERIFIER: &str = "verifier-verifier-verifier-verifier-7";
 const JAR_KID: &str = "gate-parity-jar-key";
 const RESOURCE: &str = "https://api.example.com/v1";
@@ -71,28 +70,6 @@ fn now_secs() -> u64 {
 // ---------------------------------------------------------------------------
 // Rig
 // ---------------------------------------------------------------------------
-
-struct CapturingSms {
-    messages: Mutex<Vec<SmsMessage>>,
-}
-
-impl CapturingSms {
-    fn last_code(&self) -> String {
-        #[allow(clippy::unwrap_used)]
-        let guard = self.messages.lock().unwrap();
-        let body = guard.last().expect("an SMS was sent").body.clone();
-        let (_, code) = body.rsplit_once(": ").expect("code in body");
-        code.trim().to_string()
-    }
-}
-
-impl SmsSender for CapturingSms {
-    fn send(&self, message: &SmsMessage) -> Result<(), SmsError> {
-        #[allow(clippy::unwrap_used)]
-        self.messages.lock().unwrap().push(message.clone());
-        Ok(())
-    }
-}
 
 fn null_email() -> Arc<EmailService> {
     Arc::new(
@@ -137,22 +114,16 @@ struct Rig {
     identity: Arc<dyn IdentityEngine>,
     realm_id: RealmId,
     user_id: UserId,
-    sms: Arc<CapturingSms>,
 }
 
-/// A realm, an active user with a verified phone, and the web router.
-/// `sms_realm` makes the realm require the SMS factor (with a working
-/// transport and OTP key wired).
-async fn rig(sms_realm: bool) -> Rig {
+/// A realm, an active user, and the web router.
+async fn rig() -> Rig {
     let harness = common::TestHarness::embedded().await.expect("harness");
     let identity = harness.identity_arc();
     let realm = identity
         .create_realm(&CreateRealmRequest {
             name: format!("gate-parity-{}", uuid::Uuid::new_v4()),
-            config: Some(RealmConfig {
-                mfa_methods: sms_realm.then(|| vec!["sms".to_string()]),
-                ..RealmConfig::default()
-            }),
+            config: Some(RealmConfig::default()),
         })
         .expect("realm");
     // RFC 8707: a `resource` must name a protected resource of the realm.
@@ -193,24 +164,18 @@ async fn rig(sms_realm: bool) -> Rig {
             user.id(),
             &UpdateUserRequest {
                 status: Some(UserStatus::Active),
-                phone_number: Some(Some(PHONE.to_string())),
-                phone_verified: Some(true),
                 ..Default::default()
             },
         )
         .expect("activate");
 
     let data_dir = tempfile::tempdir().expect("tempdir");
-    let sms = Arc::new(CapturingSms {
-        messages: Mutex::new(Vec::new()),
-    });
     let state = web_state(
         Arc::clone(&identity),
         harness.rbac_arc(),
         harness.audit_arc(),
         data_dir.path().to_path_buf(),
     )
-    .with_sms(Arc::clone(&sms) as _, Some(SMS_KEY.to_vec()))
     .with_default_realm(Some(realm.name().to_string()));
     Rig {
         app: web::router(state),
@@ -219,7 +184,6 @@ async fn rig(sms_realm: bool) -> Rig {
         identity,
         realm_id: realm.id().clone(),
         user_id: user.id().clone(),
-        sms,
     }
 }
 
@@ -268,6 +232,19 @@ fn require_password_update(rig: &Rig) {
             },
         )
         .expect("require a password update");
+}
+
+fn require_email_verification(rig: &Rig) {
+    rig.identity
+        .update_user(
+            &rig.realm_id,
+            &rig.user_id,
+            &UpdateUserRequest {
+                required_actions: Some(vec![RequiredAction::VerifyEmail]),
+                ..Default::default()
+            },
+        )
+        .expect("require email verification");
 }
 
 /// A signed UI session cookie (plus the CSRF cookie) for the rig's user.
@@ -639,6 +616,22 @@ fn par_uri(
     push(rig, &request)
 }
 
+/// Completes the pending VERIFY_EMAIL action started by `authorize_resp`: the
+/// user follows the emailed link, then the action page sees the verified
+/// address, clears the action and resumes the authorization.
+async fn complete_email_verification(rig: &Rig, authorize_resp: &Response<Body>) -> Response<Body> {
+    assert_eq!(location(authorize_resp), "/required-action/VERIFY_EMAIL");
+    let ra = cookie_pair(authorize_resp, "hearth_ra_session").expect("RA cookie");
+    let token = rig
+        .identity
+        .issue_email_verification_token(&rig.realm_id, &rig.user_id)
+        .expect("issue a verification token");
+    rig.identity
+        .verify_email_token(&rig.realm_id, &token)
+        .expect("verify the email address");
+    get(rig, "/required-action/VERIFY_EMAIL", &ra).await
+}
+
 /// Completes the pending UPDATE_PASSWORD action started by `authorize_resp`.
 async fn complete_password_update(rig: &Rig, authorize_resp: &Response<Body>) -> Response<Body> {
     let ra = cookie_pair(authorize_resp, "hearth_ra_session").expect("RA cookie");
@@ -665,31 +658,13 @@ async fn complete_password_update(rig: &Rig, authorize_resp: &Response<Body>) ->
     .await
 }
 
-/// Submits the SMS code for the challenge started by `authorize_resp`.
-async fn pass_sms_challenge(
-    rig: &Rig,
-    cookies: &str,
-    authorize_resp: &Response<Body>,
-) -> Response<Body> {
-    assert_eq!(location(authorize_resp), "/ui/sms-challenge");
-    let sms_cookie = cookie_pair(authorize_resp, "hearth_ui_sms_mfa").expect("SMS cookie");
-    let code = rig.sms.last_code();
-    post_form(
-        rig,
-        "/ui/sms-challenge",
-        &format!("{cookies}; {sms_cookie}"),
-        format!("code={code}&_csrf={CSRF}"),
-    )
-    .await
-}
-
 // ===========================================================================
 // Control: the plain branch (the reference behaviour)
 // ===========================================================================
 
 #[tokio::test]
 async fn plain_authorize_for_a_consent_client_shows_the_consent_prompt() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, true, None);
     let resp = get(&rig, &plain_uri(&client, ""), &session_cookie(&rig)).await;
     assert_consent_prompt(&resp, "plain");
@@ -701,7 +676,7 @@ async fn plain_authorize_for_a_consent_client_shows_the_consent_prompt() {
 
 #[tokio::test]
 async fn jar_authorize_for_a_consent_client_shows_the_consent_prompt() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let (client, pair) = jar_client(&rig, true);
     let uri = jar_uri(&rig, &client, &pair, &serde_json::json!({}), "");
     let resp = get(&rig, &uri, &session_cookie(&rig)).await;
@@ -710,7 +685,7 @@ async fn jar_authorize_for_a_consent_client_shows_the_consent_prompt() {
 
 #[tokio::test]
 async fn jar_authorize_with_prompt_none_and_no_consent_returns_consent_required() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let (client, pair) = jar_client(&rig, true);
     let uri = jar_uri(&rig, &client, &pair, &serde_json::json!({}), "&prompt=none");
     let resp = get(&rig, &uri, &session_cookie(&rig)).await;
@@ -736,7 +711,7 @@ async fn jar_authorize_with_prompt_none_and_no_consent_returns_consent_required(
 
 #[tokio::test]
 async fn jar_request_object_prompt_none_is_honoured() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let (client, pair) = jar_client(&rig, true);
     let uri = jar_uri(
         &rig,
@@ -756,7 +731,7 @@ async fn jar_request_object_prompt_none_is_honoured() {
 
 #[tokio::test]
 async fn jar_authorize_with_prompt_consent_reprompts_despite_a_recorded_consent() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let (client, pair) = jar_client(&rig, true);
     grant_consent(&rig, &client);
     let uri = jar_uri(
@@ -773,7 +748,7 @@ async fn jar_authorize_with_prompt_consent_reprompts_despite_a_recorded_consent(
 /// Control: a recorded consent covering the scopes lets the JAR through.
 #[tokio::test]
 async fn jar_authorize_with_a_recorded_consent_issues_the_code() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let (client, pair) = jar_client(&rig, true);
     grant_consent(&rig, &client);
     let uri = jar_uri(&rig, &client, &pair, &serde_json::json!({}), "");
@@ -790,7 +765,7 @@ async fn jar_authorize_with_a_recorded_consent_issues_the_code() {
 /// its state, its `response_mode` and its RFC 8707 resource.
 #[tokio::test]
 async fn jar_consent_approval_keeps_the_jar_response_mode_and_resource() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let (client, pair) = jar_client(&rig, true);
     let uri = jar_uri(
         &rig,
@@ -817,7 +792,7 @@ async fn jar_consent_approval_keeps_the_jar_response_mode_and_resource() {
 /// The request object's own `response_mode` claim wins over the outer query.
 #[tokio::test]
 async fn jar_request_object_response_mode_is_honoured() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let (client, pair) = jar_client(&rig, false);
     let uri = jar_uri(
         &rig,
@@ -840,7 +815,7 @@ async fn jar_request_object_response_mode_is_honoured() {
 
 #[tokio::test]
 async fn par_authorize_for_a_consent_client_shows_the_consent_prompt() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, true, None);
     let uri = par_uri(&rig, &client, None, None);
     let resp = get(&rig, &uri, &session_cookie(&rig)).await;
@@ -849,7 +824,7 @@ async fn par_authorize_for_a_consent_client_shows_the_consent_prompt() {
 
 #[tokio::test]
 async fn par_stored_response_mode_is_honoured() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, false, None);
     let uri = par_uri(&rig, &client, Some("fragment"), None);
     let resp = get(&rig, &uri, &session_cookie(&rig)).await;
@@ -868,7 +843,7 @@ async fn par_stored_response_mode_is_honoured() {
 /// and PAR origin.
 #[tokio::test]
 async fn par_consent_approval_keeps_the_pushed_response_mode_and_resource() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, true, None);
     let uri = par_uri(&rig, &client, Some("fragment"), Some(RESOURCE));
     let cookies = session_cookie(&rig);
@@ -893,7 +868,7 @@ async fn par_consent_approval_keeps_the_pushed_response_mode_and_resource() {
 
 #[tokio::test]
 async fn par_authorize_with_prompt_none_and_no_consent_returns_consent_required() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, true, None);
     let mut request = par_request(&client);
     request.prompt = Some("none".to_string());
@@ -917,7 +892,7 @@ async fn par_authorize_with_prompt_none_and_no_consent_returns_consent_required(
 
 #[tokio::test]
 async fn par_authorize_with_prompt_consent_reprompts_despite_a_recorded_consent() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, true, None);
     grant_consent(&rig, &client);
     let mut request = par_request(&client);
@@ -929,7 +904,7 @@ async fn par_authorize_with_prompt_consent_reprompts_despite_a_recorded_consent(
 /// Control: without a pushed prompt a recorded consent lets the request through.
 #[tokio::test]
 async fn par_authorize_with_a_recorded_consent_issues_the_code() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, true, None);
     grant_consent(&rig, &client);
     let resp = get(
@@ -945,7 +920,7 @@ async fn par_authorize_with_a_recorded_consent_issues_the_code() {
 /// A request object pushed through PAR keeps its `prompt` claim.
 #[tokio::test]
 async fn par_pushed_request_object_prompt_none_is_honoured() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let (client, pair) = jar_client(&rig, true);
     let mut request = par_request(&client);
     request.request = Some(jar_jwt(
@@ -971,7 +946,7 @@ async fn par_pushed_request_object_prompt_none_is_honoured() {
 /// outer value.
 #[tokio::test]
 async fn par_pushed_request_object_prompt_wins_over_the_outer_prompt() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let (client, pair) = jar_client(&rig, true);
     grant_consent(&rig, &client);
     let mut request = par_request(&client);
@@ -997,7 +972,7 @@ async fn par_pushed_request_object_prompt_wins_over_the_outer_prompt() {
 /// pushed `prompt=consent` or add a `prompt=none` the client never pushed.
 #[tokio::test]
 async fn par_authorize_ignores_a_prompt_on_the_authorize_query() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, true, None);
     let uri = format!("{}&prompt=none", push(&rig, &par_request(&client)));
     let resp = get(&rig, &uri, &session_cookie(&rig)).await;
@@ -1008,7 +983,7 @@ async fn par_authorize_ignores_a_prompt_on_the_authorize_query() {
 /// advertises it, but the code response always came back as `query`.
 #[tokio::test]
 async fn engine_authorize_honours_the_fragment_response_mode() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, false, None);
     let resp = rig
         .identity
@@ -1066,7 +1041,7 @@ fn assert_fragment_error(loc: &str, error: &str, state: &str) {
 
 #[tokio::test]
 async fn plain_prompt_none_error_uses_the_fragment_response_mode() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, true, None);
     let uri = plain_uri(&client, "&prompt=none&response_mode=fragment");
     let resp = get(&rig, &uri, &session_cookie(&rig)).await;
@@ -1075,7 +1050,7 @@ async fn plain_prompt_none_error_uses_the_fragment_response_mode() {
 
 #[tokio::test]
 async fn jar_prompt_none_error_uses_the_fragment_response_mode() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let (client, pair) = jar_client(&rig, true);
     let uri = jar_uri(
         &rig,
@@ -1090,7 +1065,7 @@ async fn jar_prompt_none_error_uses_the_fragment_response_mode() {
 
 #[tokio::test]
 async fn par_prompt_none_error_uses_the_fragment_response_mode() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, true, None);
     let mut request = par_request(&client);
     request.prompt = Some("none".to_string());
@@ -1101,7 +1076,7 @@ async fn par_prompt_none_error_uses_the_fragment_response_mode() {
 
 #[tokio::test]
 async fn consent_denial_uses_the_fragment_response_mode() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, true, None);
     let uri = par_uri(&rig, &client, Some("fragment"), None);
     let cookies = session_cookie(&rig);
@@ -1115,7 +1090,7 @@ async fn consent_denial_uses_the_fragment_response_mode() {
 /// confirmed, also goes where the request asked.
 #[tokio::test]
 async fn plain_request_error_uses_the_fragment_response_mode() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, false, None);
     let uri = format!(
         "/ui/oauth/authorize?client_id={}&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb\
@@ -1132,7 +1107,7 @@ async fn plain_request_error_uses_the_fragment_response_mode() {
 /// is a signed `?response=` JWT, as the code would have been.
 #[tokio::test]
 async fn jar_prompt_none_error_uses_the_query_jwt_response_mode() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let (client, pair) = jar_client(&rig, true);
     assert!(client.authorization_signed_response_alg().is_none());
     let uri = jar_uri(
@@ -1157,7 +1132,7 @@ async fn jar_prompt_none_error_uses_the_query_jwt_response_mode() {
 
 #[tokio::test]
 async fn par_prompt_none_error_uses_the_fragment_jwt_response_mode() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, true, None);
     let mut request = par_request(&client);
     request.prompt = Some("none".to_string());
@@ -1177,70 +1152,12 @@ async fn par_prompt_none_error_uses_the_fragment_jwt_response_mode() {
 }
 
 // ===========================================================================
-// SMS challenge resume
-// ===========================================================================
-
-#[tokio::test]
-async fn sms_resume_for_a_consent_client_shows_the_consent_prompt() {
-    let rig = rig(true).await;
-    let client = register(&rig, true, None);
-    let cookies = session_cookie(&rig);
-    let resp = get(&rig, &plain_uri(&client, ""), &cookies).await;
-    let resp = pass_sms_challenge(&rig, &cookies, &resp).await;
-    assert_consent_prompt(&resp, "after the SMS challenge");
-}
-
-#[tokio::test]
-async fn sms_resume_keeps_the_requested_response_mode() {
-    let rig = rig(true).await;
-    let client = register(&rig, false, None);
-    let cookies = session_cookie(&rig);
-    let resp = get(
-        &rig,
-        &plain_uri(&client, "&response_mode=fragment"),
-        &cookies,
-    )
-    .await;
-    let resp = pass_sms_challenge(&rig, &cookies, &resp).await;
-    let loc = location(&resp);
-    assert!(
-        redirect_param(&loc, "code", true).is_some(),
-        "response_mode=fragment must survive the SMS challenge; got {loc}"
-    );
-}
-
-/// JAR + SMS + consent: the JAR's resource and response mode survive both
-/// interstitials, and the consent ticket carries them to the code.
-#[tokio::test]
-async fn jar_through_sms_and_consent_keeps_resource_and_response_mode() {
-    let rig = rig(true).await;
-    let (client, pair) = jar_client(&rig, true);
-    let uri = jar_uri(
-        &rig,
-        &client,
-        &pair,
-        &serde_json::json!({ "response_mode": "fragment", "resource": RESOURCE }),
-        "",
-    );
-    let cookies = session_cookie(&rig);
-    let resp = get(&rig, &uri, &cookies).await;
-    let resp = pass_sms_challenge(&rig, &cookies, &resp).await;
-    assert_consent_prompt(&resp, "JAR after SMS");
-    let resp = approve_consent(&rig, &cookies, &resp).await;
-    let loc = location(&resp);
-    let code = redirect_param(&loc, "code", true)
-        .unwrap_or_else(|| panic!("fragment response_mode must deliver #code=; got {loc}"));
-    let aud = exchanged_audience(&rig, &client, Some(&pair), code);
-    assert!(aud.iter().any(|a| a == RESOURCE), "aud = {aud:?}");
-}
-
-// ===========================================================================
 // Required-action resume
 // ===========================================================================
 
 #[tokio::test]
 async fn required_action_resume_for_a_consent_client_shows_the_consent_prompt() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     require_password_update(&rig);
     let client = register(&rig, true, None);
     let resp = get(&rig, &plain_uri(&client, ""), &session_cookie(&rig)).await;
@@ -1250,7 +1167,7 @@ async fn required_action_resume_for_a_consent_client_shows_the_consent_prompt() 
 
 #[tokio::test]
 async fn required_action_resume_keeps_prompt_consent() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     require_password_update(&rig);
     let client = register(&rig, true, None);
     grant_consent(&rig, &client);
@@ -1266,7 +1183,7 @@ async fn required_action_resume_keeps_prompt_consent() {
 
 #[tokio::test]
 async fn required_action_resume_on_a_par_request_keeps_the_response_mode() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     require_password_update(&rig);
     let client = register(&rig, false, None);
     let uri = par_uri(&rig, &client, Some("fragment"), None);
@@ -1280,14 +1197,61 @@ async fn required_action_resume_on_a_par_request_keeps_the_response_mode() {
     );
 }
 
+#[tokio::test]
+async fn required_action_resume_keeps_the_requested_response_mode() {
+    let rig = rig().await;
+    require_password_update(&rig);
+    let client = register(&rig, false, None);
+    let resp = get(
+        &rig,
+        &plain_uri(&client, "&response_mode=fragment"),
+        &session_cookie(&rig),
+    )
+    .await;
+    let resp = complete_password_update(&rig, &resp).await;
+    let loc = location(&resp);
+    assert!(
+        redirect_param(&loc, "code", true).is_some(),
+        "response_mode=fragment must survive the required action; got {loc} ({})",
+        resp.status()
+    );
+}
+
+/// JAR + required action + consent: the JAR's resource and response mode
+/// survive both interstitials, and the consent ticket carries them to the
+/// code. (VERIFY_EMAIL, not UPDATE_PASSWORD: a password change revokes the
+/// browser session the consent approval is posted from.)
+#[tokio::test]
+async fn jar_through_a_required_action_and_consent_keeps_resource_and_response_mode() {
+    let rig = rig().await;
+    require_email_verification(&rig);
+    let (client, pair) = jar_client(&rig, true);
+    let uri = jar_uri(
+        &rig,
+        &client,
+        &pair,
+        &serde_json::json!({ "response_mode": "fragment", "resource": RESOURCE }),
+        "",
+    );
+    let cookies = session_cookie(&rig);
+    let resp = get(&rig, &uri, &cookies).await;
+    let resp = complete_email_verification(&rig, &resp).await;
+    assert_consent_prompt(&resp, "JAR after a required action");
+    let resp = approve_consent(&rig, &cookies, &resp).await;
+    let loc = location(&resp);
+    let code = redirect_param(&loc, "code", true)
+        .unwrap_or_else(|| panic!("fragment response_mode must deliver #code=; got {loc}"));
+    let aud = exchanged_audience(&rig, &client, Some(&pair), code);
+    assert!(aud.iter().any(|a| a == RESOURCE), "aud = {aud:?}");
+}
+
 // ===========================================================================
 // prompt=none never reaches an interstitial
 //
 // OIDC Core §3.1.2.1: with `prompt=none` the server MUST NOT display any
 // authentication or consent UI. The gate sequence honoured it only at the
-// consent gate; the required-action intercept and the SMS challenge ran
-// first and suspended the flow into an interactive page — and the SMS gate
-// texted the user a code on every silent renew.
+// consent gate; the required-action intercept ran first and suspended the
+// flow into an interactive page.
 // ===========================================================================
 
 /// A silent refusal: back to the client with `error`, no code, no
@@ -1318,20 +1282,11 @@ fn assert_silent_refusal(resp: &Response<Body>, error: &str, state: &str, what: 
         cookie_pair(resp, "hearth_ra_session").is_none(),
         "{what}: no required-action session may be started"
     );
-    assert!(
-        cookie_pair(resp, "hearth_ui_sms_mfa").is_none(),
-        "{what}: no SMS challenge may be started"
-    );
-}
-
-fn sms_sent(rig: &Rig) -> usize {
-    #[allow(clippy::unwrap_used)]
-    rig.sms.messages.lock().unwrap().len()
 }
 
 #[tokio::test]
 async fn plain_prompt_none_with_a_pending_required_action_is_interaction_required() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     require_password_update(&rig);
     let client = register(&rig, false, None);
     let resp = get(
@@ -1345,7 +1300,7 @@ async fn plain_prompt_none_with_a_pending_required_action_is_interaction_require
 
 #[tokio::test]
 async fn jar_prompt_none_with_a_pending_required_action_is_interaction_required() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     require_password_update(&rig);
     let (client, pair) = jar_client(&rig, false);
     let uri = jar_uri(
@@ -1361,7 +1316,7 @@ async fn jar_prompt_none_with_a_pending_required_action_is_interaction_required(
 
 #[tokio::test]
 async fn par_prompt_none_with_a_pending_required_action_is_interaction_required() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     require_password_update(&rig);
     let client = register(&rig, false, None);
     let mut request = par_request(&client);
@@ -1370,52 +1325,11 @@ async fn par_prompt_none_with_a_pending_required_action_is_interaction_required(
     assert_silent_refusal(&resp, "interaction_required", "par-state", "PAR");
 }
 
-#[tokio::test]
-async fn plain_prompt_none_on_an_sms_realm_is_login_required_and_sends_no_text() {
-    let rig = rig(true).await;
-    let client = register(&rig, false, None);
-    let resp = get(
-        &rig,
-        &plain_uri(&client, "&prompt=none"),
-        &session_cookie(&rig),
-    )
-    .await;
-    assert_silent_refusal(&resp, "login_required", "plain-state", "plain SMS");
-    assert_eq!(sms_sent(&rig), 0, "a silent request must not text the user");
-}
-
-#[tokio::test]
-async fn jar_prompt_none_on_an_sms_realm_is_login_required_and_sends_no_text() {
-    let rig = rig(true).await;
-    let (client, pair) = jar_client(&rig, false);
-    let uri = jar_uri(
-        &rig,
-        &client,
-        &pair,
-        &serde_json::json!({ "prompt": "none" }),
-        "",
-    );
-    let resp = get(&rig, &uri, &session_cookie(&rig)).await;
-    assert_silent_refusal(&resp, "login_required", "jar-state", "JAR SMS");
-    assert_eq!(sms_sent(&rig), 0, "a silent request must not text the user");
-}
-
-#[tokio::test]
-async fn par_prompt_none_on_an_sms_realm_is_login_required_and_sends_no_text() {
-    let rig = rig(true).await;
-    let client = register(&rig, false, None);
-    let mut request = par_request(&client);
-    request.prompt = Some("none".to_string());
-    let resp = get(&rig, &push(&rig, &request), &session_cookie(&rig)).await;
-    assert_silent_refusal(&resp, "login_required", "par-state", "PAR SMS");
-    assert_eq!(sms_sent(&rig), 0, "a silent request must not text the user");
-}
-
 /// The silent refusal travels in the request's response mode like any other
 /// authorization error.
 #[tokio::test]
 async fn prompt_none_interstitial_refusal_uses_the_fragment_response_mode() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     require_password_update(&rig);
     let client = register(&rig, false, None);
     let resp = get(
@@ -1427,14 +1341,19 @@ async fn prompt_none_interstitial_refusal_uses_the_fragment_response_mode() {
     assert_fragment_error(&location(&resp), "interaction_required", "plain-state");
 }
 
-/// Control: the same SMS-realm request without `prompt=none` is challenged.
+/// Control: the same request without `prompt=none` is sent to the pending
+/// action, with a required-action session started.
 #[tokio::test]
-async fn interactive_request_on_an_sms_realm_is_still_challenged() {
-    let rig = rig(true).await;
+async fn interactive_request_with_a_pending_required_action_is_still_sent_to_the_action() {
+    let rig = rig().await;
+    require_password_update(&rig);
     let client = register(&rig, false, None);
     let resp = get(&rig, &plain_uri(&client, ""), &session_cookie(&rig)).await;
-    assert_eq!(location(&resp), "/ui/sms-challenge");
-    assert_eq!(sms_sent(&rig), 1);
+    assert_eq!(location(&resp), "/required-action/UPDATE_PASSWORD");
+    assert!(
+        cookie_pair(&resp, "hearth_ra_session").is_some(),
+        "an interactive request must start a required-action session"
+    );
 }
 
 // ===========================================================================
@@ -1951,7 +1870,7 @@ async fn browser_required_action_check_fails_closed_on_a_lookup_error() {
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
-/// The realm-driven enrolment requirements (SMS / email OTP / passkey) are
+/// The realm-driven enrolment requirements (email OTP / passkey) are
 /// read from the realm record; a lookup error there must not read as "the
 /// realm requires nothing" either.
 #[tokio::test]
@@ -2047,7 +1966,7 @@ const UNDECLARED: &str = "https%3A%2F%2Fundeclared.example.com%2Fv1";
 /// `invalid_target` at the (registered) redirect URI — not issued a code.
 #[tokio::test]
 async fn plain_authorize_refuses_an_unregistered_resource() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, false, None);
     let uri = plain_uri(&client, &format!("&resource={UNDECLARED}"));
     let resp = get(&rig, &uri, &session_cookie(&rig)).await;
@@ -2067,7 +1986,7 @@ async fn plain_authorize_refuses_an_unregistered_resource() {
 /// whose token carries the resource's canonical form in `aud`.
 #[tokio::test]
 async fn plain_authorize_carries_a_registered_resource_in_canonical_form() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let client = register(&rig, false, None);
     let uri = plain_uri(
         &client,
@@ -2085,7 +2004,7 @@ async fn plain_authorize_carries_a_registered_resource_in_canonical_form() {
 /// JAR error on this entry point), not issued a code.
 #[tokio::test]
 async fn jar_authorize_refuses_an_unregistered_resource() {
-    let rig = rig(false).await;
+    let rig = rig().await;
     let (client, pair) = jar_client(&rig, false);
     let uri = jar_uri(
         &rig,

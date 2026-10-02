@@ -11,9 +11,6 @@
 #   HEARTH_PASSWORD_PEPPER_PREVIOUS_KEY_HEX            (previous password pepper)
 #   HEARTH_BACKUP_VERIFY_KEY                           (base64url Ed25519 pubkey)
 #   TURNSTILE_SECRET_KEY                               (CAPTCHA verification)
-#   HEARTH_SMS_OTP_HMAC_KEY                            (SMS OTP HMAC)
-#   HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET
-#   HEARTH_REALM_INTERNAL_TOOLS_FINGERPRINT_HMAC_SECRET
 #   SMTP_USERNAME / SMTP_PASSWORD
 #   SENDGRID_API_KEY / POSTMARK_SERVER_TOKEN / MAILGUN_API_KEY / MAILTRAP_API_KEY
 #   TWILIO_AUTH_TOKEN / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
@@ -98,21 +95,6 @@ email:
     support_email: "support@example.com"
     custom_footer_text: "© 2026 Acme Corp. All rights reserved."
   templates_dir: "./templates/email"
-
-# ----------------------------------------------------------------------------
-# SMS — Twilio active; AWS SNS commented for shape reference.
-# ----------------------------------------------------------------------------
-sms:
-  transport: twilio                         # log | twilio | awssns
-  twilio:
-    account_sid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    auth_token: "${TWILIO_AUTH_TOKEN}"
-    from: "+15550001111"
-  # aws_sns:
-  #   region: "us-east-1"
-  #   access_key_id: "${AWS_ACCESS_KEY_ID}"
-  #   secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
-  #   sender_id: "Acme"
 
 oidc:
   issuer: "https://auth.example.com"
@@ -243,25 +225,12 @@ security:
     window: "3600s"
     email_soft_cap: 1000                    # soft = alert, hard = refuse
     email_hard_cap: 5000
-    sms_soft_cap: 100
-    sms_hard_cap: 500
   cross_realm_aggregation_cap:
     enabled: true
     window: "3600s"
     alert_threshold: 3                      # realms breaching before an alert
     email_realm_soft_cap: 5
     email_realm_hard_cap: 10
-    sms_realm_soft_cap: 3
-    sms_realm_hard_cap: 6
-  risk_scorer:
-    enabled: true
-    step_up_threshold: 0.5                  # score at/above which MFA is forced
-    new_device_weight: 0.3
-    new_country_weight: 0.4
-    password_age_weight: 0.2
-    password_age_days_threshold: 365
-    breach_corpus_weight: 1.0
-    refresh_context_delta_weight: 0.35
   providers:
     bot_signal:
       enabled: true
@@ -304,7 +273,7 @@ realms:
   # --------------------------------------------------------------------------
   # 1) customer-portal — public B2C/B2B SaaS realm.
   #    Self-registration, MFA, organizations, OAuth code+PKCE, federation,
-  #    SCIM provisioning, custom attributes, adaptive MFA, declarative RBAC.
+  #    SCIM provisioning, custom attributes, declarative RBAC.
   # --------------------------------------------------------------------------
   customer-portal:
     session_ttl: "12h"
@@ -352,14 +321,6 @@ realms:
       rate_limit:
         max_failed_logins: 5
         lockout_duration: "15m"
-      # `adaptive_mfa` is NOT a hearth.yaml key. The feature exists and is enforced
-      # at runtime, but there is no YAML (or admin API) surface for it — a config
-      # file containing this block is rejected at startup by deny_unknown_fields.
-      # See docs/specs/CONFIGURATION.md § realms.<name>.auth.adaptive_mfa.
-      #   adaptive_mfa:
-      #     enabled: true
-      #     recognition_window_days: 30
-      #     fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
     scim:
       bearer_token: "${SCIM_BEARER_CUSTOMER}"
     attribute_definitions:
@@ -591,12 +552,6 @@ realms:
       rate_limit:
         max_failed_logins: 3
         lockout_duration: "30m"
-      # `adaptive_mfa` is NOT a hearth.yaml key — see the note on the
-      # customer-portal realm above and docs/specs/CONFIGURATION.md.
-      #   adaptive_mfa:
-      #     enabled: true
-      #     recognition_window_days: 14
-      #     fingerprint_hmac_secret: "${HEARTH_REALM_INTERNAL_TOOLS_FINGERPRINT_HMAC_SECRET}"
     organizations:
       platform-team:
         name: "Platform Team"

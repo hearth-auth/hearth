@@ -2882,11 +2882,6 @@ async fn token_exchange_impl(
             };
 
             let refresh_bind = crate::identity::RefreshBindContext {
-                user_agent: headers
-                    .get(axum::http::header::USER_AGENT)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string),
-                asn: None,
                 authenticated_client_id,
             };
 
@@ -4134,11 +4129,6 @@ async fn realm_token_exchange(
                 None
             };
             let refresh_bind = crate::identity::RefreshBindContext {
-                user_agent: headers
-                    .get(axum::http::header::USER_AGENT)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string),
-                asn: None,
                 authenticated_client_id,
             };
             match state.identity.refresh_tokens(

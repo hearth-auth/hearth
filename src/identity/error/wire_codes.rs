@@ -62,8 +62,6 @@ impl IdentityError {
             Self::StepUpChallengeRequired => Some("HEARTH_STEP_UP_CHALLENGE_REQUIRED"),
             Self::EnrollMfaRequired => Some("HEARTH_ENROLL_MFA_REQUIRED"),
             Self::RequiredActionsBlocking { .. } => Some("HEARTH_REQUIRED_ACTIONS_PENDING"),
-            Self::InvalidSmsOtp => Some("HEARTH_INVALID_SMS_OTP"),
-            Self::SmsResendLimitExceeded => Some("HEARTH_SMS_RESEND_LIMIT_EXCEEDED"),
             Self::InvalidEmailOtp => Some("HEARTH_INVALID_EMAIL_OTP"),
 
             Self::RealmNotFound

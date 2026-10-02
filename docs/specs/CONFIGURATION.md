@@ -44,7 +44,6 @@ key:
 | `HEARTH_MASTER_KEY` | Required in production | 32-byte host key that wraps every realm KEK on disk, and the passphrase for `hearth backup export` / `restore`. It is the only host-key source in production: when unset, startup fails, and a `{data_dir}/hearth.host_key` file is never read (only `--dev` generates and reads one). `hearth config validate` warns when it is unset. |
 | `HEARTH_PREVIOUS_MASTER_KEY` | Only during a host-key rotation | Previous host key value. Set it when startup fails with `HostKeyMismatch` after rotating `HEARTH_MASTER_KEY`; remove it once every realm KEK has been re-wrapped. |
 | `HEARTH_KEK` | One of this or `security.key_encryption_key` | Key-encryption key for realm signing keys at rest. 64 lowercase hex characters (`openssl rand -hex 32`). |
-| `HEARTH_SMS_OTP_HMAC_KEY` | Required whenever `sms.transport` is not `"log"` | At least 32 bytes. Cryptographically binds an SMS OTP to this server; startup fails without it once a real SMS transport is configured. |
 | `HEARTH_TURNSTILE_SECRET_KEY` | Only when `security.captcha.provider: turnstile` | Cloudflare Turnstile secret. Preferred over writing `security.captcha.turnstile.secret_key` into the file. |
 
 > `dev_mode` is **not** a config-file key. A YAML file containing `dev_mode: true` is
@@ -475,81 +474,16 @@ email:
     support_email: "support@example.com"
 ```
 
-### `sms`
+> **Email OTP key.** Email OTP codes are HMAC'd under a key derived (domain-separated) from
+> the process's random cookie secret, so the key is always secret and no dedicated variable is
+> needed. An email OTP verifies only on the process that issued it — the same scope as the
+> login cookies it completes.
 
-Outbound SMS delivery for one-time passwords (OTPs). Required when SMS MFA is enabled in any
-realm. Defaults to the `log` transport, which delivers nothing: under `--dev` it writes the
-full message (OTP included) to the structured log so a developer can read the code; outside
-`--dev` it logs only that a message was dropped, with the body redacted.
+### `sms` (removed)
 
-Outside `--dev`, `sms` cannot be listed in `auth.mfa_methods` or any
-`realms.<name>.auth.mfa_methods` while `transport` is `log` — the config is refused at
-startup, and the admin API / admin console realm config `PATCH` answers `400` — because no
-code could ever be delivered. The same rule rejects unknown method names on every surface.
-
-> **Environment variable:** `HEARTH_SMS_OTP_HMAC_KEY` must be set when `transport` is not
-> `log`. Generate with `openssl rand -hex 32`. Must be at least 32 characters. Set in the
-> process environment only — never in `hearth.yaml`. Under `--dev` with no key, Hearth
-> generates a random per-process key. Outside `--dev` with no key, SMS OTP fails closed: no
-> code is issued, and a user whose second factor is SMS cannot complete login until SMS is
-> configured. There is no fallback or dev key in production.
->
-> **Email OTP key.** Email OTP codes are HMAC'd under a key derived from
-> `HEARTH_SMS_OTP_HMAC_KEY` when it is set (domain-separated, never the SMS key itself), and
-> otherwise from the process's random cookie secret. Either way the key is secret — never a
-> constant — so no dedicated email OTP variable is needed. Without `HEARTH_SMS_OTP_HMAC_KEY`
-> an email OTP verifies only on the process that issued it, the same scope as the login
-> cookies it completes; set the variable if your deployment routes one sign-in across nodes.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `transport` | string | `"log"` | SMS delivery backend. One of: `log`, `twilio`, `awssns`. |
-| `twilio` | object | — | Twilio settings. **Required** when `transport: twilio`. |
-| `aws_sns` | object | — | AWS SNS settings. **Required** when `transport: awssns`. |
-
-#### `sms.twilio`
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `account_sid` | string | *required* | Twilio Account SID (e.g. `ACxxxxxxxx…`). |
-| `auth_token` | string | *required* | Twilio Auth Token. Use `${VAR}` substitution — never hardcode. |
-| `from` | string | *required* | Sender in E.164 format (e.g. `+15550001111`), short code, toll-free number, or Messaging Service SID. |
-
-#### `sms.aws_sns`
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `region` | string | *required* | AWS region for SNS calls (e.g. `us-east-1`). |
-| `access_key_id` | string | *required* | AWS Access Key ID. Use `${VAR}` substitution. |
-| `secret_access_key` | string | *required* | AWS Secret Access Key. Use `${VAR}` substitution. |
-| `sender_id` | string | — | Alphanumeric sender ID shown on recipient devices in supported markets (max 11 chars, optional). |
-
-> **AWS SNS credential chain:** Hearth does not use the AWS SDK credential chain (instance
-> roles, `~/.aws/credentials`, etc.) for the SNS transport. `access_key_id` and
-> `secret_access_key` must be supplied explicitly, using `${VAR}` substitution from
-> environment variables.
-
-```yaml
-# Twilio
-sms:
-  transport: twilio
-  twilio:
-    account_sid: "${TWILIO_ACCOUNT_SID}"
-    auth_token: "${TWILIO_AUTH_TOKEN}"
-    from: "+15005550006"
-
-# AWS SNS
-# sms:
-#   transport: awssns
-#   aws_sns:
-#     region: "us-east-1"
-#     access_key_id: "${AWS_ACCESS_KEY_ID}"
-#     secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
-#     sender_id: "MyBrand"    # optional
-```
-
-See the [SMS MFA deployment guide](../guides/sms-mfa-deployment.md) for carrier registration
-requirements, per-region setup, and the production readiness checklist.
+SMS one-time codes were removed in Hearth 3.0.0. An `sms:` block stops startup with an
+error naming the key, and `sms` in any `mfa_methods` list is refused as an unknown method.
+Use a passkey, TOTP (with recovery codes) or email OTP as the second factor.
 
 ---
 
@@ -602,7 +536,7 @@ Global authentication defaults. These apply to all realms unless overridden per-
 | `password_memory_cost` | integer | `19456` | Argon2id memory parameter in KiB. Floored at the OWASP minimum — see below. |
 | `password_time_cost` | integer | `2` | Argon2id time parameter (iterations). Floored at the OWASP minimum — see below. |
 | `mfa_required` | bool | `false` | Whether MFA is required for all users. Per-realm `auth.mfa_required` overrides. |
-| `mfa_methods` | list | — | Allowed MFA methods for every realm: `"totp"`, `"webauthn"`, `"email_otp"`, `"sms"`. A realm's `realms.<name>.auth.mfa_methods` replaces this list wholesale rather than merging with it. Absent at both levels = all methods allowed. See the per-realm key for what restriction means. |
+| `mfa_methods` | list | — | Allowed MFA methods for every realm: `"totp"`, `"webauthn"`, `"email_otp"`. `"sms"` was removed in 3.0.0 and is refused as an unknown method. A realm's `realms.<name>.auth.mfa_methods` replaces this list wholesale rather than merging with it. Absent at both levels = all methods allowed. See the per-realm key for what restriction means. |
 | `passkey_requires_mfa` | bool | `false` | Whether passkey login requires an additional TOTP challenge. Per-realm `auth.passkey_requires_mfa` overrides. |
 | `webauthn_required` | bool | — | Global default for "every user must hold a passkey". When `true`, a user with no registered passkey is intercepted by the `ENROLL_MFA` required action, which registers one during login (user verification required; see the required-actions guide), **and** every session must be opened by a WebAuthn assertion that proved user verification — a TOTP code, a recovery code or an OTP is refused with `mfa_required` even when the account holds a passkey. Per-realm `realms.<name>.auth.webauthn_required` overrides. |
 | `webauthn_resident_key` | string | — | Global default `residentKey` preference for registration ceremonies: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup. Per-realm `realms.<name>.auth.webauthn_resident_key` overrides. |
@@ -1075,8 +1009,6 @@ Consulted before the self-service verification and password-reset sends.
 | `window` | duration | `"3600s"` | Rolling window. |
 | `email_soft_cap` | integer | `1000` | Distinct email recipients before the send is flagged for operator review. |
 | `email_hard_cap` | integer | `5000` | Distinct email recipients before the send is abandoned. |
-| `sms_soft_cap` | integer | `100` | Distinct SMS recipients before flagging. |
-| `sms_hard_cap` | integer | `500` | Distinct SMS recipients before abandoning. |
 
 ##### `security.cross_realm_aggregation_cap` (A-50)
 
@@ -1090,25 +1022,11 @@ many **distinct realms** have reached one recipient.
 | `alert_threshold` | integer | `3` | Distinct realms per recipient before an operator alert. The send still proceeds. |
 | `email_realm_soft_cap` | integer | `5` | Distinct realms per email address before flagging. |
 | `email_realm_hard_cap` | integer | `10` | Distinct realms per email address before abandoning. |
-| `sms_realm_soft_cap` | integer | `3` | Distinct realms per phone number before flagging. |
-| `sms_realm_hard_cap` | integer | `6` | Distinct realms per phone number before abandoning. |
 
-##### `security.risk_scorer` (A-11 / P-4)
+##### `security.risk_scorer` (removed)
 
-Weights for the step-up MFA risk engine. These become the default
-`risk_scorer_config` for every realm, which the refresh-context drift check
-(A-49) reads at token-refresh time.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `false` | Whether scoring is active. `false` always scores `0.0`. |
-| `step_up_threshold` | float | `0.5` | Score at or above which step-up MFA is required. Range `[0.0, 1.0]`. |
-| `new_device_weight` | float | `0.3` | Contribution of an unrecognised device. |
-| `new_country_weight` | float | `0.4` | Contribution of an unrecognised country. |
-| `password_age_weight` | float | `0.2` | Contribution of a password older than the threshold. |
-| `password_age_days_threshold` | integer | `365` | Age in days before `password_age_weight` applies. |
-| `breach_corpus_weight` | float | `1.0` | Contribution of a confirmed breach-corpus hit. Defaults to `1.0` so any hit alone forces step-up. |
-| `refresh_context_delta_weight` | float | `0.35` | Contribution per changed dimension (UA hash, ASN) on refresh. |
+Risk scoring was removed in Hearth 3.0.0; a `security.risk_scorer` block stops startup.
+MFA is a plain per-realm policy (`mfa_required`).
 
 ##### `security.adaptive_backoff` (A-12)
 
@@ -1369,7 +1287,7 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 |-------|------|---------|-------------|
 | `mfa_required` | bool | `false` | Whether MFA is required for all users in this realm. |
 | `passkey_requires_mfa` | bool | `false` | Whether passkey (WebAuthn) login still requires a TOTP challenge. Passkeys are inherently multi-factor, but regulated environments (healthcare, finance) may require an additional TOTP step. When `true` and the user has TOTP enrolled, passkey login redirects to the MFA challenge page. When `true` but the user has no TOTP enrolled, login proceeds normally. |
-| `mfa_methods` | list | inherits `auth.mfa_methods` | Allowed MFA methods: `"totp"`, `"webauthn"`, `"email_otp"`, `"sms"`. When set, only the listed methods may be **enrolled or presented**; a request to enrol or verify a method not in the list is refused with `HEARTH_MFA_METHOD_NOT_ALLOWED` (HTTP 403). This applies to factors users already hold — dropping a method from the list stops it working for them, so check the list names every factor in use before narrowing it. Absent (here and globally) = all methods allowed. `"sms"` requires a working `sms:` transport block and `HEARTH_SMS_OTP_HMAC_KEY`. |
+| `mfa_methods` | list | inherits `auth.mfa_methods` | Allowed MFA methods: `"totp"`, `"webauthn"`, `"email_otp"`. When set, only the listed methods may be **enrolled or presented**; a request to enrol or verify a method not in the list is refused with `HEARTH_MFA_METHOD_NOT_ALLOWED` (HTTP 403). This applies to factors users already hold — dropping a method from the list stops it working for them, so check the list names every factor in use before narrowing it. Absent (here and globally) = all methods allowed. Unknown method names (including `"sms"`, removed in 3.0.0) are refused. |
 | `allowed_auth_methods` | list | — | Allowed login methods: `"password"`, `"magic_link"`, `"passkey"`. |
 | `webauthn_required` | bool | inherits `auth.webauthn_required` | Whether every user in this realm must hold a passkey **and** use it. When `true`, a user with no registered WebAuthn credential is intercepted by the `ENROLL_MFA` required action, which registers a user-verified passkey during login (the realm's `mfa_methods`, when set, must include `webauthn`), and `create_session` refuses any authentication whose second factor was not a user-verified WebAuthn assertion. A TOTP secret does **not** satisfy it, at enrolment or at use — the key names a passkey, and an operator setting it after a phishing incident is asking for a phishing-resistant factor specifically. |
 | `webauthn_resident_key` | string | inherits `auth.webauthn_resident_key` | `residentKey` preference sent in `authenticatorSelection` during registration: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup — the browser would silently ignore it and fall back to `"preferred"`. |
@@ -1377,7 +1295,6 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 | `password_policy` | object | — | Password complexity requirements (see below). |
 | `token` | object | — | Per-realm token TTL overrides. |
 | `rate_limit` | object | — | Per-realm rate limit overrides. |
-| `adaptive_mfa` | object | — | Risk-based step-up MFA using device fingerprinting. See below. |
 
 #### `realms.<name>.auth.password_policy`
 
@@ -1405,35 +1322,6 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 |-------|------|---------|-------------|
 | `max_failed_logins` | integer | — | Maximum failed login attempts before lockout. |
 | `lockout_duration` | duration | — | How long to lock out after exceeding max failed logins. |
-
-#### `realms.<name>.auth.adaptive_mfa`
-
-> **Not settable in `hearth.yaml`, and not settable via the admin API.** The realm
-> YAML schema has no `adaptive_mfa` key — a config file containing one is rejected at
-> startup by `deny_unknown_fields`. The feature is real and enforced at runtime, but the
-> only way to populate it today is programmatically, by constructing `RealmConfig`
-> in-process (embedded use and tests). The YAML block below is **illustrative of the
-> shape only**. See `tests/docs_config_snippets.rs`.
-
-When enabled, Hearth computes a per-device fingerprint from `{user_id, ip_/24, user_agent_normalized}` using HMAC-SHA256. Devices that have not been seen within `recognition_window_days` trigger an additional MFA challenge — a step-up — regardless of the realm's base `mfa_required` setting.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `false` | Enable risk-based step-up MFA for this realm. When `true`, `fingerprint_hmac_secret` is required. |
-| `recognition_window_days` | integer | `30` | Days a recognised device fingerprint remains valid. After this window expires the device is treated as unrecognised again and triggers a fresh MFA challenge. |
-| `fingerprint_hmac_secret` | string | — | **Required when `enabled: true`.** HMAC-SHA256 key for deriving device fingerprints. Must be at least 32 bytes. Supply via an environment variable — never commit a plaintext value. |
-
-```yaml
-realms:
-  customer-portal:
-    auth:
-      adaptive_mfa:
-        enabled: true
-        recognition_window_days: 30   # default: 30
-        fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
-```
-
-> **Key management:** See [Device fingerprint HMAC secret](../guides/security-hardening.md#device-fingerprint-hmac-secret) for key generation, minimum-length enforcement, Kubernetes injection, and the 9-step rotation runbook.
 
 #### `realms.<name>.auth.webauthn_attestation`
 
@@ -2295,8 +2183,6 @@ Every field's default value at a glance.
 | `auth` | `webauthn_required` | *(unset)* — no passkey requirement |
 | `auth` | `webauthn_resident_key` | *(unset)* — the WebAuthn default, `"preferred"` |
 | `auth` | `webauthn_user_verification` | *(unset)* — the WebAuthn default, `"preferred"` |
-| `realms.<name>.auth.adaptive_mfa` | `enabled` | `false` |
-| `realms.<name>.auth.adaptive_mfa` | `recognition_window_days` | `30` |
 | `realms.<name>.auth.webauthn_attestation` | `allow_none` | `true` |
 | `realms.<name>.auth.webauthn_attestation` | `require_prf` | `false` |
 | `realms.<name>.auth.webauthn_attestation` | `require_large_blob` | `false` |
@@ -2356,20 +2242,10 @@ Every field's default value at a glance.
 | `security.outbound_volume_shield` | `enabled` | `false` |
 | `security.outbound_volume_shield` | `window` | `"3600s"` |
 | `security.outbound_volume_shield` | `email_soft_cap` / `email_hard_cap` | `1000` / `5000` |
-| `security.outbound_volume_shield` | `sms_soft_cap` / `sms_hard_cap` | `100` / `500` |
 | `security.cross_realm_aggregation_cap` | `enabled` | `false` |
 | `security.cross_realm_aggregation_cap` | `window` | `"3600s"` |
 | `security.cross_realm_aggregation_cap` | `alert_threshold` | `3` |
 | `security.cross_realm_aggregation_cap` | `email_realm_soft_cap` / `email_realm_hard_cap` | `5` / `10` |
-| `security.cross_realm_aggregation_cap` | `sms_realm_soft_cap` / `sms_realm_hard_cap` | `3` / `6` |
-| `security.risk_scorer` | `enabled` | `false` |
-| `security.risk_scorer` | `step_up_threshold` | `0.5` |
-| `security.risk_scorer` | `new_device_weight` | `0.3` |
-| `security.risk_scorer` | `new_country_weight` | `0.4` |
-| `security.risk_scorer` | `password_age_weight` | `0.2` |
-| `security.risk_scorer` | `password_age_days_threshold` | `365` |
-| `security.risk_scorer` | `breach_corpus_weight` | `1.0` |
-| `security.risk_scorer` | `refresh_context_delta_weight` | `0.35` |
 | `security.adaptive_backoff` | `durations` | `["1m", "5m", "30m", "24h"]` |
 | `security.adaptive_backoff` | `offense_cooldown` | `"7d"` |
 | `security.providers.bot_signal` | `enabled` | `false` |

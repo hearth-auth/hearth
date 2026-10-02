@@ -99,8 +99,6 @@ impl std::error::Error for IdentityError {
             | Self::StepUpChallengeRequired
             | Self::EnrollMfaRequired
             | Self::RequiredActionsBlocking { .. }
-            | Self::InvalidSmsOtp
-            | Self::SmsResendLimitExceeded
             | Self::InvalidEmailOtp
             | Self::InvalidPushedAuthorizationRequest
             | Self::InvalidDPopProof { .. }

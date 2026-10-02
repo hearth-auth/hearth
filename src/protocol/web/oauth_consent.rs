@@ -19,7 +19,7 @@
 //! 1. `GET /ui/oauth/authorize` — validate the request (plain query, JAR or
 //!    PAR) against the registered `OAuthClient`, require a valid
 //!    `UiSession`, then run the shared gates in `authorize_gate`: required
-//!    actions, SMS MFA, and consent — check the existing
+//!    actions and consent — check the existing
 //!    [`ConsentRecord`]. If the record covers every requested scope
 //!    (or `require_consent=false`), skip straight to code issuance and
 //!    302 back to `redirect_uri`. Otherwise stash a
@@ -138,7 +138,7 @@ pub struct AuthorizeQuery {
     /// Every branch holds it to the realm's protected-resource registry
     /// before anything else happens: an undeclared resource is refused with
     /// `invalid_target`, and a registered one travels in canonical form (G6).
-    /// The required-action and SMS intercepts carry it to the code they
+    /// The required-action intercept carries it to the code they
     /// eventually issue — dropping it issued a code, and a token, without
     /// the audience the client asked for.
     #[serde(default)]
@@ -243,7 +243,7 @@ async fn authorize_get_impl(
         return refusal;
     }
     // Every branch — plain, JAR, PAR — runs the same gates in the same order:
-    // required actions, SMS MFA, consent / `prompt`, then issuance. The
+    // required actions, consent / `prompt`, then issuance. The
     // interstitials resume into the same sequence after their own gate.
     run_authorize_gates(
         state,

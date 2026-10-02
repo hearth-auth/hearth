@@ -345,7 +345,7 @@ pub enum IdentityError {
     /// (CONFIGURATION.md, audit 2026-08-28 §4.18#10). An absent list is no
     /// restriction at all, so this is never raised for it.
     MfaMethodNotAllowed {
-        /// The factor that was attempted: `"totp"`, `"webauthn"`, `"sms"` or
+        /// The factor that was attempted: `"totp"`, `"webauthn"` or
         /// `"email_otp"`.
         method: &'static str,
     },
@@ -362,10 +362,6 @@ pub enum IdentityError {
         /// The actions the user must complete.
         actions: Vec<crate::identity::types::RequiredAction>,
     },
-    /// The SMS OTP is invalid, expired, not found, or max attempts exceeded.
-    InvalidSmsOtp,
-    /// The phone number has exceeded the per-phone SMS resend limit.
-    SmsResendLimitExceeded,
     /// The Email OTP is invalid, expired, not found, or max attempts exceeded.
     InvalidEmailOtp,
     /// The pushed `request_uri` is not found, already used, or expired.

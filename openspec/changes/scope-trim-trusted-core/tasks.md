@@ -50,6 +50,8 @@ Sixteen admin operations existed only over gRPC (`docs/api/grpc-only.txt`; `Clie
 
 ## 6. MFA policy (PR 5)
 
+**Changed during apply:** groups 7 and 8 run before this group. They delete sign-in paths (SMS OTP, adaptive MFA in the password grant, the password grant itself) that the resolver would otherwise have to cover.
+
 - [ ] 6.1 Red tests from `specs/mfa-policy`: the default is required; the explicit opt-out is honoured; email OTP and magic link do not satisfy MFA; a passkey alone does; org tightening; org cannot loosen; the startup `WARN`; the console banner; an audit event on change
 - [ ] 6.2 Add `effective_mfa_requirement(...)` in the identity layer, and route every `mfa_required.unwrap_or(...)` site through it (`web/second_factor.rs:124`, `web/handlers.rs:2669`, `engine/oauth.rs:1389`, `engine/mod.rs:18971`, plus any others a search finds)
 - [ ] 6.3 Add the CI lint (clippy `disallowed-methods` or a `scripts/` check) that fails on a direct read of `mfa_required` outside the resolver, with a red self-test
@@ -62,12 +64,12 @@ Sixteen admin operations existed only over gRPC (`docs/api/grpc-only.txt`; `Clie
 
 ## 7. Risk scoring, adaptive MFA and SMS OTP (PR 6)
 
-- [ ] 7.1 Red tests: `security.risk_scorer` and `sms:` stop startup; the SMS routes and `/admin/users/{id}/device-fingerprints` answer `404`; refresh rotation works with no scorer; `mfa_methods: ["sms"]` is rejected
-- [ ] 7.2 Delete `src/abuse/risk_scorer.rs`, `src/identity/risk.rs`, `device_fp.rs`, `device_fingerprint.rs`, the realm `adaptive_mfa` and `risk_scorer_config` fields, the call at `engine/mod.rs:4132–4145`, the step-up recording (`engine/oauth.rs:1564`), the sweeper (`main.rs:2286`), the admin route and the `DeviceFingerprintsErased` audit action
-- [ ] 7.3 Delete `src/identity/sms/`, `src/protocol/web/sms_challenge.rs`, `RequiredAction::EnrollPhoneOtp` and its required-action code, the SMS config keys, `HEARTH_SMS_OTP_HMAC_KEY`, the realm `sms_otp_*` fields, the `sms_*` volume-shield settings, `check_outbound_sms`, and the SMS paths in `abuse/detector.rs`
-- [ ] 7.4 Delete the risk, device-fingerprint and SMS test files listed in the footprint survey
-- [ ] 7.5 Delete `docs/guides/sms-mfa-deployment.md`; update `required-actions.md`, `CONFIGURATION.md`, `ABUSE.md`, `privacy.md`, `concepts.md`
-- [ ] 7.6 CHANGELOG `### Removed` entries
+- [x] 7.1 Red tests: `security.risk_scorer` and `sms:` stop startup; the SMS routes and `/admin/users/{id}/device-fingerprints` answer `404`; refresh rotation works with no scorer; `mfa_methods: ["sms"]` is rejected (`tests/abuse_risk_and_sms_removed.rs`; it also carries the A-11 and A-49 IDs for the abuse coverage gate)
+- [x] 7.2 Delete `src/abuse/risk_scorer.rs`, `src/identity/risk.rs`, `device_fp.rs`, `device_fingerprint.rs`, the realm `adaptive_mfa` and `risk_scorer_config` fields, the call at `engine/mod.rs:4132–4145`, the step-up recording (`engine/oauth.rs:1564`), the sweeper (`main.rs:2286`), the admin route and the `DeviceFingerprintsErased` audit action
+- [x] 7.3 Delete `src/identity/sms/`, `src/protocol/web/sms_challenge.rs`, `RequiredAction::EnrollPhoneOtp` and its required-action code, the SMS config keys, `HEARTH_SMS_OTP_HMAC_KEY`, the realm `sms_otp_*` fields, the `sms_*` volume-shield settings, `check_outbound_sms`, and the SMS paths in `abuse/detector.rs` **Changed during apply:** (a) the OTP primitives in `sms/otp.rs` are shared by email OTP, so they moved to `src/identity/otp.rs`; (b) user records are postcard-encoded by position, so `UserStorageRecord` keeps two reserved phone slots and a storage-only `StoredRequiredAction` keeps the retired `ENROLL_PHONE_OTP` slot — old records load and the SMS data is dropped; the JSON import drops the action by name; (c) the seven SMS and device-fingerprint `AuditAction` variants (including `DeviceFingerprintsErased`) stay, unused, so audit events written before 3.0.0 still decode and the chain still verifies; (d) the email OTP key no longer mixes in `HEARTH_SMS_OTP_HMAC_KEY`; it derives from the cookie secret only, like the login cookie it is bound to
+- [x] 7.4 Delete the risk, device-fingerprint and SMS test files listed in the footprint survey. **Changed during apply:** tests of kept behaviour that used SMS as a vehicle were ported, not deleted: `tests/mfa_login_and_gate_regressions.rs` (from `sms_mfa_fail_closed.rs`), `tests/required_action_ra_cookie_forgery.rs`, `tests/abuse_challenge_store.rs` (A-16, A-48) and `tests/abuse_federation_state_binding.rs` (A-48); the `authorize_gate_parity.rs` resume tests now run through a required action
+- [x] 7.5 Delete `docs/guides/sms-mfa-deployment.md`; update `required-actions.md`, `CONFIGURATION.md`, `ABUSE.md`, `privacy.md`, `concepts.md`
+- [x] 7.6 CHANGELOG `### Removed` entries
 
 ## 8. ROPC password grant (PR 7)
 

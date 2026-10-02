@@ -26,10 +26,9 @@
 //! `prompt=none` (OIDC Core §3.1.2.1) forbids any UI, so every gate that
 //! would suspend the flow asks [`refuse_if_silent`] first and, for a silent
 //! request, answers the client with an error instead: `interaction_required`
-//! for a pending required action, `login_required` for the SMS factor,
-//! `consent_required` for consent. The first two gates used to redirect a
-//! silent request into their interactive page — and the SMS gate texted the
-//! user a code on every silent renew.
+//! for a pending required action, `consent_required` for consent. The
+//! required-action gate used to redirect a silent request into its
+//! interactive page.
 
 use std::sync::Arc;
 
@@ -163,8 +162,6 @@ pub(super) fn parse_response_mode(wire: Option<&str>) -> Option<Option<ResponseM
 pub(super) enum Gate {
     /// Pending required actions (password change, enrolment, …).
     RequiredActions,
-    /// The realm's SMS MFA challenge.
-    SmsMfa,
     /// Consent and OIDC `prompt` handling, then code issuance.
     Consent,
 }
@@ -172,8 +169,8 @@ pub(super) enum Gate {
 /// Runs every gate from `from` onward and returns the response: an
 /// interstitial redirect, an error, or the code redirect.
 ///
-/// `amr_values` are the factors proved on the way here (e.g. `["sms"]` after
-/// the SMS challenge); they are bound into the issued code.
+/// `amr_values` are the factors proved on the way here; they are bound into
+/// the issued code.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_authorize_gates(
     state: &Arc<WebState>,
@@ -189,13 +186,6 @@ pub(super) fn run_authorize_gates(
         if let Some(resp) = super::required_action::required_action_intercept(
             state, realm, user_id, params, secure, now,
         ) {
-            return resp;
-        }
-    }
-    if from <= Gate::SmsMfa {
-        if let Some(resp) =
-            super::sms_challenge::sms_mfa_challenge_gate(state, realm, user_id, params, secure)
-        {
             return resp;
         }
     }
@@ -587,11 +577,5 @@ mod tests {
         let mut o = sample().to_oidc_params();
         o.client_id = "not-a-uuid".to_string();
         assert!(AuthorizeParams::from_oidc_params(&o).is_none());
-    }
-
-    #[test]
-    fn gates_are_ordered_required_actions_sms_consent() {
-        assert!(Gate::RequiredActions < Gate::SmsMfa);
-        assert!(Gate::SmsMfa < Gate::Consent);
     }
 }

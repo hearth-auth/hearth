@@ -342,7 +342,7 @@ pub struct TokenClaims {
     /// Authentication Methods References (RFC 8176).
     ///
     /// Lists the authentication method(s) used during the session. Examples:
-    /// `"pwd"` (password), `"sms"` (SMS OTP), `"otp"` (TOTP), `"hwk"` (passkey).
+    /// `"pwd"` (password), `"otp"` (TOTP), `"hwk"` (passkey).
     /// Non-empty only when explicit MFA was performed during token issuance.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub amr: Vec<String>,

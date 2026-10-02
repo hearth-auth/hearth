@@ -1240,8 +1240,6 @@ impl EmbeddedIdentityEngine {
             resources: resource_uri.iter().cloned().collect(),
             amr_values: stored_code.amr_values.clone(),
             // UA/ASN binding context (A-49) recorded on first refresh exchange.
-            ua_hash: None,
-            bound_asn: None,
             // M1 (RFC 9449 §5): persist the DPoP key thumbprint for sender-constraint enforcement.
             bound_jkt: request.dpop_jkt.clone(),
         };
@@ -1395,56 +1393,11 @@ impl EmbeddedIdentityEngine {
             };
         }
 
-        // 3b. Adaptive step-up MFA check (HEA-836).
-        //    Only runs when the request carries IP/UA context (ROPC via HTTP).
-        if let (Some(ip), Some(ua)) = (&request.client_ip, &request.user_agent) {
-            use crate::identity::device_fp::DeviceFingerprintOutcome;
-            use crate::identity::types::RequiredAction;
-
-            let outcome = self.check_device_fingerprint(realm_id, user.id(), ip, ua)?;
-
-            match outcome {
-                DeviceFingerprintOutcome::Skipped | DeviceFingerprintOutcome::Recognised => {
-                    // Device is trusted or feature disabled — proceed normally.
-                    // check_and_refresh already refreshed the TTL on a recognised hit;
-                    // step-5 below handles recording on a first-seen device path.
-                }
-                DeviceFingerprintOutcome::StepUpRequired => {
-                    // User has an enrolled factor — require MFA challenge.
-                    return Err(IdentityError::StepUpChallengeRequired);
-                }
-                DeviceFingerprintOutcome::EnrollMfaRequired => {
-                    // No factor enrolled — inject EnrollMfa required action via
-                    // update_user() so the write goes through the full audit +
-                    // validation pipeline and avoids a TOCTOU race on storage.put().
-                    let current_user = self
-                        .get_user(realm_id, user.id())?
-                        .ok_or(IdentityError::UserNotFound)?;
-                    let actions: Vec<RequiredAction> = current_user.required_actions().to_vec();
-                    if !actions.contains(&RequiredAction::EnrollMfa) {
-                        let mut new_actions = actions;
-                        new_actions.push(RequiredAction::EnrollMfa);
-                        self.update_user(
-                            realm_id,
-                            user.id(),
-                            &UpdateUserRequest {
-                                required_actions: Some(new_actions),
-                                ..Default::default()
-                            },
-                        )?;
-                    }
-                    return Err(IdentityError::EnrollMfaRequired);
-                }
-            }
-        }
-
-        // 3c. A second factor the user holds binds here too (GA audit B4/B5).
-        //     A recognised device is not a second factor: the fingerprint is an
-        //     HMAC of the client's network and user agent, both of which the
-        //     caller supplies. So a user who holds a factor is sent to the
-        //     step-up grant, which proves it; the engine's session gate would
-        //     refuse the unproved session anyway, with an error that tells the
-        //     client nothing about what to do next.
+        // 3c. A second factor the user holds binds here too (GA audit B4/B5):
+        //     a user who holds a factor is sent to the step-up grant, which
+        //     proves it; the engine's session gate would refuse the unproved
+        //     session anyway, with an error that tells the client nothing
+        //     about what to do next.
         if self.has_second_factor(realm_id, user.id())? {
             return Err(IdentityError::StepUpChallengeRequired);
         }
@@ -1458,11 +1411,6 @@ impl EmbeddedIdentityEngine {
             &crate::identity::SessionContext::default(),
         )?;
         let token_pair = self.issue_tokens(realm_id, user.id(), session.id())?;
-
-        // 5. Record device fingerprint on first successful login from this device.
-        if let (Some(ip), Some(ua)) = (&request.client_ip, &request.user_agent) {
-            let _ = self.record_device_fingerprint(realm_id, user.id(), ip, ua);
-        }
 
         Ok(crate::identity::oidc::PasswordGrantResponse {
             access_token: token_pair.access_token().to_string(),
@@ -1559,12 +1507,7 @@ impl EmbeddedIdentityEngine {
             },
         )?;
 
-        // 5. Record device fingerprint — this device is now trusted.
-        if let (Some(ip), Some(ua)) = (&request.client_ip, &request.user_agent) {
-            let _ = self.record_device_fingerprint(realm_id, user.id(), ip, ua);
-        }
-
-        // 6. Emit StepUpMfaCompleted so incident responders can correlate trigger → resolution.
+        // 5. Emit StepUpMfaCompleted so incident responders can correlate trigger → resolution.
         let audit_ctx = AuditContext {
             actor: Actor::User(user.id().clone()),
             metadata: Some(serde_json::json!({

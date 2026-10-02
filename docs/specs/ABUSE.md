@@ -37,7 +37,7 @@ Where a guard is consulted:
 | P-5 email reputation | `POST /ui/register` |
 | A-4 outbound volume shield | self-service verification and password-reset sends |
 | A-50 cross-realm aggregation cap | self-service verification and password-reset sends |
-| A-11 / P-4 risk scorer | refresh-token context-drift check (A-49) |
+| A-11 risk scorer, A-49 refresh drift check | Removed in 3.0.0 |
 | A-12 adaptive backoff | `POST /ui/device` approval guard |
 
 "Pre-gate" means before a permit is taken from the Argon2 admission gate, for
@@ -141,9 +141,8 @@ was held in an `ArcSwap` until task 26.5; `arc-swap` is now banned, see
 Callers inspect `IpReputationVerdict`:
 - `is_blocklisted = true` → IP is in Spamhaus DROP/EDROP.  Callers apply the
   per-realm `IpReputationPolicy.action` (Block / Challenge / Log).
-- `asn`, `asn_org` → populated by `MaxMindAsnProvider` when available; used
-  as an input signal for A-11 risk scoring.  Never used as a direct block
-  decision — ASN alone does not block.
+- `asn`, `asn_org` → populated by `MaxMindAsnProvider` when available.  Never
+  used as a direct block decision — ASN alone does not block.
 
 Callers MUST NOT expose `is_blocklisted` reason to the client.
 
@@ -238,7 +237,7 @@ dimensions without recompiling.
 
 ---
 
-## A-4 — Outbound Email/SMS Volume Shield
+## A-4 — Outbound Email Volume Shield
 
 **Status:** Shipped (HEA-1189)  
 **Module:** `src/abuse/detector` → `OutboundVolumeShield`
@@ -264,7 +263,7 @@ recipient addresses are never retained in memory.
 
 Callers that dispatch outbound email call
 `OutboundVolumeShield::check_email(realm_id, recipient)` before the actual
-send.  For SMS (when `src/identity/sms.rs` ships), call `check_sms(...)`.
+send.  (The SMS caps were removed in Hearth 3.0.0 with SMS one-time codes.)
 
 ```rust
 match volume_shield.check_email(realm_id, recipient) {
@@ -289,8 +288,6 @@ security:
     window: 3600s           # rolling window (default: 1 hour)
     email_soft_cap: 1000    # distinct email recipients before SoftCap
     email_hard_cap: 5000    # distinct email recipients before HardCap
-    sms_soft_cap: 100       # distinct SMS recipients before SoftCap
-    sms_hard_cap: 500       # distinct SMS recipients before HardCap
 ```
 
 ---
@@ -361,7 +358,7 @@ access to the admin UI.
 
 ---
 
-## A-50 — Cross-Realm SMS / Email Aggregation Cap
+## A-50 — Cross-Realm Email Aggregation Cap
 
 **Status:** Shipped (HEA-1201)  
 **Module:** `src/abuse/detector` → `CrossRealmAggregationCap`  
@@ -375,7 +372,7 @@ caught here.
 ### Threat closed (§3.53)
 
 A-4 caps *per-realm* distinct recipients per hour.  Without A-50, an attacker
-controlling 50 realms can target the same `+1 555-0100` from each, staying
+controlling 50 realms can target the same `victim@example.com` from each, staying
 below A-4's per-realm threshold while flooding the victim.  A-50 detects the
 cross-realm pattern and escalates.
 
@@ -385,8 +382,8 @@ cross-realm pattern and escalates.
 |---------|--------------|------------------------|
 | `Allow` | — | Proceed with send |
 | `MultiRealmAlert { realm_count }` | ≥ `alert_threshold` | Emit `AbuseDetected` audit + A-7 webhook; MAY still send |
-| `SoftCap { realm_count }` | ≥ `email/sms_realm_soft_cap` | MUST apply CAPTCHA or queue; SHOULD emit audit + webhook |
-| `HardCap { realm_count }` | ≥ `email/sms_realm_hard_cap` | MUST reject send (HTTP 429); MUST emit audit + webhook |
+| `SoftCap { realm_count }` | ≥ `email_realm_soft_cap` | MUST apply CAPTCHA or queue; SHOULD emit audit + webhook |
+| `HardCap { realm_count }` | ≥ `email_realm_hard_cap` | MUST reject send (HTTP 429); MUST emit audit + webhook |
 
 Callers MUST NOT surface the `realm_count` value to the sending realm or to
 any external client.
@@ -403,7 +400,7 @@ per-realm caps and A-2 request shaper remain backstops.
 
 ### Integration point
 
-Call **in addition to** `OutboundVolumeShield::check_email` / `check_sms`.
+Call **in addition to** `OutboundVolumeShield::check_email`.
 Both checks must pass before a send proceeds:
 
 ```rust
@@ -431,9 +428,9 @@ security:
     alert_threshold: 3          # distinct realms before operator alert
     email_realm_soft_cap: 5     # distinct realms before email SoftCap
     email_realm_hard_cap: 10    # distinct realms before email HardCap
-    sms_realm_soft_cap: 3       # distinct realms before SMS SoftCap
-    sms_realm_hard_cap: 6       # distinct realms before SMS HardCap
 ```
+
+The SMS caps (`sms_realm_soft_cap` / `sms_realm_hard_cap`) were removed in Hearth 3.0.0.
 
 Set all thresholds to `usize::MAX` (or use `CrossRealmAggregationCap::disabled()`)
 to disable without recompiling.
@@ -501,83 +498,14 @@ rejected.  No fallback, no degraded path.
 
 ---
 
-## A-49 — Refresh-Token UA/ASN Context Binding
+## A-49 — Refresh-Token Context Binding
 
-**Status:** Shipped (HEA-1200)  
-**Module:** `src/identity/engine/mod.rs`, `src/identity/oidc.rs`, `src/protocol/http.rs`  
-**Closes:** §3.52 of the abuse-prevention plan
+**Status:** Drift scoring removed in Hearth 3.0.0.
 
-### Threat (§3.52)
-
-Refresh tokens are bearer tokens.  Rotation catches replay *after* a first
-theft-detect (mismatch family hash), but not "stolen token replayed from a
-wholly different network / device before the legitimate holder next refreshes."
-A-49 closes this window by flagging a context switch into the A-11 risk scorer.
-
-### Implementation
-
-**Grant family binding** (`src/identity/oidc.rs::StoredGrantFamily`):
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `ua_hash` | `Option<String>` | SHA-256 hex of the first `User-Agent` seen on a refresh exchange |
-| `bound_asn` | `Option<u32>` | ASN from the first refresh (stub — absent until P-2 ships) |
-
-Both fields default to `None` at grant-family creation; they are recorded on
-the **first refresh exchange** (lazy binding) so that clients that never
-refresh do not carry stale context.
-
-**Context detection** (`engine/mod.rs`, `rotate_grant_family`):
-
-1. `callback_impl` in `http.rs` extracts the `User-Agent` header and wraps it
-   in a `RefreshBindContext { user_agent, asn }`.
-2. On each refresh exchange, `ua_changed` and `asn_changed` are computed by
-   comparing hashes against the stored family values.  If neither stored hash
-   is present (fresh grant or pre-upgrade), both flags are `false` (fail-open).
-3. When `ua_changed || asn_changed`:
-   - Reads `realm.config.risk_scorer_config` (or default).
-   - Builds a `RiskContext { signals: [RefreshContextDelta { ua_changed, asn_changed }] }`.
-   - If `scorer.score(&ctx).step_up_required` → `Err(IdentityError::StepUpChallengeRequired)`.
-4. On the first refresh, the family's `ua_hash` / `bound_asn` are written with
-   the current values for future comparisons.
-
-**Signal weight** (default `refresh_context_delta_weight = 0.35`):
-
-| Changed dimensions | Score contribution |
-|-------------------|--------------------|
-| None | 0.0 |
-| UA only | 0.35 |
-| ASN only | 0.35 |
-| Both | 0.70 → exceeds default `step_up_threshold = 0.5` |
-
-### Fail mode
-
-Fail-**open**.
-
-- Scorer disabled (`security.risk_scorer.enabled: false`, the default) → never blocks.
-- No stored `ua_hash` / no inbound `User-Agent` → skip check entirely.
-- Risk scorer is a heuristic signal, not a hard gate; operators must explicitly
-  enable it and set an appropriate threshold.
-
-### Configuration (`security.risk_scorer` in `hearth.yaml`)
-
-See the P-4 section for the full config reference.  The relevant field:
-
-```yaml
-security:
-  risk_scorer:
-    enabled: true                      # false by default — opt-in
-    step_up_threshold: 0.5             # 0.70 (both dims) > 0.5 → step-up
-    refresh_context_delta_weight: 0.35 # per changed dimension
-```
-
-### Tests
-
-| Test file | Coverage |
-|-----------|---------|
-| `tests/abuse_risk.rs::a49_*` | Unit — disabled scorer, UA-only change, both dims, no change |
-| `tests/abuse_a48_a49.rs::a49_*` | Adversarial — stolen token UA change triggers step-up; fail-open guarantee; both-dims threshold; field API |
-| `tests/abuse_risk_scorer.rs::p4_refresh_*` | Scorer weight arithmetic — one/both/zero dims |
+The User-Agent/ASN drift check that fed the A-11 risk scorer was removed with
+it. Refresh tokens keep their DPoP key binding (RFC 9449) and their binding to
+the confidential client they were issued to; rotation and family-hash replay
+detection are unchanged.
 
 ---
 
@@ -871,43 +799,8 @@ and `tests/token_exchange.rs` (delegation depth + nested `act` chain tests).
 
 ## A-11 — Step-up MFA Risk Scorer
 
-**Source**: `src/identity/risk.rs` (re-exports from `src/abuse/risk_scorer.rs` — HEA-1205)
-
-Aggregates risk signals at login time into a normalised score `[0.0, 1.0]`.
-When `score >= step_up_threshold` (default `0.5`), the login handler returns
-`IdentityError::StepUpChallengeRequired` — the same gate as the existing
-device-fingerprint step-up.
-
-### Signals
-
-| Signal | Default weight | Source |
-|--------|---------------|--------|
-| `NewDevice` | 0.3 | Device-fingerprint miss (`src/identity/device_fp`) |
-| `NewCountry` | 0.4 | GeoIP lookup (stub — absent until P-2 ships) |
-| `PasswordAge { days }` | 0.2 (if `days >= threshold`) | `user.created_at()` (approximation) |
-| `BreachCorpusHit` | 1.0 (forces step-up) | HIBP k-anonymity |
-| `RefreshContextDelta` | 0.35 per dim | UA-hash or ASN change on refresh (A-49) |
-
-### Config (`security.risk_scorer` in `hearth.yaml`)
-
-```yaml
-security:
-  risk_scorer:
-    enabled: true                    # default: false (fail-open)
-    step_up_threshold: 0.5           # score >= this → step-up
-    new_device_weight: 0.3
-    new_country_weight: 0.4
-    password_age_weight: 0.2
-    password_age_days_threshold: 365
-    breach_corpus_weight: 1.0
-    refresh_context_delta_weight: 0.35
-```
-
-**Fail mode**: Fail-open. When disabled (`enabled: false`, the default) score
-is always `0.0` so existing deployments are unaffected.
-
-**Extension point (P-4)**: See [§ P-4: `RiskScorer`](#p-4-riskscorer--rule-based-step-up-mfa-risk-engine)
-for the pluggable trait contract and swap-in instructions.
+**Status:** Removed in Hearth 3.0.0. A `security.risk_scorer` block stops
+startup. MFA is a plain per-realm policy (`mfa_required`), never a risk score.
 
 ---
 
@@ -1384,70 +1277,6 @@ explicitly configured.  External adapter implementations MUST return
 
 The provider is consulted only at registration, forgot-password, and magic-link
 flows — never during `validate_token()` or `lookup_session()`.
-
----
-
-## P-4: `RiskScorer` — Rule-Based Step-Up MFA Risk Engine
-
-**Status**: Shipped (HEA-1205)  
-**Source**: `src/abuse/risk_scorer.rs`
-
-### Overview
-
-`RiskScorer` is the P-4 extension point for adaptive, risk-based step-up MFA.
-The built-in [`RuleBasedRiskScorer`] reference adapter implements the A-11 rule
-engine: it aggregates configurable risk signals observed at login time, computes
-a normalised score in `[0.0, 1.0]`, and sets `step_up_required = true` when the
-score meets or exceeds the operator's configured threshold.
-
-Operators who need vendor risk models or custom ML pipelines implement the
-`RiskScorer` trait and supply their adapter at startup.
-
-### Risk signals
-
-| Signal | Default weight | Source |
-|--------|---------------|--------|
-| `NewDevice` | 0.3 | Device-fingerprint miss (`(user_id, ip/24, UA)` not seen before) |
-| `NewCountry` | 0.4 | GeoIP country change (stub — absent until P-2 ships) |
-| `PasswordAge { days }` | 0.2 | Credential `created_at` ≥ `password_age_days_threshold` |
-| `BreachCorpusHit` | 1.0 | HIBP k-anonymity match |
-| `RefreshContextDelta` | 0.35 per dim | UA-hash or ASN change on refresh exchange (A-49) |
-
-Weights sum additively; the total is clamped to `1.0` before the threshold
-comparison.
-
-### Fail-open policy
-
-Per §6.1 of the abuse-prevention plan: `RiskScorer` is **fail-open**.
-
-- The default config ships with `enabled: false` — `RuleBasedRiskScorer::disabled()`
-  always returns score `0.0` and `step_up_required = false`.
-- `NoopRiskScorer` always returns score `0.0` regardless of signals.
-- External adapter implementations **MUST** return `step_up_required = false` on
-  any transient error so that a scorer outage never blocks legitimate logins.
-
-### Configuration (`hearth.yaml`)
-
-```yaml
-security:
-  risk_scorer:
-    enabled: true                    # false = fail-open (default)
-    step_up_threshold: 0.5           # [0.0, 1.0] — score ≥ this triggers MFA
-    new_device_weight: 0.3
-    new_country_weight: 0.4
-    password_age_weight: 0.2
-    password_age_days_threshold: 365 # days before PasswordAge signal fires
-    breach_corpus_weight: 1.0
-    refresh_context_delta_weight: 0.35
-```
-
-All weights are per-signal contributions in `[0.0, 1.0]`.  Setting a weight to
-`0.0` disables that signal without a code change.
-
-### Off hot-path guarantee
-
-The scorer is consulted only at login time (browser form-submit flows).
-It is **not** on the `validate_token()` or `lookup_session()` hot path.
 
 ---
 

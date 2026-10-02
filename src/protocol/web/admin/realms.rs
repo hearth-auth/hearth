@@ -2744,17 +2744,10 @@ pub struct PatchRealmConfigBody {
     /// `"UPDATE_PASSWORD"`); unknown values return 400.
     #[serde(default)]
     pub default_required_actions: Option<Vec<String>>,
-    /// Replaces the realm's allowed MFA methods list (e.g. `["totp","sms"]`).
+    /// Replaces the realm's allowed MFA methods list (e.g. `["totp","webauthn"]`).
     ///
     /// `null` / absent leaves the field unchanged. Pass `[]` to clear.
-    /// The value `"sms"` enables SMS OTP as an MFA method for this realm.
     pub mfa_methods: Option<Vec<String>>,
-    /// Per-realm SMS OTP expiry in seconds. `null` clears the override
-    /// (reverts to the engine default of 600 s).
-    pub sms_otp_expiry_seconds: Option<u64>,
-    /// Per-realm SMS OTP maximum verification attempts. `null` clears
-    /// the override (reverts to the engine default of 5).
-    pub sms_otp_max_attempts: Option<u32>,
     /// Per-realm Email OTP expiry in seconds. `null` clears the override
     /// (reverts to the engine default of 600 s).
     pub email_otp_expiry_seconds: Option<u64>,
@@ -2766,8 +2759,8 @@ pub struct PatchRealmConfigBody {
 /// `PATCH /admin/realms/{realm}/config`
 ///
 /// Updates mutable realm config fields. Currently exposed:
-/// `default_required_actions`, `mfa_methods`, `sms_otp_expiry_seconds`,
-/// `sms_otp_max_attempts`.
+/// `default_required_actions`, `mfa_methods`, `email_otp_expiry_seconds`,
+/// `email_otp_max_attempts`.
 ///
 /// Requires realm-admin token; returns 403 otherwise.
 /// Unknown action type strings return 400.
@@ -2827,10 +2820,8 @@ pub async fn admin_api_realm_config_patch(
     }
     if let Some(methods) = body.mfa_methods {
         // The same rule the YAML validator and the JSON admin API apply:
-        // known names only, and no `sms` on a transport that cannot deliver.
-        if let Err(reason) =
-            crate::config::check_mfa_methods(&methods, state.sms_transport, state.dev_mode)
-        {
+        // known names only.
+        if let Err(reason) = crate::config::check_mfa_methods(&methods) {
             return (
                 axum::http::StatusCode::BAD_REQUEST,
                 axum::Json(serde_json::json!({ "error": reason })),
@@ -2848,12 +2839,6 @@ pub async fn admin_api_realm_config_patch(
     // the field (None → leave unchanged) or passes a value (Some(v) → set).
     // Passing JSON `null` is not supported for these numeric fields; omit to
     // leave unchanged.
-    if let Some(v) = body.sms_otp_expiry_seconds {
-        config.sms_otp_expiry_seconds = Some(v);
-    }
-    if let Some(v) = body.sms_otp_max_attempts {
-        config.sms_otp_max_attempts = Some(v);
-    }
     if let Some(v) = body.email_otp_expiry_seconds {
         config.email_otp_expiry_seconds = Some(v);
     }

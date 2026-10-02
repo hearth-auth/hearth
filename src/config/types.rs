@@ -752,95 +752,6 @@ pub struct EmailConfig {
     pub allow_log_transport_in_production: bool,
 }
 
-/// SMS delivery transport selector.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SmsTransport {
-    /// Write SMS body to the `tracing` log at WARN level. No external delivery. Default.
-    #[default]
-    Log,
-    /// Deliver via the Twilio Messaging REST API.
-    Twilio,
-    /// Deliver via AWS SNS Transactional SMS (Signature Version 4).
-    #[serde(rename = "awssns")]
-    AwsSns,
-}
-
-/// Twilio SMS transport settings.
-///
-/// Required when [`SmsTransport::Twilio`] is selected.
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TwilioConfig {
-    /// Twilio Account SID (e.g. `AC…`).
-    pub account_sid: String,
-    /// Twilio Auth Token. Loaded from the config file but handled as a secret.
-    pub auth_token: String,
-    /// Twilio sender phone number in E.164 format (e.g. `+15550001111`)
-    /// or a Messaging Service SID.
-    pub from: String,
-}
-
-/// Redacts the auth token (GA audit L20).
-impl std::fmt::Debug for TwilioConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TwilioConfig")
-            .field("account_sid", &self.account_sid)
-            .field("auth_token", &"<redacted>")
-            .field("from", &self.from)
-            .finish()
-    }
-}
-
-/// AWS SNS SMS transport settings.
-///
-/// Required when [`SmsTransport::AwsSns`] is selected.
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SnsSmsConfig {
-    /// AWS region (e.g. `us-east-1`).
-    pub region: String,
-    /// AWS Access Key ID.
-    pub access_key_id: String,
-    /// AWS Secret Access Key. Loaded from the config file but handled as a secret.
-    pub secret_access_key: String,
-    /// Optional alphanumeric sender ID shown on recipient device (up to 11 chars).
-    #[serde(default)]
-    pub sender_id: Option<String>,
-}
-
-/// Redacts the secret access key (GA audit L20).
-impl std::fmt::Debug for SnsSmsConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SnsSmsConfig")
-            .field("region", &self.region)
-            .field("access_key_id", &self.access_key_id)
-            .field("secret_access_key", &"<redacted>")
-            .field("sender_id", &self.sender_id)
-            .finish()
-    }
-}
-
-/// SMS sender configuration.
-///
-/// Controls how OTP and transactional SMS messages are delivered.
-/// Defaults to the `Log` transport, suitable for local development.
-/// Production deployments should set `transport: twilio` (or `awssns`)
-/// and provide the corresponding config block.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SmsConfig {
-    /// Which transport to use for outbound SMS.
-    #[serde(default)]
-    pub transport: SmsTransport,
-    /// Twilio-specific settings. Required when `transport == Twilio`.
-    #[serde(default)]
-    pub twilio: Option<TwilioConfig>,
-    /// AWS SNS-specific settings. Required when `transport == AwsSns`.
-    #[serde(default)]
-    pub aws_sns: Option<SnsSmsConfig>,
-}
-
 /// Global branding configuration.
 ///
 /// Applies across the admin UI and email templates. When `logo_url` is
@@ -1166,9 +1077,6 @@ pub struct SecurityYaml {
     /// A-50 cross-realm aggregation cap (`security.cross_realm_aggregation_cap`).
     #[serde(default)]
     pub cross_realm_aggregation_cap: CrossRealmAggCapYaml,
-    /// A-11 / P-4 step-up MFA risk scorer (`security.risk_scorer`).
-    #[serde(default)]
-    pub risk_scorer: RiskScorerYaml,
     /// A-12 adaptive exponential lockout backoff (`security.adaptive_backoff`).
     #[serde(default)]
     pub adaptive_backoff: AdaptiveBackoffYaml,
@@ -1234,12 +1142,6 @@ pub struct OutboundVolumeShieldYaml {
     /// Distinct email recipients per realm per window before a hard cap.
     #[serde(default = "OutboundVolumeShieldYaml::default_email_hard_cap")]
     pub email_hard_cap: usize,
-    /// Distinct SMS recipients per realm per window before a soft cap.
-    #[serde(default = "OutboundVolumeShieldYaml::default_sms_soft_cap")]
-    pub sms_soft_cap: usize,
-    /// Distinct SMS recipients per realm per window before a hard cap.
-    #[serde(default = "OutboundVolumeShieldYaml::default_sms_hard_cap")]
-    pub sms_hard_cap: usize,
 }
 
 impl OutboundVolumeShieldYaml {
@@ -1252,12 +1154,6 @@ impl OutboundVolumeShieldYaml {
     const fn default_email_hard_cap() -> usize {
         5_000
     }
-    const fn default_sms_soft_cap() -> usize {
-        100
-    }
-    const fn default_sms_hard_cap() -> usize {
-        500
-    }
 }
 
 impl Default for OutboundVolumeShieldYaml {
@@ -1267,8 +1163,6 @@ impl Default for OutboundVolumeShieldYaml {
             window: Self::default_window(),
             email_soft_cap: Self::default_email_soft_cap(),
             email_hard_cap: Self::default_email_hard_cap(),
-            sms_soft_cap: Self::default_sms_soft_cap(),
-            sms_hard_cap: Self::default_sms_hard_cap(),
         }
     }
 }
@@ -1292,12 +1186,6 @@ pub struct CrossRealmAggCapYaml {
     /// Distinct realms per email address before a hard cap.
     #[serde(default = "CrossRealmAggCapYaml::default_email_realm_hard_cap")]
     pub email_realm_hard_cap: usize,
-    /// Distinct realms per phone number before a soft cap.
-    #[serde(default = "CrossRealmAggCapYaml::default_sms_realm_soft_cap")]
-    pub sms_realm_soft_cap: usize,
-    /// Distinct realms per phone number before a hard cap.
-    #[serde(default = "CrossRealmAggCapYaml::default_sms_realm_hard_cap")]
-    pub sms_realm_hard_cap: usize,
 }
 
 impl CrossRealmAggCapYaml {
@@ -1313,12 +1201,6 @@ impl CrossRealmAggCapYaml {
     const fn default_email_realm_hard_cap() -> usize {
         10
     }
-    const fn default_sms_realm_soft_cap() -> usize {
-        3
-    }
-    const fn default_sms_realm_hard_cap() -> usize {
-        6
-    }
 }
 
 impl Default for CrossRealmAggCapYaml {
@@ -1329,97 +1211,6 @@ impl Default for CrossRealmAggCapYaml {
             alert_threshold: Self::default_alert_threshold(),
             email_realm_soft_cap: Self::default_email_realm_soft_cap(),
             email_realm_hard_cap: Self::default_email_realm_hard_cap(),
-            sms_realm_soft_cap: Self::default_sms_realm_soft_cap(),
-            sms_realm_hard_cap: Self::default_sms_realm_hard_cap(),
-        }
-    }
-}
-
-/// `security.risk_scorer` — A-11 / P-4 step-up MFA risk weights.
-///
-/// These become the realm default for [`RealmConfig::risk_scorer_config`],
-/// which the A-49 refresh-context check in the identity engine reads. That
-/// field was hard-coded to `None`, so the scorer ran permanently disabled no
-/// matter what the operator wrote (audit §4.17#9).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RiskScorerYaml {
-    /// Whether risk scoring is active. Default: `false` (fail-open).
-    #[serde(default)]
-    pub enabled: bool,
-    /// Score at or above which step-up MFA is required. Range `[0.0, 1.0]`.
-    #[serde(default = "RiskScorerYaml::default_step_up_threshold")]
-    pub step_up_threshold: f32,
-    /// Weight for the "unrecognised device" signal.
-    #[serde(default = "RiskScorerYaml::default_new_device_weight")]
-    pub new_device_weight: f32,
-    /// Weight for the "unrecognised country" signal.
-    #[serde(default = "RiskScorerYaml::default_new_country_weight")]
-    pub new_country_weight: f32,
-    /// Weight for the "password older than the threshold" signal.
-    #[serde(default = "RiskScorerYaml::default_password_age_weight")]
-    pub password_age_weight: f32,
-    /// Password age in days before `password_age_weight` applies.
-    #[serde(default = "RiskScorerYaml::default_password_age_days_threshold")]
-    pub password_age_days_threshold: u32,
-    /// Weight for a confirmed breach-corpus hit.
-    #[serde(default = "RiskScorerYaml::default_breach_corpus_weight")]
-    pub breach_corpus_weight: f32,
-    /// Weight per changed dimension in the A-49 refresh-context delta.
-    #[serde(default = "RiskScorerYaml::default_refresh_context_delta_weight")]
-    pub refresh_context_delta_weight: f32,
-}
-
-impl RiskScorerYaml {
-    const fn default_step_up_threshold() -> f32 {
-        0.5
-    }
-    const fn default_new_device_weight() -> f32 {
-        0.3
-    }
-    const fn default_new_country_weight() -> f32 {
-        0.4
-    }
-    const fn default_password_age_weight() -> f32 {
-        0.2
-    }
-    const fn default_password_age_days_threshold() -> u32 {
-        365
-    }
-    const fn default_breach_corpus_weight() -> f32 {
-        1.0
-    }
-    const fn default_refresh_context_delta_weight() -> f32 {
-        0.35
-    }
-
-    /// Projects the YAML declaration into the engine-level scorer config.
-    #[must_use]
-    pub fn to_domain(&self) -> crate::abuse::risk_scorer::RiskScorerConfig {
-        crate::abuse::risk_scorer::RiskScorerConfig {
-            enabled: self.enabled,
-            step_up_threshold: self.step_up_threshold,
-            new_device_weight: self.new_device_weight,
-            new_country_weight: self.new_country_weight,
-            password_age_weight: self.password_age_weight,
-            password_age_days_threshold: self.password_age_days_threshold,
-            breach_corpus_weight: self.breach_corpus_weight,
-            refresh_context_delta_weight: self.refresh_context_delta_weight,
-        }
-    }
-}
-
-impl Default for RiskScorerYaml {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            step_up_threshold: Self::default_step_up_threshold(),
-            new_device_weight: Self::default_new_device_weight(),
-            new_country_weight: Self::default_new_country_weight(),
-            password_age_weight: Self::default_password_age_weight(),
-            password_age_days_threshold: Self::default_password_age_days_threshold(),
-            breach_corpus_weight: Self::default_breach_corpus_weight(),
-            refresh_context_delta_weight: Self::default_refresh_context_delta_weight(),
         }
     }
 }
@@ -1736,7 +1527,6 @@ impl Default for SecurityYaml {
             distributed_attack_detector: DistributedAttackDetectorYaml::default(),
             outbound_volume_shield: OutboundVolumeShieldYaml::default(),
             cross_realm_aggregation_cap: CrossRealmAggCapYaml::default(),
-            risk_scorer: RiskScorerYaml::default(),
             adaptive_backoff: AdaptiveBackoffYaml::default(),
             tarpit: TarpitYaml::default(),
             providers: AbuseProvidersYaml::default(),
@@ -4021,12 +3811,6 @@ impl RealmYamlConfig {
             // declaring one is rejected by `deny_unknown_fields`. It is reachable
             // only by constructing `RealmConfig` in-process. Always default here.
             breach_check: crate::identity::BreachCheckConfig::default(),
-            // Audit §4.13#9: adaptive MFA has NO YAML key and NO admin-API surface —
-            // same as `breach_check` above. Always default here.
-            adaptive_mfa: crate::identity::AdaptiveMfaConfig::default(),
-            // SMS OTP expiry and max-attempt config; `None` uses OTP module defaults.
-            sms_otp_expiry_seconds: None,
-            sms_otp_max_attempts: None,
             // Email OTP expiry and max-attempt config; `None` uses OTP module defaults.
             email_otp_expiry_seconds: None,
             email_otp_max_attempts: None,
@@ -4036,11 +3820,6 @@ impl RealmYamlConfig {
             idle_timeout_secs: None,
             absolute_timeout_secs: None,
             fapi_profile,
-            // Populated by `main.rs` from the global `security.risk_scorer`
-            // block after this call, alongside `web_theme_css` — the same
-            // post-processing seam, because `to_realm_config` is handed the
-            // `auth:` defaults but not the `security:` ones.
-            risk_scorer_config: None,
             // A-9 (§4.17#9): `realms.<name>.security.cidr_policy`. There was no
             // field to land in, so the documented block refused to boot and the
             // `CidrFilter` guard had no per-realm input.
@@ -4611,9 +4390,6 @@ pub struct Config {
     /// Outbound email delivery settings.
     #[serde(default)]
     pub email: EmailConfig,
-    /// Outbound SMS delivery settings.
-    #[serde(default)]
-    pub sms: SmsConfig,
     /// First-run onboarding settings.
     #[serde(default)]
     pub onboarding: OnboardingConfig,

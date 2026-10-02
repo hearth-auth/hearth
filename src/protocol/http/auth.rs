@@ -899,10 +899,6 @@ pub(crate) fn identity_error_to_response(
         IdentityError::RequiredActionsBlocking { .. } => {
             (StatusCode::BAD_REQUEST, "required_actions_pending")
         }
-        IdentityError::InvalidSmsOtp => (StatusCode::UNAUTHORIZED, "invalid_sms_otp"),
-        IdentityError::SmsResendLimitExceeded => {
-            (StatusCode::TOO_MANY_REQUESTS, "sms_resend_limit_exceeded")
-        }
         IdentityError::InvalidEmailOtp => (StatusCode::UNAUTHORIZED, "invalid_email_otp"),
         IdentityError::InvalidPushedAuthorizationRequest => {
             (StatusCode::BAD_REQUEST, "invalid_request")

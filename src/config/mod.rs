@@ -40,7 +40,7 @@ pub use types::BackupSecurityYaml;
 pub use types::{
     AbuseProvidersYaml, AdaptiveBackoffYaml, BotSignalYaml, CidrPolicyYaml, CrossRealmAggCapYaml,
     DistributedAttackDetectorYaml, EmailReputationProviderYaml, OutboundVolumeShieldYaml,
-    RiskScorerYaml, TarpitYaml,
+    TarpitYaml,
 };
 pub use types::{
     AccountRateLimitYaml, ApplicationYamlConfig, AuthConfig, BrandingConfig, CaptchaProviderKind,
@@ -53,9 +53,8 @@ pub use types::{
     PepperYaml, PermissionYamlConfig, PostmarkConfig, ProtectedResourceYamlConfig, RateLimitYaml,
     RealmAuthYaml, RealmEmailYaml, RealmMigrateYaml, RealmScimYaml, RealmSecurityYaml,
     RealmTokenYaml, RealmWebYaml, RealmYamlConfig, RoleYamlConfig, ScopeBundleYamlConfig,
-    SecurityYaml, SeedUserYamlConfig, SeedingYamlConfig, SendgridConfig, ServerConfig, SmsConfig,
-    SmsTransport, SmtpConfig, SmtpEncryption, SnsSmsConfig, StorageSection, TlsMinVersionYaml,
-    TokenYamlConfig, TurnstileYaml, TwilioConfig,
+    SecurityYaml, SeedUserYamlConfig, SeedingYamlConfig, SendgridConfig, ServerConfig, SmtpConfig,
+    SmtpEncryption, StorageSection, TlsMinVersionYaml, TokenYamlConfig, TurnstileYaml,
 };
 pub use types::{AgentAuthCapabilities, AgentAuthConfig};
 pub use types::{ClusterConfig, PeerConfig};

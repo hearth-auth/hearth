@@ -2314,7 +2314,6 @@ async fn a_refresh_token_rotates_once_across_a_leader_change() {
                 None,
                 Some(&hearth::identity::RefreshBindContext {
                     authenticated_client_id: Some(client.clone()),
-                    ..Default::default()
                 }),
             )
             .is_ok()
@@ -2424,7 +2423,6 @@ async fn a_consent_revocation_is_not_undone_by_a_rotation_across_a_leader_change
                 None,
                 Some(&hearth::identity::RefreshBindContext {
                     authenticated_client_id: Some(bound_client.clone()),
-                    ..Default::default()
                 }),
             )
             .ok()
@@ -2454,7 +2452,6 @@ async fn a_consent_revocation_is_not_undone_by_a_rotation_across_a_leader_change
                 None,
                 Some(&hearth::identity::RefreshBindContext {
                     authenticated_client_id: Some(client.clone()),
-                    ..Default::default()
                 }),
             )
             .is_ok();

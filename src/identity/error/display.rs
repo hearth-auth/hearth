@@ -195,10 +195,6 @@ impl fmt::Display for IdentityError {
             Self::RequiredActionsBlocking { actions } => {
                 write!(f, "token blocked: pending required actions: {actions:?}")
             }
-            Self::InvalidSmsOtp => write!(f, "invalid or expired SMS OTP"),
-            Self::SmsResendLimitExceeded => {
-                write!(f, "SMS OTP resend limit exceeded for this phone number")
-            }
             Self::InvalidEmailOtp => write!(f, "invalid or expired email OTP"),
             Self::InvalidPushedAuthorizationRequest => {
                 write!(f, "invalid, expired, or already used request_uri")

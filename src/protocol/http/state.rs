@@ -128,15 +128,6 @@ pub struct AppState {
     /// Sourced from `onboarding.base_url`; falls back to the bind address.
     pub public_base_url: String,
 
-    /// The configured `sms.transport`. Together with [`Self::dev_mode`] it
-    /// decides whether SMS MFA can actually deliver a code, which the realm
-    /// config PATCH checks before enabling `sms` in `mfa_methods`.
-    ///
-    /// Defaults to [`crate::config::SmsTransport::Log`] — the fail-closed
-    /// choice: outside dev mode it cannot deliver, so `sms` is refused until
-    /// startup wires the real transport via [`Self::with_sms_transport`].
-    pub sms_transport: crate::config::SmsTransport,
-
     /// The abuse-prevention guards shared with the web UI (task 20.13). The
     /// JSON magic-link endpoint applies their outbound-email caps (A-4, A-50)
     /// exactly as the browser forgot-password and registration forms do
@@ -177,7 +168,6 @@ impl AppState {
             request_shaper: Arc::new(RequestShaper::new()),
             email: None,
             public_base_url: "http://localhost:8420".to_string(),
-            sms_transport: crate::config::SmsTransport::Log,
             abuse_guards: Arc::new(crate::abuse::runtime::AbuseGuards::disabled()),
         }
     }
@@ -219,7 +209,6 @@ impl AppState {
             request_shaper: Arc::new(RequestShaper::new()),
             email: None,
             public_base_url: "http://localhost:8420".to_string(),
-            sms_transport: crate::config::SmsTransport::Log,
             abuse_guards: Arc::new(crate::abuse::runtime::AbuseGuards::disabled()),
         }
     }
@@ -258,7 +247,6 @@ impl AppState {
             request_shaper: Arc::new(RequestShaper::new()),
             email: None,
             public_base_url: "http://localhost:8420".to_string(),
-            sms_transport: crate::config::SmsTransport::Log,
             abuse_guards: Arc::new(crate::abuse::runtime::AbuseGuards::disabled()),
         }
     }
@@ -268,13 +256,6 @@ impl AppState {
     #[must_use]
     pub fn with_abuse_guards(mut self, guards: Arc<crate::abuse::runtime::AbuseGuards>) -> Self {
         self.abuse_guards = guards;
-        self
-    }
-
-    /// Records the configured `sms.transport` (see [`Self::sms_transport`]).
-    #[must_use]
-    pub fn with_sms_transport(mut self, transport: crate::config::SmsTransport) -> Self {
-        self.sms_transport = transport;
         self
     }
 

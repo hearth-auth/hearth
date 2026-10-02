@@ -1190,8 +1190,7 @@ pub struct AuthorizationRequest {
     /// window are rejected unconditionally.
     pub nonce: Option<String>,
     /// Authentication Methods References (RFC 8176) established before code
-    /// issuance. Non-empty when an MFA challenge was successfully completed
-    /// (e.g. `["sms"]`). Propagated to `StoredAuthorizationCode.amr_values`
+    /// issuance. Non-empty when an MFA challenge was successfully completed. Propagated to `StoredAuthorizationCode.amr_values`
     /// and then into the issued tokens at exchange time.
     pub amr_values: Vec<String>,
     /// JARM response mode (RFC 9207 / OAuth 2.0 JARM). When set to a JWT
@@ -1500,13 +1499,9 @@ pub(crate) struct StoredAuthorizationCode {
     pub(crate) mfa_proof: crate::identity::MfaProof,
 }
 
-/// Context from the refresh request used to detect binding drift (A-49).
+/// Context from the refresh request that binds it to its grant family.
 #[derive(Debug, Clone, Default)]
 pub struct RefreshBindContext {
-    /// Raw `User-Agent` header value from the refresh request.
-    pub user_agent: Option<String>,
-    /// Originating ASN (stub — always `None` until HEA-1205 ships).
-    pub asn: Option<u32>,
     /// The client that authenticated on the refresh request (O1, HEA-1755).
     ///
     /// `rotate_grant_family` asserts this equals the grant family's bound
@@ -2006,14 +2001,6 @@ pub(crate) struct StoredGrantFamily {
     /// without needing to embed them in the refresh token itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) amr_values: Vec<String>,
-
-    /// SHA-256 hex of the User-Agent string at grant creation (A-49).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) ua_hash: Option<String>,
-
-    /// Originating ASN at grant creation (A-49, stub — P-4).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) bound_asn: Option<u32>,
 
     /// DPoP JWK thumbprint bound at grant issuance (M1 — RFC 9449 §5).
     ///
@@ -2555,15 +2542,10 @@ pub struct PasswordGrantRequest {
     pub password: String,
     /// Optional OAuth scope (space-delimited). Passed through to the token.
     pub scope: Option<String>,
-    /// Client IP address for device-fingerprint step-up MFA.
-    ///
-    /// Pass the value of `X-Forwarded-For` / peer address after proxy normalisation.
-    /// When `None`, adaptive MFA is skipped (behaves as if feature is disabled for
-    /// this request). Falls back to `"unknown"` prefix in the HMAC input.
+    /// Client IP address, after proxy normalisation. Unused since adaptive MFA
+    /// was removed in 3.0.0; the grant itself goes in the next removal.
     pub client_ip: Option<String>,
-    /// Raw `User-Agent` header value for device-fingerprint step-up MFA.
-    ///
-    /// When `None`, adaptive MFA uses an empty string for the UA component.
+    /// Raw `User-Agent` header value. Unused since adaptive MFA was removed.
     pub user_agent: Option<String>,
 }
 
@@ -2609,7 +2591,7 @@ impl PasswordGrantResponse {
 ///
 /// Used with `grant_type = urn:hearth:params:grant-type:step-up-mfa`.
 /// The caller re-supplies the password and adds an `mfa_code`; both are
-/// verified before tokens are issued and the device fingerprint is recorded.
+/// verified before tokens are issued.
 pub struct StepUpMfaGrantRequest {
     /// The user's email address.
     pub email: String,
@@ -2619,9 +2601,9 @@ pub struct StepUpMfaGrantRequest {
     pub mfa_code: String,
     /// Optional OAuth scope (space-delimited).
     pub scope: Option<String>,
-    /// Client IP address — used to record the trusted device fingerprint.
+    /// Client IP address, for the lockout guard and the session context.
     pub client_ip: Option<String>,
-    /// Raw `User-Agent` header value — used to record the trusted device fingerprint.
+    /// Raw `User-Agent` header value, recorded in the session context.
     pub user_agent: Option<String>,
     /// RFC 7638 thumbprint of a DPoP proof (RFC 9449) the caller validated on
     /// the token request. Binds the issued pair and its grant family to that

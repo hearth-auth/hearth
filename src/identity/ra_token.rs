@@ -274,7 +274,7 @@ impl RaClaims {
         self.mfa_proof = MfaProof::ProvedWebAuthn;
     }
 
-    /// Records that this flow enrolled a TOTP, SMS or email-OTP factor and
+    /// Records that this flow enrolled a TOTP or email-OTP factor and
     /// the user proved it by typing back a live code.
     ///
     /// That counts as a second factor only for a login that had proved none
@@ -671,7 +671,7 @@ mod tests {
         after_password.record_enrolled_email_otp();
         assert_eq!(after_password.mfa_proof, MfaProof::Proved);
 
-        // TOTP or SMS enrolled after a magic link is a different factor.
+        // TOTP enrolled after a magic link is a different factor.
         let mut totp_after_link = browser_claims(MfaProof::None);
         totp_after_link.inbox_first_factor = true;
         totp_after_link.record_enrolled_factor();

@@ -6,10 +6,7 @@
 //! field, a panic message, an `expect` on a `Result` that holds it — wrote the
 //! secret out in clear.
 
-use hearth::config::{
-    MailgunConfig, MailtrapConfig, PostmarkConfig, SendgridConfig, SmtpConfig, SnsSmsConfig,
-    TwilioConfig,
-};
+use hearth::config::{MailgunConfig, MailtrapConfig, PostmarkConfig, SendgridConfig, SmtpConfig};
 use hearth::core::FormSecret;
 use hearth::identity::{PasswordGrantRequest, StepUpMfaGrantRequest};
 use hearth::protocol::web::account::ChangePasswordForm;
@@ -131,20 +128,6 @@ fn email_provider_configs_do_not_print_credentials() {
     let mailtrap: MailtrapConfig =
         serde_norway::from_str(&format!("api_key: {SECRET}\n")).expect("mailtrap config");
     assert_redacted("MailtrapConfig", &format!("{mailtrap:?}"));
-}
-
-#[test]
-fn sms_provider_configs_do_not_print_credentials() {
-    let twilio: TwilioConfig = serde_norway::from_str(&format!(
-        "account_sid: AC123\nauth_token: {SECRET}\nfrom: \"+15550000000\"\n"
-    ))
-    .expect("twilio config");
-    assert_redacted("TwilioConfig", &format!("{twilio:?}"));
-    let sns: SnsSmsConfig = serde_norway::from_str(&format!(
-        "region: us-east-1\naccess_key_id: AKIAEXAMPLE\nsecret_access_key: {SECRET}\n"
-    ))
-    .expect("sns config");
-    assert_redacted("SnsSmsConfig", &format!("{sns:?}"));
 }
 
 #[test]

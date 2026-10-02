@@ -17,7 +17,6 @@ use std::sync::Arc;
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::core::{Clock, SystemClock};
 use hearth::identity::{
-    device_fp::DeviceFingerprintStore,
     hibp::{HibpError, HibpTransport},
     CreateRealmRequest, CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
 };
@@ -576,11 +575,6 @@ impl TestHarness {
     /// Returns an `Arc<dyn AuditEngine>`.
     pub fn audit_arc(&self) -> Arc<dyn AuditEngine> {
         self.audit_engine.clone() as Arc<dyn AuditEngine>
-    }
-
-    /// Returns a `DeviceFingerprintStore` backed by the same storage as the identity engine.
-    pub fn device_fp_store(&self) -> DeviceFingerprintStore {
-        DeviceFingerprintStore::new(Arc::clone(&self.engine) as Arc<dyn StorageEngine>)
     }
 
     /// Creates a new realm and returns its `RealmId`.
