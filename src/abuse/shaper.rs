@@ -1,8 +1,8 @@
-//! Global request shaper (A-2) and gRPC rate-limit interceptor (A-15).
+//! Global request shaper (A-2).
 //!
 //! Implements a per-IP + per-realm sliding-window rate limiter that applies to
-//! all public routes.  The gRPC surface is covered by a `tonic` interceptor
-//! that shares the same state.
+//! all public routes. (A-15, its gRPC interceptor, went with the public gRPC
+//! API in 3.0.0.)
 //!
 //! # Defaults (configurable via `security.request_shaper` in `hearth.yaml`)
 //!
@@ -55,8 +55,7 @@ const WINDOW: Duration = Duration::from_secs(1);
 
 /// Per-IP and per-realm sliding-window rate limiter.
 ///
-/// Shared across HTTP and gRPC surfaces (via `Arc`) so a caller cannot evade
-/// the limit by switching protocols.
+/// Shared across every HTTP surface (via `Arc`).
 #[derive(Debug)]
 pub struct RequestShaper {
     config: ShaperConfig,
@@ -100,7 +99,7 @@ impl Default for ShaperConfig {
 /// The realm a request is counted against in the per-realm dimension.
 ///
 /// Built only from a value that *can* name a realm: a UUID (an `X-Realm-ID`
-/// header or gRPC `x-realm-id` metadata) or a string that is a well-formed
+/// header) or a string that is a well-formed
 /// realm name (a `/realms/{name}` path segment). Anything else names no realm
 /// and opens no bucket, so an attacker-chosen header of arbitrary length can
 /// no longer become a map key.

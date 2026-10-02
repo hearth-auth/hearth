@@ -989,9 +989,6 @@ pub struct SecurityYaml {
     /// accepted when their `scheme://host[:port]` matches an entry here.
     #[serde(default)]
     pub allowed_return_to_origins: Vec<String>,
-    /// IP reputation provider configuration (P-2).
-    #[serde(default)]
-    pub ip_reputation: IpReputationYaml,
     /// CAPTCHA provider configuration (P-1 — HEA-1202).
     #[serde(default)]
     pub captcha: Option<CaptchaYaml>,
@@ -1080,12 +1077,6 @@ pub struct SecurityYaml {
     /// A-12 adaptive exponential lockout backoff (`security.adaptive_backoff`).
     #[serde(default)]
     pub adaptive_backoff: AdaptiveBackoffYaml,
-    /// A-17 login-event tarpit (`security.tarpit`).
-    #[serde(default)]
-    pub tarpit: TarpitYaml,
-    /// P-3 / P-5 pluggable signal providers (`security.providers`).
-    #[serde(default)]
-    pub providers: AbuseProvidersYaml,
 }
 
 /// `security.distributed_attack_detector` — A-3 cardinality detector.
@@ -1251,81 +1242,6 @@ impl Default for AdaptiveBackoffYaml {
     }
 }
 
-/// `security.tarpit` — A-17 per-IP login tarpit.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TarpitYaml {
-    /// Failures per IP within `window_secs` before delays apply.
-    /// Absent = disabled (fail-open).
-    #[serde(default)]
-    pub threshold: Option<u32>,
-    /// Rolling window for counting failures, in seconds. Default: 60.
-    #[serde(default = "TarpitYaml::default_window_secs")]
-    pub window_secs: u64,
-    /// Deterministic delay per tarpitted request, in milliseconds.
-    /// Must be 100–500 per plan §4.1 A-17. Default: 200.
-    #[serde(default = "TarpitYaml::default_delay_ms")]
-    pub delay_ms: u64,
-}
-
-impl TarpitYaml {
-    const fn default_window_secs() -> u64 {
-        60
-    }
-    const fn default_delay_ms() -> u64 {
-        200
-    }
-}
-
-impl Default for TarpitYaml {
-    fn default() -> Self {
-        Self {
-            threshold: None,
-            window_secs: Self::default_window_secs(),
-            delay_ms: Self::default_delay_ms(),
-        }
-    }
-}
-
-/// `security.providers` — pluggable abuse-signal adapters (P-3, P-5).
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AbuseProvidersYaml {
-    /// P-3 UA + JA3/JA4 bot-signal heuristics.
-    #[serde(default)]
-    pub bot_signal: BotSignalYaml,
-    /// P-5 disposable-domain and role-address detection.
-    #[serde(default)]
-    pub email_reputation: EmailReputationProviderYaml,
-}
-
-/// `security.providers.bot_signal` — P-3 heuristic adapter.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BotSignalYaml {
-    /// Whether the heuristic adapter replaces the no-op default.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Extra JA3 hashes to block beyond the built-in list.
-    #[serde(default)]
-    pub extra_ja3_blocklist: Vec<String>,
-    /// Extra JA4 hashes or prefixes to block beyond the built-in list.
-    #[serde(default)]
-    pub extra_ja4_blocklist: Vec<String>,
-}
-
-/// `security.providers.email_reputation` — P-5 built-in adapter.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EmailReputationProviderYaml {
-    /// Whether the built-in adapter replaces the no-op default.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Extra disposable domains beyond the built-in list.
-    #[serde(default)]
-    pub extra_disposable_domains: Vec<String>,
-}
-
 /// Redacts `dpop_nonce_secret` and `key_encryption_key` — both are secret key
 /// material (a DPoP-nonce HMAC key and the storage KEK) and MUST NOT be
 /// revealed if `SecurityYaml`, or any struct containing it, is ever
@@ -1349,7 +1265,6 @@ impl std::fmt::Debug for SecurityYaml {
             .field("request_shaper", &self.request_shaper)
             .field("load_test_unthrottled", &self.load_test_unthrottled)
             .field("allowed_return_to_origins", &self.allowed_return_to_origins)
-            .field("ip_reputation", &self.ip_reputation)
             .field("captcha", &self.captcha)
             .field("tls", &self.tls)
             .field("backup", &self.backup)
@@ -1514,7 +1429,6 @@ impl Default for SecurityYaml {
             request_shaper: None,
             load_test_unthrottled: None,
             allowed_return_to_origins: Vec::new(),
-            ip_reputation: IpReputationYaml::default(),
             captcha: None,
             tls: TlsSecurityYaml::default(),
             backup: BackupSecurityYaml::default(),
@@ -1528,8 +1442,6 @@ impl Default for SecurityYaml {
             outbound_volume_shield: OutboundVolumeShieldYaml::default(),
             cross_realm_aggregation_cap: CrossRealmAggCapYaml::default(),
             adaptive_backoff: AdaptiveBackoffYaml::default(),
-            tarpit: TarpitYaml::default(),
-            providers: AbuseProvidersYaml::default(),
         }
     }
 }
@@ -1711,41 +1623,6 @@ impl BackupSecurityYaml {
     }
 }
 
-/// `security.ip_reputation` — IP reputation policy and provider config (P-2).
-///
-/// Example:
-///
-/// ```yaml
-/// security:
-///   ip_reputation:
-///     enabled: true
-///     action: block          # block | challenge | log (default: log)
-///     spamhaus:
-///       drop_url: https://www.spamhaus.org/drop/drop.txt
-///       dropv6_url: https://www.spamhaus.org/drop/dropv6.txt
-///       refresh_interval_secs: 86400
-///     maxmind_db_path: /etc/hearth/GeoLite2-ASN.mmdb
-/// ```
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IpReputationYaml {
-    /// Whether IP reputation checks are enabled.  Default: `false`.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Action to take when the provider flags an IP (block / challenge / log).
-    /// Default: `"log"`.
-    #[serde(default)]
-    pub action: IpReputationActionYaml,
-    /// Spamhaus DROP / EDROP provider settings.
-    #[serde(default)]
-    pub spamhaus: SpamhausDropYaml,
-    /// Path to the MaxMind GeoLite2-ASN or GeoIP2-ASN MMDB file.
-    ///
-    /// Absent / empty = MaxMind ASN lookup disabled.
-    #[serde(default)]
-    pub maxmind_db_path: Option<String>,
-}
-
 /// Minimum TLS protocol version the server will accept (HEA-SEC-33).
 ///
 /// Restricting to TLS 1.3 eliminates downgrade-attack surface present in TLS 1.2
@@ -1793,56 +1670,6 @@ pub struct TlsSecurityYaml {
     /// behaviour is preserved.
     #[serde(default)]
     pub crl_paths: Vec<PathBuf>,
-}
-
-/// Action taken when IP reputation flags an IP.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum IpReputationActionYaml {
-    /// Reject the request with HTTP 403.
-    Block,
-    /// Return a challenge response (A-16 CAPTCHA-of-last-resort).
-    Challenge,
-    /// Allow but record the signal (default, fail-open posture).
-    #[default]
-    Log,
-}
-
-/// `security.ip_reputation.spamhaus` — Spamhaus DROP/EDROP refresh settings.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SpamhausDropYaml {
-    /// URL for the Spamhaus DROP (IPv4) list.
-    #[serde(default = "SpamhausDropYaml::default_drop_url")]
-    pub drop_url: String,
-    /// URL for the Spamhaus EDROP (IPv6) list.
-    #[serde(default = "SpamhausDropYaml::default_dropv6_url")]
-    pub dropv6_url: String,
-    /// Refresh interval in seconds.  Default: 86 400 (24 hours).
-    #[serde(default = "SpamhausDropYaml::default_refresh_interval_secs")]
-    pub refresh_interval_secs: u64,
-}
-
-impl SpamhausDropYaml {
-    fn default_drop_url() -> String {
-        "https://www.spamhaus.org/drop/drop.txt".into()
-    }
-    fn default_dropv6_url() -> String {
-        "https://www.spamhaus.org/drop/dropv6.txt".into()
-    }
-    fn default_refresh_interval_secs() -> u64 {
-        86_400
-    }
-}
-
-impl Default for SpamhausDropYaml {
-    fn default() -> Self {
-        Self {
-            drop_url: Self::default_drop_url(),
-            dropv6_url: Self::default_dropv6_url(),
-            refresh_interval_secs: Self::default_refresh_interval_secs(),
-        }
-    }
 }
 
 /// `security.http2` — HTTP/2 rapid-reset defense (A-39, CVE-2023-44487).

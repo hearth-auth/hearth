@@ -694,7 +694,7 @@ std::thread::sleep(Duration::from_millis(50));
 
 > **The claim that "the codebase has zero `#[ignore]` markers today" was false and is withdrawn.**
 > At `333c74e6` there are **14** `#[ignore]` attributes: 4 in `tests/abuse_phase0.rs`, 7 in
-> `tests/ldap_federation.rs` (require a live LDAP server), 1 in `tests/backup.rs`, 1 in
+> `tests/ldap_federation.rs` (require a live LDAP server; the file was removed with LDAP support in 3.0.0), 1 in `tests/backup.rs`, 1 in
 > `tests/tenant_enumeration_oracle.rs`, and 1 in `simulation/src/tests/wal_group_commit.rs`.
 > Because rule I greps for the *text* `#[ignore` rather than parsing attributes, a prose comment
 > that merely mentions `#[ignore]` is also flagged. Both facts matter to anyone reading the rule:

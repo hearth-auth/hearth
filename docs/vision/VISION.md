@@ -197,7 +197,7 @@ What Hearth explicitly **does**:
 - Password hashing with Argon2id default, support for bcrypt/PBKDF2/scrypt verification (for migration), automatic upgrade-on-login, and enforced minimum parameters
 
 What Hearth explicitly **does not do**:
-- LDAP server (legacy protocol; provide a migration path in, not ongoing support)
+- LDAP, as a server or as a directory connector (legacy protocol; directory users come in through SCIM provisioning, OIDC/SAML federation, or the offline importers)
 - RADIUS (not in scope; different domain)
 - Custom authentication flow scripting (opinionated flows are the product)
 - Generic policy engines or arbitrary scripting (not OPA/Rego; one permission model, not a framework for inventing your own)

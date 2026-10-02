@@ -234,30 +234,6 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/protocol/http/limits.rs (both accept loops)",
     ),
     key(
-        "security.ip_reputation.action",
-        "src/abuse/ip_reputation/mod.rs",
-    ),
-    key(
-        "security.ip_reputation.enabled",
-        "src/abuse/ip_reputation/mod.rs",
-    ),
-    key(
-        "security.ip_reputation.maxmind_db_path",
-        "src/abuse/ip_reputation/maxmind.rs, src/abuse/runtime.rs",
-    ),
-    key(
-        "security.ip_reputation.spamhaus.drop_url",
-        "src/abuse/ip_reputation/spamhaus.rs",
-    ),
-    key(
-        "security.ip_reputation.spamhaus.dropv6_url",
-        "src/abuse/ip_reputation/spamhaus.rs",
-    ),
-    key(
-        "security.ip_reputation.spamhaus.refresh_interval_secs",
-        "src/abuse/ip_reputation/spamhaus.rs",
-    ),
-    key(
         "security.jwks_rps_limit",
         "src/protocol/admin_auth.rs (JwksRateLimiter), src/main.rs",
     ),
@@ -322,26 +298,6 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/config/validate.rs::resolve_pepper -> src/identity/credentials.rs",
     ),
     key(
-        "security.providers.bot_signal.enabled",
-        "src/abuse/runtime.rs (HeuristicBotSignalProvider, P-3)",
-    ),
-    key(
-        "security.providers.bot_signal.extra_ja3_blocklist",
-        "src/abuse/runtime.rs (HeuristicBotSignalProvider, P-3)",
-    ),
-    key(
-        "security.providers.bot_signal.extra_ja4_blocklist",
-        "src/abuse/runtime.rs (HeuristicBotSignalProvider, P-3)",
-    ),
-    key(
-        "security.providers.email_reputation.enabled",
-        "src/abuse/runtime.rs (BuiltinEmailReputation, P-5)",
-    ),
-    key(
-        "security.providers.email_reputation.extra_disposable_domains",
-        "src/abuse/runtime.rs (BuiltinEmailReputation, P-5)",
-    ),
-    key(
         "security.rate_limiting.admin_per_minute",
         "src/protocol/admin_auth.rs (AdminRateLimiter), src/main.rs",
     ),
@@ -374,18 +330,6 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
     key(
         "security.slug_cooldown_days",
         "src/identity/keys.rs (slug reservation key TTL), src/main.rs",
-    ),
-    key(
-        "security.tarpit.delay_ms",
-        "src/abuse/runtime.rs (TarpitStore, A-17)",
-    ),
-    key(
-        "security.tarpit.threshold",
-        "src/abuse/runtime.rs (TarpitStore, A-17)",
-    ),
-    key(
-        "security.tarpit.window_secs",
-        "src/abuse/runtime.rs (TarpitStore, A-17)",
     ),
     key("security.tls.crl_paths", "src/protocol/tls.rs"),
     key(

@@ -18,7 +18,6 @@ pub mod hibp;
 pub mod kdf_gate;
 pub mod key_encryption;
 pub(crate) mod keys;
-pub mod ldap;
 pub(crate) mod magic_link;
 pub mod mcp;
 pub mod migration;

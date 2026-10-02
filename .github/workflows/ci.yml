@@ -79,7 +79,6 @@ jobs:
       # scanners rather than skipping them.
       docs-only: ${{ steps.docs.outputs.non-docs == 'false' && 'true' || 'false' }}
       abuse-coverage: ${{ steps.filter.outputs.abuse-coverage }}
-      ldap: ${{ steps.filter.outputs.ldap }}
 
     steps:
       - name: Checkout
@@ -230,9 +229,6 @@ jobs:
               - 'tests/abuse_*.rs'
               - 'scripts/check-abuse-coverage.sh'
               - '.github/workflows/ci.yml'
-            ldap:
-              - 'src/identity/ldap/**'
-              - 'tests/ldap_*.rs'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
@@ -281,7 +277,6 @@ jobs:
             echo "| loadtest | ${{ steps.filter.outputs.loadtest }} |"
             echo "| non-docs (any non-documentation file changed) | ${{ steps.docs.outputs.non-docs }} |"
             echo "| abuse-coverage | ${{ steps.filter.outputs.abuse-coverage }} |"
-            echo "| ldap | ${{ steps.filter.outputs.ldap }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # HEA-858: static guard against committing real secret material.
@@ -1234,149 +1229,6 @@ jobs:
         # block above. Document the reason and the tracking issue in the PR.
         run: bash scripts/check-abuse-coverage.sh
 
-  # ── LDAP / Active Directory integration tests (HEA-1331) ────────────────────
-  #
-  # Spins up bitnamilegacy/openldap (Bitnami's legacy namespace, same env-var
-  # schema as the retired bitnami/openldap) with LDAPS enabled. LDAP integration
-  # tests must be marked #[ignore] in source so the `quality` job skips them
-  # when no LDAP server is present. This job runs them via --run-ignored against
-  # the real service container.
-  #
-  # Service credentials are test-only — the OpenLDAP container is ephemeral
-  # with no real user data.
-  #
-  # Image pinned by manifest-list digest (HEA-1331 resolved).
-
-  ldap-integration:
-    name: ldap-integration (OpenLDAP — HEA-1331)
-    needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.ldap == 'true') || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    # No services: block — OpenLDAP is started in a step so we can mount
-    # ephemeral TLS certificates. bitnami/openldap 2.6.10+ removed auto-cert
-    # generation; explicit certs are required for LDAP_ENABLE_TLS=yes.
-
-    env:
-      # Consumed by LDAP integration tests (see tests/ldap_*.rs).
-      HEARTH_TEST_LDAP_URL: ldap://localhost:1389
-      HEARTH_TEST_LDAPS_URL: ldaps://localhost:1636
-      HEARTH_TEST_LDAP_BIND_DN: cn=admin,dc=hearth,dc=test
-      HEARTH_TEST_LDAP_BIND_PASSWORD: HearthLdapCI1!
-      HEARTH_TEST_LDAP_BASE_DN: dc=hearth,dc=test
-      HEARTH_TEST_LDAP_USER: hearthldaptest
-      HEARTH_TEST_LDAP_USER_PASSWORD: HearthLdapUser1!
-      # Same reason as the quality job: this run died on "ld terminated with
-      # signal 7 [Bus error]" followed by "No space left on device". Full debug
-      # info is ~90% of every test binary's bytes.
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          df -h
-
-      - name: Generate TLS certs and start OpenLDAP (HEA-1382/HEA-1385)
-        run: |
-          # bitnami/openldap 2.6.10+ requires explicit TLS certs. Generate a
-          # proper 2-tier PKI: CA cert (CA:TRUE) + server end-entity cert
-          # (CA:FALSE). Rustls rejects CA-flagged certs as server certs
-          # (CaUsedAsEndEntity), so the server cert must NOT have CA:TRUE.
-          mkdir -p /tmp/ldap-tls
-
-          # 1. Generate CA key + self-signed CA cert
-          openssl genrsa -out /tmp/ldap-tls/ca.key 2048
-          openssl req -x509 -new -nodes -key /tmp/ldap-tls/ca.key \
-            -sha256 -days 1 -out /tmp/ldap-tls/ca.crt \
-            -subj "/CN=hearth-ldap-ci-ca" \
-            -addext "basicConstraints=critical,CA:TRUE" \
-            -addext "keyUsage=critical,keyCertSign,cRLSign"
-
-          # 2. Generate server key + CSR
-          openssl genrsa -out /tmp/ldap-tls/server.key 2048
-          openssl req -new -key /tmp/ldap-tls/server.key \
-            -out /tmp/ldap-tls/server.csr \
-            -subj "/CN=localhost"
-
-          # 3. Sign server cert with CA — end-entity (CA:FALSE), SAN required by rustls
-          openssl x509 -req \
-            -in /tmp/ldap-tls/server.csr \
-            -CA /tmp/ldap-tls/ca.crt -CAkey /tmp/ldap-tls/ca.key -CAcreateserial \
-            -out /tmp/ldap-tls/server.crt -days 1 -sha256 \
-            -extfile <(printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n")
-
-          chmod 644 /tmp/ldap-tls/*.crt /tmp/ldap-tls/*.key
-
-          # Trust the CA so rustls-native-certs (used by ldap3 tls-rustls-ring)
-          # accepts the LDAPS connection in ldaps_connection_succeeds test.
-          sudo cp /tmp/ldap-tls/ca.crt /usr/local/share/ca-certificates/hearth-ldap-ci.crt
-          sudo update-ca-certificates
-
-          # Start OpenLDAP with certs mounted; digest-pinned image (HEA-1382)
-          docker run -d --name openldap \
-            -p 1389:1389 -p 1636:1636 \
-            -e LDAP_ADMIN_USERNAME=admin \
-            -e LDAP_ADMIN_PASSWORD=HearthLdapCI1! \
-            -e LDAP_ROOT=dc=hearth,dc=test \
-            -e LDAP_ENABLE_TLS=yes \
-            -e LDAP_TLS_VERIFY_CLIENT=never \
-            -e LDAP_USERS=hearthldaptest \
-            -e LDAP_PASSWORDS=HearthLdapUser1! \
-            -e LDAP_TLS_CERT_FILE=/tls/server.crt \
-            -e LDAP_TLS_KEY_FILE=/tls/server.key \
-            -e LDAP_TLS_CA_FILE=/tls/ca.crt \
-            -v /tmp/ldap-tls:/tls:ro \
-            bitnamilegacy/openldap:2.6.10-debian-12-r4@sha256:966fd39ed25813890e9bd57dac56def163bbcfe64967e0bae59ab018d505bd93
-
-      - name: Setup Rust toolchain (HEA-676 reusable)
-        uses: ./.github/actions/setup-rust
-        with:
-          toolchain: stable
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
-        with:
-          tool: cargo-nextest
-
-      - name: Install ldap-utils (runner-side ldapsearch for readiness probe)
-        run: sudo apt-get install -y --no-install-recommends ldap-utils
-
-      - name: Wait for OpenLDAP to be ready
-        run: |
-          # Wait for LDAP port AND user seeding: bitnami seeds LDAP_USERS
-          # asynchronously after the port comes up, so we must verify at least
-          # one inetOrgPerson entry exists before running tests.
-          for i in $(seq 1 40); do
-            USER_COUNT=$(ldapsearch -x -H ldap://localhost:1389 \
-              -b dc=hearth,dc=test \
-              -D cn=admin,dc=hearth,dc=test \
-              -w HearthLdapCI1! \
-              "(objectClass=inetOrgPerson)" 2>/dev/null | grep -c "^dn:" || true)
-            if [ "${USER_COUNT:-0}" -gt 0 ]; then
-              echo "OpenLDAP ready with ${USER_COUNT} user(s) (attempt $i)"
-              break
-            fi
-            echo "Waiting for OpenLDAP users... (attempt $i/40, currently ${USER_COUNT:-0} users)"
-            sleep 3
-          done
-
-      - name: Run LDAP integration tests (run-ignored against real server)
-        run: |
-          cargo nextest run --workspace \
-            --run-ignored all \
-            -E 'test(ldap)' \
-            --no-fail-fast
-        env:
-          PROTOC: protoc
-
   # ── Raft cluster chaos validation (Gap C-1, HEA-1323) ───────────────────────
   #
   # Runs the full cluster simulation suite (AC-1 through AC-7) in a single
@@ -1726,7 +1578,7 @@ jobs:
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, proto-freshness, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-kotlin, sdk-go, sdk-typescript, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, no-dev-endpoints, cargo-deny, msrv, unsafe-code, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
+    needs: [filter, quality, proto-freshness, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-kotlin, sdk-go, sdk-typescript, sdk-conformance, abuse-coverage, cluster-chaos, no-dev-endpoints, cargo-deny, msrv, unsafe-code, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -1746,7 +1598,6 @@ jobs:
           SDK_TYPESCRIPT: ${{ needs.sdk-typescript.result }}
           SDK_CONFORMANCE: ${{ needs.sdk-conformance.result }}
           ABUSE_COVERAGE: ${{ needs.abuse-coverage.result }}
-          LDAP_INTEGRATION: ${{ needs.ldap-integration.result }}
           CLUSTER_CHAOS: ${{ needs.cluster-chaos.result }}
           NO_DEV_ENDPOINTS: ${{ needs.no-dev-endpoints.result }}
           CARGO_DENY: ${{ needs.cargo-deny.result }}
@@ -1758,14 +1609,14 @@ jobs:
           SECURITY: ${{ needs.security.result }}
           LOADTEST_SMOKE: ${{ needs.loadtest-smoke.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-kotlin=$SDK_KOTLIN sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS no-dev-endpoints=$NO_DEV_ENDPOINTS cargo-deny=$CARGO_DENY msrv=$MSRV unsafe-code=$UNSAFE_CODE commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
+          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-kotlin=$SDK_KOTLIN sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE cluster-chaos=$CLUSTER_CHAOS no-dev-endpoints=$NO_DEV_ENDPOINTS cargo-deny=$CARGO_DENY msrv=$MSRV unsafe-code=$UNSAFE_CODE commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
           # ALLOWLIST, not a denylist (production-readiness task 24.4). This
           # loop used to fail only on "failure" or "cancelled". That is
           # fail-open by construction: any result GitHub adds, and any empty
           # string from an expression that did not evaluate, would have been
           # read as "fine". `success` and `skipped` are the only two results
           # that may pass; everything else — including "" — blocks the merge.
-          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_KOTLIN" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$NO_DEV_ENDPOINTS" "$CARGO_DENY" "$MSRV" "$UNSAFE_CODE" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
+          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_KOTLIN" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$CLUSTER_CHAOS" "$NO_DEV_ENDPOINTS" "$CARGO_DENY" "$MSRV" "$UNSAFE_CODE" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
             case "$result" in
               success|skipped) ;;
               *)

@@ -62,32 +62,32 @@ pub const REMOVED_KEYS: &[RemovedKey] = &[
     },
     RemovedKey {
         path: "security.risk_scorer",
-        feature: "risk scoring and adaptive step-up MFA",
+        feature: "the risk scorer (adaptive step-up MFA)",
         replacement: Some("MFA is a realm policy; set auth.mfa_required"),
     },
     RemovedKey {
         path: "sms",
-        feature: "SMS one-time codes",
+        feature: "SMS one-time-code MFA",
         replacement: Some("use a passkey, TOTP or recovery codes as the second factor"),
     },
     RemovedKey {
         path: "security.outbound_volume_shield.sms_soft_cap",
-        feature: "SMS one-time codes",
+        feature: "SMS one-time-code MFA",
         replacement: Some("use a passkey, TOTP or recovery codes as the second factor"),
     },
     RemovedKey {
         path: "security.outbound_volume_shield.sms_hard_cap",
-        feature: "SMS one-time codes",
+        feature: "SMS one-time-code MFA",
         replacement: Some("use a passkey, TOTP or recovery codes as the second factor"),
     },
     RemovedKey {
         path: "security.cross_realm_aggregation_cap.sms_realm_soft_cap",
-        feature: "SMS one-time codes",
+        feature: "SMS one-time-code MFA",
         replacement: Some("use a passkey, TOTP or recovery codes as the second factor"),
     },
     RemovedKey {
         path: "security.cross_realm_aggregation_cap.sms_realm_hard_cap",
-        feature: "SMS one-time codes",
+        feature: "SMS one-time-code MFA",
         replacement: Some("use a passkey, TOTP or recovery codes as the second factor"),
     },
     RemovedKey {
@@ -112,6 +112,30 @@ pub const REMOVED_KEYS: &[RemovedKey] = &[
         replacement: Some(
             "to require sender-constrained tokens, set dpop_bound_access_tokens: true on the \
              application",
+        ),
+    },
+    RemovedKey {
+        path: "security.tarpit",
+        feature: "the A-17 login tarpit",
+        replacement: Some(
+            "use the per-IP and per-account rate limits and the CAPTCHA challenge \
+             (security.captcha)",
+        ),
+    },
+    RemovedKey {
+        path: "security.ip_reputation",
+        feature: "IP reputation",
+        replacement: Some(
+            "use the per-IP and per-account rate limits and the CAPTCHA challenge \
+             (security.captcha)",
+        ),
+    },
+    RemovedKey {
+        path: "security.providers",
+        feature: "the abuse signal-provider block (bot signals and email reputation)",
+        replacement: Some(
+            "use the per-IP and per-account rate limits and the CAPTCHA challenge \
+             (security.captcha)",
         ),
     },
 ];

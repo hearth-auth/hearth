@@ -390,19 +390,6 @@ oidc:
 #     ip_rps: 100       # default: 100 req/s per source IP
 #     realm_rps: 1000   # default: 1000 req/s per realm
 
-# --- IP reputation (P-2) ----------------------------------------------------
-# Block or challenge IPs on the Spamhaus DROP/EDROP list, or from flagged ASNs
-# via MaxMind. action: "block" | "challenge" (CAPTCHA) | "log" (metrics only).
-# Requires a MaxMind MMDB for ASN lookups (download free GeoLite2-ASN.mmdb).
-#
-# security:
-#   ip_reputation:
-#     enabled: true
-#     action: block
-#     maxmind_db_path: "/var/lib/hearth/GeoLite2-ASN.mmdb"  # optional
-#     spamhaus:
-#       refresh_interval_secs: 86400  # default: 24 hours
-
 # --- mTLS certificate revocation (A-44) ------------------------------------
 # PEM-encoded CRL files checked on every TLS handshake. Reloaded on SIGHUP.
 # Only relevant when server.tls_require_client_cert is true.

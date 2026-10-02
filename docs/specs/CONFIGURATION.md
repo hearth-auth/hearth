@@ -890,7 +890,7 @@ Global per-client and per-realm one-second sliding-window request limiter (A-2),
 | `ip_rps` | integer | `100` | Maximum requests per second from one client across all endpoints. A client is an IPv4 address, or an IPv6 `/64` (one host is routinely assigned a whole `/64`). `0` disables. |
 | `realm_rps` | integer | `1000` | Maximum requests per second to one realm, across all clients. A request counts against a realm only when it names one: the realm segment of a `/realms/{realm}/…`, `/ui/realms/{realm}/…` or `/v1/{realm}/…` path, otherwise a UUID `X-Realm-ID` header. Requests that name no realm — `/health`, root discovery, the admin console — are limited per client only. A realm addressed by name on one route and by id on another is counted in two buckets. `0` disables. |
 
-Every in-process rate limiter (this one, the JWKS/discovery, token, admin and export limiters, the login tarpit and CAPTCHA challenge store, and the A-3/A-4/A-50 detectors) keeps its per-key state in a bounded map: entries are dropped once their window closes, and each limiter holds at most a fixed number of keys (100 000; 16 384 realm buckets; 65 536 per detector dimension), evicting the soonest-expiring entries when full. Per-IP limiters all bucket IPv6 per `/64`, like `operational.max_connections_per_ip`.
+Every in-process rate limiter (this one, the JWKS/discovery, token, admin and export limiters, the CAPTCHA challenge store, and the A-3/A-4/A-50 detectors) keeps its per-key state in a bounded map: entries are dropped once their window closes, and each limiter holds at most a fixed number of keys (100 000; 16 384 realm buckets; 65 536 per detector dimension), evicting the soonest-expiring entries when full. Per-IP limiters all bucket IPv6 per `/64`, like `operational.max_connections_per_ip`.
 
 ```yaml
 security:
@@ -901,73 +901,15 @@ security:
 
 ---
 
-#### `security.ip_reputation`
-
-IP reputation integration (P-2). Checks incoming IPs against blocklists and optionally a MaxMind ASN database before processing requests.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `false` | Whether IP reputation checks are active. |
-| `action` | string | `"log"` | Action taken when an IP is flagged: `"block"` (HTTP 403), `"challenge"` (CAPTCHA), or `"log"` (metric + log only). |
-| `maxmind_db_path` | string | — | Path to a MaxMind GeoLite2-ASN or GeoIP2-ASN `.mmdb` file. When absent, MaxMind ASN lookup is disabled. |
-
-```yaml
-security:
-  ip_reputation:
-    enabled: true
-    action: block
-    maxmind_db_path: "/var/lib/hearth/GeoLite2-ASN.mmdb"
-```
-
-##### `security.ip_reputation.spamhaus`
-
-Spamhaus DROP / EDROP IPv4/IPv6 blocklist settings. Lists are fetched at startup and refreshed on the configured interval.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `drop_url` | string | Spamhaus DROP URL | URL for the Spamhaus DROP (IPv4) list. |
-| `dropv6_url` | string | Spamhaus EDROP URL | URL for the Spamhaus EDROP (IPv6) list. |
-| `refresh_interval_secs` | integer | `86400` (24 h) | How often (seconds) the blocklists are re-fetched. |
-
-```yaml
-security:
-  ip_reputation:
-    enabled: true
-    spamhaus:
-      refresh_interval_secs: 86400  # 24 hours
-```
-
----
-
 #### Abuse-prevention guards
 
-Eight guards documented in [`ABUSE.md`](ABUSE.md) are configured here. **Every
+The abuse-prevention guards documented in [`ABUSE.md`](ABUSE.md) are configured here. **Every
 one is off by default** — an existing configuration is unaffected until an
 operator opts in, which is the fail-open posture ABUSE.md §6.1 requires.
 
 Until the keys below existed, `security:` carried `deny_unknown_fields` and none
 of these blocks had a field to land in, so pasting a documented block made the
 server refuse to boot.
-
-##### `security.tarpit` (A-17)
-
-Deterministic per-IP delay on the login form after repeated failures. The delay
-is applied before the Argon2 admission gate, so tarpitted traffic consumes a
-timer rather than hashing capacity.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `threshold` | integer | — | Failures per IP within `window_secs` before delays apply. Absent = disabled. |
-| `window_secs` | integer | `60` | Rolling window for counting failures. |
-| `delay_ms` | integer | `200` | Delay injected per tarpitted request. |
-
-```yaml
-security:
-  tarpit:
-    threshold: 5
-    window_secs: 60
-    delay_ms: 200
-```
 
 ##### `security.captcha` challenge state (A-16)
 
@@ -1033,34 +975,6 @@ MFA is a plain per-realm policy (`mfa_required`).
 |-------|------|---------|-------------|
 | `durations` | list of durations | `["1m", "5m", "30m", "24h"]` | Lockout applied to each successive offence. |
 | `offense_cooldown` | duration | `"7d"` | How long a clean record must persist before the offence counter resets. |
-
-##### `security.providers` (P-3, P-5)
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_signal.enabled` | bool | `false` | Install the built-in UA + JA3/JA4 heuristic adapter in place of the no-op. |
-| `bot_signal.extra_ja3_blocklist` | list of strings | `[]` | Extra JA3 hashes beyond the built-in list. |
-| `bot_signal.extra_ja4_blocklist` | list of strings | `[]` | Extra JA4 hashes or prefixes beyond the built-in list. |
-| `email_reputation.enabled` | bool | `false` | Install the built-in disposable-domain / role-address adapter in place of the no-op. |
-| `email_reputation.extra_disposable_domains` | list of strings | `[]` | Extra disposable domains beyond the built-in list. |
-
-Only the disposable-domain signal refuses a registration. A role address
-(`admin@`, `support@`) is recorded and allowed — it is legitimate in plenty of
-tenants. Hearth performs no DNS or MX lookup of the email domain; an address
-whose domain does not receive mail is caught by email verification, not here.
-
-```yaml
-security:
-  providers:
-    bot_signal:
-      enabled: true
-      extra_ja3_blocklist:
-        - "deadbeef00000000deadbeef00000000"
-    email_reputation:
-      enabled: true
-      extra_disposable_domains:
-        - "my-internal-throwaway.example"
-```
 
 ---
 
@@ -1626,6 +1540,20 @@ Cluster nodes still talk to each other over an internal gRPC transport
 
 ---
 
+### `security.ip_reputation`, `security.providers`, `security.tarpit` — removed in 3.0.0
+
+IP reputation (Spamhaus DROP/EDROP, MaxMind ASN), the signal-provider block (bot
+signals and email reputation) and the A-17 login tarpit were removed in 3.0.0. Use the
+per-IP and per-account rate limits (`security.rate_limiting`), the A-12 adaptive backoff
+and the CAPTCHA challenge (`security.captcha`) instead. A configuration that still sets
+any of these keys refuses to start:
+
+```
+configuration key 'security.tarpit' is no longer supported: the A-17 login tarpit was removed in Hearth 3.0.0. Remove the key from the configuration. Instead: use the per-IP and per-account rate limits and the CAPTCHA challenge (security.captcha).
+```
+
+---
+
 ### `realms.<name>` RBAC blocks (`permissions`, `roles`, `groups`, `scopes`)
 
 > There is **no** `rbac:` nesting level. `permissions`, `roles`, `groups` and `scopes`
@@ -2082,9 +2010,6 @@ security:
   request_shaper:
     ip_rps: 100
     realm_rps: 1000
-  ip_reputation:
-    enabled: true
-    action: block
   rate_limiting:
     login_per_ip:
       max_attempts: 10
@@ -2230,9 +2155,6 @@ Every field's default value at a glance.
 | `security.captcha.turnstile` | `verify_url` | Cloudflare default |
 | `security.http2` | `max_concurrent_streams` | `100` |
 | `security.http2` | `max_pending_reset_streams` | `10` |
-| `security.ip_reputation` | `enabled` | `false` |
-| `security.ip_reputation` | `action` | `"log"` |
-| `security.ip_reputation.spamhaus` | `refresh_interval_secs` | `86400` (24 h) |
 | `security` | `load_test_unthrottled` | `false` |
 | `security.rate_limiting.login_per_ip` | `max_attempts` | `10` |
 | `security.rate_limiting.login_per_ip` | `window_seconds` | `60` |
@@ -2243,9 +2165,6 @@ Every field's default value at a glance.
 | `security.captcha` | `challenge_threshold` | *(unset)* — A-16 challenge disabled |
 | `security.captcha` | `window_secs` | `60` |
 | `security.captcha` | `challenge_ttl_secs` | `1800` (30 min) |
-| `security.tarpit` | `threshold` | *(unset)* — A-17 tarpit disabled |
-| `security.tarpit` | `window_secs` | `60` |
-| `security.tarpit` | `delay_ms` | `200` |
 | `security.distributed_attack_detector` | `enabled` | `false` |
 | `security.distributed_attack_detector` | `window` | `"300s"` |
 | `security.distributed_attack_detector` | `username_per_ip_threshold` | `20` |
@@ -2259,8 +2178,6 @@ Every field's default value at a glance.
 | `security.cross_realm_aggregation_cap` | `email_realm_soft_cap` / `email_realm_hard_cap` | `5` / `10` |
 | `security.adaptive_backoff` | `durations` | `["1m", "5m", "30m", "24h"]` |
 | `security.adaptive_backoff` | `offense_cooldown` | `"7d"` |
-| `security.providers.bot_signal` | `enabled` | `false` |
-| `security.providers.email_reputation` | `enabled` | `false` |
 | `realms.<name>.security.cidr_policy` | `allow` / `deny` | `[]` / `[]` (no network restriction) |
 | `realms.<name>.auth` | `webauthn_required` | inherits `auth.webauthn_required` |
 | `realms.<name>.auth` | `webauthn_resident_key` | inherits `auth.webauthn_resident_key` |

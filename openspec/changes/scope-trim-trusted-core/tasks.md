@@ -94,12 +94,12 @@ Sixteen admin operations existed only over gRPC (`docs/api/grpc-only.txt`; `Clie
 
 ## 10. LDAP and abuse extras (PR 9)
 
-- [ ] 10.1 Red tests: each removed abuse config key stops startup; signup still works without email reputation; login still works without the tarpit; the shaper, detector email shield, agent monitor, device approval and CAPTCHA tests stay green
-- [ ] 10.2 Delete `src/identity/ldap/`, `pub mod ldap;`, `ldap3`, `tests/ldap_federation.rs`, the `ldap-integration` CI job, the `ldap` path filter and its required-summary entries
-- [ ] 10.3 Delete `src/abuse/ip_reputation/` (and `maxminddb`), `email_reputation.rs` (and its call at `web/handlers.rs:5474`), `bot_signal.rs`, `tarpit.rs`
-- [ ] 10.4 Slim `src/abuse/runtime.rs` to the guards with kept users: pre-auth login checks, outbound email caps, `cidr_policy_denies`
-- [ ] 10.5 Update docs that mention LDAP or the removed abuse features (`federation.md`, README, `STATUS.md`, `VISION.md`, `TESTING.md`, `ABUSE.md`, both migrating-from guides)
-- [ ] 10.6 CHANGELOG `### Removed` entries
+- [x] 10.1 Red tests: each removed abuse config key stops startup; signup still works without email reputation; login still works without the tarpit; the shaper, detector email shield, agent monitor, device approval and CAPTCHA tests stay green **Changed during apply:** `tests/abuse_extras_removed.rs` (carries A-17 for the coverage gate); signup and login keep their own suites
+- [x] 10.2 Delete `src/identity/ldap/`, `pub mod ldap;`, `ldap3`, `tests/ldap_federation.rs`, the `ldap-integration` CI job, the `ldap` path filter and its required-summary entries **Changed during apply:** the LDAP module was never wired to config or login, so nothing else depended on it
+- [x] 10.3 Delete `src/abuse/ip_reputation/` (and `maxminddb`), `email_reputation.rs` (and its call at `web/handlers.rs:5474`), `bot_signal.rs`, `tarpit.rs`
+- [x] 10.4 Slim `src/abuse/runtime.rs` to the guards with kept users: pre-auth login checks, outbound email caps, `cidr_policy_denies`
+- [x] 10.5 Update docs that mention LDAP or the removed abuse features (`federation.md`, README, `STATUS.md`, `VISION.md`, `TESTING.md`, `ABUSE.md`, both migrating-from guides)
+- [x] 10.6 CHANGELOG `### Removed` entries
 
 ## 11. Pre-token webhook default (PR 10)
 

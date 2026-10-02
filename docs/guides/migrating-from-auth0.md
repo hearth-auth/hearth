@@ -240,7 +240,7 @@ Spot-check a representative set of users against the Auth0 role list.
 | Auth0 feature | Status in Hearth | Action required |
 |---|---|---|
 | **Federated connections** (Google OAuth, OIDC, SAML) | Not imported | Declare each connection as a provider in `hearth.yaml` under `realms.<name>.federation.providers` — see [How to Configure Federation](federation.md) |
-| **AD / LDAP connections** | Not available | Import the directory's users, or put an OIDC/SAML IdP in front of the directory and federate to it |
+| **AD / LDAP connections** | Not supported (LDAP removed in 3.0.0) | Import the directory's users, provision them over SCIM, or put an OIDC/SAML IdP in front of the directory and federate to it |
 | **MFA factors** (TOTP, WebAuthn, SMS) | Not exported by Auth0 | Users must re-enroll after migration. Hearth has no SMS factor: SMS users enroll TOTP, a passkey or email OTP |
 | **Actions / Rules / Hooks** | Not applicable | Implement equivalent logic in your application or wait for Hearth's planned hook surface |
 | **Session tokens** | Not migrated | All users must log in again after switchover |

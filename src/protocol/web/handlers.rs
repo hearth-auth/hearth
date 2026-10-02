@@ -1888,10 +1888,6 @@ struct PreparedLogin {
     /// Parsed client IP for the abuse guards (task 20.13). `None` when no IP
     /// could be determined — every guard skips in that case.
     guard_ip: Option<std::net::IpAddr>,
-    /// A-17 tarpit delay owed by this attempt. Awaited by
-    /// [`login_submit_gated`] **before** the KDF gate; it must not be slept on
-    /// synchronously, which would park an executor thread.
-    tarpit_delay: Option<std::time::Duration>,
 }
 
 /// Orchestrates a login submission across the bounded KDF admission gate
@@ -1922,13 +1918,6 @@ async fn login_submit_gated(
         // Rejected pre-gate: no KDF permit was ever acquired.
         Err(response) => return response,
     };
-
-    // A-17 tarpit: the delay is owed before any further work and is awaited,
-    // never slept on, so a tarpitted flood costs the server a timer rather
-    // than an executor thread.
-    if let Some(delay) = prepared.tarpit_delay {
-        tokio::time::sleep(delay).await;
-    }
 
     let is_admin = prepared.is_admin;
     // Extract shed context before all values are moved into the closure.
@@ -2065,9 +2054,8 @@ fn login_prepare(
         return Err(render_ctx.generic_error(&email));
     }
 
-    // Abuse guards (task 20.13, audit §4.17#9). A-9 tenant CIDR, P-2 IP
-    // reputation, P-3 bot signal, A-16 challenge, A-3 cardinality and A-17
-    // tarpit all run here, before a KDF permit is acquired, for the same
+    // Abuse guards (task 20.13, audit §4.17#9). A-9 tenant CIDR, A-16
+    // challenge and A-3 cardinality all run here, before a KDF permit is acquired, for the same
     // reason the rate limit does: rejected traffic must not consume admission
     // capacity. Every arm collapses into the one generic page, so login
     // enumeration properties are unchanged. All are fail-open until the
@@ -2076,15 +2064,10 @@ fn login_prepare(
         .ip_address
         .as_deref()
         .and_then(|s| s.parse::<std::net::IpAddr>().ok());
-    let mut tarpit_delay = None;
-    match state.abuse_guards.pre_auth_login(
-        guard_ip,
-        &email,
-        headers
-            .get(header::USER_AGENT)
-            .and_then(|v| v.to_str().ok()),
-        realm.config().cidr_policy.as_ref(),
-    ) {
+    match state
+        .abuse_guards
+        .pre_auth_login(guard_ip, &email, realm.config().cidr_policy.as_ref())
+    {
         PreAuthVerdict::Allow => {}
         PreAuthVerdict::Deny { reason } => {
             tracing::warn!(ip = %client_ip, guard = reason, "login: refused by abuse guard");
@@ -2099,7 +2082,6 @@ fn login_prepare(
             tracing::warn!(ip = %client_ip, guard = reason, "login: challenged by abuse guard");
             return Err(render_ctx.generic_error(&email));
         }
-        PreAuthVerdict::Delay(d) => tarpit_delay = Some(d),
     }
 
     Ok(PreparedLogin {
@@ -2110,7 +2092,6 @@ fn login_prepare(
         email,
         is_admin,
         guard_ip,
-        tarpit_delay,
     })
 }
 
@@ -2137,7 +2118,6 @@ fn login_finish(
         email,
         is_admin: _,
         guard_ip,
-        tarpit_delay: _,
     } = prepared;
     let return_to = render_ctx.return_to.clone();
 
@@ -5418,27 +5398,6 @@ fn register_submit_impl(
         return render_err(
             format!("Password must be at least {MIN_BROWSER_PASSWORD_LENGTH} characters."),
             form.email,
-        );
-    }
-
-    // P-5 email reputation (task 20.13). The adapter was never constructed on
-    // a production path, so `security.providers.email_reputation` did nothing
-    // at all. It is opt-in and only the disposable-domain signal refuses:
-    // role addresses (`admin@`, `support@`) are legitimate in plenty of
-    // tenants and are recorded, not blocked (§6.1 fail-open). No DNS/MX
-    // lookup is performed.
-    let reputation = state.abuse_guards.check_email_reputation(form.email.trim());
-    if reputation.is_disposable {
-        tracing::warn!("register_submit: refused a disposable email domain");
-        return render_err(
-            "That email provider is not accepted. Please use a different address.".to_string(),
-            form.email,
-        );
-    }
-    if reputation.is_role_address {
-        tracing::info!(
-            role_address = reputation.is_role_address,
-            "register_submit: email reputation signal recorded"
         );
     }
 

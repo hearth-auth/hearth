@@ -31,13 +31,9 @@ Where a guard is consulted:
 | A-3 distributed-attack detector | login form, pre-gate |
 | A-9 tenant CIDR policy | login form, pre-gate |
 | A-16 CAPTCHA challenge state | login form, pre-gate |
-| A-17 login tarpit | login form, pre-gate (awaited, never slept on) |
-| P-2 IP reputation | login form, pre-gate |
-| P-3 bot signal | login form, pre-gate |
-| P-5 email reputation | `POST /ui/register` |
 | A-4 outbound volume shield | self-service verification and password-reset sends |
 | A-50 cross-realm aggregation cap | self-service verification and password-reset sends |
-| A-11 risk scorer, A-49 refresh drift check | Removed in 3.0.0 |
+| A-11 risk scorer, A-49 refresh drift check, A-17 login tarpit, P-2 IP reputation, P-3 bot signal, P-5 email reputation | Removed in 3.0.0 |
 | A-12 adaptive backoff | `POST /ui/device` approval guard |
 
 "Pre-gate" means before a permit is taken from the Argon2 admission gate, for
@@ -100,79 +96,9 @@ When absent, `NoopCaptchaProvider` is active (fail-open per §6.1).
 
 ---
 
-## P-2 — IP Reputation: Spamhaus DROP + MaxMind ASN
+## P-2 — IP Reputation
 
-**Status:** Shipped (HEA-1203)  
-**Module:** `src/abuse/ip_reputation/` → `IpReputationProvider` (trait), `SpamhausDropProvider`, `MaxMindAsnProvider`
-
-### What it provides
-
-| Adapter | Signal | Source | Refresh |
-|---------|--------|--------|---------|
-| `SpamhausDropProvider` | `is_blocklisted: bool` | Spamhaus DROP (IPv4) + EDROP (IPv6) CIDR lists | Daily, background task |
-| `MaxMindAsnProvider` | `asn: Option<u32>`, `asn_org: Option<String>` | Local MaxMind GeoLite2-ASN / GeoIP2-ASN MMDB file | On restart / manual |
-
-### Trait contract
-
-```rust
-pub trait IpReputationProvider: Send + Sync {
-    fn check(&self, ip: IpAddr) -> IpReputationVerdict;
-}
-```
-
-`check()` MUST be synchronous, allocation-free on the happy path, and
-**fail-open** (return `IpReputationVerdict::default()` on any error).
-
-### Data structure
-
-`SpamhausDropProvider` holds an `Arc<SwapCell<CidrFilter>>` (`core::SwapCell`).
-The background refresh task builds a new `CidrFilter` from the downloaded DROP +
-EDROP text, then calls `SwapCell::store(Arc::new(new_filter))` to replace it
-atomically. Reads call `SwapCell::load()` — a read lock, on which readers never
-block one another, permitted here because reputation checks are not on the
-`validate_token` / `lookup_session` hot path — then perform a linear scan over
-the deny `Vec<Cidr>`.  For the current DROP list size (~800 IPv4 + ~100 IPv6
-CIDRs) this stays well under the 5 µs `AbuseGuard.check()` budget. (The filter
-was held in an `ArcSwap` until task 26.5; `arc-swap` is now banned, see
-`ARCHITECTURE.md` §9.1.)
-
-### Outcome and caller contract
-
-Callers inspect `IpReputationVerdict`:
-- `is_blocklisted = true` → IP is in Spamhaus DROP/EDROP.  Callers apply the
-  per-realm `IpReputationPolicy.action` (Block / Challenge / Log).
-- `asn`, `asn_org` → populated by `MaxMindAsnProvider` when available.  Never
-  used as a direct block decision — ASN alone does not block.
-
-Callers MUST NOT expose `is_blocklisted` reason to the client.
-
-### Failure mode: fail-open
-
-Per §6.1 of the abuse-prevention plan: `IpReputation` is **fail-open**.
-
-- `SpamhausDropProvider` starts with an empty filter until the first background
-  refresh succeeds.  If a refresh fails, the previous filter is retained.
-- `MaxMindAsnProvider` returns `IpReputationVerdict::default()` if the MMDB
-  file is missing, unreadable, or the IP has no ASN record.
-- Both: any internal error returns the default verdict — no request is ever
-  blocked by a provider fault.
-
-### Configuration (`hearth.yaml`)
-
-```yaml
-security:
-  ip_reputation:
-    enabled: true           # false (default) = checks skipped entirely
-    action: block           # block | challenge | log (default: log)
-    spamhaus:
-      drop_url: https://www.spamhaus.org/drop/drop.txt
-      dropv6_url: https://www.spamhaus.org/drop/dropv6.txt
-      refresh_interval_secs: 86400   # 24 hours
-    maxmind_db_path: /etc/hearth/GeoLite2-ASN.mmdb   # absent = disabled
-```
-
-Per-realm override: set `security.ip_reputation.enabled: false` in the realm
-block to opt a realm out of IP reputation checks.
+**Status:** Removed in Hearth 3.0.0. A `security.ip_reputation` block stops startup; use the per-IP rate limits and the A-16 CAPTCHA challenge.
 
 ---
 
@@ -211,7 +137,7 @@ DetectorOutcome::Challenge { reason: &'static str }
 
 Callers receiving `Challenge` MUST:
 1. Emit `AuditAction::AbuseDetected` with IP and username in metadata.
-2. Apply a challenge response (A-16 CAPTCHA or A-17 tarpit).
+2. Apply a challenge response (A-16 CAPTCHA).
 3. Return an appropriate error to the client (HTTP 429 or challenge token).
 
 MUST NOT surface the `reason` field to the client.
@@ -353,8 +279,6 @@ access to the admin UI.
 ### Not yet implemented on this page
 
 - **Block / unblock IPs** — requires A-9 (CIDR allow/deny lists).
-- **ASN view** — requires P-2 (`IpReputationProvider` integration).
-- **Geo heat-map** — requires P-2 (MaxMind GeoIP2 or equivalent).
 
 ---
 
@@ -1213,140 +1137,9 @@ not found" to avoid locking out users during transient outages.
 
 ---
 
-## P-3: `BotSignalProvider` — UA + JA3/JA4 Heuristics Adapter
+## P-3 — Bot Signals; P-5 — Email Reputation
 
-**Status**: Shipped (HEA-1204)  
-**Source**: `src/abuse/bot_signal.rs`
-
-### Overview
-
-`BotSignalProvider` is the P-3 extension point for bot-signal detection.  The
-built-in `HeuristicBotSignalProvider` reference adapter ships with Hearth.
-External adapters (Cloudflare Bot Management, Datadome, Kasada, Akamai) implement
-the trait and are wired at startup via `security.providers.bot_signal`.
-
-### Signal layers (applied in order)
-
-| Priority | Layer | Signal | Verdict |
-|----------|-------|--------|---------|
-| 1 | JA3 hash | Matches built-in or operator blocklist | `Block` |
-| 2 | JA4 hash | Matches built-in or operator blocklist | `Block` |
-| 3 | UA — woothee category | `"crawler"` | `Block` |
-| 3 | UA — substring | Known scripting client (`curl/`, `python-requests/`, etc.) | `Block` |
-| 4 | UA — substring | Headless browser / automation framework (`HeadlessChrome`, `Selenium`, etc.) | `Suspect` |
-| 5 | UA — length | Shorter than 10 characters after trimming | `Suspect` |
-| 5 | UA — absent | `User-Agent` header missing | `Suspect` |
-| — | (none matched) | — | `Allow` |
-
-### JA3/JA4 notes
-
-JA3 and JA4 hashes must be injected by the proxy tier (`X-JA3-Hash` /
-`X-JA4-Hash` headers set by Nginx, HAProxy, Cloudflare, etc.).  Hearth does not
-perform TLS fingerprinting of its own listener — these headers are treated as
-advisory.  When absent, the layers are skipped entirely.
-
-The built-in JA3 blocklist contains 7 publicly documented automated-scanner
-fingerprints (zgrab2/masscan, Nmap NSE, Metasploit, Shodan, Censys.io, etc.).
-Add site-specific hashes via `security.providers.bot_signal.extra_ja3_blocklist`.
-
-**False-positive warning**: JA3 hashes can collide between legitimate clients
-and bots sharing the same TLS implementation.  Always pair JA3 blocking with
-additional signals.
-
-### Config (`security.providers.bot_signal` in `hearth.yaml`)
-
-```yaml
-security:
-  providers:
-    bot_signal:
-      extra_ja3_blocklist:
-        - "deadbeef00000000deadbeef00000000"
-      extra_ja4_blocklist: []
-```
-
-### Fail-open policy (§6.1)
-
-`BotSignal` is **fail-open**.  The default shipping configuration uses
-`NoopBotSignalProvider` — no request is ever blocked until an adapter is
-explicitly configured.  External adapter implementations MUST return
-`BotSignalVerdict::Allow` on any transport or internal error.
-
-### Off hot-path guarantee
-
-The provider is consulted only at registration, forgot-password, and magic-link
-flows — never during `validate_token()` or `lookup_session()`.
-
----
-
-## P-5: `EmailReputation` — Disposable-Domain List + Role-Address Detection
-
-**Status**: Shipped (HEA-1204)  
-**Source**: `src/abuse/email_reputation.rs`
-
-### Overview
-
-`EmailReputation` is the P-5 extension point for email-address reputation checks.
-The built-in `BuiltinEmailReputation` reference adapter ships with Hearth.
-`security.providers.email_reputation.enabled` chooses between the built-in
-adapter and the no-op. External services (Kickbox, ZeroBounce, NeverBounce)
-can implement the trait, but there is no configuration key that loads one —
-wiring a third-party adapter is a code change.
-
-### Verdict flags
-
-| Flag | Meaning |
-|------|---------|
-| `is_disposable` | Domain matched the bundled (~400-entry) disposable-domain list |
-| `is_role_address` | Local part is a well-known role address (`noreply`, `admin`, etc.) |
-
-All flags are **advisory** — callers decide policy.  `is_clean()` is true only
-when both flags are false.
-
-### No DNS / MX lookup
-
-Hearth performs no DNS lookup of the email domain — there is no resolver
-dependency and `check()` is synchronous by contract. A domain that does not
-exist or has no MX record is **not** flagged. (An earlier `no-MX` verdict flag
-was removed: nothing ever set it, so it implied a check that never ran.) Use
-email verification to establish that an address receives mail.
-
-### Disposable-domain list
-
-~400 entries from well-known community lists (disposable-email-domains project,
-ivolo/disposable-email-domains, wesbos/burner-email-providers).  Domain matching
-is exact and case-insensitive (domain is lowercased before lookup).  Subdomains
-are NOT checked by default — add them via `extra_disposable_domains` if needed.
-
-### Role-address prefixes (RFC 2142 + common additions)
-
-`noreply`, `no-reply`, `no_reply`, `donotreply`, `postmaster`, `hostmaster`,
-`webmaster`, `mailer-daemon`, `abuse`, `security`, `admin`, `administrator`,
-`root`, `support`, `helpdesk`, `help`, `info`, `contact`, `sales`, `marketing`,
-`billing`, `finance`, `hr`, `jobs`, `careers`, `newsletter`, `notifications`,
-`alerts`, `bounce`, `bounces`, `unsubscribe`, `feedback`, `system`, `daemon`.
-
-### Config (`security.providers.email_reputation` in `hearth.yaml`)
-
-```yaml
-security:
-  providers:
-    email_reputation:
-      extra_disposable_domains:
-        - "my-internal-throwaway.example"
-```
-
-### Fail-open policy (§6.1)
-
-`EmailReputation` is **fail-open**.  The default shipping configuration uses
-`NoopEmailReputation` — no registration is ever blocked until an adapter is
-explicitly configured.  External adapter implementations MUST return a
-permissive verdict (all flags `false`) on any transport or internal error.
-
-### Off hot-path guarantee
-
-The provider is consulted only at registration, invitation acceptance, and
-similar account-creation flows — never during `validate_token()` or
-`lookup_session()`.
+**Status:** Removed in Hearth 3.0.0. A `security.providers` block stops startup; use the per-IP and per-account rate limits and the A-16 CAPTCHA challenge.
 
 ---
 
@@ -1577,41 +1370,7 @@ The backoff key is a free-form string.  Auth handlers use:
 
 ## A-17 — Login-Event Tarpit
 
-**Status:** Shipped (HEA-1191)  
-**Module:** `src/abuse/tarpit`
-
-Once a source IP exceeds the failure threshold, every subsequent auth `POST`
-from that IP receives a deterministic fixed delay before credential
-verification.  The delay is **off the hot path**: `check()` returns
-immediately; the caller applies `tokio::time::sleep(delay)`.
-
-### Hot-path contract
-
-`TarpitStore::check()` is:
-- Synchronous and allocation-free.
-- Holds a `Mutex` only for the duration of a hash-map lookup.
-- Completes in ≤1 µs p99; the overall `AbuseGuard::check()` budget is ≤5 µs.
-
-### Fail-open policy
-
-`threshold: None` (the default) means all calls return `Allow`.  The tarpit
-does not activate until explicitly configured.
-
-### Configuration surface
-
-```yaml
-security:
-  tarpit:
-    threshold: 5          # failures in `window_secs` before tarpit activates
-    window_secs: 60       # rolling window for counting failures
-    delay_ms: 200         # deterministic delay (100–500 ms per plan §4.1 A-17)
-```
-
-### Relationship to A-16 (Challenge)
-
-A-16 **gates** the request (CAPTCHA required).  A-17 **adds latency** but
-does not gate.  Both can be active simultaneously; tarpit fires before the
-CAPTCHA check in handler order.
+**Status:** Removed in Hearth 3.0.0. A `security.tarpit` block stops startup; use the A-12 adaptive backoff, the per-IP rate limits and the A-16 CAPTCHA challenge.
 
 ---
 

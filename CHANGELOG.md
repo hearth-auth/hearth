@@ -85,6 +85,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   fields `fapi_profile` and `authorization_signing_alg_values_supported`, and the
   `fapi_violation` error. PAR, JAR, PKCE, `private_key_jwt` and DPoP stay, for every client. The
   removed config keys stop startup and point at `dpop_bound_access_tokens`.
+- **BREAKING: LDAP and the abuse extras are removed.** The LDAP connector (never wired to config
+  or login) and its CI job are gone; directory users come in through SCIM, federation or the
+  offline importers. Also gone: IP reputation (`security.ip_reputation`, Spamhaus DROP and
+  MaxMind ASN), the signal-provider block (`security.providers`: bot signals and the
+  disposable-email check at registration), and the A-17 login tarpit (`security.tarpit`). Each
+  removed key stops startup with a named error. The rate limits, lockout backoff, request
+  shaper, distributed-attack detector, tenant CIDR policy, CAPTCHA challenge and outbound caps
+  stay.
 
 ### Security
 - **`GET /admin/users/{id}/effective-permissions?org_id=` no longer reports a suspended

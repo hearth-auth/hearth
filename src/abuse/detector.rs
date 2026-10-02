@@ -279,7 +279,7 @@ pub enum DetectorOutcome {
     /// Callers MUST:
     /// 1. Emit an [`crate::audit::types::AuditAction::AbuseDetected`] event
     ///    with the IP and username in metadata.
-    /// 2. Apply the challenge response (A-16 CAPTCHA or A-17 tarpit).
+    /// 2. Apply the challenge response (A-16 CAPTCHA).
     /// 3. Return an appropriate 429 / challenge response to the caller.
     Challenge {
         /// Human-readable reason for internal logging.

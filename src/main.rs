@@ -2637,15 +2637,10 @@ async fn run_serve(
     let abuse_guards = Arc::new(hearth::abuse::runtime::AbuseGuards::from_security(
         &config.security,
     ));
-    abuse_guards.spawn_background_tasks(&config.security);
     info!(
-        tarpit = config.security.tarpit.threshold.is_some(),
         distributed_attack_detector = config.security.distributed_attack_detector.enabled,
         outbound_volume_shield = config.security.outbound_volume_shield.enabled,
         cross_realm_aggregation_cap = config.security.cross_realm_aggregation_cap.enabled,
-        bot_signal = config.security.providers.bot_signal.enabled,
-        email_reputation = config.security.providers.email_reputation.enabled,
-        ip_reputation = config.security.ip_reputation.enabled,
         "abuse-prevention guards installed"
     );
 

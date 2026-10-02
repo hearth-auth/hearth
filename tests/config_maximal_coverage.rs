@@ -114,8 +114,10 @@ fn any_realm_sets(leaves: &BTreeSet<String>, suffix: &str) -> bool {
 #[test]
 fn maximal_example_sets_every_registered_security_key() {
     let registered = registry_key_paths(&read(REGISTRY));
+    // 3.0.0 removed whole feature blocks (risk scorer, SMS, IP reputation,
+    // tarpit, signal providers), so the floor is set from what remains.
     assert!(
-        registered.len() >= 60,
+        registered.len() >= 45,
         "the registry extractor found only {} keys — it is probably broken, which \
          would make this guard vacuous",
         registered.len()

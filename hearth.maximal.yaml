@@ -188,15 +188,6 @@ security:
       previous_version: 1                   # must differ from `version`
       previous_key_hex: "${HEARTH_PASSWORD_PEPPER_PREVIOUS_KEY_HEX}"
 
-  ip_reputation:
-    enabled: true
-    action: log                             # block | challenge | log
-    maxmind_db_path: "/etc/hearth/GeoLite2-ASN.mmdb"
-    spamhaus:
-      drop_url: "https://www.spamhaus.org/drop/drop.txt"
-      dropv6_url: "https://www.spamhaus.org/drop/dropv6.txt"
-      refresh_interval_secs: 86400
-
   captcha:
     provider: turnstile                     # only adapter shipped today
     challenge_threshold: 25                 # failures in `window_secs` per IP
@@ -208,10 +199,6 @@ security:
       verify_url: "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 
   # --- Abuse guards constructed on the production path (audit §4.17#9) ------
-  tarpit:
-    threshold: 10                           # null disables the tarpit
-    window_secs: 60
-    delay_ms: 200                           # injected delay past the threshold
   adaptive_backoff:
     durations: ["1m", "5m", "30m", "24h"]   # nth offence -> nth duration
     offense_cooldown: "7d"                  # clean streak that resets the ladder
@@ -231,18 +218,6 @@ security:
     alert_threshold: 3                      # realms breaching before an alert
     email_realm_soft_cap: 5
     email_realm_hard_cap: 10
-  providers:
-    bot_signal:
-      enabled: true
-      extra_ja3_blocklist:
-        - "deadbeef00000000deadbeef00000000"
-      extra_ja4_blocklist:
-        - "t13d1516h2_8daaf6152771_02713d6af862"
-    email_reputation:
-      enabled: true
-      extra_disposable_domains:
-        - "mailinator.com"
-        - "10minutemail.com"
 
 auth:
   session_ttl: "24h"
