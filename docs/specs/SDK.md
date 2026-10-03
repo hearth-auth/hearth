@@ -71,7 +71,9 @@ SDKs must parse OKP JWKs that omit `y`. Parsers that assume `y` is always presen
 **JWKS caching rules (mandatory):**
 1. Cache keys by `kid`. Do not discard keys not present in the latest fetch.
 2. Respect `Cache-Control: max-age` from the JWKS endpoint response.
-3. On cache miss for a `kid`: re-fetch once before returning an error.
+3. On cache miss for a `kid`: re-fetch once. When the `kid` is still absent, the token is bad:
+   return `TokenInvalidError`. `JWKSFetchError` is only for a JWKS endpoint that is unreachable or
+   answers with an invalid document.
 4. On HTTP 401 from a protected resource: re-fetch JWKS once, then retry the verification.
 5. Maximum cache age: 24 hours regardless of Cache-Control.
 6. When parsing a cached JWKS, skip (do not error on) any key that is not `OKP`/`Ed25519`. A realm
@@ -82,15 +84,41 @@ SDKs must parse OKP JWKs that omit `y`. Parsers that assume `y` is always presen
    above is what refuses an RS256 token. The `"saml-signing"` and `"ecdsa-compat"` roles named in
    older notes are not published in any JWKS.
 
-**JWT validation steps (mandatory, in order):**
+**JWT validation steps (mandatory):**
 1. Verify signature against cached JWKS.
 2. Verify `exp` claim (reject if expired).
-3. Verify `iss` matches configured `issuer_url`.
+3. Verify `iss` matches the **configured** `issuer_url`. The issuer in the discovery document does not
+   replace it.
 4. Verify `aud` contains the configured `client_id` (server SDKs only; configurable).
-5. Verify `iat` is not in the future (allow up to 5s clock skew).
-6. Verify `nbf`, when present: reject with `TokenNotYetValidError` while `now < nbf` beyond the clock-skew
-   allowance. Hearth enforces the same claim server-side on `validate_token`, introspection and the
-   authorization decision endpoint, so an SDK that skips it is more permissive than the server.
+5. Verify `iat` is not in the future.
+6. Verify `nbf`, when present: reject with `TokenNotYetValidError` while `now < nbf`. Hearth enforces
+   the same claim server-side on `validate_token`, introspection and the authorization decision
+   endpoint, so an SDK that skips it is more permissive than the server.
+
+**Clock skew.** One allowance of **5 s** applies to `exp`, `nbf` and `iat` alike. The JOSE library
+applies it (owner decision 2026-10-03, `sdk-standard-libraries`). Before, `exp` had no allowance and
+the TypeScript SDK defaulted to 60 s. A caller may widen the allowance where the SDK exposes it
+(TypeScript `clockSkewSeconds`). Known gap: TypeScript's `jose` refuses a future `iat` only when
+`maxTokenAge` is set, so the TypeScript SDK does not run step 5.
+
+The libraries do not promise the step order above. A token with two faults (for example expired
+**and** the wrong issuer) may get either error in different SDKs. A token with one fault gets the
+same error in every SDK; the conformance harness (§9) checks this.
+
+**JOSE libraries (mandatory).** Each SDK verifies the signature, the `alg` allow-list, the key match
+by `kid` and the registered claims through a widely used JOSE library. No SDK contains its own
+signature-verification code. Section 5 of `scripts/check-sdk-conformance.sh` fails CI on a direct
+verify call (`ed25519.Verify`, `Ed25519PublicKey.verify`, `sodium_crypto_sign_verify_detached`,
+`openssl_verify`, `crypto.subtle.verify`, …) in SDK source.
+
+| SDK | Library | Call |
+|-----|---------|------|
+| TypeScript | `jose` | `jwtVerify` over `createLocalJWKSet`, `algorithms: ["EdDSA"]` |
+| Go | `github.com/go-jose/go-jose/v4` | `jwt.ParseSigned(…, []jose.SignatureAlgorithm{jose.EdDSA})`, `Claims`, `ValidateWithLeeway` |
+| Python | `PyJWT[crypto]` | `jwt.decode(…, algorithms=["EdDSA"])` with a `PyJWK` key |
+| PHP | `lcobucci/jwt` v5 | `Signer\Eddsa` with the `SignedWith`, `IssuedBy`, `PermittedFor` and `LooseValidAt` constraints |
+
+Turning a JWK `x` value into a key (a base64url decode) is not signature code.
 
 **Rejected tokens must return a typed error** (see Section 5), not a bare string or generic exception.
 
@@ -102,13 +130,13 @@ Every SDK MUST expose a `verifyToken()` method — or the language-idiomatic equ
 verifyToken(token: string) → Claims
 ```
 
-- MUST execute all five JWT validation steps above, in order.
+- MUST execute all six JWT validation steps above, through the SDK's JOSE library.
 - MUST use JWKS-based Ed25519/EdDSA local signature verification. An introspection-only path does not satisfy this requirement.
 - MUST return a typed `Claims` object on success (see §4).
 - MUST return a typed error from §5 on any validation failure — never a bare string or generic exception.
 - MUST NOT silently fall back to introspection or skip signature verification on any recoverable error.
 
-**No per-language or per-platform exception applies.** Go, Python, PHP, and all future language SDKs must implement full EdDSA JWKS-based local verification. If a language's standard library does not include an Ed25519 verifier, the SDK MUST declare a dependency on a reputable Ed25519 library (e.g., `golang.org/x/crypto` for Go; `PyNaCl` or `cryptography` for Python). Delegating signature verification to a reverse-proxy header, gateway, or remote service is non-conformant.
+**No per-language or per-platform exception applies.** Go, Python, PHP, and all future language SDKs must implement full EdDSA JWKS-based local verification, through a JOSE library (see the table above). A new SDK picks a widely used JOSE library with EdDSA support, not a bare Ed25519 primitive. Delegating signature verification to a reverse-proxy header, gateway, or remote service is non-conformant.
 
 ---
 
@@ -278,6 +306,11 @@ clientCredentials(scope?: string) → TokenResponse
 
 - MUST send `client_id` and `client_secret` as `application/x-www-form-urlencoded` body fields (RFC 6749 §2.3.1). Sending credentials as query parameters is explicitly prohibited.
 - MUST discover the token endpoint (`token_endpoint`) from the OIDC discovery document.
+- MUST NOT send `X-Realm-ID` on the realm token endpoint. The realm is in the path; a header that
+  disagrees with it (for example the realm *name* where the server expects the id) is refused with
+  `400 realm_mismatch`. The conformance harness found this in the Python SDK.
+- Hearth 3.0.0 answers `400 HEARTH_INVALID_INPUT` when `scope` is absent, although RFC 6749 §4.4.2
+  makes it optional. Until the server is fixed, callers pass a `scope` (the harness uses `openid`).
 
 **Example** (token endpoint path discovered from `/.well-known/openid-configuration`):
 
@@ -417,10 +450,10 @@ All SDKs must define and expose the following error/exception types. Language-na
 |-------|-------------|
 | `ConfigurationError` | Missing required config, invalid issuer URL |
 | `DiscoveryError` | OIDC discovery endpoint unreachable or returned invalid JSON |
-| `JWKSFetchError` | JWKS endpoint unreachable or returned invalid response |
+| `JWKSFetchError` | JWKS endpoint unreachable or returned invalid response (not an unknown `kid`) |
 | `TokenExpiredError` | `exp` claim is in the past |
-| `TokenNotYetValidError` | `nbf` claim is in the future (beyond clock skew) |
-| `TokenInvalidError` | Signature invalid, malformed JWT, or algorithm mismatch |
+| `TokenNotYetValidError` | `nbf` claim is in the future (beyond the 5 s clock skew) |
+| `TokenInvalidError` | Signature invalid, malformed JWT, algorithm mismatch, or a `kid` absent from the JWKS after one re-fetch |
 | `TokenIssuerError` | `iss` does not match configured issuer |
 | `TokenAudienceError` | `aud` does not contain expected audience |
 | `IntrospectionError` | Introspection endpoint unreachable or returned error |
@@ -493,8 +526,28 @@ The browser SDK must additionally implement:
 | Integration tests | Verified against a live Hearth instance (or Hearth test server in CI) |
 | JWKS rotation test | Force a key rollover and verify transparent recovery |
 | Clock skew test | Verify tolerance at boundaries |
+| Conformance runner | `sdks/<sdk>/conformance/run.sh`, run by the shared harness (below) |
 | Coverage target | ≥ 80% line coverage |
 | CI gate | Tests must pass on every PR; coverage check enforced |
+
+**Shared conformance harness.** One scenario set runs through every supported SDK against live
+servers, and every SDK must give the same answer.
+
+- Scenarios: `sdks/conformance/scenarios.yaml`. The runner contract (case file in, one JSON line per
+  case out): `sdks/conformance/README.md`.
+- Driver: `scripts/sdk-conformance.sh` (`make sdk-conformance`; also the last step of
+  `make sdk-smoke-local`). It boots two `serve --dev` servers (one with 1 s access tokens), mints
+  real tokens, runs each SDK's runner, and compares each result with the scenario's expectation and
+  with the other SDKs. A failure names the SDK and the scenario.
+- CI: job `conformance / all SDKs` in `.github/workflows/sdk-smoke.yml`, gated by `sdk-smoke-ok`,
+  which `required-summary` needs.
+- Scenarios today: a user token and a client-credentials token validate (same `sub`, `scope` and
+  `permissions` in every SDK); a tampered payload, `alg: none` and an unknown `kid` give
+  `TokenInvalidError`; an expired token gives `TokenExpiredError`; a wrong audience gives
+  `TokenAudienceError`; a wrong issuer gives `TokenIssuerError`; the SDK's own client-credentials
+  call returns a token that validates.
+- A new SDK is not supported until it ships `sdks/<sdk>/conformance/run.sh` and passes every
+  scenario.
 
 ---
 
@@ -543,11 +596,30 @@ Authorization: Bearer {access_token}
 X-Realm-ID: {realm_id}
 ```
 
+### Generated client
+
+Each SDK's admin client is generated from the `/admin` paths of `docs/api/openapi.json`
+(`scripts/admin_openapi.py` writes that subset). The generated code is committed and never edited by
+hand. The handwritten `AdminClient` wraps it: it keeps the constructor, the auth headers, the
+ergonomic method names and the §5 error mapping. The generated names stay internal.
+
+| SDK | Generator (pinned in `sdks/<sdk>/gen-admin.sh`) | Generated code |
+|-----|-----------------------------------------------|----------------|
+| TypeScript | `openapi-typescript` 7.13.0, with the `openapi-fetch` runtime | `sdks/typescript/src/generated/admin/` |
+| Go | `oapi-codegen` v2.8.0 (`types,client`) | `sdks/go/generated/admin/` |
+| Python | `openapi-python-client` 0.29.1 | `sdks/python/src/hearth/generated/admin/` |
+| PHP | `jane-php/open-api-3` 7.14.4 | `sdks/php/generated/admin/` |
+
+`make sdk-admin-gen` regenerates all four. `make sdk-admin-check` regenerates and fails on any diff;
+the CI job `sdk-admin-freshness` runs it, so an OpenAPI change reaches every SDK or fails the PR. An
+OpenAPI gap is fixed in the server's OpenAPI derivation (`proto/`, `docs/api/openapi.supplement.yaml`,
+`scripts/merge_openapi.py`), never in generated code.
+
 ### Scoping and Auth
 
 - All operations are scoped to the realm identified by `realm_id`.
 - The `access_token` must belong to a subject with the `admin` role in that realm.
-- Tokens scoped to the system realm (`RealmId::nil()`) may administer realm-level metadata (e.g., creating or deleting realms via `/admin/realms`).
+- Tokens scoped to the system realm (`RealmId::nil()`) may administer realm-level metadata (e.g., reading realms, or deleting an archived realm, via `/admin/realms`). Realms are created in `hearth.yaml`: `POST /admin/realms` answers `405`.
 - A `403 Forbidden` response indicates the token's subject lacks the required admin role; SDKs should surface this as a distinct error (e.g., an HTTP error type carrying the status code) rather than silently failing.
 
 ### Minimum Required Operations
@@ -601,13 +673,27 @@ Role assignment is not CRUD-shaped: `POST /admin/users/{id}/roles` with a
 `{ "role_id": ..., "org_id"?: ... }` body creates an assignment,
 `GET /admin/users/{id}/roles` lists them, and `DELETE /admin/assignments/{id}` removes one.
 
-**Organizations.** The REST admin API serves organization CRUD at `/admin/organizations`
-and `/admin/organizations/{id}`, and a member's extra organization roles at
-`/admin/organizations/{id}/members/{user_id}/roles` (Hearth 3.0.0). No SDK exposes these
-yet; the OpenAPI-generated admin clients of the follow-up change `sdk-standard-libraries`
-will. **Membership itself (adding or removing a member) has no REST route**, so no SDK may
-expose membership methods (audit 2026-08-28 §25.19). Membership is administered through the
-admin console or SCIM.
+#### Organizations
+
+The REST admin API serves organization CRUD and a member's extra organization roles (Hearth 3.0.0).
+Every SDK exposes them:
+
+| HTTP | TypeScript | Go | Python | PHP |
+|------|-----------|----|--------|-----|
+| `GET /admin/organizations` | `listOrganizations` | `ListOrganizations` | `list_organizations` | `listOrganizations` |
+| `POST /admin/organizations` | `createOrganization` | `CreateOrganization` | `create_organization` | `createOrganization` |
+| `GET /admin/organizations/{id}` | `getOrganization` | `GetOrganization` | `get_organization` | `getOrganization` |
+| `PATCH /admin/organizations/{id}` | `updateOrganization` | `UpdateOrganization` | `update_organization` | `updateOrganization` |
+| `DELETE /admin/organizations/{id}` | `deleteOrganization` | `DeleteOrganization` | `delete_organization` | `deleteOrganization` |
+| `GET /admin/organizations/{id}/members/{user_id}/roles` | `listMemberRoles` | `ListMemberRoles` | `list_member_roles` | `listOrganizationMemberRoles` |
+| `POST /admin/organizations/{id}/members/{user_id}/roles` | `addMemberRole` | `AddMemberRole` | `add_member_role` | `addOrganizationMemberRole` |
+| `DELETE /admin/organizations/{id}/members/{user_id}/roles/{role_name}` | `removeMemberRole` | `RemoveMemberRole` | `remove_member_role` | `removeOrganizationMemberRole` |
+
+The body fields are snake_case: `slug`, `display_name`, `member_limit`, `mfa_required`, `attributes`
+on create; the same without `slug` (immutable, `400`) plus `status` (`active` | `suspended`) on
+update; `role_name` to add a role. **Membership itself (adding or removing a member) has no REST
+route**, so no SDK may expose membership methods (audit 2026-08-28 §25.19). Membership is
+administered through the admin console or SCIM.
 
 ### Pagination
 
@@ -621,7 +707,7 @@ All list methods must accept an optional `limit` (integer, server-defined defaul
 
 ## Conformance Checklist
 
-For use in PR reviews and automated CI checks (see `.github/workflows/sdk-conformance.yml` and `scripts/check-sdk-conformance.sh`):
+For use in PR reviews and automated CI checks (the `sdk-conformance` job in `.github/workflows/ci.yml` runs `scripts/check-sdk-conformance.sh`; the live harness is §9):
 
 - [ ] Error types match the 10 names from Section 5 (`ConfigurationError`, `DiscoveryError`, `JWKSFetchError`, `TokenExpiredError`, `TokenNotYetValidError`, `TokenInvalidError`, `TokenIssuerError`, `TokenAudienceError`, `IntrospectionError`, `RequiredActionError`)
 - [ ] `RequiredActionError` exposes `requiredActions: string[]` and no redirect URL (Section 5)
@@ -635,10 +721,14 @@ For use in PR reviews and automated CI checks (see `.github/workflows/sdk-confor
 - [ ] `access_token_authorization` mode handling: `Introspection` and `Decision` modes enforce introspect/authorize call before accepting claims; JWKS-only verification is not used for authorization in those modes (Section 3.5)
 - [ ] Ed25519/OKP JWKS key parsing: SDK correctly parses OKP keys (`kty: "OKP"`, `crv: "Ed25519"`) from the JWKS endpoint; does not require a `y` coordinate; does not error on unrecognized `kty` values, including the realm's `RSA`/`RS256` ID-token key (Section 2)
 - [ ] RS256 containment: `verifyToken()` refuses an RS256 token signed by an RSA key the JWKS publishes, while still verifying EdDSA tokens against that same JWKS (Section 2, task 26.55)
-- [ ] Admin SDK entry-point pattern: `AdminClient` is a separate type from `HearthClient`; takes `(base_url, realm_id, access_token)` directly (no OIDC discovery); sends `X-Realm-ID` header on every request; implements minimum CRUD + list for users, realms, clients, roles, groups, and org memberships (Section 12)
+- [ ] Admin SDK entry-point pattern: `AdminClient` is a separate type from `HearthClient`; takes `(base_url, realm_id, access_token)` directly (no OIDC discovery); sends `X-Realm-ID` header on every request; implements minimum CRUD + list for users, realms (read and delete only), clients, roles, groups and organizations, plus organization extra member roles, as a wrapper over the generated admin client (Section 12)
 - [ ] Agent auth section present in README: covers agent CRUD (`/v1/agents`), API-key issuance, DPoP proof construction (RFC 9449), RFC 8693 token exchange, AAT issuance/derivation (`/v1/aats`), transaction token lifecycle (`/v1/transaction-tokens`), and draft-tracking owner reference (Section 13)
 - [ ] `verifyToken()` (or language-idiomatic equivalent `VerifyToken` / `verify_token`) present in every SDK: performs full Ed25519/EdDSA JWKS signature verification locally; returns typed `Claims` on success; returns typed §5 error on failure; does not delegate to introspection-only or reverse-proxy verification (§2)
-- [ ] No per-language EdDSA exception: SDK declares an Ed25519 library dependency rather than skipping or proxying local signature verification; verification works without a running proxy or gateway (§2)
+- [ ] No per-language EdDSA exception: SDK verifies through a JOSE library (§2 table) rather than skipping or proxying local signature verification; verification works without a running proxy or gateway (§2)
+- [ ] No handwritten signature check: section 5 of `scripts/check-sdk-conformance.sh` passes (§2)
+- [ ] One 5 s clock-skew allowance on `exp`, `nbf` and `iat`; an unknown `kid` after one re-fetch is `TokenInvalidError`; `iss` is checked against the configured issuer (§2)
+- [ ] Generated admin client committed and fresh: `make sdk-admin-check` passes (§12)
+- [ ] Conformance runner `sdks/<sdk>/conformance/run.sh` passes every scenario of `make sdk-conformance` (§9)
 - [ ] Client credentials grant present: `clientCredentials()` (or equivalent) sends `client_id` and `client_secret` as POST body fields (`application/x-www-form-urlencoded`); discovers token endpoint from OIDC discovery document; does not send credentials as query parameters (§4.5.1)
 - [ ] Device authorization flow present: `startDeviceFlow()` (or equivalent) calls discovered `device_authorization_endpoint`; `pollDeviceToken()` respects server `interval`; `authorization_pending` handled transparently; `slow_down` increases interval by 5 s per occurrence; `expired_token` raises `TokenExpiredError` (§4.5.2)
 - [ ] Magic-link initiation present: `requestMagicLink()` (or equivalent) POSTs JSON `{"email":"..."}` to `/v1/{realm_slug}/auth/magic-link`; always passes through `202 Accepted` without surfacing a "user not found" error; surfaces HTTP 429 as a rate-limit error (§4.5.3)

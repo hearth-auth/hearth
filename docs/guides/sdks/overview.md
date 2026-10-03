@@ -61,15 +61,17 @@ All public clients (browser SPAs, mobile apps) must use PKCE. Hearth rejects aut
 
 ## Token verification without an SDK
 
-Every GA SDK exposes `verifyToken()` (or the language-idiomatic equivalent — see the table above). Prefer `verifyToken()` over manual JWKS calls: it performs all five mandatory validation steps in the correct order, caches keys, re-fetches on rotation, and returns typed errors.
+Every GA SDK exposes `verifyToken()` (or the language-idiomatic equivalent — see the table above). Prefer `verifyToken()` over manual JWKS calls: it runs the six mandatory validation steps through a standard JOSE library with one 5 s clock-skew allowance, caches keys, re-fetches on rotation, and returns typed errors. A shared conformance harness (`make sdk-conformance`) proves all four SDKs give the same answer for the same token.
 
 If you need to verify tokens from a language or framework that has no Hearth SDK, call the JWKS endpoint directly:
 
 ```bash
-GET /realms/<realm_id>/jwks
+GET /realms/<realm>/.well-known/jwks.json
 ```
 
-Hearth signs every access token with **Ed25519** (`alg: EdDSA`, `kty: OKP`). Your parser **must** support OKP keys — parsers that only handle EC or RSA keys will fail to load Hearth's JWKS. Compatible JWKS libraries: `jose` (Node/TypeScript), `lestrrat-go/jwx` (Go), `python-jose` (Python), `Auth0/java-jwt` (JVM).
+(The realm's discovery document, `/realms/<realm>/.well-known/openid-configuration`, names it as `jwks_uri`.)
+
+Hearth signs every access token with **Ed25519** (`alg: EdDSA`, `kty: OKP`). Your parser **must** support OKP keys — parsers that only handle EC or RSA keys will fail to load Hearth's JWKS. Use a JOSE library with EdDSA support, as the SDKs do: `jose` (Node/TypeScript), `github.com/go-jose/go-jose/v4` (Go), `PyJWT[crypto]` (Python), `lcobucci/jwt` v5 (PHP). Allow `EdDSA` only, check `iss`, `aud` and `exp`, and do not write your own signature check.
 
 The JWKS can also carry an `RSA` key with `alg: RS256`: it signs **ID tokens** only, for clients registered with `id_token_signed_response_alg: RS256` (the OpenID Connect default, and what Dynamic Client Registration gives a client that omits the parameter). The SDKs' `verifyToken` verifies access tokens and keeps refusing RS256 even though that key is published — an ID token must never pass as a bearer token.
 
