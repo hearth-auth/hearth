@@ -112,6 +112,11 @@ func (c *Client) VerifyToken(ctx context.Context, token string, audience ...stri
 	}
 
 	pubKey, err := cache.GetKey(jws.Headers[0].KeyID)
+	if errors.Is(err, errKidNotFound) {
+		// SDK.md §5: the JWKS endpoint answered; the token names a key it
+		// does not publish. That is a bad token, not a fetch failure.
+		return nil, &TokenInvalidError{Reason: "unknown signing key: kid=" + jws.Headers[0].KeyID}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -157,6 +162,9 @@ func (c *Client) VerifyToken(ctx context.Context, token string, audience ...stri
 		return nil, &TokenInvalidError{Reason: "invalid registered claims: " + err.Error()}
 	}
 }
+
+// errKidNotFound marks a JWKS lookup whose kid is absent after the re-fetch.
+var errKidNotFound = errors.New("key not found")
 
 // clockSkew is the one allowance applied to exp, nbf and iat (spec §2).
 const clockSkew = 5 * time.Second
