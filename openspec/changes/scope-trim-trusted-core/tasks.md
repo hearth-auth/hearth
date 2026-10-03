@@ -112,9 +112,11 @@ Sixteen admin operations existed only over gRPC (`docs/api/grpc-only.txt`; `Clie
 
 ## 11. Pre-token webhook default (PR 10)
 
-- [ ] 11.1 Red tests from `specs/pre-token-webhook-failure`: the default fails closed on timeout; explicit `fail_open` still issues the token; reserved claims are dropped
-- [ ] 11.2 Change `#[default]` from `FailOpen` to `FailClosed` in `src/identity/types/realm.rs:455–457`
-- [ ] 11.3 CHANGELOG `### Changed` entry
+- [x] 11.1 Red tests from `specs/pre-token-webhook-failure`: the default fails closed on timeout; explicit `fail_open` still issues the token; reserved claims are dropped
+- [x] 11.2 Change `#[default]` from `FailOpen` to `FailClosed` in `src/identity/types/realm.rs:455–457`
+- [x] 11.3 CHANGELOG `### Changed` entry
+
+**Changed during apply:** the reserved-claims test now also sends `aud` and `roles`; both were already dropped. The webhook has no YAML or admin-API surface (it is set in-process only), so the change is the type's `Default` and serde default; `docs/specs/CONFIGURATION.md` is updated.
 
 ## 12. SDKs (PR 11, may split per SDK)
 

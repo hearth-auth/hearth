@@ -1868,13 +1868,13 @@ Hearth (equivalent to Auth0 Actions / Keycloak Token Mappers via HTTP).
 |-------|------|---------|-------------|
 | `url` | string | *required* | HTTPS endpoint to POST to. Hearth rejects non-HTTPS URLs in production. |
 | `timeout_ms` | integer | `1000` | Request timeout in milliseconds. Exceeded requests are treated as errors and handled per `on_error`. |
-| `on_error` | string | `fail_open` | `fail_open` — token issuance continues without the extra claims; `fail_closed` — token issuance is rejected with an error. |
+| `on_error` | string | `fail_closed` | `fail_closed` — token issuance is rejected with an error. `fail_open` — token issuance continues without the extra claims, and a warning is logged. |
 | `hmac_secret` | string | — | HMAC-SHA256 signing key. When set, the request body is signed and `X-Hearth-Signature-256: sha256=<hex>` is added so the endpoint can verify the request is authentic. |
 
 **Security requirements:**
 
 - `hmac_secret` **MUST** be set in production. Without it, any party that can reach your webhook endpoint can forge enrichment responses and inject arbitrary claims into issued tokens.
-- Use `on_error: fail_closed` together with `hmac_secret` for defense in depth. `fail_open` is the default only to avoid blocking token issuance during initial rollout.
+- `on_error` defaults to `fail_closed`: a webhook failure stops token issuance. Set `on_error: fail_open` only when a token without the extra claims is acceptable.
 - Supply `hmac_secret` via an environment variable — never commit a plaintext secret.
 - The webhook cannot overwrite reserved JWT claims. Keys silently dropped from `extra_claims`: `sub`, `iss`, `aud`, `exp`, `iat`, `nbf`, `jti`, `sid`, `nonce`, `roles`, `permissions`, `required_actions`, `amr`, `cnf`, `sv`, `oid`, `act`, `azp`, `client_id`, `auth_time`, `acr`. The `act`, `azp`, and `client_id` keys are blocked specifically to prevent a compromised enrichment endpoint from injecting a delegation chain or misrepresenting the authorized party.
 

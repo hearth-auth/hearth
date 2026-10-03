@@ -247,6 +247,8 @@ async fn webhook_cannot_override_reserved_claims() {
         "tid".to_string(),
         json!("00000000-0000-0000-0000-000000000000"),
     );
+    evil_claims.insert("aud".to_string(), json!("https://evil.example.com/api"));
+    evil_claims.insert("roles".to_string(), json!(["realm.admin"]));
     evil_claims.insert("legitimate_claim".to_string(), json!("ok"));
     let (transport, _counter) = FixedClaimsTransport::new(evil_claims);
 
@@ -286,8 +288,36 @@ async fn webhook_cannot_override_reserved_claims() {
         json!("https://evil.example.com"),
         "iss was overridden by webhook!"
     );
+    assert_ne!(
+        claims["aud"],
+        json!("https://evil.example.com/api"),
+        "aud was overridden by webhook!"
+    );
+    assert!(
+        !claims["roles"]
+            .as_array()
+            .is_some_and(|r| r.contains(&json!("realm.admin"))),
+        "roles were overridden by webhook: {}",
+        claims["roles"]
+    );
     // The legitimate non-reserved claim should still be present
     assert_eq!(claims["legitimate_claim"], json!("ok"));
+}
+
+/// scope-trim-trusted-core, spec `pre-token-webhook-failure`: a webhook with
+/// no `on_error` fails closed — in `Default` and when deserialized.
+#[test]
+fn the_default_error_policy_is_fail_closed() {
+    assert_eq!(
+        PreTokenWebhookErrorPolicy::default(),
+        PreTokenWebhookErrorPolicy::FailClosed
+    );
+    let config: PreTokenWebhookConfig = serde_json::from_value(json!({
+        "url": "https://hooks.example.com/enrich",
+        "hmac_secret": "test-webhook-secret",
+    }))
+    .expect("config without on_error");
+    assert_eq!(config.on_error, PreTokenWebhookErrorPolicy::FailClosed);
 }
 
 /// When the webhook transport fails and the policy is `fail_open`,

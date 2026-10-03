@@ -422,13 +422,15 @@ pub struct RealmConfig {
 #[serde(rename_all = "snake_case")]
 pub enum PreTokenWebhookErrorPolicy {
     /// Token is issued without extra claims; a warning is logged and a
-    /// `PreTokenWebhookFailed` audit event is emitted. This is the safe
-    /// default — Auth availability takes precedence over enrichment.
-    #[default]
+    /// `PreTokenWebhookFailed` audit event is emitted. Choose it explicitly
+    /// when availability matters more than the enrichment.
     FailOpen,
     /// Token issuance is rejected with `IdentityError::PreTokenWebhookFailed`.
-    /// Use when the enrichment data is required for authorization decisions
-    /// downstream and issuing a token without it would be a security risk.
+    /// The default (scope-trim-trusted-core, spec `pre-token-webhook-failure`):
+    /// claims a webhook adds can drive authorization downstream, so a token
+    /// issued without them must be an explicit choice, not an outage's side
+    /// effect.
+    #[default]
     FailClosed,
 }
 
@@ -447,7 +449,7 @@ pub struct PreTokenWebhookConfig {
     /// Request timeout in milliseconds. Defaults to `1000`.
     #[serde(default = "default_webhook_timeout_ms")]
     pub timeout_ms: u64,
-    /// What to do when the webhook call fails. Defaults to `fail_open`.
+    /// What to do when the webhook call fails. Defaults to `fail_closed`.
     #[serde(default)]
     pub on_error: PreTokenWebhookErrorPolicy,
     /// HMAC-SHA256 signing secret.

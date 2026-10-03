@@ -131,6 +131,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `HEARTH_UNSUPPORTED_GRANT_TYPE`, exactly like the global `/token`.
 
 ### Changed
+- **BREAKING: the pre-token webhook fails closed by default.** A webhook with no `on_error`
+  now stops token issuance when it fails or times out (`pre_token_webhook_failed`, `502`).
+  Set `on_error: fail_open` to issue the token without the extra claims instead.
 - **BREAKING: MFA is required by default.** A realm with no `auth.mfa_required` (and no global
   value) now requires a second factor, in `serve --dev` too. Set `auth.mfa_required: false` to
   opt out; the server then logs a `WARN` at startup naming every such realm, and the admin
