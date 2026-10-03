@@ -18,7 +18,7 @@ export interface VerifyOptions {
   issuer?: string;
   /** Expected `aud` claim(s). Skipped when absent. */
   audience?: string | string[];
-  /** Clock skew tolerance in seconds. Default: 60. */
+  /** Clock skew tolerance in seconds, applied to `exp` and `nbf`. Default: 5. */
   clockSkewSeconds?: number;
 }
 
@@ -112,7 +112,7 @@ export class JwksClient {
    * @throws {@link ConfigurationError} when no expected issuer is configured.
    */
   async verify(token: string, options?: VerifyOptions): Promise<Claims> {
-    const clockTolerance = options?.clockSkewSeconds ?? 60;
+    const clockTolerance = options?.clockSkewSeconds ?? 5;
 
     // Pin the issuer: fall back to the one this client was constructed with,
     // and refuse outright when neither is available. Verifying a signature

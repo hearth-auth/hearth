@@ -10,7 +10,12 @@ import { generateKeyPair, exportJWK, SignJWT, base64url } from "jose";
 import type { KeyLike } from "jose";
 import { HearthClient } from "../src/hearth-client.js";
 import { JwksClient } from "../src/jwks-client.js";
-import { TokenInvalidError, TokenIssuerError, TokenNotYetValidError } from "../src/errors.js";
+import {
+  TokenExpiredError,
+  TokenInvalidError,
+  TokenIssuerError,
+  TokenNotYetValidError,
+} from "../src/errors.js";
 
 const ISSUER = "https://auth.example.com";
 const KID = "key-1";
@@ -153,5 +158,42 @@ describe("jose error → SDK error taxonomy", () => {
     expect(err).toBeInstanceOf(TokenIssuerError);
     expect((err as TokenIssuerError).expected).toBe(ISSUER);
     expect((err as TokenIssuerError).actual).toBe("https://wrong.issuer.com");
+  });
+});
+
+/** Sign a token that expired `secondsAgo` seconds ago. */
+function signExpired(secondsAgo: number): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({ sub: "user123" })
+    .setProtectedHeader({ alg: "EdDSA", kid: KID })
+    .setIssuedAt(now - 3600)
+    .setIssuer(ISSUER)
+    .setExpirationTime(now - secondsAgo)
+    .sign(privateKey);
+}
+
+describe("default clock skew (5 s, shared by all four SDKs)", () => {
+  it("rejects a token that expired 10 s ago under the default options", async () => {
+    mockFetch();
+    await expect(
+      new HearthClient({ issuerUrl: ISSUER }).verifyToken(await signExpired(10)),
+    ).rejects.toBeInstanceOf(TokenExpiredError);
+  });
+
+  it("accepts that token when the caller widens clockSkewSeconds", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify(jwksDoc), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      ),
+    );
+    const jc = new JwksClient({ jwksUri: DISCOVERY.jwks_uri, issuer: ISSUER });
+    const claims = await jc.verify(await signExpired(10), { clockSkewSeconds: 60 });
+    expect(claims.subject()).toBe("user123");
   });
 });
