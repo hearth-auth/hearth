@@ -23,7 +23,7 @@ def _get_kwargs(
 
     params: dict[str, Any] = {}
 
-    params["realmId"] = realm_id
+    params["realm_id"] = realm_id
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 

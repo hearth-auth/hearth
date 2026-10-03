@@ -26,9 +26,9 @@ def _get_kwargs(
 
     params: dict[str, Any] = {}
 
-    params["realmId"] = realm_id
+    params["realm_id"] = realm_id
 
-    params["orgId"] = org_id
+    params["org_id"] = org_id
 
     params["scope"] = scope
 

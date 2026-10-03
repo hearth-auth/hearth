@@ -25,8 +25,8 @@ class V1User:
         email (str | Unset):
         display_name (str | Unset):
         status (V1UserStatus | Unset): The lifecycle status of a user account.
-        created_at (str | Unset):
-        updated_at (str | Unset):
+        created_at (int | Unset):
+        updated_at (int | Unset):
         first_name (str | Unset):
         last_name (str | Unset):
         required_actions (list[str] | Unset): Actions the user must complete before full access is granted.
@@ -37,8 +37,8 @@ class V1User:
     email: str | Unset = UNSET
     display_name: str | Unset = UNSET
     status: V1UserStatus | Unset = UNSET
-    created_at: str | Unset = UNSET
-    updated_at: str | Unset = UNSET
+    created_at: int | Unset = UNSET
+    updated_at: int | Unset = UNSET
     first_name: str | Unset = UNSET
     last_name: str | Unset = UNSET
     required_actions: list[str] | Unset = UNSET
@@ -75,19 +75,19 @@ class V1User:
         if email is not UNSET:
             field_dict["email"] = email
         if display_name is not UNSET:
-            field_dict["displayName"] = display_name
+            field_dict["display_name"] = display_name
         if status is not UNSET:
             field_dict["status"] = status
         if created_at is not UNSET:
-            field_dict["createdAt"] = created_at
+            field_dict["created_at"] = created_at
         if updated_at is not UNSET:
-            field_dict["updatedAt"] = updated_at
+            field_dict["updated_at"] = updated_at
         if first_name is not UNSET:
-            field_dict["firstName"] = first_name
+            field_dict["first_name"] = first_name
         if last_name is not UNSET:
-            field_dict["lastName"] = last_name
+            field_dict["last_name"] = last_name
         if required_actions is not UNSET:
-            field_dict["requiredActions"] = required_actions
+            field_dict["required_actions"] = required_actions
 
         return field_dict
 
@@ -98,7 +98,7 @@ class V1User:
 
         email = d.pop("email", UNSET)
 
-        display_name = d.pop("displayName", UNSET)
+        display_name = d.pop("display_name", UNSET)
 
         _status = d.pop("status", UNSET)
         status: V1UserStatus | Unset
@@ -107,15 +107,15 @@ class V1User:
         else:
             status = V1UserStatus(_status)
 
-        created_at = d.pop("createdAt", UNSET)
+        created_at = d.pop("created_at", UNSET)
 
-        updated_at = d.pop("updatedAt", UNSET)
+        updated_at = d.pop("updated_at", UNSET)
 
-        first_name = d.pop("firstName", UNSET)
+        first_name = d.pop("first_name", UNSET)
 
-        last_name = d.pop("lastName", UNSET)
+        last_name = d.pop("last_name", UNSET)
 
-        required_actions = cast(list[str], d.pop("requiredActions", UNSET))
+        required_actions = cast(list[str], d.pop("required_actions", UNSET))
 
         v1_user = cls(
             id=id,

@@ -5,6 +5,7 @@ TDD: written before implementation. Run with `pytest sdks/python/tests/`.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 import httpx
@@ -376,6 +377,44 @@ class TestAdminClients:
         self._admin().delete_client("c1")  # no error = success
 
 
+# Server-shaped bodies: the generated models decode every success body and
+# check formats (UUID ids, proto enum names), so fixtures must match the
+# JSON the server sends (docs/api/openapi.json, tests/openapi_contract.rs).
+REALM = "55555555-5555-4555-8555-555555555555"
+R1 = "11111111-1111-4111-8111-111111111111"
+R2 = "22222222-2222-4222-8222-222222222222"
+G1 = "33333333-3333-4333-8333-333333333333"
+G2 = "44444444-4444-4444-8444-444444444444"
+
+
+def _role(role_id, name, description=None, permissions=()):
+    return {
+        "id": role_id,
+        "realm_id": REALM,
+        "name": name,
+        "description": description,
+        "permissions": list(permissions),
+        "parent_roles": [],
+        "scope_kind": "realm",
+        "status": "active",
+        "yaml_managed": False,
+        "created_at": 1,
+        "updated_at": 1,
+    }
+
+
+def _group(group_id, name, description=None):
+    return {
+        "id": group_id,
+        "realm_id": REALM,
+        "name": name,
+        "slug": name,
+        "description": description,
+        "created_at": 1,
+        "updated_at": 1,
+    }
+
+
 class TestAdminRoles:
     def _admin(self):
         from hearth.admin import AdminClient
@@ -385,11 +424,7 @@ class TestAdminRoles:
     def test_list_roles(self, respx_mock):
         respx_mock.get("http://localhost:8420/admin/roles").mock(
             return_value=httpx.Response(
-                200,
-                json={
-                    "items": [{"id": "r1", "name": "admin", "description": None}],
-                    "next_cursor": None,
-                },
+                200, json={"items": [_role(R1, "admin")], "next_cursor": None}
             )
         )
         result = self._admin().list_roles()
@@ -397,43 +432,48 @@ class TestAdminRoles:
         assert result.items[0].name == "admin"
 
     def test_get_role(self, respx_mock):
-        respx_mock.get("http://localhost:8420/admin/roles/r1").mock(
+        respx_mock.get(f"http://localhost:8420/admin/roles/{R1}").mock(
             return_value=httpx.Response(
-                200, json={"id": "r1", "name": "admin", "description": None}
+                200, json=_role(R1, "admin", permissions=["user.read"])
             )
         )
-        result = self._admin().get_role("r1")
-        assert result.id == "r1"
+        result = self._admin().get_role(R1)
+        assert result.id == R1
+        assert result.permissions == ["user.read"]
 
     def test_create_role(self, respx_mock):
         from hearth.types import CreateRoleRequest
 
-        respx_mock.post("http://localhost:8420/admin/roles").mock(
-            return_value=httpx.Response(
-                201, json={"id": "r2", "name": "editor", "description": "Can edit"}
-            )
+        route = respx_mock.post("http://localhost:8420/admin/roles").mock(
+            return_value=httpx.Response(201, json=_role(R2, "editor", "Can edit"))
         )
-        req = CreateRoleRequest(name="editor", description="Can edit")
+        req = CreateRoleRequest(
+            name="editor", description="Can edit", permissions=["a.b"]
+        )
         result = self._admin().create_role(req)
-        assert result.id == "r2"
+        assert result.id == R2
+        sent = json.loads(route.calls.last.request.content)
+        assert sent == {
+            "name": "editor",
+            "description": "Can edit",
+            "permissions": ["a.b"],
+        }
 
     def test_update_role(self, respx_mock):
         from hearth.types import UpdateRoleRequest
 
-        respx_mock.patch("http://localhost:8420/admin/roles/r1").mock(
-            return_value=httpx.Response(
-                200, json={"id": "r1", "name": "superadmin", "description": None}
-            )
+        respx_mock.patch(f"http://localhost:8420/admin/roles/{R1}").mock(
+            return_value=httpx.Response(200, json=_role(R1, "superadmin"))
         )
         req = UpdateRoleRequest(name="superadmin")
-        result = self._admin().update_role("r1", req)
+        result = self._admin().update_role(R1, req)
         assert result.name == "superadmin"
 
     def test_delete_role(self, respx_mock):
-        respx_mock.delete("http://localhost:8420/admin/roles/r1").mock(
+        respx_mock.delete(f"http://localhost:8420/admin/roles/{R1}").mock(
             return_value=httpx.Response(204)
         )
-        self._admin().delete_role("r1")
+        self._admin().delete_role(R1)
 
 
 class TestAdminGroups:
@@ -447,8 +487,9 @@ class TestAdminGroups:
             return_value=httpx.Response(
                 200,
                 json={
-                    "items": [{"id": "g1", "name": "engineering", "description": None}],
+                    "items": [_group(G1, "engineering")],
                     "next_cursor": None,
+                    "total": 1,
                 },
             )
         )
@@ -457,43 +498,40 @@ class TestAdminGroups:
         assert result.items[0].name == "engineering"
 
     def test_get_group(self, respx_mock):
-        respx_mock.get("http://localhost:8420/admin/groups/g1").mock(
-            return_value=httpx.Response(
-                200, json={"id": "g1", "name": "engineering", "description": None}
-            )
+        respx_mock.get(f"http://localhost:8420/admin/groups/{G1}").mock(
+            return_value=httpx.Response(200, json=_group(G1, "engineering"))
         )
-        result = self._admin().get_group("g1")
-        assert result.id == "g1"
+        result = self._admin().get_group(G1)
+        assert result.id == G1
+        assert result.slug == "engineering"
 
     def test_create_group(self, respx_mock):
         from hearth.types import CreateGroupRequest
 
-        respx_mock.post("http://localhost:8420/admin/groups").mock(
-            return_value=httpx.Response(
-                201, json={"id": "g2", "name": "design", "description": None}
-            )
+        route = respx_mock.post("http://localhost:8420/admin/groups").mock(
+            return_value=httpx.Response(201, json=_group(G2, "design"))
         )
-        req = CreateGroupRequest(name="design")
+        req = CreateGroupRequest(name="design", slug="design")
         result = self._admin().create_group(req)
-        assert result.id == "g2"
+        assert result.id == G2
+        sent = json.loads(route.calls.last.request.content)
+        assert sent == {"name": "design", "slug": "design"}
 
     def test_update_group(self, respx_mock):
         from hearth.types import UpdateGroupRequest
 
-        respx_mock.patch("http://localhost:8420/admin/groups/g1").mock(
-            return_value=httpx.Response(
-                200, json={"id": "g1", "name": "infra", "description": "Infrastructure"}
-            )
+        respx_mock.patch(f"http://localhost:8420/admin/groups/{G1}").mock(
+            return_value=httpx.Response(200, json=_group(G1, "infra", "Infrastructure"))
         )
         req = UpdateGroupRequest(name="infra", description="Infrastructure")
-        result = self._admin().update_group("g1", req)
+        result = self._admin().update_group(G1, req)
         assert result.name == "infra"
 
     def test_delete_group(self, respx_mock):
-        respx_mock.delete("http://localhost:8420/admin/groups/g1").mock(
+        respx_mock.delete(f"http://localhost:8420/admin/groups/{G1}").mock(
             return_value=httpx.Response(204)
         )
-        self._admin().delete_group("g1")
+        self._admin().delete_group(G1)
 
 
 class TestAdminOrgMembersRemoved:
@@ -559,8 +597,8 @@ class TestAdminMutationVerbs:
                 json={
                     "id": "u1",
                     "email": "a@b.c",
-                    "username": "alice",
-                    "status": "active",
+                    "display_name": "New",
+                    "status": "USER_STATUS_ACTIVE",
                 },
             )
         )
@@ -588,27 +626,20 @@ class TestAdminMutationVerbs:
     def test_update_role_sends_patch(self, respx_mock):
         from hearth.types import UpdateRoleRequest
 
-        route = respx_mock.patch("http://localhost:8420/admin/roles/r1").mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    "id": "r1",
-                    "name": "admin",
-                    "permissions": [],
-                },
-            )
+        route = respx_mock.patch(f"http://localhost:8420/admin/roles/{R1}").mock(
+            return_value=httpx.Response(200, json=_role(R1, "admin", "New"))
         )
-        self._admin().update_role("r1", UpdateRoleRequest(description="New"))
+        self._admin().update_role(R1, UpdateRoleRequest(description="New"))
         assert route.called
         assert route.calls.last.request.method == "PATCH"
 
     def test_update_group_sends_patch(self, respx_mock):
         from hearth.types import UpdateGroupRequest
 
-        route = respx_mock.patch("http://localhost:8420/admin/groups/g1").mock(
-            return_value=httpx.Response(200, json={"id": "g1", "name": "eng"})
+        route = respx_mock.patch(f"http://localhost:8420/admin/groups/{G1}").mock(
+            return_value=httpx.Response(200, json=_group(G1, "eng"))
         )
-        self._admin().update_group("g1", UpdateGroupRequest(name="eng"))
+        self._admin().update_group(G1, UpdateGroupRequest(name="eng"))
         assert route.called
         assert route.calls.last.request.method == "PATCH"
 

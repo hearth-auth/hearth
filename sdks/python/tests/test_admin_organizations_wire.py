@@ -162,7 +162,7 @@ def test_update_user_sends_status_as_proto_enum_name(respx_mock):
 def test_base_url_path_prefix_is_kept(respx_mock):
     route = respx_mock.get("http://gw.example/hearth/admin/users/u-1").mock(
         return_value=httpx.Response(
-            200, json={"id": "u-1", "username": "u", "status": "a"}
+            200, json={"id": "u-1", "email": "u@x.test", "status": "USER_STATUS_ACTIVE"}
         )
     )
 

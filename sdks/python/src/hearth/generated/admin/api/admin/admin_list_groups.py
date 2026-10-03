@@ -8,19 +8,29 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
-from ...models.rpc_status import RpcStatus
+from ...models.admin_group_page import AdminGroupPage
+from ...types import UNSET, Unset
 from typing import cast
 
 
 def _get_kwargs(
-    id: str,
+    *,
+    cursor: str | Unset = UNSET,
+    limit: int | Unset = UNSET,
 ) -> dict[str, Any]:
 
+    params: dict[str, Any] = {}
+
+    params["cursor"] = cursor
+
+    params["limit"] = limit
+
+    params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
+
     _kwargs: dict[str, Any] = {
-        "method": "delete",
-        "url": "/admin/users/{id}".format(
-            id=quote(str(id), safe=""),
-        ),
+        "method": "get",
+        "url": "/admin/groups",
+        "params": params,
     }
 
     return _kwargs
@@ -28,19 +38,21 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Any | RpcStatus:
-    if response.status_code == 204:
-        response_204 = cast(Any, None)
-        return response_204
+) -> AdminGroupPage | None:
+    if response.status_code == 200:
+        response_200 = AdminGroupPage.from_dict(response.json())
 
-    response_default = RpcStatus.from_dict(response.json())
+        return response_200
 
-    return response_default
+    if client.raise_on_unexpected_status:
+        raise errors.UnexpectedStatus(response.status_code, response.content)
+    else:
+        return None
 
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[Any | RpcStatus]:
+) -> Response[AdminGroupPage]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -50,24 +62,30 @@ def _build_response(
 
 
 def sync_detailed(
-    id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Response[Any | RpcStatus]:
-    """
+    cursor: str | Unset = UNSET,
+    limit: int | Unset = UNSET,
+) -> Response[AdminGroupPage]:
+    """List groups
+
+     `cursor` is a decimal offset; follow `next_cursor` until it is null.
+
     Args:
-        id (str):
+        cursor (str | Unset):
+        limit (int | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | RpcStatus]
+        Response[AdminGroupPage]
     """
 
     kwargs = _get_kwargs(
-        id=id,
+        cursor=cursor,
+        limit=limit,
     )
 
     response = client.get_httpx_client().request(
@@ -78,47 +96,59 @@ def sync_detailed(
 
 
 def sync(
-    id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Any | RpcStatus | None:
-    """
+    cursor: str | Unset = UNSET,
+    limit: int | Unset = UNSET,
+) -> AdminGroupPage | None:
+    """List groups
+
+     `cursor` is a decimal offset; follow `next_cursor` until it is null.
+
     Args:
-        id (str):
+        cursor (str | Unset):
+        limit (int | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | RpcStatus
+        AdminGroupPage
     """
 
     return sync_detailed(
-        id=id,
         client=client,
+        cursor=cursor,
+        limit=limit,
     ).parsed
 
 
 async def asyncio_detailed(
-    id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Response[Any | RpcStatus]:
-    """
+    cursor: str | Unset = UNSET,
+    limit: int | Unset = UNSET,
+) -> Response[AdminGroupPage]:
+    """List groups
+
+     `cursor` is a decimal offset; follow `next_cursor` until it is null.
+
     Args:
-        id (str):
+        cursor (str | Unset):
+        limit (int | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | RpcStatus]
+        Response[AdminGroupPage]
     """
 
     kwargs = _get_kwargs(
-        id=id,
+        cursor=cursor,
+        limit=limit,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -127,25 +157,31 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Any | RpcStatus | None:
-    """
+    cursor: str | Unset = UNSET,
+    limit: int | Unset = UNSET,
+) -> AdminGroupPage | None:
+    """List groups
+
+     `cursor` is a decimal offset; follow `next_cursor` until it is null.
+
     Args:
-        id (str):
+        cursor (str | Unset):
+        limit (int | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | RpcStatus
+        AdminGroupPage
     """
 
     return (
         await asyncio_detailed(
-            id=id,
             client=client,
+            cursor=cursor,
+            limit=limit,
         )
     ).parsed

@@ -104,17 +104,17 @@ class V1RegisterClientRequest:
         field_dict.update(self.additional_properties)
         field_dict.update({})
         if client_name is not UNSET:
-            field_dict["clientName"] = client_name
+            field_dict["client_name"] = client_name
         if redirect_uris is not UNSET:
-            field_dict["redirectUris"] = redirect_uris
+            field_dict["redirect_uris"] = redirect_uris
         if client_secret is not UNSET:
-            field_dict["clientSecret"] = client_secret
+            field_dict["client_secret"] = client_secret
         if grant_types is not UNSET:
-            field_dict["grantTypes"] = grant_types
+            field_dict["grant_types"] = grant_types
         if access_token_authorization is not UNSET:
-            field_dict["accessTokenAuthorization"] = access_token_authorization
+            field_dict["access_token_authorization"] = access_token_authorization
         if trust_level is not UNSET:
-            field_dict["trustLevel"] = trust_level
+            field_dict["trust_level"] = trust_level
         if id_token_signed_response_alg is not UNSET:
             field_dict["id_token_signed_response_alg"] = id_token_signed_response_alg
         if token_endpoint_auth_method is not UNSET:
@@ -125,15 +125,15 @@ class V1RegisterClientRequest:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        client_name = d.pop("clientName", UNSET)
+        client_name = d.pop("client_name", UNSET)
 
-        redirect_uris = cast(list[str], d.pop("redirectUris", UNSET))
+        redirect_uris = cast(list[str], d.pop("redirect_uris", UNSET))
 
-        client_secret = d.pop("clientSecret", UNSET)
+        client_secret = d.pop("client_secret", UNSET)
 
-        grant_types = cast(list[str], d.pop("grantTypes", UNSET))
+        grant_types = cast(list[str], d.pop("grant_types", UNSET))
 
-        _access_token_authorization = d.pop("accessTokenAuthorization", UNSET)
+        _access_token_authorization = d.pop("access_token_authorization", UNSET)
         access_token_authorization: V1AccessTokenAuthorization | Unset
         if isinstance(_access_token_authorization, Unset):
             access_token_authorization = UNSET
@@ -142,7 +142,7 @@ class V1RegisterClientRequest:
                 _access_token_authorization
             )
 
-        _trust_level = d.pop("trustLevel", UNSET)
+        _trust_level = d.pop("trust_level", UNSET)
         trust_level: V1ClientTrustLevel | Unset
         if isinstance(_trust_level, Unset):
             trust_level = UNSET

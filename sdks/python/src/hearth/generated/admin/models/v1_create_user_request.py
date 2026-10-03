@@ -60,11 +60,11 @@ class V1CreateUserRequest:
         if email is not UNSET:
             field_dict["email"] = email
         if display_name is not UNSET:
-            field_dict["displayName"] = display_name
+            field_dict["display_name"] = display_name
         if first_name is not UNSET:
-            field_dict["firstName"] = first_name
+            field_dict["first_name"] = first_name
         if last_name is not UNSET:
-            field_dict["lastName"] = last_name
+            field_dict["last_name"] = last_name
         if attributes is not UNSET:
             field_dict["attributes"] = attributes
 
@@ -79,11 +79,11 @@ class V1CreateUserRequest:
         d = dict(src_dict)
         email = d.pop("email", UNSET)
 
-        display_name = d.pop("displayName", UNSET)
+        display_name = d.pop("display_name", UNSET)
 
-        first_name = d.pop("firstName", UNSET)
+        first_name = d.pop("first_name", UNSET)
 
-        last_name = d.pop("lastName", UNSET)
+        last_name = d.pop("last_name", UNSET)
 
         _attributes = d.pop("attributes", UNSET)
         attributes: V1CreateUserRequestAttributes | Unset

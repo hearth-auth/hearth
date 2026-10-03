@@ -22,15 +22,15 @@ class V1ConsentEntry:
         client_id (str | Unset):
         client_name (str | Unset):
         granted_scopes (list[str] | Unset):
-        granted_at (str | Unset):
-        updated_at (str | Unset):
+        granted_at (int | Unset):
+        updated_at (int | Unset):
     """
 
     client_id: str | Unset = UNSET
     client_name: str | Unset = UNSET
     granted_scopes: list[str] | Unset = UNSET
-    granted_at: str | Unset = UNSET
-    updated_at: str | Unset = UNSET
+    granted_at: int | Unset = UNSET
+    updated_at: int | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,30 +50,30 @@ class V1ConsentEntry:
         field_dict.update(self.additional_properties)
         field_dict.update({})
         if client_id is not UNSET:
-            field_dict["clientId"] = client_id
+            field_dict["client_id"] = client_id
         if client_name is not UNSET:
-            field_dict["clientName"] = client_name
+            field_dict["client_name"] = client_name
         if granted_scopes is not UNSET:
-            field_dict["grantedScopes"] = granted_scopes
+            field_dict["granted_scopes"] = granted_scopes
         if granted_at is not UNSET:
-            field_dict["grantedAt"] = granted_at
+            field_dict["granted_at"] = granted_at
         if updated_at is not UNSET:
-            field_dict["updatedAt"] = updated_at
+            field_dict["updated_at"] = updated_at
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        client_id = d.pop("clientId", UNSET)
+        client_id = d.pop("client_id", UNSET)
 
-        client_name = d.pop("clientName", UNSET)
+        client_name = d.pop("client_name", UNSET)
 
-        granted_scopes = cast(list[str], d.pop("grantedScopes", UNSET))
+        granted_scopes = cast(list[str], d.pop("granted_scopes", UNSET))
 
-        granted_at = d.pop("grantedAt", UNSET)
+        granted_at = d.pop("granted_at", UNSET)
 
-        updated_at = d.pop("updatedAt", UNSET)
+        updated_at = d.pop("updated_at", UNSET)
 
         v1_consent_entry = cls(
             client_id=client_id,

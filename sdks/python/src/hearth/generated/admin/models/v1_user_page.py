@@ -49,7 +49,7 @@ class V1UserPage:
         if items is not UNSET:
             field_dict["items"] = items
         if next_cursor is not UNSET:
-            field_dict["nextCursor"] = next_cursor
+            field_dict["next_cursor"] = next_cursor
 
         return field_dict
 
@@ -67,7 +67,7 @@ class V1UserPage:
 
                 items.append(items_item)
 
-        next_cursor = d.pop("nextCursor", UNSET)
+        next_cursor = d.pop("next_cursor", UNSET)
 
         v1_user_page = cls(
             items=items,

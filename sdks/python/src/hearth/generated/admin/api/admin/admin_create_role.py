@@ -8,39 +8,55 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
-from ...models.rpc_status import RpcStatus
+from ...models.admin_create_role_request import AdminCreateRoleRequest
+from ...models.admin_role import AdminRole
 from typing import cast
 
 
 def _get_kwargs(
-    id: str,
+    *,
+    body: AdminCreateRoleRequest,
 ) -> dict[str, Any]:
+    headers: dict[str, Any] = {}
 
     _kwargs: dict[str, Any] = {
-        "method": "delete",
-        "url": "/admin/users/{id}".format(
-            id=quote(str(id), safe=""),
-        ),
+        "method": "post",
+        "url": "/admin/roles",
     }
 
+    _kwargs["json"] = body.to_dict()
+
+    headers["Content-Type"] = "application/json"
+
+    _kwargs["headers"] = headers
     return _kwargs
 
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Any | RpcStatus:
-    if response.status_code == 204:
-        response_204 = cast(Any, None)
-        return response_204
+) -> AdminRole | Any | None:
+    if response.status_code == 201:
+        response_201 = AdminRole.from_dict(response.json())
 
-    response_default = RpcStatus.from_dict(response.json())
+        return response_201
 
-    return response_default
+    if response.status_code == 400:
+        response_400 = cast(Any, None)
+        return response_400
+
+    if response.status_code == 409:
+        response_409 = cast(Any, None)
+        return response_409
+
+    if client.raise_on_unexpected_status:
+        raise errors.UnexpectedStatus(response.status_code, response.content)
+    else:
+        return None
 
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[Any | RpcStatus]:
+) -> Response[AdminRole | Any]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -50,24 +66,25 @@ def _build_response(
 
 
 def sync_detailed(
-    id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Response[Any | RpcStatus]:
-    """
+    body: AdminCreateRoleRequest,
+) -> Response[AdminRole | Any]:
+    """Create a role
+
     Args:
-        id (str):
+        body (AdminCreateRoleRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | RpcStatus]
+        Response[AdminRole | Any]
     """
 
     kwargs = _get_kwargs(
-        id=id,
+        body=body,
     )
 
     response = client.get_httpx_client().request(
@@ -78,47 +95,49 @@ def sync_detailed(
 
 
 def sync(
-    id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Any | RpcStatus | None:
-    """
+    body: AdminCreateRoleRequest,
+) -> AdminRole | Any | None:
+    """Create a role
+
     Args:
-        id (str):
+        body (AdminCreateRoleRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | RpcStatus
+        AdminRole | Any
     """
 
     return sync_detailed(
-        id=id,
         client=client,
+        body=body,
     ).parsed
 
 
 async def asyncio_detailed(
-    id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Response[Any | RpcStatus]:
-    """
+    body: AdminCreateRoleRequest,
+) -> Response[AdminRole | Any]:
+    """Create a role
+
     Args:
-        id (str):
+        body (AdminCreateRoleRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | RpcStatus]
+        Response[AdminRole | Any]
     """
 
     kwargs = _get_kwargs(
-        id=id,
+        body=body,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -127,25 +146,26 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Any | RpcStatus | None:
-    """
+    body: AdminCreateRoleRequest,
+) -> AdminRole | Any | None:
+    """Create a role
+
     Args:
-        id (str):
+        body (AdminCreateRoleRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | RpcStatus
+        AdminRole | Any
     """
 
     return (
         await asyncio_detailed(
-            id=id,
             client=client,
+            body=body,
         )
     ).parsed

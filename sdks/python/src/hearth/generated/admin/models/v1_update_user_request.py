@@ -73,17 +73,17 @@ class V1UpdateUserRequest:
         if email is not UNSET:
             field_dict["email"] = email
         if display_name is not UNSET:
-            field_dict["displayName"] = display_name
+            field_dict["display_name"] = display_name
         if status is not UNSET:
             field_dict["status"] = status
         if first_name is not UNSET:
-            field_dict["firstName"] = first_name
+            field_dict["first_name"] = first_name
         if last_name is not UNSET:
-            field_dict["lastName"] = last_name
+            field_dict["last_name"] = last_name
         if attributes is not UNSET:
             field_dict["attributes"] = attributes
         if clear_attributes is not UNSET:
-            field_dict["clearAttributes"] = clear_attributes
+            field_dict["clear_attributes"] = clear_attributes
 
         return field_dict
 
@@ -96,7 +96,7 @@ class V1UpdateUserRequest:
         d = dict(src_dict)
         email = d.pop("email", UNSET)
 
-        display_name = d.pop("displayName", UNSET)
+        display_name = d.pop("display_name", UNSET)
 
         _status = d.pop("status", UNSET)
         status: V1UserStatus | Unset
@@ -105,9 +105,9 @@ class V1UpdateUserRequest:
         else:
             status = V1UserStatus(_status)
 
-        first_name = d.pop("firstName", UNSET)
+        first_name = d.pop("first_name", UNSET)
 
-        last_name = d.pop("lastName", UNSET)
+        last_name = d.pop("last_name", UNSET)
 
         _attributes = d.pop("attributes", UNSET)
         attributes: V1UpdateUserRequestAttributes | Unset
@@ -116,7 +116,7 @@ class V1UpdateUserRequest:
         else:
             attributes = V1UpdateUserRequestAttributes.from_dict(_attributes)
 
-        clear_attributes = d.pop("clearAttributes", UNSET)
+        clear_attributes = d.pop("clear_attributes", UNSET)
 
         v1_update_user_request = cls(
             email=email,

@@ -28,16 +28,16 @@ class V1Realm:
         name (str | Unset):
         status (V1RealmStatus | Unset): The lifecycle status of a realm.
         config (V1RealmConfig | Unset): Per-realm configuration overrides.
-        created_at (str | Unset):
-        updated_at (str | Unset):
+        created_at (int | Unset):
+        updated_at (int | Unset):
     """
 
     id: str | Unset = UNSET
     name: str | Unset = UNSET
     status: V1RealmStatus | Unset = UNSET
     config: V1RealmConfig | Unset = UNSET
-    created_at: str | Unset = UNSET
-    updated_at: str | Unset = UNSET
+    created_at: int | Unset = UNSET
+    updated_at: int | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,9 +71,9 @@ class V1Realm:
         if config is not UNSET:
             field_dict["config"] = config
         if created_at is not UNSET:
-            field_dict["createdAt"] = created_at
+            field_dict["created_at"] = created_at
         if updated_at is not UNSET:
-            field_dict["updatedAt"] = updated_at
+            field_dict["updated_at"] = updated_at
 
         return field_dict
 
@@ -100,9 +100,9 @@ class V1Realm:
         else:
             config = V1RealmConfig.from_dict(_config)
 
-        created_at = d.pop("createdAt", UNSET)
+        created_at = d.pop("created_at", UNSET)
 
-        updated_at = d.pop("updatedAt", UNSET)
+        updated_at = d.pop("updated_at", UNSET)
 
         v1_realm = cls(
             id=id,

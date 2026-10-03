@@ -1,15 +1,14 @@
 """AdminClient: Hearth admin API operations (requires an admin token).
 
-The routes, methods and path and query parameters come from the client
-generated from ``docs/api/openapi.json`` (:mod:`hearth.generated.admin`, see
-``sdks/python/gen-admin.sh``); so do the organization request bodies. This
-module keeps the ergonomic method names, the auth headers, the SDK error
-taxonomy and the pydantic return types. Other request bodies are sent as the
-SDK serializes them (:class:`_RawBody`) until their schemas match the REST JSON.
+The routes, methods, path and query parameters and request bodies come from
+the client generated from ``docs/api/openapi.json`` (:mod:`hearth.generated.admin`,
+see ``sdks/python/gen-admin.sh``). Success bodies are decoded by the generated
+models, then returned as the SDK's pydantic types. This module keeps the
+ergonomic method names, the auth headers and the SDK error taxonomy.
 
-Responses are not decoded by the generated client: its parser expects JSON for
-every documented and undocumented status, so a ``204`` delete or a plain-text
-error would raise ``JSONDecodeError`` instead of :class:`HearthError`.
+The generated ``sync`` parsers are not used: they call ``response.json()`` on
+every status, so a ``204`` delete or a plain-text error would raise
+``JSONDecodeError`` instead of :class:`HearthError`.
 """
 
 from types import ModuleType
@@ -21,13 +20,23 @@ from .errors import HearthError
 from .generated.admin import models as _gen
 from .generated.admin.api.admin import (
     admin_add_additional_role,
+    admin_create_group,
     admin_create_organization,
+    admin_create_role,
+    admin_delete_group,
     admin_delete_organization,
+    admin_delete_role,
+    admin_get_group,
     admin_get_organization,
+    admin_get_role,
     admin_list_additional_roles,
+    admin_list_groups,
     admin_list_organizations,
+    admin_list_roles,
     admin_remove_additional_role,
+    admin_update_group,
     admin_update_organization,
+    admin_update_role,
 )
 from .generated.admin.api.application_admin_service import (
     application_admin_service_create_application as create_application,
@@ -57,18 +66,6 @@ from .generated.admin.api.identity_admin_service import (
     identity_admin_service_list_users,
     identity_admin_service_update_user,
 )
-from .generated.admin.api.rbac_admin_service import (
-    rbac_admin_service_create_group,
-    rbac_admin_service_create_role,
-    rbac_admin_service_delete_group,
-    rbac_admin_service_delete_role,
-    rbac_admin_service_get_group,
-    rbac_admin_service_get_role,
-    rbac_admin_service_list_groups,
-    rbac_admin_service_list_roles,
-    rbac_admin_service_update_group,
-    rbac_admin_service_update_role,
-)
 from .generated.admin.client import Client as _GeneratedClient
 from .types import (
     CreateClientRequest,
@@ -89,23 +86,6 @@ from .types import (
     UpdateUserRequest,
     User,
 )
-
-
-class _RawBody:
-    """A request body sent exactly as the SDK serializes it.
-
-    The proto-derived schemas for users, clients, roles and groups do not yet
-    match the REST JSON (snake_case keys, list shapes), so their generated
-    models would rewrite the body. The generated request builder only calls
-    ``to_dict()``. Organization bodies use the generated models.
-    """
-
-    def __init__(self, data: dict[str, Any]) -> None:
-        self._data = data
-
-    def to_dict(self) -> dict[str, Any]:
-        return self._data
-
 
 _OK = (200,)
 _CREATED = (200, 201)
@@ -149,15 +129,20 @@ class AdminClient:
             raise HearthError(resp.status_code, resp.text)
         return resp
 
+    @staticmethod
+    def _decode(model: Any, resp: httpx.Response) -> dict[str, Any]:
+        """Decode a success body through the generated ``model``."""
+        return model.from_dict(resp.json()).to_dict()
+
     # ------------------------------------------------------------------
     # Users
     # ------------------------------------------------------------------
 
     def create_user(self, req: CreateUserRequest) -> User:
         """Create a new user."""
-        body = _RawBody(req.model_dump(exclude_none=True))
+        body = _gen.V1CreateUserRequest.from_dict(req.model_dump(exclude_none=True))
         resp = self._send(identity_admin_service_create_user, _CREATED, body=body)
-        return User(**resp.json())
+        return User(**self._decode(_gen.V1User, resp))
 
     def list_users(
         self, cursor: str | None = None, limit: int = 50
@@ -166,20 +151,20 @@ class AdminClient:
         resp = self._send(
             identity_admin_service_list_users, _OK, **_page(cursor, limit)
         )
-        return PageResponse[User](**resp.json())
+        return PageResponse[User](**self._decode(_gen.V1UserPage, resp))
 
     def get_user(self, user_id: str) -> User:
         """Get a user by ID."""
         resp = self._send(identity_admin_service_get_user, _OK, id=user_id)
-        return User(**resp.json())
+        return User(**self._decode(_gen.V1User, resp))
 
     def update_user(self, user_id: str, req: UpdateUserRequest) -> User:
         """Update an existing user."""
-        body = _RawBody(req.model_dump(exclude_none=True))
+        body = _gen.V1UpdateUserRequest.from_dict(req.model_dump(exclude_none=True))
         resp = self._send(
             identity_admin_service_update_user, _OK, id=user_id, body=body
         )
-        return User(**resp.json())
+        return User(**self._decode(_gen.V1User, resp))
 
     def delete_user(self, user_id: str) -> None:
         """Delete a user."""
@@ -197,13 +182,14 @@ class AdminClient:
 
     def list_realms(self) -> list[Realm]:
         """List all realms."""
-        data = self._send(identity_admin_service_list_realms, _OK).json()
+        resp = self._send(identity_admin_service_list_realms, _OK)
+        data = self._decode(_gen.V1RealmPage, resp)
         return [Realm(**r) for r in data.get("items", data)]
 
     def get_realm(self, realm_id: str) -> Realm:
         """Get a realm by ID."""
         resp = self._send(identity_admin_service_get_realm, _OK, id=realm_id)
-        return Realm(**resp.json())
+        return Realm(**self._decode(_gen.V1Realm, resp))
 
     def delete_realm(self, realm_id: str) -> None:
         """Delete a realm."""
@@ -216,28 +202,32 @@ class AdminClient:
     def create_client(self, req: CreateClientRequest) -> OAuthClient:
         """Create a new OAuth client."""
         # by_alias: the wire key is `client_name`; the server 422s on `name`.
-        body = _RawBody(req.model_dump(exclude_none=True, by_alias=True))
+        body = _gen.V1RegisterClientRequest.from_dict(
+            req.model_dump(exclude_none=True, by_alias=True)
+        )
         resp = self._send(create_application, _CREATED, body=body)
-        return OAuthClient(**resp.json())
+        return OAuthClient(**self._decode(_gen.V1OAuthClient, resp))
 
     def list_clients(
         self, cursor: str | None = None, limit: int = 50
     ) -> PageResponse[OAuthClient]:
         """List OAuth clients with cursor-based pagination."""
         resp = self._send(list_applications, _OK, **_page(cursor, limit))
-        return PageResponse[OAuthClient](**resp.json())
+        return PageResponse[OAuthClient](**self._decode(_gen.V1OAuthClientPage, resp))
 
     def get_client(self, client_id: str) -> OAuthClient:
         """Get an OAuth client by ID."""
         resp = self._send(get_application, _OK, client_id=client_id)
-        return OAuthClient(**resp.json())
+        return OAuthClient(**self._decode(_gen.V1OAuthClient, resp))
 
     def update_client(self, client_id: str, req: UpdateClientRequest) -> OAuthClient:
         """Update an existing OAuth client."""
         # by_alias: the route reads `client_name` and silently ignores `name`.
-        body = _RawBody(req.model_dump(exclude_none=True, by_alias=True))
+        body = _gen.V1UpdateClientRequest.from_dict(
+            req.model_dump(exclude_none=True, by_alias=True)
+        )
         resp = self._send(update_application, _OK, client_id=client_id, body=body)
-        return OAuthClient(**resp.json())
+        return OAuthClient(**self._decode(_gen.V1OAuthClient, resp))
 
     def regenerate_client_secret(self, client_id: str) -> OAuthClient:
         """Replace a confidential client's secret.
@@ -247,7 +237,7 @@ class AdminClient:
         stops working immediately.
         """
         resp = self._send(regenerate_secret, _OK, client_id=client_id)
-        return OAuthClient.model_validate(resp.json())
+        return OAuthClient.model_validate(self._decode(_gen.V1OAuthClient, resp))
 
     def delete_client(self, client_id: str) -> None:
         """Delete an OAuth client."""
@@ -259,33 +249,31 @@ class AdminClient:
 
     def create_role(self, req: CreateRoleRequest) -> Role:
         """Create a new realm-level role."""
-        body = _RawBody(req.model_dump(exclude_none=True))
-        resp = self._send(rbac_admin_service_create_role, _CREATED, body=body)
-        return Role(**resp.json())
+        body = _gen.AdminCreateRoleRequest.from_dict(req.model_dump(exclude_none=True))
+        resp = self._send(admin_create_role, _CREATED, body=body)
+        return Role(**self._decode(_gen.AdminRole, resp))
 
     def list_roles(
         self, cursor: str | None = None, limit: int = 50
     ) -> PageResponse[Role]:
         """List realm-level roles with cursor-based pagination."""
-        resp = self._send(rbac_admin_service_list_roles, _OK, **_page(cursor, limit))
-        return PageResponse[Role](**resp.json())
+        resp = self._send(admin_list_roles, _OK, **_page(cursor, limit))
+        return PageResponse[Role](**self._decode(_gen.AdminRolePage, resp))
 
     def get_role(self, role_id: str) -> Role:
         """Get a role by ID."""
-        resp = self._send(rbac_admin_service_get_role, _OK, role_id=role_id)
-        return Role(**resp.json())
+        resp = self._send(admin_get_role, _OK, id=role_id)
+        return Role(**self._decode(_gen.AdminRole, resp))
 
     def update_role(self, role_id: str, req: UpdateRoleRequest) -> Role:
         """Update an existing role."""
-        body = _RawBody(req.model_dump(exclude_none=True))
-        resp = self._send(
-            rbac_admin_service_update_role, _OK, role_id=role_id, body=body
-        )
-        return Role(**resp.json())
+        body = _gen.AdminUpdateRoleRequest.from_dict(req.model_dump(exclude_none=True))
+        resp = self._send(admin_update_role, _OK, id=role_id, body=body)
+        return Role(**self._decode(_gen.AdminRole, resp))
 
     def delete_role(self, role_id: str) -> None:
         """Delete a role."""
-        self._send(rbac_admin_service_delete_role, _NO_CONTENT, role_id=role_id)
+        self._send(admin_delete_role, _NO_CONTENT, id=role_id)
 
     # ------------------------------------------------------------------
     # Groups
@@ -293,33 +281,31 @@ class AdminClient:
 
     def create_group(self, req: CreateGroupRequest) -> Group:
         """Create a new realm-level group."""
-        body = _RawBody(req.model_dump(exclude_none=True))
-        resp = self._send(rbac_admin_service_create_group, _CREATED, body=body)
-        return Group(**resp.json())
+        body = _gen.AdminCreateGroupRequest.from_dict(req.model_dump(exclude_none=True))
+        resp = self._send(admin_create_group, _CREATED, body=body)
+        return Group(**self._decode(_gen.AdminGroup, resp))
 
     def list_groups(
         self, cursor: str | None = None, limit: int = 50
     ) -> PageResponse[Group]:
         """List realm-level groups with cursor-based pagination."""
-        resp = self._send(rbac_admin_service_list_groups, _OK, **_page(cursor, limit))
-        return PageResponse[Group](**resp.json())
+        resp = self._send(admin_list_groups, _OK, **_page(cursor, limit))
+        return PageResponse[Group](**self._decode(_gen.AdminGroupPage, resp))
 
     def get_group(self, group_id: str) -> Group:
         """Get a group by ID."""
-        resp = self._send(rbac_admin_service_get_group, _OK, group_id=group_id)
-        return Group(**resp.json())
+        resp = self._send(admin_get_group, _OK, id=group_id)
+        return Group(**self._decode(_gen.AdminGroup, resp))
 
     def update_group(self, group_id: str, req: UpdateGroupRequest) -> Group:
         """Update an existing group."""
-        body = _RawBody(req.model_dump(exclude_none=True))
-        resp = self._send(
-            rbac_admin_service_update_group, _OK, group_id=group_id, body=body
-        )
-        return Group(**resp.json())
+        body = _gen.AdminUpdateGroupRequest.from_dict(req.model_dump(exclude_none=True))
+        resp = self._send(admin_update_group, _OK, id=group_id, body=body)
+        return Group(**self._decode(_gen.AdminGroup, resp))
 
     def delete_group(self, group_id: str) -> None:
         """Delete a group."""
-        self._send(rbac_admin_service_delete_group, _NO_CONTENT, group_id=group_id)
+        self._send(admin_delete_group, _NO_CONTENT, id=group_id)
 
     # ------------------------------------------------------------------
     # Organizations
@@ -331,19 +317,21 @@ class AdminClient:
             req.model_dump(exclude_none=True)
         )
         resp = self._send(admin_create_organization, _CREATED, body=body)
-        return Organization(**resp.json())
+        return Organization(**self._decode(_gen.AdminOrganization, resp))
 
     def list_organizations(
         self, cursor: str | None = None, limit: int = 50
     ) -> PageResponse[Organization]:
         """List organizations; follow ``next_cursor`` until it is ``None``."""
         resp = self._send(admin_list_organizations, _OK, **_page(cursor, limit))
-        return PageResponse[Organization](**resp.json())
+        return PageResponse[Organization](
+            **self._decode(_gen.AdminOrganizationPage, resp)
+        )
 
     def get_organization(self, org_id: str) -> Organization:
         """Get an organization by ID."""
         resp = self._send(admin_get_organization, _OK, id=org_id)
-        return Organization(**resp.json())
+        return Organization(**self._decode(_gen.AdminOrganization, resp))
 
     def update_organization(
         self, org_id: str, req: UpdateOrganizationRequest
@@ -353,7 +341,7 @@ class AdminClient:
             req.model_dump(exclude_none=True)
         )
         resp = self._send(admin_update_organization, _OK, id=org_id, body=body)
-        return Organization(**resp.json())
+        return Organization(**self._decode(_gen.AdminOrganization, resp))
 
     def delete_organization(self, org_id: str) -> None:
         """Delete an organization."""
@@ -362,7 +350,7 @@ class AdminClient:
     def list_member_roles(self, org_id: str, user_id: str) -> list[str]:
         """List a member's extra organization role names."""
         resp = self._send(admin_list_additional_roles, _OK, id=org_id, user_id=user_id)
-        return list(resp.json()["items"])
+        return list(self._decode(_gen.AdminRoleNameList, resp)["items"])
 
     def add_member_role(self, org_id: str, user_id: str, role_name: str) -> None:
         """Give an organization member an extra role.

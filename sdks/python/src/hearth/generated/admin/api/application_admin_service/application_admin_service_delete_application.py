@@ -9,7 +9,6 @@ from ...types import Response, UNSET
 from ... import errors
 
 from ...models.rpc_status import RpcStatus
-from ...models.v1o_auth_empty import V1OAuthEmpty
 from typing import cast
 
 
@@ -29,11 +28,10 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> RpcStatus | V1OAuthEmpty:
-    if response.status_code == 200:
-        response_200 = V1OAuthEmpty.from_dict(response.json())
-
-        return response_200
+) -> Any | RpcStatus:
+    if response.status_code == 204:
+        response_204 = cast(Any, None)
+        return response_204
 
     response_default = RpcStatus.from_dict(response.json())
 
@@ -42,7 +40,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[RpcStatus | V1OAuthEmpty]:
+) -> Response[Any | RpcStatus]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -55,7 +53,7 @@ def sync_detailed(
     client_id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Response[RpcStatus | V1OAuthEmpty]:
+) -> Response[Any | RpcStatus]:
     """
     Args:
         client_id (str):
@@ -65,7 +63,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[RpcStatus | V1OAuthEmpty]
+        Response[Any | RpcStatus]
     """
 
     kwargs = _get_kwargs(
@@ -83,7 +81,7 @@ def sync(
     client_id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> RpcStatus | V1OAuthEmpty | None:
+) -> Any | RpcStatus | None:
     """
     Args:
         client_id (str):
@@ -93,7 +91,7 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        RpcStatus | V1OAuthEmpty
+        Any | RpcStatus
     """
 
     return sync_detailed(
@@ -106,7 +104,7 @@ async def asyncio_detailed(
     client_id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Response[RpcStatus | V1OAuthEmpty]:
+) -> Response[Any | RpcStatus]:
     """
     Args:
         client_id (str):
@@ -116,7 +114,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[RpcStatus | V1OAuthEmpty]
+        Response[Any | RpcStatus]
     """
 
     kwargs = _get_kwargs(
@@ -132,7 +130,7 @@ async def asyncio(
     client_id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> RpcStatus | V1OAuthEmpty | None:
+) -> Any | RpcStatus | None:
     """
     Args:
         client_id (str):
@@ -142,7 +140,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        RpcStatus | V1OAuthEmpty
+        Any | RpcStatus
     """
 
     return (

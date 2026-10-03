@@ -8,9 +8,6 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
-from ...models.rpc_status import RpcStatus
-from typing import cast
-
 
 def _get_kwargs(
     id: str,
@@ -18,7 +15,7 @@ def _get_kwargs(
 
     _kwargs: dict[str, Any] = {
         "method": "delete",
-        "url": "/admin/users/{id}".format(
+        "url": "/admin/groups/{id}".format(
             id=quote(str(id), safe=""),
         ),
     }
@@ -28,19 +25,22 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Any | RpcStatus:
+) -> Any | None:
     if response.status_code == 204:
-        response_204 = cast(Any, None)
-        return response_204
+        return None
 
-    response_default = RpcStatus.from_dict(response.json())
+    if response.status_code == 404:
+        return None
 
-    return response_default
+    if client.raise_on_unexpected_status:
+        raise errors.UnexpectedStatus(response.status_code, response.content)
+    else:
+        return None
 
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[Any | RpcStatus]:
+) -> Response[Any]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -53,8 +53,9 @@ def sync_detailed(
     id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Response[Any | RpcStatus]:
-    """
+) -> Response[Any]:
+    """Delete a group
+
     Args:
         id (str):
 
@@ -63,7 +64,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | RpcStatus]
+        Response[Any]
     """
 
     kwargs = _get_kwargs(
@@ -77,35 +78,13 @@ def sync_detailed(
     return _build_response(client=client, response=response)
 
 
-def sync(
-    id: str,
-    *,
-    client: AuthenticatedClient | Client,
-) -> Any | RpcStatus | None:
-    """
-    Args:
-        id (str):
-
-    Raises:
-        errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
-        httpx.TimeoutException: If the request takes longer than Client.timeout.
-
-    Returns:
-        Any | RpcStatus
-    """
-
-    return sync_detailed(
-        id=id,
-        client=client,
-    ).parsed
-
-
 async def asyncio_detailed(
     id: str,
     *,
     client: AuthenticatedClient | Client,
-) -> Response[Any | RpcStatus]:
-    """
+) -> Response[Any]:
+    """Delete a group
+
     Args:
         id (str):
 
@@ -114,7 +93,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | RpcStatus]
+        Response[Any]
     """
 
     kwargs = _get_kwargs(
@@ -124,28 +103,3 @@ async def asyncio_detailed(
     response = await client.get_async_httpx_client().request(**kwargs)
 
     return _build_response(client=client, response=response)
-
-
-async def asyncio(
-    id: str,
-    *,
-    client: AuthenticatedClient | Client,
-) -> Any | RpcStatus | None:
-    """
-    Args:
-        id (str):
-
-    Raises:
-        errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
-        httpx.TimeoutException: If the request takes longer than Client.timeout.
-
-    Returns:
-        Any | RpcStatus
-    """
-
-    return (
-        await asyncio_detailed(
-            id=id,
-            client=client,
-        )
-    ).parsed

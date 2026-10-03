@@ -19,12 +19,12 @@ class V1RealmConfig:
     """Per-realm configuration overrides.
 
     Attributes:
-        session_ttl_micros (str | Unset):
+        session_ttl_micros (int | Unset):
         password_memory_cost (int | Unset):
         password_time_cost (int | Unset):
     """
 
-    session_ttl_micros: str | Unset = UNSET
+    session_ttl_micros: int | Unset = UNSET
     password_memory_cost: int | Unset = UNSET
     password_time_cost: int | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -40,22 +40,22 @@ class V1RealmConfig:
         field_dict.update(self.additional_properties)
         field_dict.update({})
         if session_ttl_micros is not UNSET:
-            field_dict["sessionTtlMicros"] = session_ttl_micros
+            field_dict["session_ttl_micros"] = session_ttl_micros
         if password_memory_cost is not UNSET:
-            field_dict["passwordMemoryCost"] = password_memory_cost
+            field_dict["password_memory_cost"] = password_memory_cost
         if password_time_cost is not UNSET:
-            field_dict["passwordTimeCost"] = password_time_cost
+            field_dict["password_time_cost"] = password_time_cost
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        session_ttl_micros = d.pop("sessionTtlMicros", UNSET)
+        session_ttl_micros = d.pop("session_ttl_micros", UNSET)
 
-        password_memory_cost = d.pop("passwordMemoryCost", UNSET)
+        password_memory_cost = d.pop("password_memory_cost", UNSET)
 
-        password_time_cost = d.pop("passwordTimeCost", UNSET)
+        password_time_cost = d.pop("password_time_cost", UNSET)
 
         v1_realm_config = cls(
             session_ttl_micros=session_ttl_micros,

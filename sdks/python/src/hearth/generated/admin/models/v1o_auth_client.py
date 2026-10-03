@@ -24,7 +24,7 @@ class V1OAuthClient:
         client_id (str | Unset):
         client_name (str | Unset):
         redirect_uris (list[str] | Unset):
-        created_at (str | Unset):
+        created_at (int | Unset):
         is_confidential (bool | Unset):
         grant_types (list[str] | Unset):
         access_token_authorization (V1AccessTokenAuthorization | Unset): Controls how access-token authorization data is
@@ -48,7 +48,7 @@ class V1OAuthClient:
     client_id: str | Unset = UNSET
     client_name: str | Unset = UNSET
     redirect_uris: list[str] | Unset = UNSET
-    created_at: str | Unset = UNSET
+    created_at: int | Unset = UNSET
     is_confidential: bool | Unset = UNSET
     grant_types: list[str] | Unset = UNSET
     access_token_authorization: V1AccessTokenAuthorization | Unset = UNSET
@@ -88,19 +88,19 @@ class V1OAuthClient:
         field_dict.update(self.additional_properties)
         field_dict.update({})
         if client_id is not UNSET:
-            field_dict["clientId"] = client_id
+            field_dict["client_id"] = client_id
         if client_name is not UNSET:
-            field_dict["clientName"] = client_name
+            field_dict["client_name"] = client_name
         if redirect_uris is not UNSET:
-            field_dict["redirectUris"] = redirect_uris
+            field_dict["redirect_uris"] = redirect_uris
         if created_at is not UNSET:
-            field_dict["createdAt"] = created_at
+            field_dict["created_at"] = created_at
         if is_confidential is not UNSET:
-            field_dict["isConfidential"] = is_confidential
+            field_dict["is_confidential"] = is_confidential
         if grant_types is not UNSET:
-            field_dict["grantTypes"] = grant_types
+            field_dict["grant_types"] = grant_types
         if access_token_authorization is not UNSET:
-            field_dict["accessTokenAuthorization"] = access_token_authorization
+            field_dict["access_token_authorization"] = access_token_authorization
         if id_token_signed_response_alg is not UNSET:
             field_dict["id_token_signed_response_alg"] = id_token_signed_response_alg
         if client_secret is not UNSET:
@@ -113,19 +113,19 @@ class V1OAuthClient:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        client_id = d.pop("clientId", UNSET)
+        client_id = d.pop("client_id", UNSET)
 
-        client_name = d.pop("clientName", UNSET)
+        client_name = d.pop("client_name", UNSET)
 
-        redirect_uris = cast(list[str], d.pop("redirectUris", UNSET))
+        redirect_uris = cast(list[str], d.pop("redirect_uris", UNSET))
 
-        created_at = d.pop("createdAt", UNSET)
+        created_at = d.pop("created_at", UNSET)
 
-        is_confidential = d.pop("isConfidential", UNSET)
+        is_confidential = d.pop("is_confidential", UNSET)
 
-        grant_types = cast(list[str], d.pop("grantTypes", UNSET))
+        grant_types = cast(list[str], d.pop("grant_types", UNSET))
 
-        _access_token_authorization = d.pop("accessTokenAuthorization", UNSET)
+        _access_token_authorization = d.pop("access_token_authorization", UNSET)
         access_token_authorization: V1AccessTokenAuthorization | Unset
         if isinstance(_access_token_authorization, Unset):
             access_token_authorization = UNSET
