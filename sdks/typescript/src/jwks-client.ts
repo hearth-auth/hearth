@@ -9,6 +9,7 @@ import {
   TokenInvalidError,
   TokenIssuerError,
   TokenAudienceError,
+  TokenNotYetValidError,
 } from "./errors.js";
 
 /** Options for {@link JwksClient.verify}. */
@@ -99,7 +100,9 @@ export class JwksClient {
    * 3. `iss` — always, against `options.issuer` or the client's configured
    *    `issuer`. Throws {@link ConfigurationError} when neither is set.
    * 4. `aud` — when `options.audience` or the client's configured `audience` is set.
-   * 5. `iat` — within clock skew tolerance.
+   * 5. `nbf` — when present, within clock skew tolerance.
+   *
+   * `jose` performs every check above; this method only maps its errors.
    *
    * @throws {@link TokenExpiredError} when the token is expired.
    * @throws {@link TokenInvalidError} when the signature or structure is invalid.
@@ -135,6 +138,8 @@ export class JwksClient {
         // the RS256 key a realm JWKS may carry signs ID tokens only, and an ID
         // token must never pass as an access token (task 26.55).
         algorithms: ["EdDSA"],
+        // Hearth always sets `exp`; a token without one would never expire.
+        requiredClaims: ["exp"],
         clockTolerance,
       });
       return new Claims(payload as Record<string, unknown>);
@@ -149,30 +154,40 @@ export class JwksClient {
         try {
           return await doVerify(keySet);
         } catch (retryErr) {
-          return this.mapJoseError(retryErr, options);
+          return this.mapJoseError(retryErr, issuer, audience);
         }
       }
-      return this.mapJoseError(firstErr, options);
+      return this.mapJoseError(firstErr, issuer, audience);
     }
   }
 
-  private mapJoseError(err: unknown, options?: VerifyOptions): never {
+  /**
+   * Map a `jose` error onto the SDK error taxonomy (docs/specs/SDK.md §5).
+   * `issuer` and `audience` are the values the check actually used.
+   */
+  private mapJoseError(
+    err: unknown,
+    issuer: string,
+    audience: string | string[] | undefined,
+  ): never {
     if (err instanceof joseErrors.JWTExpired) {
       const exp = err.payload?.exp;
       throw new TokenExpiredError(exp ? new Date(exp * 1000) : new Date(0));
     }
     if (err instanceof joseErrors.JWTClaimValidationFailed) {
       const claim = err.claim;
+      if (claim === "nbf" && err.reason === "check_failed") {
+        const nbf = err.payload?.nbf;
+        throw new TokenNotYetValidError(new Date((nbf ?? 0) * 1000));
+      }
       if (claim === "iss") {
         const actual = ((err.payload as Record<string, unknown>)?.["iss"] as string) ?? "";
-        throw new TokenIssuerError(options?.issuer ?? "", actual);
+        throw new TokenIssuerError(issuer, actual);
       }
       if (claim === "aud") {
         const raw = (err.payload as Record<string, unknown>)?.["aud"];
         const actual = Array.isArray(raw) ? (raw as string[]) : [String(raw ?? "")];
-        const expected = Array.isArray(options?.audience)
-          ? options.audience[0]
-          : (options?.audience ?? "");
+        const expected = Array.isArray(audience) ? (audience[0] ?? "") : (audience ?? "");
         throw new TokenAudienceError(expected, actual);
       }
       throw new TokenInvalidError(`JWT claim validation failed (${claim}): ${err.message}`);
