@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import base64
-import json
-import time
 from typing import Any
 
 import httpx
+import jwt
 
 from .claims import Claims
 from .errors import (
@@ -35,6 +33,19 @@ from .types import (
     TokenResponse,
     UserInfoResponse,
 )
+
+#: Clock-skew allowance for ``exp``, ``nbf`` and ``iat``, in seconds (SDK spec §2).
+_CLOCK_SKEW_SECONDS = 5
+
+
+def _claims_after_decode(token: str) -> dict[str, Any]:
+    """Read the claims of a token that ``jwt.decode`` refused on a claim.
+
+    Only the error arms of ``verify_token`` call this, to fill the error's
+    fields. PyJWT checks the signature before any claim, so a claim error
+    means the signature was good.
+    """
+    return jwt.decode(token, options={"verify_signature": False})
 
 
 class HearthClient:
@@ -529,23 +540,17 @@ class HearthClient:
         :raises TokenNotYetValidError: ``nbf`` or ``iat`` is more than 5 s in the future.
         :raises JWKSFetchError: JWKS endpoint unreachable.
         """
-        from cryptography.exceptions import InvalidSignature
-
-        parts = token.split(".")
-        if len(parts) != 3:
-            raise TokenInvalidError("expected three dot-separated segments")
-
         try:
-            header_bytes = base64.urlsafe_b64decode(parts[0] + "==")
-            header: dict[str, Any] = json.loads(header_bytes)
-        except Exception as exc:
+            header = jwt.get_unverified_header(token)
+        except jwt.PyJWTError as exc:
             raise TokenInvalidError(f"failed to decode JWT header: {exc}") from exc
 
+        # Access tokens are EdDSA only. Refuse any other alg (``none``, an
+        # RS256 ID token, HS256) before a JWKS fetch; ``jwt.decode`` below
+        # enforces the same allow-list.
         alg = header.get("alg")
         if alg != "EdDSA":
             raise TokenInvalidError(f"unsupported algorithm: {alg!r}")
-
-        kid: str = header.get("kid") or ""
 
         # Lazy-init JWKS cache.
         if self._jwks_cache is None:
@@ -556,58 +561,48 @@ class HearthClient:
                 ttl=self._jwks_ttl,
             )
 
-        pub_key = self._jwks_cache.get_key(kid)
-
-        # Verify signature: message = header.payload (ASCII bytes).
-        message = f"{parts[0]}.{parts[1]}".encode("ascii")
-        try:
-            sig_bytes = base64.urlsafe_b64decode(parts[2] + "==")
-        except Exception as exc:
-            raise TokenInvalidError(f"failed to decode JWT signature: {exc}") from exc
-
-        try:
-            pub_key.verify(sig_bytes, message)
-        except InvalidSignature as exc:
-            raise TokenInvalidError("signature verification failed") from exc
-
-        # Decode payload claims.
-        try:
-            payload_bytes = base64.urlsafe_b64decode(parts[1] + "==")
-            payload: dict[str, Any] = json.loads(payload_bytes)
-        except Exception as exc:
-            raise TokenInvalidError(f"failed to decode JWT payload: {exc}") from exc
-
-        now = int(time.time())
-
-        # Step 2: exp
-        exp = payload.get("exp")
-        if exp is not None and now > int(exp):
-            raise TokenExpiredError(int(exp))
-
-        # Step 3: iss
+        key = self._jwks_cache.get_key(str(header.get("kid") or ""))
         expected_iss = (issuer_url or self._base).rstrip("/")
-        actual_iss = str(payload.get("iss", ""))
-        if actual_iss != expected_iss:
-            raise TokenIssuerError(expected=expected_iss, actual=actual_iss)
 
-        # Step 4: aud (server SDKs only, skipped when audience is None)
-        if audience is not None:
-            aud = payload.get("aud", [])
-            if isinstance(aud, str):
-                aud = [aud]
-            if audience not in aud:
-                raise TokenAudienceError(expected=audience, actual=list(aud))
-
-        # Step 5: nbf — the token is not usable before it (RFC 7519 §4.1.5).
-        # Same 5 s clock-skew allowance as the iat check below.
-        nbf = payload.get("nbf")
-        if nbf is not None and int(nbf) > now + 5:
-            raise TokenNotYetValidError(int(nbf))
-
-        # Step 6: iat — must not be more than 5 s in the future
-        iat = payload.get("iat")
-        if iat is not None and int(iat) > now + 5:
-            raise TokenNotYetValidError(int(iat))
+        # PyJWT checks the signature first, then exp, iss, aud (only when an
+        # audience is configured), nbf and iat, with the spec's clock-skew
+        # allowance. The except arms only map its errors onto the SDK taxonomy.
+        try:
+            payload: dict[str, Any] = jwt.decode(
+                token,
+                key=key,
+                algorithms=["EdDSA"],
+                issuer=expected_iss,
+                audience=audience,
+                leeway=_CLOCK_SKEW_SECONDS,
+                options={"verify_aud": audience is not None},
+            )
+        except jwt.ExpiredSignatureError as exc:
+            raise TokenExpiredError(
+                int(_claims_after_decode(token).get("exp", 0))
+            ) from exc
+        except jwt.ImmatureSignatureError as exc:
+            claims = _claims_after_decode(token)
+            raise TokenNotYetValidError(
+                int(claims.get("nbf") or claims.get("iat") or 0)
+            ) from exc
+        except jwt.MissingRequiredClaimError as exc:
+            if exc.claim == "aud":
+                raise TokenAudienceError(expected=str(audience), actual=[]) from exc
+            if exc.claim == "iss":
+                raise TokenIssuerError(expected=expected_iss, actual="") from exc
+            raise TokenInvalidError(str(exc)) from exc
+        except jwt.InvalidIssuerError as exc:
+            actual_iss = str(_claims_after_decode(token).get("iss", ""))
+            raise TokenIssuerError(expected=expected_iss, actual=actual_iss) from exc
+        except jwt.InvalidAudienceError as exc:
+            aud = _claims_after_decode(token).get("aud", [])
+            raise TokenAudienceError(
+                expected=str(audience),
+                actual=[aud] if isinstance(aud, str) else list(aud),
+            ) from exc
+        except jwt.PyJWTError as exc:
+            raise TokenInvalidError(str(exc) or type(exc).__name__) from exc
 
         return Claims(payload)
 

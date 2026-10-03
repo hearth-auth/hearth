@@ -1,17 +1,18 @@
 """JWKS key cache with TTL (spec §2).
 
-Caches Ed25519/OKP public keys by ``kid``.  Respects ``Cache-Control: max-age``
+Caches Ed25519/OKP public keys by ``kid`` as PyJWT :class:`jwt.PyJWK` objects, so the
+signature check itself is PyJWT's (``jwt.decode``), never SDK code.  Respects
+``Cache-Control: max-age``
 from the server, capped at 24 hours.  Re-fetches once on a cache miss before
 raising :exc:`~hearth.errors.JWKSFetchError`.
 """
 
 from __future__ import annotations
 
-import base64
 import time
 
 import httpx
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+import jwt
 
 from .errors import JWKSFetchError
 
@@ -22,7 +23,7 @@ _MAX_AGE = 86400.0
 
 
 class JwksCache:
-    """Thread-unsafe JWKS cache.  Holds Ed25519 public keys keyed by ``kid``.
+    """Thread-unsafe JWKS cache.  Holds Ed25519 :class:`jwt.PyJWK` keys keyed by ``kid``.
 
     :param jwks_url: Full URL of the JWKS endpoint.
     :param ttl: Override cache TTL in seconds (default: respect ``Cache-Control``,
@@ -39,7 +40,7 @@ class JwksCache:
         self._url = jwks_url
         self._configured_ttl: float = ttl if ttl is not None else _DEFAULT_TTL
         self._ttl: float = self._configured_ttl
-        self._keys: dict[str, Ed25519PublicKey] = {}
+        self._keys: dict[str, jwt.PyJWK] = {}
         self._fetched_at: float = 0.0
         self._http = httpx.Client(timeout=timeout)
 
@@ -47,8 +48,8 @@ class JwksCache:
     # Public interface
     # ------------------------------------------------------------------
 
-    def get_key(self, kid: str) -> Ed25519PublicKey:
-        """Return the cached Ed25519 public key for *kid*.
+    def get_key(self, kid: str) -> jwt.PyJWK:
+        """Return the cached Ed25519 key for *kid*.
 
         Fetches the JWKS endpoint if the cache is stale.  On a cache miss,
         re-fetches once before raising :exc:`~hearth.errors.JWKSFetchError`.
@@ -112,15 +113,10 @@ class JwksCache:
                 continue
             if key.get("crv") != "Ed25519":
                 continue
-            kid = key.get("kid", "")
-            x_b64 = key.get("x", "")
             try:
-                # Add padding before decoding (base64url omits =).
-                x_bytes = base64.urlsafe_b64decode(x_b64 + "==")
-                pub_key = Ed25519PublicKey.from_public_bytes(x_bytes)
-                self._keys[kid] = pub_key
-            except Exception:  # noqa: BLE001, S112 -- a malformed key entry is skipped, not fatal
-                # Malformed key entry — skip silently.
+                self._keys[key.get("kid", "")] = jwt.PyJWK(key, algorithm="EdDSA")
+            except jwt.PyJWTError:
+                # A malformed key entry is skipped, not fatal.
                 continue
 
         self._fetched_at = time.time()
