@@ -49,11 +49,12 @@ realms:
         description: "Acme account"
         config:
           max_members: 50
+          mfa_required: true
       beta-customer:
         name: "Beta Customer"
 ```
 
-The YAML key (`acme-corp`) becomes the URL-safe slug. `max_members` is optional; omit it for unlimited membership. Members and invitations are runtime-only and cannot be seeded from YAML.
+The YAML key (`acme-corp`) becomes the URL-safe slug. `max_members` is optional; omit it for unlimited membership. `mfa_required` is optional and defaults to `false`. Members and invitations are runtime-only and cannot be seeded from YAML.
 
 ## Managing organizations via the Admin UI
 
@@ -325,6 +326,7 @@ Slugs must also be unique within the realm. Once set, a slug cannot be changed v
 | Field | Default | Description |
 |-------|---------|-------------|
 | `max_members` | unlimited | Maximum number of active members. Invitation acceptance fails when the limit would be exceeded. |
+| `mfa_required` | `false` | When `true`, every member must use MFA, even where the realm does not require it. It can only tighten the realm policy. Set it in YAML under `config`, with `mfa_required` on the admin REST API, or with the **Members need MFA** checkbox in the Admin console. Organizations created through SCIM start with `false`. |
 
 ## Cascading deletes
 

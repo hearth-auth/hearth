@@ -1380,6 +1380,11 @@ pub(crate) fn reconcile_organizations(
     for (slug, org_cfg) in orgs {
         let yaml_config = OrganizationConfig {
             max_members: org_cfg.config.as_ref().and_then(|c| c.max_members),
+            mfa_required: org_cfg
+                .config
+                .as_ref()
+                .and_then(|c| c.mfa_required)
+                .unwrap_or(false),
         };
         let description = org_cfg.description.clone().unwrap_or_default();
 

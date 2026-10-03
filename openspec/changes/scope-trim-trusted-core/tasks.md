@@ -50,17 +50,26 @@ Sixteen admin operations existed only over gRPC (`docs/api/grpc-only.txt`; `Clie
 
 ## 6. MFA policy (PR 5)
 
-**Changed during apply:** groups 7 and 8 run before this group. They delete sign-in paths (SMS OTP, adaptive MFA in the password grant, the password grant itself) that the resolver would otherwise have to cover.
+**Changed during apply:** groups 7 and 8 run before this group. They delete sign-in paths (SMS OTP, adaptive MFA in the password grant, the password grant itself) that the resolver would otherwise have to cover. Two owner/apply decisions (2026-10-02): (1) the "required by default" lives where a server builds a realm's config — YAML conversion, the system realm at startup, the bootstrap dev realm — which record an explicit `mfa_required`; a realm created in-process with no value (tests only; `POST /admin/realms` is 405) reads as not required. Flipping the engine default instead broke 1,003 of 6,074 tests that never set the key. (2) `/admin/bootstrap` enrols TOTP for both dev admins, returns each secret once with the password, and mints its API tokens after verifying a code from that secret.
 
-- [ ] 6.1 Red tests from `specs/mfa-policy`: the default is required; the explicit opt-out is honoured; email OTP and magic link do not satisfy MFA; a passkey alone does; org tightening; org cannot loosen; the startup `WARN`; the console banner; an audit event on change
-- [ ] 6.2 Add `effective_mfa_requirement(...)` in the identity layer, and route every `mfa_required.unwrap_or(...)` site through it (`web/second_factor.rs:124`, `web/handlers.rs:2669`, `engine/oauth.rs:1389`, `engine/mod.rs:18971`, plus any others a search finds)
-- [ ] 6.3 Add the CI lint (clippy `disallowed-methods` or a `scripts/` check) that fails on a direct read of `mfa_required` outside the resolver, with a red self-test
-- [ ] 6.4 Split the email OTP proof from `MfaProof::Proved`, and make `satisfies_mfa_required` accept only WebAuthn, TOTP and recovery-code proofs
-- [ ] 6.5 Add `mfa_required` to organizations (storage, admin REST, console, SCIM-created orgs default `false`), and feed it to the resolver
-- [ ] 6.6 Add the startup `WARN`, the console warning banner (follow `docs/specs/THEME.md`), and the audit events
-- [ ] 6.7 Keep the production default under `--dev` (owner decision). Make `/admin/bootstrap` and the quick start in `CLAUDE.md` and README describe the enrolment step for the dev admin. Update `make dev`-based scripts (`make sdk-smoke-local`, UI smoke, `make seed`) that sign in as the dev admin
-- [ ] 6.8 A cluster test: the leader and a follower reach the same MFA decision for the same user
-- [ ] 6.9 CHANGELOG `### Changed` (default required, email OTP no longer MFA) and `### Added` (org MFA) entries
+- [x] 6.1 Red tests from `specs/mfa-policy`: the default is required; the explicit opt-out is honoured; email OTP and magic link do not satisfy MFA; a passkey alone does; org tightening; org cannot loosen; the startup `WARN`; the console banner; an audit event on change
+- [x] 6.2 Add `effective_mfa_requirement(...)` in the identity layer, and route every `mfa_required.unwrap_or(...)` site through it (`web/second_factor.rs:124`, `web/handlers.rs:2669`, `engine/oauth.rs:1389`, `engine/mod.rs:18971`, plus any others a search finds)
+- [x] 6.3 Add the CI lint (clippy `disallowed-methods` or a `scripts/` check) that fails on a direct read of `mfa_required` outside the resolver, with a red self-test
+- [x] 6.4 Split the email OTP proof from `MfaProof::Proved`, and make `satisfies_mfa_required` accept only WebAuthn, TOTP and recovery-code proofs
+- [x] 6.5 Add `mfa_required` to organizations (storage, admin REST, console, SCIM-created orgs default `false`), and feed it to the resolver
+- [x] 6.6 Add the startup `WARN`, the console warning banner (follow `docs/specs/THEME.md`), and the audit events
+- [x] 6.7 Keep the production default under `--dev` (owner decision). Make `/admin/bootstrap` and the quick start in `CLAUDE.md` and README describe the enrolment step for the dev admin. Update `make dev`-based scripts (`make sdk-smoke-local`, UI smoke, `make seed`) that sign in as the dev admin
+- [x] 6.8 A cluster test: the leader and a follower reach the same MFA decision for the same user
+- [x] 6.9 CHANGELOG `### Changed` (default required, email OTP no longer MFA) and `### Added` (org MFA) entries
+
+**Changed during apply (6.1–6.9):**
+- Tests: `tests/mfa_policy.rs` (default, opt-out, startup listing, audit, system realm, bootstrap, strong factors, org tighten/no-loosen/audit/SCIM, the lint self-test, the `mfa_methods` rule), `tests/web_ui_admin.rs` (console banner), `tests/cluster_three_node_control_coherence.rs` (6.8), and web cases in `mfa_login_and_gate_regressions`, `mfa_otp_second_factor_login`, `required_action_mfa_proof`. The startup `WARN` text itself is not asserted; `realms_with_mfa_off` (which feeds it) is. The 6.8 cluster test passed on first run (the resolver reads replicated storage only).
+- 6.2: the resolver is `IdentityEngine::effective_mfa_requirement(realm, user, client)`; `realm_requires_mfa(config)` is the realm-only input. `mfa_required_roles` now binds at `create_session` too (it was web-layer only); `conditional_mfa` was flipped accordingly. The realm requirement now also injects `ENROLL_MFA`, which lets a user with no qualifying factor enrol a passkey or TOTP — this is how a password + email OTP sign-in reaches a qualifying factor.
+- 6.3: `scripts/check-mfa-resolver.sh` (`make mfa-resolver-check`, CI lint job, `ci-local-fast`). Marker `// mfa-resolver-ok: <reason>` on the line or the line above (rustfmt moves trailing comments). The config loader, reconcile, the backup importer and the admin settings editors are exempt.
+- 6.4: new `MfaProof::EmailOtp` (satisfies neither policy, proves the held email-OTP factor) and `FirstFactor::VerifiedPasskey` (a passkey with UV, then an email OTP, keeps `ProvedWebAuthn`). Where MFA is required a held passkey is asked before email OTP, and after a UV-less passkey only TOTP can finish. Added a config rule: a realm that requires MFA must offer `totp` or `webauthn` in `mfa_methods`.
+- 6.5: org REST `PATCH` now starts from the stored config, so a field the body omits is kept (before, `member_limit` alone reset the whole config).
+- 6.6: the system realm always requires MFA (startup writes it, audited); the old HSEC-004 checks are gone.
+- 6.7: found by a live run and fixed with tests: the inline TOTP form on the login page carried no CSRF token, so the first code was refused with 422; an unverified account reached forced enrolment and failed with 500 — it now gets the verify-your-email page first. The Playwright fixture signs in with TOTP (`tests/ui/fixtures/totp.ts`, `nextTotp` avoids the code bootstrap spent); `make ui-test-smoke` and `make sdk-smoke-local` pass on a fresh server. The load-test login plane still measures the Argon2id path; its sign-ins now stop at the second factor.
 
 ## 7. Risk scoring, adaptive MFA and SMS OTP (PR 6)
 

@@ -63,7 +63,7 @@ async fn ctx() -> Ctx {
                 name: "acme-rest".to_string(),
                 slug: "acme-rest".to_string(),
                 description: None,
-                config: Some(OrganizationConfig { max_members: None }),
+                config: Some(OrganizationConfig::default()),
                 ..Default::default()
             },
         )

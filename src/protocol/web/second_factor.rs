@@ -99,8 +99,11 @@ pub(super) fn non_passkey_factor_step(
 /// refuses the session if neither fires.
 ///
 /// Order: a passkey first when the realm sets `webauthn_required` (no other
-/// factor satisfies it), then TOTP, then an OTP, then a passkey. Forced
-/// enrolment only when the user holds no factor at all.
+/// factor satisfies it), then TOTP. Where MFA is required a passkey comes
+/// next, because an email OTP does not satisfy MFA (spec `mfa-policy`); a
+/// user who then still owes a qualifying factor is sent to enrol one by the
+/// required-action gate. Otherwise an OTP, then a passkey. Forced enrolment
+/// only when the user holds no factor at all.
 ///
 /// # Errors
 ///
@@ -115,13 +118,19 @@ pub(super) fn second_factor_step(
     if holds_passkey && realm.config().webauthn_required.unwrap_or(false) {
         return Ok(Some(SecondFactorStep::Passkey));
     }
+    let realm_requires_mfa =
+        state
+            .identity
+            .effective_mfa_requirement(realm.id(), user.id(), None)?;
+    if realm_requires_mfa && holds_passkey && !state.identity.mfa_enabled(realm.id(), user.id())? {
+        return Ok(Some(SecondFactorStep::Passkey));
+    }
     if let Some(step) = non_passkey_factor_step(state, realm, user, first)? {
         return Ok(Some(step));
     }
     if holds_passkey {
         return Ok(Some(SecondFactorStep::Passkey));
     }
-    let realm_requires_mfa = realm.config().mfa_required.unwrap_or(false);
     // An absent `mfa_methods` restricts nothing, so TOTP is on offer.
     let realm_offers_totp = realm
         .config()

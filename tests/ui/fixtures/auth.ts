@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { chromium } from '@playwright/test';
+import { chromium, Page } from '@playwright/test';
+import { computeTotp, markTotpUsed, nextTotp } from './totp';
 
 const BASE_URL = process.env.HEARTH_URL ?? 'http://127.0.0.1:8420';
 
@@ -22,6 +23,74 @@ export const USER_PASSWORD = ADMIN_PASSWORD;
 export const DEV_REALM_NAME = 'dev-realm';
 export const DEV_REALM_USER_EMAIL = 'admin@dev.local';
 export const DEV_REALM_USER_PASSWORD = 'HearthDev123!';
+
+const CREDENTIALS_PATH = path.join(AUTH_DIR, 'credentials.json');
+const ADMIN_TOTP_PATH = path.join(AUTH_DIR, 'admin-totp.txt');
+
+/** A TOTP secret cached by `bootstrap()` (`.auth/credentials.json`). */
+function cachedSecret(field: 'totp_secret' | 'admin_totp_secret'): string {
+  try {
+    const creds = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf-8')) as Record<string, string>;
+    return creds[field] ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/** The system admin's TOTP secret: from bootstrap, or from a forced enrolment. */
+function adminTotpSecret(): string {
+  const fromBootstrap = cachedSecret('admin_totp_secret');
+  if (fromBootstrap) return fromBootstrap;
+  try {
+    return fs.readFileSync(ADMIN_TOTP_PATH, 'utf-8').trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Clears the second factor after the password step. Every realm requires MFA
+ * by default (scope-trim-trusted-core, spec `mfa-policy`), so the login page
+ * either asks for a TOTP code inline, or — for an account with no factor —
+ * sends the user to forced TOTP enrolment. Returns the secret it used, so a
+ * secret learned at enrolment can be saved. Does nothing when neither appears.
+ */
+async function passSecondFactor(page: Page, secret: string): Promise<string> {
+  const inline = page.locator('#totp_code');
+  await Promise.race([
+    inline.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => undefined),
+    page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 10_000 }).catch(() => undefined),
+  ]);
+
+  if (page.url().includes('/ui/mfa-enroll-required')) {
+    const shown = (await page
+      .locator('p:has-text("Or enter the secret manually") + code')
+      .innerText()).trim();
+    await page.fill('#code', computeTotp(shown));
+    markTotpUsed(shown);
+    await Promise.all([
+      page.waitForURL((url) => !url.pathname.includes('/mfa-enroll-required'), { timeout: 15_000 }),
+      page.click('form[action="/ui/mfa-enroll-required/activate"] button[type="submit"]'),
+    ]);
+    return shown;
+  }
+
+  if (await inline.isVisible()) {
+    if (!secret) {
+      throw new Error(
+        '[auth] the login asks for a TOTP code but no secret is cached. Delete ' +
+          'tests/ui/.auth/ and restart `make dev` with a fresh data dir, so the first ' +
+          'bootstrap returns the TOTP secrets.',
+      );
+    }
+    await inline.fill(await nextTotp(secret));
+    await Promise.all([
+      page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15_000 }),
+      page.click('form:has(#totp_code) button[type="submit"]'),
+    ]);
+  }
+  return secret;
+}
 
 /**
  * Performs first-time admin setup if the setup token is present, then logs in
@@ -94,15 +163,19 @@ export async function setupAdminAuth(): Promise<void> {
   await page.goto(`${BASE_URL}/ui/admin/login`);
   await page.fill('input[name="email"]', ADMIN_EMAIL);
   await page.fill('input[name="password"]', ADMIN_PASSWORD);
+  await page.click('button[type="submit"]');
 
-  await Promise.all([
-    // Wait for a successful post-login redirect to /ui (the admin dashboard area).
-    // Using a positive match avoids accidentally resolving on /required-action,
-    // /mfa-enroll-required, or /ui/setup/sent — all of which are non-/login URLs
-    // but do NOT carry a hearth_ui_session cookie.
-    page.waitForURL((url) => url.pathname.startsWith('/ui') && !url.pathname.includes('/login') && !url.pathname.includes('/setup') && !url.pathname.includes('/required-action') && !url.pathname.includes('/mfa'), { timeout: 15_000 }),
-    page.click('button[type="submit"]'),
-  ]);
+  // The system realm always requires MFA: a TOTP code, or forced enrolment.
+  const used = await passSecondFactor(page, adminTotpSecret());
+  if (used && used !== cachedSecret('admin_totp_secret')) {
+    fs.writeFileSync(ADMIN_TOTP_PATH, used);
+  }
+
+  // Wait for a successful post-login redirect to /ui (the admin dashboard area).
+  // Using a positive match avoids accidentally resolving on /required-action,
+  // /mfa-enroll-required, or /ui/setup/sent — all of which are non-/login URLs
+  // but do NOT carry a hearth_ui_session cookie.
+  await page.waitForURL((url) => url.pathname.startsWith('/ui') && !url.pathname.includes('/login') && !url.pathname.includes('/setup') && !url.pathname.includes('/required-action') && !url.pathname.includes('/mfa'), { timeout: 15_000 });
 
   const finalUrl = page.url();
   console.log(`[setupAdminAuth] post-login URL: ${finalUrl}`);
@@ -152,11 +225,11 @@ export async function setupRealmUserAuth(): Promise<void> {
 
     await page.fill('input[name="email"]', DEV_REALM_USER_EMAIL, { timeout: 5_000 });
     await page.fill('input[name="password"]', DEV_REALM_USER_PASSWORD, { timeout: 5_000 });
+    await page.click('button[type="submit"]');
 
-    await Promise.all([
-      page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
-    ]);
+    // The dev realm requires MFA; bootstrap enrolled TOTP for this user.
+    await passSecondFactor(page, cachedSecret('totp_secret'));
+    await page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15_000 });
 
     await context.storageState({ path: path.join(AUTH_DIR, 'realm-user.json') });
   } catch (err) {
@@ -198,11 +271,10 @@ export async function setupUserAuth(): Promise<void> {
 
     await page.fill('input[name="email"]', USER_EMAIL, { timeout: 5_000 });
     await page.fill('input[name="password"]', USER_PASSWORD, { timeout: 5_000 });
+    await page.click('button[type="submit"]');
 
-    await Promise.all([
-      page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
-    ]);
+    await passSecondFactor(page, adminTotpSecret());
+    await page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15_000 });
 
     await context.storageState({ path: path.join(AUTH_DIR, 'user.json') });
   } catch (err) {

@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(realm.updated_at(), now);
 
         // Verify new auth policy fields default to None
-        assert!(config.mfa_required.is_none());
+        assert!(config.mfa_required.is_none()); // mfa-resolver-ok: a test
         assert!(config.mfa_methods.is_none());
         assert!(config.allowed_auth_methods.is_none());
         assert!(config.password_policy.is_none());
@@ -231,6 +231,7 @@ mod tests {
         let now = Timestamp::from_micros(1_000_000);
         let config = OrganizationConfig {
             max_members: Some(100),
+            mfa_required: false,
         };
         let org = Organization::new(
             id.clone(),
@@ -289,6 +290,7 @@ mod tests {
         org.set_status(OrganizationStatus::Suspended);
         org.set_config(OrganizationConfig {
             max_members: Some(50),
+            mfa_required: false,
         });
         org.set_updated_at(Timestamp::from_micros(2_000));
 

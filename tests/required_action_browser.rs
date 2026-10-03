@@ -1306,10 +1306,12 @@ async fn an_email_otp_enrolled_after_a_magic_link_is_not_a_second_factor() {
     );
 }
 
-/// The control: after a password login the same enrolment is a second
-/// factor, as it always was.
+/// The control: after a password login the same enrolment proves the
+/// email-OTP factor the account now holds, so the flow ends in a session on
+/// this realm, which does not require MFA. The proof is an inbox
+/// (`EmailOtp`), never MFA (spec `mfa-policy`).
 #[tokio::test]
-async fn an_email_otp_enrolled_after_a_password_login_is_a_second_factor() {
+async fn an_email_otp_enrolled_after_a_password_login_proves_the_inbox() {
     let rig = build_rig(&["email_otp"]);
     let email = "jar-password-emailotp@example.com";
     user_with_actions(&rig, email, vec![RequiredAction::EnrollEmailOtp]);
@@ -1331,6 +1333,6 @@ async fn an_email_otp_enrolled_after_a_password_login_is_a_second_factor() {
 
     assert_eq!(
         jar_session_proof(&rig, &browser),
-        hearth::identity::MfaProof::Proved
+        hearth::identity::MfaProof::EmailOtp
     );
 }

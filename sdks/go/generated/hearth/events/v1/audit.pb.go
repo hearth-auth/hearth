@@ -151,9 +151,10 @@ const (
 	AuditAction_AUDIT_ACTION_MFA_ENABLED  AuditAction = 117
 	AuditAction_AUDIT_ACTION_MFA_DISABLED AuditAction = 118
 	// Organization invitation lifecycle
-	AuditAction_AUDIT_ACTION_INVITATION_CREATED  AuditAction = 119
-	AuditAction_AUDIT_ACTION_INVITATION_ACCEPTED AuditAction = 120
-	AuditAction_AUDIT_ACTION_INVITATION_REVOKED  AuditAction = 121
+	AuditAction_AUDIT_ACTION_INVITATION_CREATED      AuditAction = 119
+	AuditAction_AUDIT_ACTION_INVITATION_ACCEPTED     AuditAction = 120
+	AuditAction_AUDIT_ACTION_INVITATION_REVOKED      AuditAction = 121
+	AuditAction_AUDIT_ACTION_MFA_REQUIREMENT_CHANGED AuditAction = 122
 )
 
 // Enum value maps for AuditAction.
@@ -272,6 +273,7 @@ var (
 		119: "AUDIT_ACTION_INVITATION_CREATED",
 		120: "AUDIT_ACTION_INVITATION_ACCEPTED",
 		121: "AUDIT_ACTION_INVITATION_REVOKED",
+		122: "AUDIT_ACTION_MFA_REQUIREMENT_CHANGED",
 	}
 	AuditAction_value = map[string]int32{
 		"AUDIT_ACTION_UNSPECIFIED":                     0,
@@ -387,6 +389,7 @@ var (
 		"AUDIT_ACTION_INVITATION_CREATED":              119,
 		"AUDIT_ACTION_INVITATION_ACCEPTED":             120,
 		"AUDIT_ACTION_INVITATION_REVOKED":              121,
+		"AUDIT_ACTION_MFA_REQUIREMENT_CHANGED":         122,
 	}
 )
 
@@ -893,7 +896,7 @@ const file_hearth_events_v1_audit_proto_rawDesc = "" +
 	"\x12broken_at_event_id\x18\x02 \x01(\tH\x00R\x0fbrokenAtEventId\x88\x01\x01\x12\x1f\n" +
 	"\vevent_count\x18\x03 \x01(\x04R\n" +
 	"eventCountB\x15\n" +
-	"\x13_broken_at_event_id*\x81!\n" +
+	"\x13_broken_at_event_id*\xab!\n" +
 	"\vAuditAction\x12\x1c\n" +
 	"\x18AUDIT_ACTION_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19AUDIT_ACTION_USER_CREATED\x10\x01\x12\x1d\n" +
@@ -1008,7 +1011,8 @@ const file_hearth_events_v1_audit_proto_rawDesc = "" +
 	"\x19AUDIT_ACTION_MFA_DISABLED\x10v\x12#\n" +
 	"\x1fAUDIT_ACTION_INVITATION_CREATED\x10w\x12$\n" +
 	" AUDIT_ACTION_INVITATION_ACCEPTED\x10x\x12#\n" +
-	"\x1fAUDIT_ACTION_INVITATION_REVOKED\x10y2\xda\x01\n" +
+	"\x1fAUDIT_ACTION_INVITATION_REVOKED\x10y\x12(\n" +
+	"$AUDIT_ACTION_MFA_REQUIREMENT_CHANGED\x10z2\xda\x01\n" +
 	"\fAuditService\x12b\n" +
 	"\n" +
 	"ListEvents\x12\x1c.hearth.events.v1.AuditQuery\x1a .hearth.events.v1.AuditEventPage\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/admin/audit\x12f\n" +

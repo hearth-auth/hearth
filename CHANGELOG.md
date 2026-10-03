@@ -32,6 +32,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   in dynamic registration (echoed in the response), or through the admin API; the client record
   returns it. This replaces the FAPI profile as the way to require sender-constrained tokens.
 
+- **Organization MFA requirement.** An organization has an `mfa_required` setting (YAML
+  `realms.<name>.organizations.<slug>.config.mfa_required`, the admin API's `mfa_required` on
+  `POST`/`PATCH /admin/organizations`, and a checkbox in the console). When `true`, its members
+  need a passkey, a TOTP code or a recovery code to sign in, even where the realm does not
+  require MFA. It can only tighten: `false` never removes a realm requirement. It defaults to
+  `false`, also for organizations SCIM creates.
+- **`mfa_requirement_changed` audit event** — written whenever a realm's or an organization's
+  MFA requirement changes, by reconcile, by startup or by an admin, with the old and new values.
+- **`/admin/bootstrap` returns `totp_secret` and `admin_totp_secret`** (dev only, first call
+  only): bootstrap enrols TOTP for `admin@dev.local` and `admin@hearth.test`, because both of
+  their realms now require MFA. Add each secret to an authenticator app to sign in.
+
 ### Removed
 - **BREAKING: Hearth no longer acts as a SAML Identity Provider.** The routes
   `/ui/realms/{realm}/saml/metadata`, `/saml/sso` (GET and POST), `/saml/sso/init` and
@@ -108,12 +120,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   XML signature-wrapping variants (XSW1–XSW8).
 
 ### Fixed
+- The TOTP step of the login page refused the first code with `422` ("Your session has
+  expired"): its form did not carry the CSRF token. It now does.
+- A password sign-in by an account whose email is not verified, in a realm that requires MFA,
+  went on to forced TOTP enrolment and then failed with `500`. It now gets the
+  "verify your email" page right after the password.
 - The realm-scoped token endpoint (`/realms/{realm}/token`) answered an unknown `grant_type`
   with `{"error":"unsupported grant_type: <value>"}`, echoing the caller's input and not using
   the RFC 6749 §5.2 code. It now answers `unsupported_grant_type` with
   `HEARTH_UNSUPPORTED_GRANT_TYPE`, exactly like the global `/token`.
 
 ### Changed
+- **BREAKING: MFA is required by default.** A realm with no `auth.mfa_required` (and no global
+  value) now requires a second factor, in `serve --dev` too. Set `auth.mfa_required: false` to
+  opt out; the server then logs a `WARN` at startup naming every such realm, and the admin
+  console shows a warning on the realm. The system realm (the admin console) always requires
+  MFA. A first sign-in without a factor is sent to enrol one.
+- **BREAKING: email OTP and magic links no longer satisfy MFA.** Only a passkey, a TOTP code or
+  a recovery code does. After a password and an email OTP, a realm that requires MFA sends the
+  user on to enrol a passkey or TOTP. Where MFA is optional, email OTP still works as a second
+  step. A realm that requires MFA must offer `totp` or `webauthn` in `mfa_methods`; one that
+  offers only `email_otp` stops startup.
+- **BREAKING: one MFA resolver.** Every MFA decision (browser login, `/authorize`, device
+  approval, and the session behind every grant) combines the realm, organization, client and
+  role requirements with OR. `mfa_required_roles` now binds at session creation too, not only in the browser.
 - **BREAKING: a configuration key of a removed feature now stops startup with a named
   error.** Instead of serde's generic "unknown field", the message names the key, the removed
   feature, the release that removed it (3.0.0) and what to use instead. The check runs in every

@@ -155,14 +155,31 @@ impl std::fmt::Debug for CookieSecret {
 /// round 3, D-4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FirstFactor {
-    /// A password, a passkey or an upstream identity provider.
+    /// A password, a passkey without user verification, or an upstream
+    /// identity provider.
     Credential,
     /// A magic link: control of the user's inbox. An email OTP proves the
     /// same inbox, so it cannot be this login's second factor.
     Inbox,
+    /// A passkey that proved user verification. That alone satisfies MFA
+    /// (spec `mfa-policy`), so the factor a realm's `passkey_requires_mfa`
+    /// adds on top keeps the login's [`crate::identity::MfaProof::ProvedWebAuthn`].
+    VerifiedPasskey,
 }
 
 impl FirstFactor {
+    /// The proof a login that started with this factor holds once an email
+    /// OTP is typed back: [`crate::identity::MfaProof::ProvedWebAuthn`] after
+    /// a user-verified passkey, otherwise
+    /// [`crate::identity::MfaProof::EmailOtp`] — an inbox, not MFA.
+    #[must_use]
+    pub fn proof_after_email_otp(self) -> crate::identity::MfaProof {
+        match self {
+            Self::VerifiedPasskey => crate::identity::MfaProof::ProvedWebAuthn,
+            Self::Credential | Self::Inbox => crate::identity::MfaProof::EmailOtp,
+        }
+    }
+
     /// Whether an email OTP can be this login's second factor.
     #[must_use]
     pub fn allows_email_otp(self) -> bool {
@@ -173,6 +190,7 @@ impl FirstFactor {
         match self {
             Self::Credential => "c",
             Self::Inbox => "i",
+            Self::VerifiedPasskey => "v",
         }
     }
 
@@ -180,6 +198,7 @@ impl FirstFactor {
         match s {
             "c" => Some(Self::Credential),
             "i" => Some(Self::Inbox),
+            "v" => Some(Self::VerifiedPasskey),
             _ => None,
         }
     }

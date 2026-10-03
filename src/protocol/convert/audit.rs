@@ -148,6 +148,7 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         domain::AuditAction::InvitationCreated => pb::AuditAction::InvitationCreated,
         domain::AuditAction::InvitationAccepted => pb::AuditAction::InvitationAccepted,
         domain::AuditAction::InvitationRevoked => pb::AuditAction::InvitationRevoked,
+        domain::AuditAction::MfaRequirementChanged => pb::AuditAction::MfaRequirementChanged,
     }
 }
 

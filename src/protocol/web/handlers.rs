@@ -971,10 +971,10 @@ pub async fn mfa_otp_challenge_submit(
         &pending.realm_id,
         &pending.user_id,
         pending.return_to.as_deref(),
-        // The OTP just verified is a proved second factor, as in
-        // `finish_otp_login`; the RA flow carries it to the session.
+        // What the OTP just verified, as in `finish_otp_login`; the RA flow
+        // carries it to the session.
         &SessionContext {
-            mfa_proof: MfaProof::Proved,
+            mfa_proof: pending.first_factor.proof_after_email_otp(),
             ..session_ctx.clone()
         },
         pending.first_factor,
@@ -1033,11 +1033,11 @@ fn finish_otp_login(
 ) -> Response {
     revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
 
-    // An OTP the realm delivered out of band and the user typed back is a
-    // proved second factor — the `mfa_required` gate reads exactly this
-    // (audit 2026-08-28 §4.18#3, §4.18#6).
+    // An email OTP the user typed back proves the inbox, not MFA (spec
+    // `mfa-policy`); after a user-verified passkey the login keeps the
+    // passkey's proof. The engine's gates read exactly this.
     let session_ctx = SessionContext {
-        mfa_proof: MfaProof::Proved,
+        mfa_proof: pending.first_factor.proof_after_email_otp(),
         ..session_ctx
     };
 
@@ -2196,6 +2196,18 @@ fn login_finish(
     // Forced enrolment is now chosen only for a user who holds no factor.
     // Neither branch decides whether the policy is met: the engine gate reads
     // factor use from `SessionContext::mfa_proof` (§4.18#3).
+    //
+    // An unverified account cannot open a session, so it is told so before
+    // any second-factor step: with MFA required by default, it used to reach
+    // forced enrolment and fail there with a 500.
+    if user.status() == crate::identity::UserStatus::PendingVerification {
+        return render_ctx.error_page(
+            "Your email is not verified yet. Check your inbox (or the server \
+             logs) for the verification link and click it before signing in.",
+            StatusCode::FORBIDDEN,
+            Some(&email),
+        );
+    }
     let secure = state.is_secure_request(&headers);
     let step = match super::second_factor::second_factor_step(
         &state,
@@ -2238,8 +2250,25 @@ fn login_finish(
             tmpl.realm_theme_url.clone_from(&render_ctx.realm_theme);
             tmpl.inline_theme_css
                 .clone_from(&render_ctx.inline_theme_css);
+            // The inline form posts to `/ui/mfa-challenge`, which checks the
+            // CSRF double-submit: echo the token this request carried, or mint
+            // one (the `--dev` path admits a request without the cookie).
+            let fresh_csrf = match super::auth::csrf_cookie_value_from_headers(&headers) {
+                Some(existing) => {
+                    tmpl.csrf = Some(existing.to_string());
+                    None
+                }
+                None => {
+                    let (value, csrf_cookie) = super::auth::fresh_csrf_cookie(secure);
+                    tmpl.csrf = Some(value);
+                    Some(csrf_cookie)
+                }
+            };
             let mut response = render(&tmpl);
             append_cookie(&mut response, &cookie);
+            if let Some(csrf_cookie) = fresh_csrf {
+                append_cookie(&mut response, &csrf_cookie);
+            }
             return response;
         }
         Some(other) => {
@@ -2602,7 +2631,6 @@ fn passkey_second_factor_gate(
     secure: bool,
 ) -> Option<Response> {
     let require_mfa_after_passkey = realm.config().passkey_requires_mfa.unwrap_or(false);
-    let realm_requires_mfa = realm.config().mfa_required.unwrap_or(false);
 
     if user_verified && !require_mfa_after_passkey {
         return None;
@@ -2617,12 +2645,29 @@ fn passkey_second_factor_gate(
             return Some(refuse());
         }
     };
-    let owed = match super::second_factor::non_passkey_factor_step(
-        state,
-        realm,
-        &user,
-        super::auth::FirstFactor::Credential,
-    ) {
+    let mfa_required = match state
+        .identity
+        .effective_mfa_requirement(realm.id(), user_id, None)
+    {
+        Ok(required) => required,
+        Err(e) => {
+            tracing::warn!(error = %e, "passkey-login: MFA-requirement lookup failed");
+            return Some(refuse());
+        }
+    };
+    let first = if user_verified {
+        super::auth::FirstFactor::VerifiedPasskey
+    } else {
+        super::auth::FirstFactor::Credential
+    };
+    let owed = match super::second_factor::non_passkey_factor_step(state, realm, &user, first) {
+        // A UV-less passkey plus an email OTP is still not MFA: where MFA is
+        // required, only TOTP can complete this sign-in.
+        Ok(Some(super::second_factor::SecondFactorStep::Otp(_)))
+            if !user_verified && mfa_required =>
+        {
+            None
+        }
         Ok(step) => step,
         Err(e) => {
             // The user's factors are unknown: refuse rather than skip one.
@@ -2637,7 +2682,7 @@ fn passkey_second_factor_gate(
             realm.id(),
             user_id,
             step,
-            super::auth::FirstFactor::Credential,
+            first,
             None, // no return_to for passkey flow
             secure,
         );
@@ -2654,9 +2699,9 @@ fn passkey_second_factor_gate(
         return Some(response);
     }
 
-    // Nothing else to challenge. A UV-less passkey on a realm that mandates
-    // a second factor cannot stand in for one.
-    if !user_verified && realm_requires_mfa {
+    // Nothing else to challenge. A UV-less passkey cannot stand in for a
+    // second factor the MFA policy mandates.
+    if !user_verified && mfa_required {
         return Some(
             (
                 StatusCode::FORBIDDEN,
@@ -6215,19 +6260,11 @@ fn device_mfa_use_gate(
     else {
         return None;
     };
-    let realm_config = match state.identity.get_realm(&session.realm_id) {
-        Ok(r) => r.map(|r| r.config().clone()),
-        Err(e) => {
-            tracing::warn!(error = %e, "device_approve: realm lookup failed at the MFA-use gate");
-            return Some(super::handlers_common::server_error());
-        }
-    };
     let client_id = pending.client_id.as_uuid().to_string();
-    match super::required_action::client_or_role_requires_mfa(
+    match super::required_action::mfa_requirement_for(
         state,
         &session.realm_id,
         &session.user_id,
-        realm_config.as_ref(),
         Some(&client_id),
     ) {
         Ok(false) => return None,

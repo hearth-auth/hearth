@@ -150,11 +150,15 @@ The bootstrap call returns a realm, an admin user, and a signed JWT — everythi
   "quickstart":          "# ready-to-paste shell commands (dev only)",
   "admin_password":      "HearthTest123!",
   "system_access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9...",
-  "system_realm_id":     "00000000-0000-0000-0000-000000000000"
+  "system_realm_id":     "00000000-0000-0000-0000-000000000000",
+  "totp_secret":         "JBSWY3DPEHPK3PXP...",
+  "admin_totp_secret":   "KRUGS4ZANFZSAYJA..."
 }
 ```
 
 `admin_password` is only populated on the **first** bootstrap call — store it securely, it is never returned again. Re-bootstrap (when the dev-realm already exists) requires the `Authorization: Bearer <access_token>` header from the first bootstrap and returns `"admin_password": null` (JSON null, not `""` — `jq -r .admin_password` prints the string `null`).
+
+The `dev-realm` requires MFA. The first bootstrap call enrols TOTP for both admins. It returns `totp_secret` (base32, for `admin@dev.local`) and `admin_totp_secret` (base32, for `admin@hearth.test`) once. Both are empty on re-bootstrap. The returned tokens work without a code.
 
 > **No Docker, no Postgres, no config required** — `--dev` mode is fully self-contained. The bootstrap endpoint is disabled in production (`404 Not Found`).
 
@@ -399,7 +403,9 @@ Response (JSON):
   "quickstart":          "<shell snippet with realm_id and token interpolated>",
   "admin_password":      "<randomly generated — non-empty on first call only>",
   "system_access_token": "<jwt scoped to the system realm for cross-realm admin ops>",
-  "system_realm_id":     "00000000-0000-0000-0000-000000000000"
+  "system_realm_id":     "00000000-0000-0000-0000-000000000000",
+  "totp_secret":         "<base32 TOTP secret for admin@dev.local — first call only>",
+  "admin_totp_secret":   "<base32 TOTP secret for admin@hearth.test — first call only>"
 }
 ```
 
@@ -412,7 +418,9 @@ Bootstrap creates **two** admin identities that share the returned `admin_passwo
 | `admin@dev.local` | the `dev-realm` it just created | the REST/OIDC walkthrough below — this is the `sub` behind `access_token` |
 | `admin@hearth.test` | the system realm (`00000000-…-0000`) | the browser admin console at `/ui/admin/login` |
 
-Signing in at `/ui/admin/login` as `admin@dev.local` answers `401`: operators live in the system realm, so use `admin@hearth.test`. A successful login answers `303` to `/ui`; `/ui/admin` then redirects to `/ui/admin/realms`. There is no `/admin` HTML page — that prefix is the JSON admin API.
+Bootstrap enrols TOTP for both identities on the first call. `totp_secret` belongs to `admin@dev.local`. `admin_totp_secret` belongs to `admin@hearth.test`. Both are empty on re-bootstrap, so store them with the password.
+
+Signing in at `/ui/admin/login` as `admin@dev.local` answers `401`: operators live in the system realm, so use `admin@hearth.test`. The system realm always requires MFA, so the console asks for a TOTP code after the password. Add `admin_totp_secret` to an authenticator app, or compute a code with `oathtool --totp -b "$ADMIN_TOTP_SECRET"`. A successful login answers `303` to `/ui`; `/ui/admin` then redirects to `/ui/admin/realms`. There is no `/admin` HTML page — that prefix is the JSON admin API.
 
 Every `/admin/*` JSON route is realm-scoped and requires an **`X-Realm-ID` header** alongside the bearer token. Without it the call answers `400 {"error":"missing X-Realm-ID header"}`, not `401`:
 
@@ -695,7 +703,7 @@ echo "Realm: $REALM_ID"
 echo "User:  $USER_ID"
 ```
 
-The bootstrap endpoint is available only in `--dev` mode. It creates a realm, an admin user, assigns the `realm.admin` role (which carries the `hearth.admin` permission), and returns short-lived tokens. The `admin_password` field is **non-empty on the first call only** — store it securely. Re-bootstrap (to refresh expired tokens) requires `Authorization: Bearer <access_token>` from the initial bootstrap. In production it returns `404 Not Found`.
+The bootstrap endpoint is available only in `--dev` mode. It creates a realm, an admin user, assigns the `realm.admin` role (which carries the `hearth.admin` permission), and returns short-lived tokens. The `admin_password`, `totp_secret` and `admin_totp_secret` fields are **non-empty on the first call only** — store them securely. Re-bootstrap (to refresh expired tokens) requires `Authorization: Bearer <access_token>` from the initial bootstrap. In production it returns `404 Not Found`.
 
 ### 2. Register a client
 

@@ -32,7 +32,7 @@ async fn org_context_token_emits_org_groups_paths() {
                 name: "Acme Corp".to_string(),
                 slug: "acme-corp".to_string(),
                 description: None,
-                config: Some(OrganizationConfig { max_members: None }),
+                config: Some(OrganizationConfig::default()),
                 ..Default::default()
             },
         )

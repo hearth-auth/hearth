@@ -27,7 +27,7 @@ Four action types are supported. Values are SCREAMING_SNAKE_CASE strings in the 
 |---|---|---|
 | `VERIFY_EMAIL` | User must click a verification link sent to their registered email address. | No — assign explicitly. |
 | `UPDATE_PASSWORD` | User must set a new password. Use after an admin-initiated credential reset or a forced rotation policy. | No — assign explicitly. |
-| `ENROLL_MFA` | User must enroll a second factor: TOTP, or — in a realm with `webauthn_required` — a passkey. | Yes — injected when a client or role requires MFA and the user has no factor, and when the realm sets `webauthn_required` and the user has no passkey (see [Passkey enrolment during login](#passkey-enrolment-during-login)). |
+| `ENROLL_MFA` | User must enroll a second factor: TOTP, or — in a realm with `webauthn_required` — a passkey. | Yes — injected when the realm, an organization of the user, the client or a role in `mfa_required_roles` requires MFA and the user has no passkey or TOTP. A user who signs in with a password and email OTP in such a realm also gets it: email OTP does not satisfy MFA. Also injected when the realm sets `webauthn_required` and the user has no passkey (see [Passkey enrolment during login](#passkey-enrolment-during-login)). |
 | `ENROLL_EMAIL_OTP` | User must enable email one-time codes as a second factor. | Yes — injected when the realm's `mfa_methods` includes `email_otp` and the user has not enabled it. |
 
 `ENROLL_PHONE_OTP` was removed in Hearth 3.0.0 with SMS one-time codes; the API refuses it as an unknown action. A stored user that still carries it loads with the action dropped.

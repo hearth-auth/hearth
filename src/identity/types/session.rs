@@ -31,8 +31,7 @@ pub enum MfaProof {
     #[default]
     None,
     /// A second factor was proved in this authentication by a factor that is
-    /// **not** phishing-resistant: a TOTP code, a recovery code or an
-    /// email OTP.
+    /// **not** phishing-resistant: a TOTP code or a recovery code.
     ///
     /// This satisfies `mfa_required`. It does not satisfy `webauthn_required`
     /// — that key names a passkey specifically (audit 2026-08-28 §4.18#3).
@@ -58,6 +57,13 @@ pub enum MfaProof {
     /// did not prove". A user who also holds TOTP or email OTP still owes
     /// that factor (GA audit B5).
     PasskeyPossession,
+    /// An email OTP was typed back: control of the user's inbox, which a
+    /// magic link proves too. It satisfies neither `mfa_required` nor
+    /// `webauthn_required` (spec `mfa-policy`: only a passkey, a TOTP code or
+    /// a recovery code counts). It differs from [`MfaProof::None`] in one
+    /// respect: the email-OTP factor the account holds was proved, so a user
+    /// whose only factor is email OTP is not refused for holding it.
+    EmailOtp,
 }
 
 impl MfaProof {
@@ -78,8 +84,8 @@ impl MfaProof {
         matches!(self, Self::ProvedWebAuthn)
     }
 
-    /// This proof raised by a second factor (a TOTP code, a recovery code
-    /// or an email OTP) that was just verified on top of it.
+    /// This proof raised by a second factor (a TOTP code or a recovery code)
+    /// that was just verified on top of it.
     ///
     /// Every second-factor challenge records [`MfaProof::Proved`] for what it
     /// verified. A challenge that runs inside an existing authentication
@@ -91,7 +97,7 @@ impl MfaProof {
     pub fn with_proved_second_factor(self) -> Self {
         match self {
             Self::ProvedWebAuthn => Self::ProvedWebAuthn,
-            Self::None | Self::Proved | Self::PasskeyPossession => Self::Proved,
+            Self::None | Self::Proved | Self::PasskeyPossession | Self::EmailOtp => Self::Proved,
         }
     }
 }

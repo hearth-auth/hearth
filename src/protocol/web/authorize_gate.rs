@@ -214,19 +214,11 @@ pub(super) fn mfa_use_gate(
     if session.mfa_proof.satisfies_mfa_required() {
         return None;
     }
-    let realm_config = match state.identity.get_realm(realm) {
-        Ok(r) => r.map(|r| r.config().clone()),
-        Err(e) => {
-            tracing::warn!(error = %e, "authorize: realm lookup failed at the MFA-use gate");
-            return Some(handlers_common::server_error());
-        }
-    };
     let client_id = params.client_id.as_uuid().to_string();
-    match super::required_action::client_or_role_requires_mfa(
+    match super::required_action::mfa_requirement_for(
         state,
         realm,
         &session.user_id,
-        realm_config.as_ref(),
         Some(&client_id),
     ) {
         Ok(false) => return None,

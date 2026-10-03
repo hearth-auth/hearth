@@ -483,7 +483,8 @@ email:
 
 SMS one-time codes were removed in Hearth 3.0.0. An `sms:` block stops startup with an
 error naming the key, and `sms` in any `mfa_methods` list is refused as an unknown method.
-Use a passkey, TOTP (with recovery codes) or email OTP as the second factor.
+Use a passkey, TOTP (with recovery codes) or email OTP as the second factor. Only a passkey, TOTP or a
+recovery code satisfies a realm that requires MFA. Email OTP works as a second step only where MFA is optional.
 
 ---
 
@@ -535,8 +536,8 @@ Global authentication defaults. These apply to all realms unless overridden per-
 | `session_ttl` | duration | `"24h"` | Default session lifetime. |
 | `password_memory_cost` | integer | `19456` | Argon2id memory parameter in KiB. Floored at the OWASP minimum — see below. |
 | `password_time_cost` | integer | `2` | Argon2id time parameter (iterations). Floored at the OWASP minimum — see below. |
-| `mfa_required` | bool | `false` | Whether MFA is required for all users. Per-realm `auth.mfa_required` overrides. |
-| `mfa_methods` | list | — | Allowed MFA methods for every realm: `"totp"`, `"webauthn"`, `"email_otp"`. `"sms"` was removed in 3.0.0 and is refused as an unknown method. A realm's `realms.<name>.auth.mfa_methods` replaces this list wholesale rather than merging with it. Absent at both levels = all methods allowed. See the per-realm key for what restriction means. |
+| `mfa_required` | bool | `true` when unset | Whether MFA is required for all users. MFA is required by default; set `false` to opt out. Per-realm `auth.mfa_required` overrides. When a realm's MFA is off, startup logs one `WARN` that names every such realm. Only a passkey (WebAuthn, user-verified), a TOTP code or a recovery code satisfies MFA. Email OTP and magic links do not. |
+| `mfa_methods` | list | — | Allowed MFA methods for every realm: `"totp"`, `"webauthn"`, `"email_otp"`. `"sms"` was removed in 3.0.0 and is refused as an unknown method. A realm's `realms.<name>.auth.mfa_methods` replaces this list wholesale rather than merging with it. Absent at both levels = all methods allowed. A realm that requires MFA must offer `totp` or `webauthn` in its effective list. A list with only `email_otp` is a validation error that stops startup. See the per-realm key for what restriction means. |
 | `passkey_requires_mfa` | bool | `false` | Whether passkey login requires an additional TOTP challenge. Per-realm `auth.passkey_requires_mfa` overrides. |
 | `webauthn_required` | bool | — | Global default for "every user must hold a passkey". When `true`, a user with no registered passkey is intercepted by the `ENROLL_MFA` required action, which registers one during login (user verification required; see the required-actions guide), **and** every session must be opened by a WebAuthn assertion that proved user verification — a TOTP code, a recovery code or an OTP is refused with `mfa_required` even when the account holds a passkey. Per-realm `realms.<name>.auth.webauthn_required` overrides. |
 | `webauthn_resident_key` | string | — | Global default `residentKey` preference for registration ceremonies: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup. Per-realm `realms.<name>.auth.webauthn_resident_key` overrides. |
@@ -1197,9 +1198,9 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `mfa_required` | bool | `false` | Whether MFA is required for all users in this realm. |
+| `mfa_required` | bool | inherits `auth.mfa_required`; `true` when both are unset | Whether MFA is required for all users in this realm. The realm value wins over the global value. MFA is required by default; set `false` to opt out. The YAML loader records `mfa_required: true` on a realm when both values are absent. This holds under `serve --dev` too. When it is `false`, startup logs one `WARN` that names the realm, and the realm page in the admin console shows "MFA is disabled for this realm". The system realm always requires MFA. Only a user-verified passkey, a TOTP code or a recovery code satisfies MFA. Email OTP and magic links do not. After a password and email OTP, the user must enrol a passkey or TOTP (`ENROLL_MFA`). |
 | `passkey_requires_mfa` | bool | `false` | Whether passkey (WebAuthn) login still requires a TOTP challenge. Passkeys are inherently multi-factor, but regulated environments (healthcare, finance) may require an additional TOTP step. When `true` and the user has TOTP enrolled, passkey login redirects to the MFA challenge page. When `true` but the user has no TOTP enrolled, login proceeds normally. |
-| `mfa_methods` | list | inherits `auth.mfa_methods` | Allowed MFA methods: `"totp"`, `"webauthn"`, `"email_otp"`. When set, only the listed methods may be **enrolled or presented**; a request to enrol or verify a method not in the list is refused with `HEARTH_MFA_METHOD_NOT_ALLOWED` (HTTP 403). This applies to factors users already hold — dropping a method from the list stops it working for them, so check the list names every factor in use before narrowing it. Absent (here and globally) = all methods allowed. Unknown method names (including `"sms"`, removed in 3.0.0) are refused. |
+| `mfa_methods` | list | inherits `auth.mfa_methods` | Allowed MFA methods: `"totp"`, `"webauthn"`, `"email_otp"`. When set, only the listed methods may be **enrolled or presented**; a request to enrol or verify a method not in the list is refused with `HEARTH_MFA_METHOD_NOT_ALLOWED` (HTTP 403). This applies to factors users already hold — dropping a method from the list stops it working for them, so check the list names every factor in use before narrowing it. Absent (here and globally) = all methods allowed. Unknown method names (including `"sms"`, removed in 3.0.0) are refused. When the realm requires MFA and the list is set (here or inherited), it must include `"totp"` or `"webauthn"`. A list with only `"email_otp"` is a validation error that stops startup. |
 | `allowed_auth_methods` | list | — | Allowed login methods: `"password"`, `"magic_link"`, `"passkey"`. |
 | `webauthn_required` | bool | inherits `auth.webauthn_required` | Whether every user in this realm must hold a passkey **and** use it. When `true`, a user with no registered WebAuthn credential is intercepted by the `ENROLL_MFA` required action, which registers a user-verified passkey during login (the realm's `mfa_methods`, when set, must include `webauthn`), and `create_session` refuses any authentication whose second factor was not a user-verified WebAuthn assertion. A TOTP secret does **not** satisfy it, at enrolment or at use — the key names a passkey, and an operator setting it after a phishing incident is asking for a phishing-resistant factor specifically. |
 | `webauthn_resident_key` | string | inherits `auth.webauthn_resident_key` | `residentKey` preference sent in `authenticatorSelection` during registration: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup — the browser would silently ignore it and fall back to `"preferred"`. |
@@ -1394,6 +1395,7 @@ Declarative organization definitions. Keyed by **slug**. Members and invitations
 | `name` | string | *required* | Human-readable organization name. |
 | `description` | string | — | Optional description. |
 | `config.max_members` | integer | — | Maximum number of members allowed. `null`/omitted means unlimited. |
+| `config.mfa_required` | bool | `false` | Whether every member of this organization must use MFA. It can only tighten the realm policy. It cannot turn MFA off. |
 
 Reconciliation:
 - New slug → organization **created**
@@ -1409,6 +1411,7 @@ realms:
         description: "Enterprise customer"
         config:
           max_members: 500
+          mfa_required: true
       beta-testers:
         name: "Beta Testers"
 ```
@@ -2112,7 +2115,7 @@ Every field's default value at a glance.
 | `token` | `access_token_ttl` | `"15m"` |
 | `token` | `refresh_token_ttl` | `"7d"` |
 | `auth` | `session_ttl` | `"24h"` |
-| `auth` | `mfa_required` | `false` |
+| `auth` | `mfa_required` | `true` (MFA required; set `false` to opt out) |
 | `auth` | `passkey_requires_mfa` | `false` |
 | `auth` | `password_memory_cost` | `19456` (19 MiB) |
 | `auth` | `password_time_cost` | `2` |

@@ -45,7 +45,9 @@ fn config(uris: &[&str]) -> Config {
         }
         s
     };
-    let yaml = format!("realms:\n  {REALM}:\n    session_ttl: \"12h\"\n{resources}");
+    let yaml = format!(
+        "auth:\n  mfa_required: false\nrealms:\n  {REALM}:\n    session_ttl: \"12h\"\n{resources}"
+    );
     let mut config = Config::from_yaml_str_unchecked(&yaml).expect("parse yaml");
     config.dev_mode = true;
     config
@@ -284,7 +286,8 @@ async fn a_changed_yaml_entry_updates_the_record() {
     let h = common::TestHarness::embedded().await.unwrap();
     let realm = reconcile(&h, &[RS]);
     let yaml = format!(
-        "realms:\n  {REALM}:\n    session_ttl: \"12h\"\n    protected_resources:\n      \
+        "auth:\n  mfa_required: false\nrealms:\n  {REALM}:\n    session_ttl: \"12h\"\n    \
+         protected_resources:\n      \
          - resource_uri: \"{RS}\"\n        display_name: \"Renamed\"\n        scopes:\n          \
          - name: \"mcp:tools:invoke\"\n            display_name: \"Invoke tools\"\n"
     );
@@ -380,7 +383,8 @@ const DIFFERENT: [&str; 4] = [
 /// whose `mcp:tools:invoke` bundle grants it (none → no `protected_resources`).
 fn bundle_config(uris: &[&str]) -> Config {
     let mut yaml = format!(
-        "realms:\n  {REALM}:\n    session_ttl: \"12h\"\n    permissions:\n      \
+        "auth:\n  mfa_required: false\nrealms:\n  {REALM}:\n    session_ttl: \"12h\"\n    \
+         permissions:\n      \
          - name: {PERM}\n        display_name: Invoke\n"
     );
     if !uris.is_empty() {

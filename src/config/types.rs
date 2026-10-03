@@ -2190,6 +2190,10 @@ pub struct OrgConfigYaml {
     /// Maximum number of members allowed. `None` means unlimited.
     #[serde(default)]
     pub max_members: Option<u32>,
+    /// Members need MFA even where the realm does not require it. Default
+    /// `false`; it can only tighten the realm's policy (spec `mfa-policy`).
+    #[serde(default)]
+    pub mfa_required: Option<bool>,
 }
 
 /// YAML declaration for an OAuth 2.0 application (client).
@@ -3108,7 +3112,14 @@ impl RealmYamlConfig {
             .filter(|s| !s.is_empty())
             .map(sha256_hex);
 
-        let mfa_required = auth.and_then(|a| a.mfa_required).or(global.mfa_required);
+        // MFA is required unless the realm or the global `auth:` block says
+        // otherwise (scope-trim-trusted-core, spec `mfa-policy`). The value is
+        // recorded explicitly, so the realm record says what the server does.
+        let mfa_required = Some(
+            auth.and_then(|a| a.mfa_required)
+                .or(global.mfa_required)
+                .unwrap_or(true),
+        );
         // Realm wins over global, whole-list (audit 2026-08-28 §4.18#10).
         let mfa_methods = auth
             .and_then(|a| a.mfa_methods.clone())

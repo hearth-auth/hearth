@@ -622,7 +622,7 @@ async fn invitation_get_confirms_and_post_accepts_once() {
                 name: "acme-org".to_string(),
                 slug: "acme-org".to_string(),
                 description: None,
-                config: Some(OrganizationConfig { max_members: None }),
+                config: Some(OrganizationConfig::default()),
                 ..Default::default()
             },
         )

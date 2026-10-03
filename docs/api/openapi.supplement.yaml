@@ -1075,7 +1075,7 @@ paths:
         "200": {description: "`{items: [Organization], next_cursor}`"}
     post:
       summary: Create an organization
-      description: "Requires `hearth.realm.admin`. Body: `{slug, display_name, member_limit?, attributes?}`. Refused in the system realm."
+      description: "Requires `hearth.realm.admin`. Body: `{slug, display_name, member_limit?, mfa_required?, attributes?}`. `mfa_required` (default `false`) makes members need MFA even where the realm does not; it can only tighten. Refused in the system realm."
       operationId: adminCreateOrganization
       tags: [Admin]
       responses:
@@ -1093,7 +1093,7 @@ paths:
         "404": {description: No such organization in the realm}
     patch:
       summary: Update an organization
-      description: "Body: `{display_name?, status? (active|suspended), member_limit?, attributes?}`. A `slug` is refused with 400 (it is immutable). Suspending is checked against the admin privilege ceiling, like a delete."
+      description: "Body: `{display_name?, status? (active|suspended), member_limit?, mfa_required?, attributes?}`. A field left out keeps its value. A `slug` is refused with 400 (it is immutable). Suspending is checked against the admin privilege ceiling, like a delete."
       operationId: adminUpdateOrganization
       tags: [Admin]
       responses:

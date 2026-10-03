@@ -725,7 +725,7 @@ async fn decide_answers_only_for_the_tokens_organization() {
                         name: slug.to_string(),
                         slug: slug.to_string(),
                         description: None,
-                        config: Some(OrganizationConfig { max_members: None }),
+                        config: Some(OrganizationConfig::default()),
                         ..Default::default()
                     },
                 )

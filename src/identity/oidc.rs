@@ -877,7 +877,7 @@ impl OAuthClient {
     /// When `Some(true)`, users without an enrolled MFA factor are intercepted
     /// by the `EnrollMfa` required action before an authorization code is issued.
     pub fn mfa_required(&self) -> Option<bool> {
-        self.mfa_required
+        self.mfa_required // mfa-resolver-ok: the getter
     }
 
     /// Sets the per-client MFA requirement. `None` clears the override.

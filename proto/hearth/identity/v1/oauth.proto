@@ -292,6 +292,13 @@ message BootstrapResponse {
   // The reserved system realm id (the nil UUID). Use as the `X-Realm-ID` header
   // alongside `system_access_token` for cross-realm admin API calls.
   string system_realm_id = 8;
+  // Base32 TOTP secret of the dev-realm admin (`admin@dev.local`). Every realm
+  // requires MFA by default, so bootstrap enrols TOTP for this admin. Non-empty
+  // ONLY on the first bootstrap call; add it to an authenticator app.
+  string totp_secret = 9;
+  // Base32 TOTP secret of the system-realm admin (`admin@hearth.test`), whose
+  // console sign-in asks for a code. Non-empty ONLY on the first bootstrap call.
+  string admin_totp_secret = 10;
 }
 
 // ---------------------------------------------------------------------------

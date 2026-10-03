@@ -27,6 +27,12 @@ pub enum OrganizationStatus {
 pub struct OrganizationConfig {
     /// Maximum number of members allowed. `None` means unlimited.
     pub max_members: Option<u32>,
+    /// Whether the organization's members need MFA to sign in, even where
+    /// their realm does not require it (spec `mfa-policy`). It can only
+    /// tighten: `false` never removes a realm, client or role requirement.
+    /// Defaults to `false`, also for an organization SCIM creates.
+    #[serde(default)]
+    pub mfa_required: bool,
 }
 
 /// An organization within a realm.

@@ -233,6 +233,7 @@ struct OrgNewTemplate {
     form_slug: String,
     form_description: String,
     form_max_members: Option<u32>,
+    form_mfa_required: bool,
     /// Realm-level org attribute definitions (empty = free-form mode).
     attr_definitions: Vec<crate::identity::AttributeDefinition>,
     chrome: bool,
@@ -269,6 +270,7 @@ pub async fn admin_org_create_form(
         form_slug: String::new(),
         form_description: String::new(),
         form_max_members: None,
+        form_mfa_required: false,
         attr_definitions,
         chrome: true,
         active: "organizations",
@@ -298,6 +300,9 @@ pub struct CreateOrgForm {
         deserialize_with = "super::handlers_common::empty_string_as_none"
     )]
     pub max_members: Option<u32>,
+    /// The "members need MFA" checkbox: present (`1`) when ticked.
+    #[serde(default)]
+    pub mfa_required: bool,
     /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
     #[serde(
         default,
@@ -329,6 +334,7 @@ impl<S: Send + Sync> axum::extract::FromRequest<S> for CreateOrgForm {
             slug: super::handlers_common::form_scalar(&p, "slug"),
             description: super::handlers_common::form_scalar(&p, "description"),
             max_members: super::handlers_common::form_opt_u32(&p, "max_members"),
+            mfa_required: super::handlers_common::form_scalar(&p, "mfa_required") == "1",
             attr_keys: super::handlers_common::form_vec(&p, "attr_key"),
             attr_vals: super::handlers_common::form_vec(&p, "attr_val"),
             csrf: super::handlers_common::form_scalar(&p, "_csrf"),
@@ -355,8 +361,9 @@ pub async fn admin_org_create_submit(
         Some(form.description.clone())
     };
 
-    let config = form.max_members.map(|max_members| OrganizationConfig {
-        max_members: Some(max_members),
+    let config = Some(OrganizationConfig {
+        max_members: form.max_members,
+        mfa_required: form.mfa_required,
     });
 
     let realm_name = target.0.name().to_string();
@@ -434,6 +441,7 @@ pub async fn admin_org_create_submit(
             form_slug: form.slug,
             form_description: form.description,
             form_max_members: form.max_members,
+            form_mfa_required: form.mfa_required,
             attr_definitions: attr_definitions.clone(),
             chrome: true,
             active: "organizations",
@@ -456,6 +464,7 @@ pub async fn admin_org_create_submit(
                 form_slug: form.slug,
                 form_description: form.description,
                 form_max_members: form.max_members,
+                form_mfa_required: form.mfa_required,
                 attr_definitions,
                 chrome: true,
                 active: "organizations",
@@ -680,6 +689,7 @@ struct OrgEditTemplate {
     form_description: String,
     form_status: String,
     form_max_members: Option<u32>,
+    form_mfa_required: bool,
     /// Current attribute values as sorted (key, value) pairs — used in free-form mode.
     form_attributes: Vec<(String, String)>,
     /// Schema-defined attributes paired with their current values (empty = free-form mode).
@@ -739,6 +749,7 @@ pub async fn admin_org_edit_form(
                 form_description: org.description().to_string(),
                 form_status: format!("{:?}", org.status()),
                 form_max_members: org.config().max_members,
+                form_mfa_required: org.config().mfa_required,
                 org,
                 realm_name: target.0.name().to_string(),
                 error: None,
@@ -779,6 +790,9 @@ pub struct EditOrgForm {
         deserialize_with = "super::handlers_common::empty_string_as_none"
     )]
     pub max_members: Option<u32>,
+    /// The "members need MFA" checkbox: present (`1`) when ticked.
+    #[serde(default)]
+    pub mfa_required: bool,
     /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
     #[serde(
         default,
@@ -810,6 +824,7 @@ impl<S: Send + Sync> axum::extract::FromRequest<S> for EditOrgForm {
             description: super::handlers_common::form_scalar(&p, "description"),
             status: super::handlers_common::form_scalar(&p, "status"),
             max_members: super::handlers_common::form_opt_u32(&p, "max_members"),
+            mfa_required: super::handlers_common::form_scalar(&p, "mfa_required") == "1",
             attr_keys: super::handlers_common::form_vec(&p, "attr_key"),
             attr_vals: super::handlers_common::form_vec(&p, "attr_val"),
             csrf: super::handlers_common::form_scalar(&p, "_csrf"),
@@ -848,6 +863,7 @@ pub async fn admin_org_edit_submit(
 
     let org_config = Some(OrganizationConfig {
         max_members: form.max_members,
+        mfa_required: form.mfa_required,
     });
 
     let realm_name = target.0.name().to_string();

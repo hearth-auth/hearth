@@ -216,7 +216,7 @@ async fn create_organization_rejects_system_realm() {
             name: "Sneaky Org".to_string(),
             slug: "sneaky".to_string(),
             description: None,
-            config: Some(OrganizationConfig { max_members: None }),
+            config: Some(OrganizationConfig::default()),
             attributes: std::collections::BTreeMap::new(),
         },
     );

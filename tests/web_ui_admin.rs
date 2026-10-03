@@ -1492,6 +1492,67 @@ async fn admin_realm_detail_renders() {
     assert!(body.contains("Active"));
 }
 
+async fn realm_detail_body(rig: &TestRig, cookie: String) -> String {
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/admin/realms/acme")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    String::from_utf8(body_bytes.to_vec()).expect("utf-8")
+}
+
+/// scope-trim-trusted-core, spec `mfa-policy`: a realm whose MFA is off
+/// shows a persistent warning naming the setting; a realm that requires MFA
+/// shows none.
+#[tokio::test]
+async fn admin_realm_detail_warns_when_mfa_is_off() {
+    let rig = build_rig();
+    let body = realm_detail_body(&rig, admin_cookie(&rig, "csrf-mfa-off")).await;
+    assert!(
+        body.contains("MFA is disabled for this realm"),
+        "banner missing"
+    );
+    assert!(
+        body.contains("auth.mfa_required"),
+        "the banner names the setting"
+    );
+
+    let mut config = rig
+        .identity
+        .get_realm(&rig.realm_id)
+        .expect("get")
+        .expect("realm")
+        .config()
+        .clone();
+    config.mfa_required = Some(true);
+    rig.identity
+        .update_realm(
+            &rig.realm_id,
+            &hearth::identity::UpdateRealmRequest {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .expect("require MFA");
+    let body = realm_detail_body(&rig, admin_cookie(&rig, "csrf-mfa-on")).await;
+    assert!(
+        !body.contains("MFA is disabled for this realm"),
+        "no banner when required"
+    );
+}
+
 // NOTE: admin_edit_realm_succeeds removed — realms are now managed
 // via hearth.yaml; the /admin/realms/{id}/edit route no longer exists.
 

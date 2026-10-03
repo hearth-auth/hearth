@@ -367,9 +367,10 @@ async fn a_uv_less_passkey_cannot_detour_a_login_through_a_required_action() {
 }
 
 /// I-2 (B): an `mfa_required` realm whose only method is a passkey, and a
-/// password-only user with an operator-forced password change. Without the
-/// pending action the password alone is refused; with it, completing the
-/// action must not open a session either.
+/// password-only user with an operator-forced password change. The pending
+/// action must not stand in for the second factor: the flow it starts also
+/// queues `ENROLL_MFA` (spec `mfa-policy`: the user enrols a passkey or TOTP
+/// before the sign-in completes), and no session is opened on the way.
 #[tokio::test]
 async fn a_required_action_does_not_stand_in_for_the_second_factor_a_realm_requires() {
     let rig = build_rig(RealmConfig {
@@ -384,16 +385,26 @@ async fn a_required_action_does_not_stand_in_for_the_second_factor_a_realm_requi
     );
 
     let (browser, resp) = post_password(&rig, "i2-pw-only@example.com").await;
-    let status = resp.status();
     let next = location(&resp);
     assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "the login proved no second factor and no pending action can prove one \
-         (redirected to {next:?})"
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "the flow starts (redirected to {next:?})"
     );
-    assert!(!browser.has_cookie("hearth_ra_session"));
-    assert!(!browser.has_cookie("hearth_ui_session"));
+    assert_eq!(next.as_deref(), Some("/required-action/UPDATE_PASSWORD"));
+    assert!(!browser.has_cookie("hearth_ui_session"), "no session yet");
+    let ra = browser.cookie("hearth_ra_session").expect("RA cookie");
+    let payload = ra.split('.').nth(1).expect("JWT payload");
+    let claims = String::from_utf8(
+        data_encoding::BASE64URL_NOPAD
+            .decode(payload.as_bytes())
+            .expect("base64url"),
+    )
+    .expect("utf-8");
+    assert!(
+        claims.contains("ENROLL_MFA"),
+        "the flow must also enrol a qualifying factor: {claims}"
+    );
 }
 
 /// The session a completed detour opens records the factor the login
@@ -779,4 +790,39 @@ async fn the_session_after_a_required_action_records_the_client() {
         .expect("session");
     assert_eq!(session.ip_address(), Some("127.0.0.1"));
     assert_eq!(session.user_agent_raw(), Some("RaProofAgent/1.0"));
+}
+
+/// The inline TOTP form the password step renders posts straight to
+/// `/ui/mfa-challenge`. It must carry the CSRF token: without it, the
+/// browser's first code was refused with 422 ("Your session has expired"),
+/// on every sign-in now that MFA is required by default.
+#[tokio::test]
+async fn the_inline_totp_form_completes_the_login_on_the_first_submit() {
+    let rig = build_rig(RealmConfig {
+        mfa_methods: methods(&["totp"]),
+        ..Default::default()
+    });
+    let user = create_user(&rig, "inline-totp@example.com", vec![]);
+    let secret = enrol_totp(&rig, &user);
+
+    let (mut browser, login) = post_password(&rig, "inline-totp@example.com").await;
+    assert_eq!(
+        login.status(),
+        StatusCode::OK,
+        "the TOTP step renders inline"
+    );
+    let html = body_text(login).await;
+    let mut fields = hidden_fields(&html, "/ui/mfa-challenge");
+    assert!(
+        fields.iter().any(|(k, v)| k == "_csrf" && !v.is_empty()),
+        "the inline form carries the CSRF token: {fields:?}"
+    );
+    fields.push(("code".to_string(), totp_code(&secret, 1)));
+    let resp = browser.post_form("/ui/mfa-challenge", &fields).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "the first submit signs in"
+    );
+    assert!(browser.has_cookie("hearth_ui_session"));
 }

@@ -39,6 +39,8 @@ struct OrganizationDto {
     /// `active`, `suspended` or `archived`.
     status: &'static str,
     member_limit: Option<u32>,
+    /// Whether members need MFA even where the realm does not require it.
+    mfa_required: bool,
     attributes: BTreeMap<String, String>,
     /// Microseconds since the Unix epoch.
     created_at: i64,
@@ -58,6 +60,7 @@ impl From<&Organization> for OrganizationDto {
                 OrganizationStatus::Archived => "archived",
             },
             member_limit: o.config().max_members,
+            mfa_required: o.config().mfa_required,
             attributes: o.attributes().clone(),
             created_at: o.created_at().as_micros(),
             updated_at: o.updated_at().as_micros(),
@@ -72,6 +75,10 @@ pub(super) struct CreateOrganizationBody {
     display_name: String,
     #[serde(default)]
     member_limit: Option<u32>,
+    /// Members need MFA even where the realm does not require it. Default
+    /// `false`; it can only tighten the realm's policy.
+    #[serde(default)]
+    mfa_required: bool,
     #[serde(default)]
     attributes: BTreeMap<String, String>,
 }
@@ -89,6 +96,8 @@ pub(super) struct UpdateOrganizationBody {
     status: Option<String>,
     #[serde(default)]
     member_limit: Option<u32>,
+    #[serde(default)]
+    mfa_required: Option<bool>,
     /// Replaces the whole attribute map.
     #[serde(default)]
     attributes: Option<BTreeMap<String, String>>,
@@ -186,8 +195,9 @@ pub(super) async fn admin_create_organization(
         name: body.display_name,
         slug: body.slug,
         description: None,
-        config: body.member_limit.map(|m| OrganizationConfig {
-            max_members: Some(m),
+        config: Some(OrganizationConfig {
+            max_members: body.member_limit,
+            mfa_required: body.mfa_required,
         }),
         attributes: body.attributes,
     };
@@ -245,9 +255,10 @@ pub(super) async fn admin_update_organization(
         Some("suspended") => Some(OrganizationStatus::Suspended),
         Some(_) => return bad_request("status must be \"active\" or \"suspended\""),
     };
-    if let Err(e) = require_org(&state, &auth, &org_id) {
-        return e;
-    }
+    let current = match require_org(&state, &auth, &org_id) {
+        Ok(org) => org,
+        Err(e) => return e,
+    };
     if status == Some(OrganizationStatus::Suspended) {
         if let Err(e) = crate::protocol::admin_auth::check_org_admin_ceiling(
             state.identity.as_ref(),
@@ -263,8 +274,12 @@ pub(super) async fn admin_update_organization(
         name: body.display_name,
         description: None,
         status,
-        config: body.member_limit.map(|m| OrganizationConfig {
-            max_members: Some(m),
+        // Start from the stored config: a field the body leaves out is kept.
+        config: (body.member_limit.is_some() || body.mfa_required.is_some()).then(|| {
+            OrganizationConfig {
+                max_members: body.member_limit.or(current.config().max_members),
+                mfa_required: body.mfa_required.unwrap_or(current.config().mfa_required),
+            }
         }),
         attributes: body.attributes,
     };

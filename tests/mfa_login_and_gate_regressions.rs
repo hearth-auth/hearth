@@ -455,15 +455,22 @@ fn ungated_rig() -> LoginRig {
 }
 
 fn login_rig(mfa_methods: Option<Vec<String>>, email_otp_enabled: bool) -> LoginRig {
+    login_rig_with(
+        RealmConfig {
+            mfa_methods,
+            ..RealmConfig::default()
+        },
+        email_otp_enabled,
+    )
+}
+
+fn login_rig_with(config: RealmConfig, email_otp_enabled: bool) -> LoginRig {
     let e = engines();
     let realm = e
         .identity
         .create_realm(&CreateRealmRequest {
             name: format!("mfa-gate-{}", uuid::Uuid::new_v4()),
-            config: Some(RealmConfig {
-                mfa_methods,
-                ..RealmConfig::default()
-            }),
+            config: Some(config),
         })
         .expect("realm");
     // RFC 8707: a `resource` must name a protected resource of the realm.
@@ -1541,4 +1548,36 @@ async fn device_approval_without_gates_approves_the_device() {
     let resp = post_device(&rig, &ui_session_cookie(&rig, &rig.user_id), &user_code).await;
     assert_eq!(location(&resp), "/ui/device?flash=approved");
     assert!(device_approved(&rig, &client, &device_code));
+}
+
+/// scope-trim-trusted-core, spec `mfa-policy`: an email OTP does not satisfy
+/// MFA. A password and a correct email OTP in a realm that requires MFA open
+/// no session; the user is sent on to enrol a passkey or TOTP.
+#[tokio::test]
+async fn an_email_otp_does_not_satisfy_a_realm_that_requires_mfa() {
+    let rig = login_rig_with(
+        RealmConfig {
+            mfa_required: Some(true),
+            mfa_methods: Some(vec!["totp".to_string(), "email_otp".to_string()]),
+            ..RealmConfig::default()
+        },
+        true,
+    );
+    let (pending, otp) = start_otp_login(&rig, USER_EMAIL).await;
+    let code = rig.mail.last_code();
+    let resp = submit_login_otp(&rig, &format!("{pending}; {otp}"), &code, "").await;
+    assert!(
+        !has_cookie(&resp, SESSION_COOKIE),
+        "password + email OTP must not open a session on an MFA-required realm"
+    );
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        location.contains("ENROLL_MFA") || location.contains("enroll-mfa"),
+        "the user is sent on to enrol a qualifying factor, got {location:?}"
+    );
 }

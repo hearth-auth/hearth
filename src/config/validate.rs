@@ -519,6 +519,7 @@ impl Config {
             }
         }
         validate_realm_auth_configs_all(self.realms.as_ref(), &mut issues);
+        validate_mfa_is_satisfiable(&self.auth, self.realms.as_ref(), &mut issues);
         validate_realm_applications_all(self.realms.as_ref(), &mut issues);
         validate_realm_organizations_all(self.realms.as_ref(), &mut issues);
         validate_realm_federation_keys_all(self.realms.as_ref(), &mut issues);
@@ -1783,6 +1784,42 @@ fn validate_realm_web_configs_all(
                     reason: format!("{path}: {e}"),
                 });
             }
+        }
+    }
+}
+
+/// A realm that requires MFA — explicitly or by the default — must offer a
+/// method that satisfies it: a passkey (`webauthn`) or TOTP. Email OTP alone
+/// cannot (spec `mfa-policy`), so such a realm could never finish a sign-in.
+/// An absent `mfa_methods` restricts nothing and always passes.
+fn validate_mfa_is_satisfiable(
+    global: &AuthConfig,
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(realms) = realms else { return };
+    for (name, cfg) in realms {
+        let auth = cfg.auth.as_ref();
+        let required = auth
+            .and_then(|a| a.mfa_required)
+            .or(global.mfa_required)
+            .unwrap_or(true);
+        let (source, methods) = match auth.and_then(|a| a.mfa_methods.as_ref()) {
+            Some(m) => ("", Some(m)),
+            None => (
+                " (inherited from auth.mfa_methods)",
+                global.mfa_methods.as_ref(),
+            ),
+        };
+        let Some(methods) = methods else { continue };
+        if required && !methods.iter().any(|m| m == "totp" || m == "webauthn") {
+            issues.push(ValidationIssue {
+                field: format!("realms.{name}.auth.mfa_methods"),
+                reason: format!(
+                    "this realm requires MFA, so mfa_methods{source} must include totp or \
+                     webauthn: email OTP does not satisfy MFA"
+                ),
+            });
         }
     }
 }

@@ -157,6 +157,9 @@ struct RealmAdminView {
 #[template(path = "ui/admin/realms/detail.html")]
 struct RealmDetailTemplate {
     realm: Realm,
+    /// The realm's MFA requirement is off: the page shows a persistent
+    /// warning (spec `mfa-policy`).
+    mfa_off: bool,
     /// Pre-formatted access token TTL (e.g. "15m", "1h").
     access_token_ttl_display: Option<String>,
     /// Pre-formatted refresh token TTL.
@@ -205,8 +208,10 @@ pub async fn admin_realm_detail(
             let password_memory_cost_display = cfg.password_memory_cost.map(format_kib_human);
             let admins = resolve_realm_admins(&state, realm.id());
             let product_name = state.product_name_for(realm.id());
+            let mfa_off = !crate::identity::realm_requires_mfa(realm.config());
             render(&RealmDetailTemplate {
                 realm,
+                mfa_off,
                 access_token_ttl_display,
                 refresh_token_ttl_display,
                 lockout_duration_display,
@@ -446,6 +451,7 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::InvitationCreated => "Invitation Created",
         A::InvitationAccepted => "Invitation Accepted",
         A::InvitationRevoked => "Invitation Revoked",
+        A::MfaRequirementChanged => "MFA Requirement Changed",
         A::GroupCreated => "Group Created",
         A::GroupUpdated => "Group Updated",
         A::GroupDeleted => "Group Deleted",
@@ -607,7 +613,8 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::PasswordCompromisedRejected
         | A::BreachCheckUnavailable
         | A::MfaEnabled
-        | A::MfaDisabled => "Security",
+        | A::MfaDisabled
+        | A::MfaRequirementChanged => "Security",
         // System — realm config, federation/SAML/SCIM integrations,
         // backup/restore, and internal cleanup jobs.
         A::RealmCreated

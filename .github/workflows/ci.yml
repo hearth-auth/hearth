@@ -300,6 +300,12 @@ jobs:
       - name: RBAC storage-write lint (check-rbac-storage-writes.sh)
         run: bash scripts/check-rbac-storage-writes.sh
 
+      # scope-trim-trusted-core, spec `mfa-policy`: every decision on whether
+      # a sign-in needs MFA goes through IdentityEngine::effective_mfa_requirement.
+      # Fails on a direct read of `mfa_required` outside it. Pure grep.
+      - name: MFA resolver lint (check-mfa-resolver.sh)
+        run: bash scripts/check-mfa-resolver.sh
+
       # HEA-2116: prevent a release from shipping with stale install-instruction
       # version references in README.md. Compares every pinned release URL / tag
       # against the latest published binary GitHub Release (HEA-2199: guard keys off

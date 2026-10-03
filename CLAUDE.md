@@ -117,20 +117,25 @@ admin password — include the Bearer token from the first bootstrap.
 make dev &
 # Wait for: "listening on 127.0.0.1:8420"
 
-# 2. First bootstrap — creates realm + admin user + API token.
-#    admin_password is returned ONLY on this first call — save it securely.
+# 2. First bootstrap — creates realm + admin user + API token, and enrols TOTP
+#    for both admins. admin_password, totp_secret and admin_totp_secret are
+#    returned ONLY on this first call — save them securely.
 BOOTSTRAP=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap)
 REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.realm_id')
 ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
 ADMIN_PASSWORD=$(echo "$BOOTSTRAP" | jq -r '.admin_password')
 SYSTEM_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.system_access_token')
 SYSTEM_REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.system_realm_id')
+ADMIN_TOTP_SECRET=$(echo "$BOOTSTRAP" | jq -r '.admin_totp_secret')  # admin@hearth.test
+TOTP_SECRET=$(echo "$BOOTSTRAP" | jq -r '.totp_secret')              # admin@dev.local
 
 echo "Realm:         $REALM_ID"
 echo "Token:         $ADMIN_TOKEN"
 echo "Password:      $ADMIN_PASSWORD"   # store this — it will not be shown again
 echo "System Token:  $SYSTEM_TOKEN"
 echo "System Realm:  $SYSTEM_REALM_ID"
+echo "Admin TOTP:    $ADMIN_TOTP_SECRET"   # store this — it will not be shown again
+echo "Dev TOTP:      $TOTP_SECRET"         # store this — it will not be shown again
 
 # 3. Re-bootstrap (after server restart / token expiry) — requires the Bearer token.
 BOOTSTRAP=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap \
@@ -145,6 +150,13 @@ SYSTEM_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.system_access_token')
 |----------|--------------------------------------------|
 | Email    | `admin@hearth.test`                        |
 | Password | the `admin_password` from first bootstrap  |
+| TOTP code | a code from `admin_totp_secret`, e.g. `oathtool --totp -b "$ADMIN_TOTP_SECRET"` |
+
+The system realm always requires MFA, so the console asks for a TOTP code after the
+password. Add `admin_totp_secret` (base32) to an authenticator app, or compute a code
+with `oathtool`. Both TOTP secrets are empty on re-bootstrap. Bootstrap spends the
+current 30-second code when it enrols the factor, and a spent code is refused, so right
+after bootstrap use the next code (wait up to 30 s).
 
 A successful login answers `303` to `/ui` (the dashboard). `/ui/admin` redirects on to
 `/ui/admin/realms`. There is no `/admin` HTML page — that prefix is the JSON admin API

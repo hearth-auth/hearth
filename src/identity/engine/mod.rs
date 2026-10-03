@@ -564,6 +564,11 @@ impl HeldSecondFactors {
     fn any_besides_webauthn(self) -> bool {
         self.totp || self.email_otp
     }
+
+    /// Whether the user holds a factor other than email OTP.
+    fn any_besides_email_otp(self) -> bool {
+        self.totp || self.webauthn
+    }
 }
 
 /// Tracks failed credential verification attempts for a single user.
@@ -1365,6 +1370,45 @@ impl EmbeddedIdentityEngine {
     /// a warning on failure. Returns `Err(AuditFailure)` for destructive
     /// actions (`FailOperation` policy) so the caller knows the audit
     /// trail has a gap.
+    /// Records [`AuditAction::MfaRequirementChanged`] when `realm`'s MFA
+    /// requirement differs from `previous` — the realm-update half of the
+    /// audit the spec `mfa-policy` asks for.
+    fn audit_realm_mfa_change(
+        &self,
+        realm_id: &RealmId,
+        audit_ctx: Option<&AuditContext>,
+        previous: bool,
+        realm: &Realm,
+    ) -> Result<(), IdentityError> {
+        let now = crate::identity::realm_requires_mfa(realm.config());
+        if now == previous {
+            return Ok(());
+        }
+        self.record_mfa_requirement_changed(realm_id, audit_ctx.map(|c| &c.actor), previous, now)
+    }
+
+    /// Records [`AuditAction::MfaRequirementChanged`] for a realm whose MFA
+    /// requirement went from `old` to `new` (spec `mfa-policy`).
+    fn record_mfa_requirement_changed(
+        &self,
+        realm_id: &RealmId,
+        actor: Option<&crate::audit::Actor>,
+        old: bool,
+        new: bool,
+    ) -> Result<(), IdentityError> {
+        let ctx = AuditContext {
+            actor: actor.cloned().unwrap_or(crate::audit::Actor::System),
+            metadata: Some(serde_json::json!({ "old": old, "new": new })),
+        };
+        self.record_audit(
+            realm_id,
+            Some(&ctx),
+            AuditAction::MfaRequirementChanged,
+            "realm",
+            &realm_id.as_uuid().to_string(),
+        )
+    }
+
     fn record_audit(
         &self,
         realm_id: &RealmId,
@@ -7316,10 +7360,10 @@ impl EmbeddedIdentityEngine {
         client.set_post_logout_redirect_uris(request.post_logout_redirect_uris.clone());
         client.set_cors_origins(request.cors_origins.clone());
         client.set_access_token_authorization(request.access_token_authorization);
-        client.set_mfa_required(request.mfa_required);
-        // Credentials and the security profile, validated as a registration
-        // validates them and set in this same write, so the client is never
-        // stored weaker than requested — not even between two writes.
+        client.set_mfa_required(request.mfa_required); // mfa-resolver-ok: a write
+                                                       // Credentials and the security profile, validated as a registration
+                                                       // validates them and set in this same write, so the client is never
+                                                       // stored weaker than requested — not even between two writes.
         if let Some(key) = request.assertion_public_key.as_deref() {
             Self::check_assertion_public_key(key)?;
         }
@@ -7488,6 +7532,7 @@ impl EmbeddedIdentityEngine {
     /// attributes the `RealmUpdated` event; on a status change its metadata
     /// gains `previous_status` and `status`. Returns the status the realm had
     /// before the update, and the updated realm.
+    #[allow(clippy::too_many_lines)] // one read-modify-write under the realm-ops lock
     fn update_realm_impl(
         &self,
         realm_id: &RealmId,
@@ -7529,6 +7574,7 @@ impl EmbeddedIdentityEngine {
         }
         precondition(&realm)?;
         let previous_status = realm.status();
+        let previous_mfa = crate::identity::realm_requires_mfa(realm.config());
 
         let now = self.clock.now();
         let old_name = realm.name().to_string();
@@ -7622,6 +7668,7 @@ impl EmbeddedIdentityEngine {
             "realm",
             &realm_id.as_uuid().to_string(),
         )?;
+        self.audit_realm_mfa_change(realm_id, audit_ctx, previous_mfa, &realm)?;
 
         // When suspending or archiving a realm, revoke all active sessions so
         // existing tokens backed by those sessions fail immediately on the
@@ -7848,6 +7895,56 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<Realm, IdentityError> {
         self.update_realm_impl(realm_id, request, "update_realm", None, |_| Ok(()))
             .map(|(_, realm)| realm)
+    }
+
+    fn effective_mfa_requirement(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_id: Option<&ClientId>,
+    ) -> Result<bool, IdentityError> {
+        let realm = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+        if crate::identity::realm_requires_mfa(realm.config()) {
+            return Ok(true);
+        }
+        if let Some(client_id) = client_id {
+            let client = self.get_client(realm_id, client_id)?;
+            // mfa-resolver-ok: the resolver's client input
+            if client.is_some_and(|c| c.mfa_required() == Some(true)) {
+                return Ok(true);
+            }
+        }
+        if self.org_requires_mfa(realm_id, user_id)? {
+            return Ok(true);
+        }
+        self.role_requires_mfa(realm_id, user_id, realm.config())
+    }
+
+    fn apply_system_realm_mfa_required(&self, required: bool) -> Result<bool, IdentityError> {
+        let _ops_guard = self.realm_ops_lock.lock().expect("realm ops lock");
+        let sys_realm = keys::system_realm_id();
+        let mut realm = self
+            .get_realm(&sys_realm)?
+            .ok_or(IdentityError::RealmNotFound)?;
+        // mfa-resolver-ok: compares the stored value before a write
+        if realm.config().mfa_required == Some(required) {
+            return Ok(false);
+        }
+        let previous = crate::identity::realm_requires_mfa(realm.config());
+        let mut config = realm.config().clone();
+        config.mfa_required = Some(required);
+        realm.set_config(config);
+        realm.set_updated_at(self.clock.now());
+        let realm_bytes = Self::serialize_realm(&realm)?;
+        self.storage
+            .put(&sys_realm, &keys::encode_realm_id(&sys_realm), &realm_bytes)
+            .map_err(Self::storage_err)?;
+        if previous != required {
+            self.record_mfa_requirement_changed(&sys_realm, None, previous, required)?;
+        }
+        Ok(true)
     }
 
     fn set_realm_suspended(
@@ -12917,6 +13014,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if let Some(status) = request.status {
             org.set_status(status);
         }
+        let previous_mfa = org.config().mfa_required; // mfa-resolver-ok: audit
         if let Some(ref config) = request.config {
             org.set_config(config.clone());
         }
@@ -12951,6 +13049,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             "org",
             &org_id.as_uuid().to_string(),
         )?;
+        let mfa = org.config().mfa_required; // mfa-resolver-ok: audit
+        if mfa != previous_mfa {
+            let ctx = AuditContext {
+                actor: crate::audit::Actor::System,
+                metadata: Some(serde_json::json!({ "old": previous_mfa, "new": mfa })),
+            };
+            self.record_audit(
+                realm_id,
+                Some(&ctx),
+                AuditAction::MfaRequirementChanged,
+                "organization",
+                &org_id.as_uuid().to_string(),
+            )?;
+        }
 
         Ok(org)
     }
@@ -18306,20 +18418,14 @@ impl EmbeddedIdentityEngine {
             // strength of the enrolment alone. The caller now states what this
             // ceremony proved; `MfaProof::None` is the default, so a path that says
             // nothing is refused.
-            if !context.mfa_proof.satisfies_mfa_required() {
-                if let Ok(Some(realm)) = self.get_realm(realm_id) {
-                    // HSEC-004 (revised): MFA defaults to opt-in for all realms. Operators
-                    // enable it explicitly via `mfa_required: true` in hearth.yaml after
-                    // enrolling a second factor. Defaulting to `true` for the system realm
-                    // made fresh installs unbootable (no MFA enrollment path exists before
-                    // the first admin session). The production hard-error in main.rs already
-                    // blocks `mfa_required: false` from being set explicitly; a startup
-                    // warning nudges operators who leave it `null` to enable it once enrolled.
-                    let mfa_default = false;
-                    if realm.config().mfa_required.unwrap_or(mfa_default) {
-                        return Err(IdentityError::MfaRequired);
-                    }
-                }
+            //
+            // One resolver decides (spec `mfa-policy`): the realm, the user's
+            // organizations and roles. A client's own requirement is checked
+            // where the client is known — the authorize and device gates.
+            if !context.mfa_proof.satisfies_mfa_required()
+                && self.effective_mfa_requirement(realm_id, user_id, None)?
+            {
+                return Err(IdentityError::MfaRequired);
             }
 
             // Enforce `webauthn_required` on factor **use** too (audit 2026-08-28
@@ -18366,6 +18472,16 @@ impl EmbeddedIdentityEngine {
                 crate::identity::MfaProof::Proved | crate::identity::MfaProof::ProvedWebAuthn => {}
                 crate::identity::MfaProof::None => {
                     if self.held_second_factors(realm_id, user_id)?.any() {
+                        return Err(IdentityError::MfaRequired);
+                    }
+                }
+                // An email OTP proved the email-OTP factor; it still owes any
+                // other factor the user enrolled.
+                crate::identity::MfaProof::EmailOtp => {
+                    if self
+                        .held_second_factors(realm_id, user_id)?
+                        .any_besides_email_otp()
+                    {
                         return Err(IdentityError::MfaRequired);
                     }
                 }

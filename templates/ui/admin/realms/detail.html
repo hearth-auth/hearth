@@ -17,6 +17,13 @@
   </a>
 </div>
 
+{% if mfa_off %}
+<div role="alert" class="mb-4 rounded-lg border border-warning/30 bg-warning/[0.12] px-4 py-3 text-sm text-warning-fg">
+  <p class="font-medium">MFA is disabled for this realm</p>
+  <p class="mt-1 text-ht-content-secondary">A stolen password alone signs a user in. To require a passkey or an authenticator code, remove <code class="rounded-sm bg-ht-surface-base px-1 py-0.5 font-mono text-xs">auth.mfa_required: false</code> for this realm in <code class="rounded-sm bg-ht-surface-base px-1 py-0.5 font-mono text-xs">hearth.yaml</code>.</p>
+</div>
+{% endif %}
+
 {# Sub-page navigation is in the sidebar (per-realm tree). On this overview
    page we surface the full set of sub-pages as Quick access tiles below so
    it doubles as a hub when the sidebar is collapsed / on mobile. #}

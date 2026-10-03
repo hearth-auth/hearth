@@ -105,6 +105,10 @@
       <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Member limit</dt>
       <dd class="mt-1 text-sm text-ht-content-secondary">{% match max_members %}{% when Some with (n) %}{{ n }}{% when None %}Unlimited{% endmatch %}</dd>
     </div>
+    <div>
+      <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Members need MFA</dt>
+      <dd class="mt-1 text-sm text-ht-content-secondary">{% if org.config().mfa_required %}Yes{% else %}Only when the realm requires it{% endif %}</dd>
+    </div>
   </dl>
   {% if !org.attributes().is_empty() %}
   <div class="mt-4 border-t border-divider-subtle pt-4">

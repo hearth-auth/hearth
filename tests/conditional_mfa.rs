@@ -264,16 +264,13 @@ async fn realm_wide_mfa_required_blocks_session_for_any_user_without_mfa() {
     );
 }
 
-/// `mfa_required_roles` does NOT gate engine-level `create_session` — it is
-/// enforced by the web layer only. A user with a matching role can still
-/// create a session via the engine directly, while a user in a realm with
-/// `mfa_required: true` cannot.
-///
-/// This test draws the line between the two controls: `mfa_required_roles`
-/// is a web-layer injection gate (it pushes `EnrollMfa` into `RequiredAction`
-/// on the login flow), whereas `mfa_required` is an engine-level hard block.
+/// `mfa_required_roles` binds at the engine too (scope-trim-trusted-core,
+/// spec `mfa-policy`): one resolver combines realm, organization, client and
+/// role requirements, and `create_session` asks it. A user holding a listed
+/// role, in a realm that does not itself require MFA, cannot open a session
+/// that proved no second factor.
 #[tokio::test]
-async fn mfa_required_roles_does_not_block_engine_create_session() {
+async fn mfa_required_roles_blocks_engine_create_session() {
     let harness = common::TestHarness::embedded().await.expect("test harness");
     let realm = harness
         .identity()
@@ -309,20 +306,16 @@ async fn mfa_required_roles_does_not_block_engine_create_session() {
         )
         .expect("assign_role");
 
-    // The engine does NOT enforce mfa_required_roles — session creation
-    // succeeds even for a user with the matching role and no MFA enrolled.
-    // The web layer (`required_action_check`) injects EnrollMfa on the
-    // login flow; that path requires a full HTTP WebState harness and is
-    // tested in the web-layer integration suite.
-    harness
+    let err = harness
         .identity()
         .create_session(
             realm.id(),
             user.id(),
             &hearth::identity::SessionContext::default(),
         )
-        .expect(
-            "create_session must succeed via the engine when only mfa_required_roles is set \
-             (role-gate is enforced by the web layer, not the engine)",
-        );
+        .expect_err("a listed role needs a proved second factor");
+    assert!(
+        matches!(err, hearth::identity::IdentityError::MfaRequired),
+        "{err:?}"
+    );
 }

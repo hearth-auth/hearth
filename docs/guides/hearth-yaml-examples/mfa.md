@@ -25,10 +25,13 @@ realms:
         - totp             # time-based one-time password (Google Authenticator, Authy, etc.)
 ```
 
-- `auth.mfa_required: true` at the top level enables MFA globally. Override per-realm with
-  `realms.<name>.auth.mfa_required: false`.
+- MFA is required by default. `auth.mfa_required: true` states the default explicitly.
+  Opt out globally or per realm with `mfa_required: false`. A realm value wins over the global value.
+- When a realm's MFA is off, startup logs one `WARN` that names every such realm.
 - `mfa_methods` controls which second factors are accepted. When absent, all enrolled factors
-  are accepted.
+  are accepted. When MFA is required, a set list must include `totp` or `webauthn`. A list with
+  only `email_otp` stops startup.
+- Only a passkey, a TOTP code or a recovery code satisfies MFA. Email OTP and magic links do not.
 - Users without an enrolled factor are redirected to MFA enrollment on first login.
 
 ---
@@ -87,4 +90,4 @@ realms:
 ## Example 42 — removed
 
 Adaptive (risk-based) step-up MFA and SMS codes were removed in Hearth 3.0.0. Use
-`mfa_required` with TOTP, WebAuthn or email OTP instead.
+`mfa_required` with TOTP or WebAuthn instead. Email OTP does not satisfy `mfa_required`.

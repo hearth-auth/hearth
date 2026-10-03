@@ -327,8 +327,11 @@ pub fn required_action_check_browser(
         }
     };
     if let Some(config) = realm_config.as_ref() {
-        let reachable = best_reachable_proof(mfa_proof, &actions, config, inbox_first_factor);
-        if !realm_policy_admits(config, reachable) {
+        let reachable = best_reachable_proof(mfa_proof, &actions, config);
+        let Ok(mfa_required) = mfa_requirement_for(state, realm, user_id, None) else {
+            return Some(handlers_common::server_error());
+        };
+        if !realm_policy_admits(config, mfa_required, reachable) {
             tracing::info!(
                 realm_id = %realm.as_uuid(),
                 "required actions: this login cannot meet the realm's second-factor policy; \
@@ -370,17 +373,15 @@ pub fn required_action_check_browser(
 /// The strongest proof a browser required-action flow that starts from
 /// `proof` with `actions` pending can end with: a passkey registration (the
 /// `ENROLL_MFA` page registers one in a realm that offers passkeys) records
-/// [`MfaProof::ProvedWebAuthn`]; any enrolment raises a login that proved
-/// nothing to [`MfaProof::Proved`] (see [`ra_token::RaClaims`]) — except an
-/// email-OTP enrolment after a magic link (`inbox_first_factor`), which proves
-/// the inbox the login already proved. An upper bound — an action can be
-/// skipped as already satisfied — so the session the flow ends in is still
-/// checked by the engine.
+/// [`MfaProof::ProvedWebAuthn`]; a TOTP enrolment raises a login that proved
+/// nothing to [`MfaProof::Proved`] (see [`ra_token::RaClaims`]). An email-OTP
+/// enrolment proves an inbox, never MFA ([`MfaProof::EmailOtp`], spec
+/// `mfa-policy`). An upper bound — an action can be skipped as already
+/// satisfied — so the session the flow ends in is still checked by the engine.
 fn best_reachable_proof(
     proof: MfaProof,
     actions: &[RequiredAction],
     config: &crate::identity::RealmConfig,
-    inbox_first_factor: bool,
 ) -> MfaProof {
     let offers_passkeys = config
         .mfa_methods
@@ -389,21 +390,26 @@ fn best_reachable_proof(
     if offers_passkeys && actions.contains(&RequiredAction::EnrollMfa) {
         return MfaProof::ProvedWebAuthn;
     }
-    let enrols_a_factor = actions.iter().any(|a| match a {
-        RequiredAction::EnrollMfa => true,
-        RequiredAction::EnrollEmailOtp => !inbox_first_factor,
-        _ => false,
-    });
-    if enrols_a_factor && proof == MfaProof::None {
+    if actions.contains(&RequiredAction::EnrollMfa)
+        && matches!(proof, MfaProof::None | MfaProof::EmailOtp)
+    {
         return MfaProof::Proved;
+    }
+    if actions.contains(&RequiredAction::EnrollEmailOtp) && proof == MfaProof::None {
+        return MfaProof::EmailOtp;
     }
     proof
 }
 
-/// Whether the realm's second-factor policy admits a session with `proof` —
-/// the same two predicates `create_session` applies.
-fn realm_policy_admits(config: &crate::identity::RealmConfig, proof: MfaProof) -> bool {
-    let mfa_ok = !config.mfa_required.unwrap_or(false) || proof.satisfies_mfa_required();
+/// Whether the second-factor policy admits a session with `proof` — the same
+/// two predicates `create_session` applies. `mfa_required` is the resolver's
+/// answer for this user.
+fn realm_policy_admits(
+    config: &crate::identity::RealmConfig,
+    mfa_required: bool,
+    proof: MfaProof,
+) -> bool {
+    let mfa_ok = !mfa_required || proof.satisfies_mfa_required();
     let webauthn_ok =
         !config.webauthn_required.unwrap_or(false) || proof.satisfies_webauthn_required();
     mfa_ok && webauthn_ok
@@ -778,74 +784,36 @@ fn inject_enroll_mfa_if_needed(
         return Ok(());
     }
 
-    if client_or_role_requires_mfa(state, realm, user_id, realm_config, client_id_str)? {
+    if mfa_requirement_for(state, realm, user_id, client_id_str)? {
         actions.push(RequiredAction::EnrollMfa);
     }
     Ok(())
 }
 
-/// Whether the client (its `mfa_required`) or one of the user's roles (listed
-/// in the realm's `mfa_required_roles`) demands a second factor for this
-/// authorization.
-///
-/// `Err(())` when a lookup the answer depends on fails: the requirement is
-/// then unknown and the caller refuses. A client or role that does not exist
-/// imposes nothing.
-pub(super) fn client_or_role_requires_mfa(
+/// Whether `user_id` needs a qualifying second factor for this request:
+/// the identity layer's one MFA resolver
+/// ([`crate::identity::IdentityEngine::effective_mfa_requirement`]) with the
+/// client named by `client_id_str`, if any. A lookup failure is logged and
+/// returned as `Err(())`, so the caller refuses.
+pub(super) fn mfa_requirement_for(
     state: &Arc<WebState>,
     realm: &RealmId,
     user_id: &UserId,
-    realm_config: Option<&crate::identity::RealmConfig>,
     client_id_str: Option<&str>,
 ) -> Result<bool, ()> {
-    let refuse = |what: &str, e: &dyn std::fmt::Display| {
-        tracing::warn!(
-            error = %e,
-            realm_id = %realm.as_uuid(),
-            lookup = what,
-            "required actions: MFA-requirement lookup failed; refusing"
-        );
-    };
-
-    // Per-client requirement.
-    let client_requires_mfa = match client_id_str
+    let client_id = client_id_str
         .and_then(|cid| uuid::Uuid::parse_str(cid).ok())
-        .map(ClientId::new)
-    {
-        Some(cid) => state
-            .identity
-            .get_client(realm, &cid)
-            .map_err(|e| refuse("client", &e))?
-            .and_then(|c| c.mfa_required())
-            .unwrap_or(false),
-        None => false,
-    };
-    if client_requires_mfa {
-        return Ok(true);
-    }
-
-    // Per-role requirement: any role the user holds that appears in
-    // `realm.config.mfa_required_roles` triggers enforcement.
-    let required_roles = realm_config
-        .and_then(|c| c.mfa_required_roles.as_deref())
-        .unwrap_or_default();
-    if required_roles.is_empty() {
-        return Ok(false);
-    }
-    let assignments = state
-        .rbac
-        .list_user_assignments(realm, user_id)
-        .map_err(|e| refuse("role assignments", &e))?;
-    for assignment in &assignments {
-        let role = state
-            .rbac
-            .get_role(realm, &assignment.role_id)
-            .map_err(|e| refuse("role", &e))?;
-        if role.is_some_and(|r| required_roles.iter().any(|req| req == &r.name)) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+        .map(ClientId::new);
+    state
+        .identity
+        .effective_mfa_requirement(realm, user_id, client_id.as_ref())
+        .map_err(|e| {
+            tracing::warn!(
+                error = %e,
+                realm_id = %realm.as_uuid(),
+                "MFA-requirement lookup failed; refusing"
+            );
+        })
 }
 
 // ---------------------------------------------------------------------------

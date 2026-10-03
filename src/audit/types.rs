@@ -432,6 +432,13 @@ pub enum AuditAction {
     /// every other revocation here, a security control must not be applied
     /// without a record of it.
     InvitationRevoked,
+    /// A realm's or organization's effective MFA requirement changed — by
+    /// reconcile, by startup applying the system realm's policy, or by an
+    /// admin action (spec `mfa-policy`). `resource_type` is `realm` or
+    /// `organization`; metadata carries `old` and `new` (booleans).
+    /// Failure policy: `FailOperation` — a security control must not change
+    /// without a record of it.
+    MfaRequirementChanged,
 }
 
 impl AuditAction {
@@ -500,6 +507,7 @@ impl AuditAction {
             Self::InvitationCreated,
             Self::InvitationAccepted,
             Self::InvitationRevoked,
+            Self::MfaRequirementChanged,
             Self::RoleAssigned,
             Self::RoleRevoked,
             Self::OrphanedReferenceSkipped,
@@ -598,6 +606,7 @@ impl AuditAction {
             Self::InvitationCreated => "invitation_created",
             Self::InvitationAccepted => "invitation_accepted",
             Self::InvitationRevoked => "invitation_revoked",
+            Self::MfaRequirementChanged => "mfa_requirement_changed",
             Self::GroupCreated => "group_created",
             Self::GroupUpdated => "group_updated",
             Self::GroupDeleted => "group_deleted",
@@ -722,6 +731,7 @@ impl std::str::FromStr for AuditAction {
             "invitation_created" => Ok(Self::InvitationCreated),
             "invitation_accepted" => Ok(Self::InvitationAccepted),
             "invitation_revoked" => Ok(Self::InvitationRevoked),
+            "mfa_requirement_changed" => Ok(Self::MfaRequirementChanged),
             "group_created" => Ok(Self::GroupCreated),
             "group_updated" => Ok(Self::GroupUpdated),
             "group_deleted" => Ok(Self::GroupDeleted),
@@ -946,6 +956,7 @@ impl AuditAction {
             // Revoking an invitation is a security control; this table makes
             // every revocation mandatory to record.
             | Self::InvitationRevoked
+            | Self::MfaRequirementChanged
             | Self::BulkUsersDisabled
             | Self::ConsentRevoked
             | Self::ConsentDenied

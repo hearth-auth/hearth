@@ -121,3 +121,28 @@ test('401 then refresh also fails: throws a clear error', async () => {
   );
   await assert.rejects(bootstrap(h.deps), /refresh/i);
 });
+
+test('re-bootstrap keeps the cached TOTP secrets the server returns only once', async () => {
+  const cached: Credentials = {
+    ...FRESH,
+    access_token: 'cached-access',
+    totp_secret: 'DEVREALMSECRET',
+    admin_totp_secret: 'SYSTEMSECRET',
+  };
+  const h = harness([() => jsonResponse(200, { ...FRESH, totp_secret: '', admin_totp_secret: '' })], cached);
+  const creds = await bootstrap(h.deps);
+
+  assert.equal(creds.totp_secret, 'DEVREALMSECRET');
+  assert.equal(creds.admin_totp_secret, 'SYSTEMSECRET');
+  assert.equal(h.getWritten()?.admin_totp_secret, 'SYSTEMSECRET');
+});
+
+test('first bootstrap caches the TOTP secrets it returns', async () => {
+  const h = harness(
+    [() => jsonResponse(200, { ...FRESH, totp_secret: 'NEWDEV', admin_totp_secret: 'NEWSYS' })],
+    null,
+  );
+  const creds = await bootstrap(h.deps);
+  assert.equal(creds.totp_secret, 'NEWDEV');
+  assert.equal(h.getWritten()?.admin_totp_secret, 'NEWSYS');
+});

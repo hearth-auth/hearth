@@ -289,7 +289,7 @@ async fn assigning_a_role_to_an_unknown_org_is_refused() {
                     name: "acme-assign".to_string(),
                     slug: "acme-assign".to_string(),
                     description: None,
-                    config: Some(hearth::identity::OrganizationConfig { max_members: None }),
+                    config: Some(hearth::identity::OrganizationConfig::default()),
                     ..Default::default()
                 },
             )

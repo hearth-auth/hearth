@@ -42,6 +42,7 @@ async fn full_organization_lifecycle() {
                 description: Some("A test organization".to_string()),
                 config: Some(OrganizationConfig {
                     max_members: Some(100),
+                    mfa_required: false,
                 }),
                 ..Default::default()
             },
@@ -529,6 +530,7 @@ async fn member_limit_enforced() {
                 description: None,
                 config: Some(OrganizationConfig {
                     max_members: Some(1),
+                    mfa_required: false,
                 }),
                 ..Default::default()
             },

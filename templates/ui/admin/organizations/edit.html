@@ -64,6 +64,16 @@
       <p class="mt-1 text-xs text-ht-content-muted">Leave empty for unlimited members.</p>
     </div>
 
+    <div>
+      <label class="flex items-center gap-2 text-sm text-ht-content-secondary">
+        <input type="checkbox" id="mfa_required" name="mfa_required" value="1"
+               {% if form_mfa_required %}checked{% endif %}
+               class="h-4 w-4 rounded text-ht-content-brand">
+        Members need MFA
+      </label>
+      <p class="mt-1 text-xs text-ht-content-muted">Members must sign in with a passkey or an authenticator code, even where the realm does not require MFA. This can only add the requirement, never remove the realm's.</p>
+    </div>
+
     {# ── Attributes ── #}
     {% if !attr_fields.is_empty() %}
     <div class="space-y-3">

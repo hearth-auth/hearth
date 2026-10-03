@@ -2093,12 +2093,16 @@ async fn admin_surface_fixture() -> AdminSurfaceFixture {
             },
         )
         .expect("assign narrow role");
+    // The bootstrap dev realm requires MFA; the sub-admin proved TOTP.
     let narrow_session = state
         .identity
         .create_session(
             &realm_id,
             &narrow_uid,
-            &crate::identity::SessionContext::default(),
+            &crate::identity::SessionContext {
+                mfa_proof: crate::identity::MfaProof::Proved,
+                ..Default::default()
+            },
         )
         .expect("narrow session");
     let narrow_tokens = state

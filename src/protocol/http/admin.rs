@@ -2746,7 +2746,7 @@ async fn admin_update_client(
         require_consent: body.require_consent,
         access_token_authorization,
         trust_level,
-        mfa_required: body.mfa_required.map(Some),
+        mfa_required: body.mfa_required.map(Some), // mfa-resolver-ok: a write
         cors_origins: body.cors_origins,
         // 22.15: the operator surface for `private_key_jwt` / `jwt-bearer`.
         // `update_client_inner` validates the base64url decode and the 32-byte
@@ -3358,8 +3358,11 @@ pub(super) const DEV_SYSTEM_ADMIN_PASSWORD: &str = "HearthTest123!";
 /// user already existed — the existing password is left untouched.
 ///
 /// Best-effort: logs on error but never returns a failure to the caller.
+/// Returns the password and the base32 TOTP secret, on creation only: the
+/// system realm requires MFA, so the admin gets a TOTP factor (spec
+/// `mfa-policy`).
 #[cfg(feature = "dev-endpoints")]
-fn dev_seed_system_admin(state: &AppState) -> Option<String> {
+fn dev_seed_system_admin(state: &AppState) -> Option<(String, String)> {
     let sys = crate::identity::keys::system_realm_id();
 
     // Ensure the system realm has RBAC roles seeded.
@@ -3435,7 +3438,47 @@ fn dev_seed_system_admin(state: &AppState) -> Option<String> {
         tracing::warn!(error = %e, "dev bootstrap: system realm role assignment failed");
     }
 
-    Some(password)
+    match dev_enrol_totp(state, &sys, admin.id()) {
+        Ok(secret) => Some((password, secret)),
+        Err(e) => {
+            tracing::warn!(error = %e, "dev bootstrap: system admin TOTP enrolment failed");
+            None
+        }
+    }
+}
+
+/// Enrols TOTP for a dev admin and activates it with a code computed from
+/// the new secret — the step a person makes with an authenticator app.
+/// Returns the base32 secret, which bootstrap hands back once.
+#[cfg(feature = "dev-endpoints")]
+fn dev_enrol_totp(
+    state: &AppState,
+    realm_id: &RealmId,
+    user_id: &UserId,
+) -> Result<String, crate::identity::IdentityError> {
+    let enrolment = state.identity.enroll_totp(realm_id, user_id)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let code = crate::identity::totp::code_at(&enrolment.secret_base32, now).ok_or_else(|| {
+        crate::identity::IdentityError::Internal {
+            reason: "dev bootstrap: TOTP secret did not decode".to_string(),
+        }
+    })?;
+    state
+        .identity
+        .verify_totp_enrollment(realm_id, user_id, &code)?;
+    Ok(enrolment.secret_base32.clone())
+}
+
+/// The session context for a bootstrap session: it records `proof`, the
+/// second factor the authentication behind this bootstrap call proved.
+#[cfg(feature = "dev-endpoints")]
+fn dev_session_context(proof: crate::identity::MfaProof) -> crate::identity::SessionContext {
+    crate::identity::SessionContext {
+        mfa_proof: proof,
+        ..Default::default()
+    }
 }
 
 /// Issues a fresh access token for the reserved system-realm admin
@@ -3450,8 +3493,11 @@ fn dev_seed_system_admin(state: &AppState) -> Option<String> {
 ///
 /// Best-effort: logs on error and returns `None` rather than failing bootstrap.
 /// Call [`dev_seed_system_admin`] first to guarantee the admin user exists.
+///
+/// The session records `proof`: what the authentication behind this bootstrap
+/// call proved (the TOTP just activated, or the Bearer session's proof).
 #[cfg(feature = "dev-endpoints")]
-fn dev_system_admin_token(state: &AppState) -> Option<String> {
+fn dev_system_admin_token(state: &AppState, proof: crate::identity::MfaProof) -> Option<String> {
     let sys = crate::identity::keys::system_realm_id();
     let admin = match state.identity.get_user_by_email(&sys, "admin@hearth.test") {
         Ok(Some(u)) => u,
@@ -3464,11 +3510,10 @@ fn dev_system_admin_token(state: &AppState) -> Option<String> {
             return None;
         }
     };
-    let session = match state.identity.create_session(
-        &sys,
-        admin.id(),
-        &crate::identity::SessionContext::default(),
-    ) {
+    let session = match state
+        .identity
+        .create_session(&sys, admin.id(), &dev_session_context(proof))
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "dev bootstrap: system admin session creation failed");
@@ -3544,7 +3589,11 @@ pub(super) async fn admin_bootstrap(
         .identity
         .create_realm(&crate::identity::CreateRealmRequest {
             name: "dev-realm".to_string(),
-            config: None,
+            // The production MFA default holds under `--dev` too.
+            config: Some(crate::identity::RealmConfig {
+                mfa_required: Some(true),
+                ..Default::default()
+            }),
         }) {
         Ok(t) => t,
         Err(crate::identity::IdentityError::DuplicateRealmName) => {
@@ -3569,13 +3618,27 @@ pub(super) async fn admin_bootstrap(
 
             // Validate the Bearer token against the dev-realm to confirm the
             // caller completed the first bootstrap.
-            if state.identity.validate_token(&rid, &bearer).is_err() {
+            let Ok(claims) = state.identity.validate_token(&rid, &bearer) else {
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({"error": "invalid or expired token"})),
                 )
                     .into_response();
-            }
+            };
+            // The new sessions carry what the Bearer token's session proved.
+            let proof = claims
+                .sid
+                .strip_prefix("session_")
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .and_then(|u| {
+                    state
+                        .identity
+                        .get_session(&rid, &crate::core::SessionId::new(u))
+                        .ok()
+                        .flatten()
+                })
+                .map_or(crate::identity::MfaProof::None, |s| s.mfa_proof());
+            let mut totp_secret = String::new();
 
             // Reconciliation archives realms not in hearth.yaml. Re-activate
             // the dev-realm so create_session doesn't reject it as non-Active.
@@ -3632,19 +3695,23 @@ pub(super) async fn admin_bootstrap(
                             },
                         );
                     }
+                    totp_secret = match dev_enrol_totp(&state, &rid, &new_uid) {
+                        Ok(secret) => secret,
+                        Err(e) => return identity_error_to_response(&e).into_response(),
+                    };
                     new_user
                 }
                 Err(e) => return identity_error_to_response(&e).into_response(),
             };
             let uid = admin.id().clone();
-            let session = match state.identity.create_session(
-                &rid,
-                &uid,
-                &crate::identity::SessionContext::default(),
-            ) {
-                Ok(s) => s,
-                Err(e) => return identity_error_to_response(&e).into_response(),
-            };
+            let session =
+                match state
+                    .identity
+                    .create_session(&rid, &uid, &dev_session_context(proof))
+                {
+                    Ok(s) => s,
+                    Err(e) => return identity_error_to_response(&e).into_response(),
+                };
             let tokens = match state.identity.issue_tokens(&rid, &uid, session.id()) {
                 Ok(t) => t,
                 Err(e) => return identity_error_to_response(&e).into_response(),
@@ -3654,8 +3721,10 @@ pub(super) async fn admin_bootstrap(
             let qs = bootstrap_quickstart(&headers, &at_str, &rid_str);
             // Re-bootstrap: do not modify existing password (HEA-1670). Still
             // mint a fresh cross-realm system token (HEA-2087).
-            dev_seed_system_admin(&state);
-            let system_access_token = dev_system_admin_token(&state).unwrap_or_default();
+            let admin_totp_secret = dev_seed_system_admin(&state)
+                .map(|(_, secret)| secret)
+                .unwrap_or_default();
+            let system_access_token = dev_system_admin_token(&state, proof).unwrap_or_default();
             return (
                 StatusCode::OK,
                 Json(pb::BootstrapResponse {
@@ -3669,6 +3738,8 @@ pub(super) async fn admin_bootstrap(
                     system_realm_id: crate::identity::keys::system_realm_id()
                         .as_uuid()
                         .to_string(),
+                    totp_secret,
+                    admin_totp_secret,
                 }),
             )
                 .into_response();
@@ -3743,15 +3814,23 @@ pub(super) async fn admin_bootstrap(
         return rbac_error_to_response(&e).into_response();
     }
 
-    // Create session (API-initiated — no browser context)
-    let session = match state.identity.create_session(
-        &realm_id,
-        &user_id,
-        &crate::identity::SessionContext::default(),
-    ) {
-        Ok(s) => s,
+    // Every realm requires MFA by default, so the admin gets a TOTP factor;
+    // activating it proves the factor for the session below.
+    let totp_secret = match dev_enrol_totp(&state, &realm_id, &user_id) {
+        Ok(secret) => secret,
         Err(e) => return identity_error_to_response(&e).into_response(),
     };
+    let proof = crate::identity::MfaProof::Proved;
+
+    // Create session (API-initiated — no browser context)
+    let session =
+        match state
+            .identity
+            .create_session(&realm_id, &user_id, &dev_session_context(proof))
+        {
+            Ok(s) => s,
+            Err(e) => return identity_error_to_response(&e).into_response(),
+        };
 
     // Issue tokens — now resolves `realm.admin` role's permissions into
     // the JWT claim set.
@@ -3767,10 +3846,10 @@ pub(super) async fn admin_bootstrap(
     let access_token_str = tokens.access_token().to_string();
     let quickstart = bootstrap_quickstart(&headers, &access_token_str, &realm_id_str);
 
-    let admin_password = dev_seed_system_admin(&state).unwrap_or_default();
+    let (admin_password, admin_totp_secret) = dev_seed_system_admin(&state).unwrap_or_default();
     // Cross-realm system-realm admin token (HEA-2087) — the dev-realm
     // `access_token` above cannot manage other realms.
-    let system_access_token = dev_system_admin_token(&state).unwrap_or_default();
+    let system_access_token = dev_system_admin_token(&state, proof).unwrap_or_default();
     (
         StatusCode::OK,
         Json(pb::BootstrapResponse {
@@ -3784,6 +3863,8 @@ pub(super) async fn admin_bootstrap(
             system_realm_id: crate::identity::keys::system_realm_id()
                 .as_uuid()
                 .to_string(),
+            totp_secret,
+            admin_totp_secret,
         }),
     )
         .into_response()

@@ -1693,31 +1693,10 @@ async fn run_serve(
         );
     }
 
-    // HSEC-003/004: Production startup security checks against the system realm.
+    // HSEC-003: Production startup security checks against the system realm.
     if !config.dev_mode {
         let sys_realm_id = hearth::core::RealmId::new(uuid::Uuid::nil());
         if let Ok(Some(sys_realm)) = identity_engine.get_realm(&sys_realm_id) {
-            // HSEC-004: Hard error — explicitly disabling MFA on the admin control
-            // plane is a misconfiguration that blocks startup in production.
-            if sys_realm.config().mfa_required == Some(false) {
-                return Err(
-                    "security: system realm mfa_required is explicitly set to false; \
-                     MFA may not be disabled on the admin realm in production. \
-                     Remove the override or set mfa_required: true."
-                        .into(),
-                );
-            }
-            // HSEC-004: Soft warning — when mfa_required is not configured at all,
-            // the system realm defaults to MFA not required. Operators should enroll
-            // a second factor for all admin accounts and then set mfa_required: true
-            // in hearth.yaml to enforce it.
-            if sys_realm.config().mfa_required.is_none() {
-                warn!(
-                    "system realm mfa_required is not configured; admin sessions do not \
-                     require a second factor. Enroll MFA for all admin accounts and set \
-                     mfa_required: true under the system realm config to enforce it."
-                );
-            }
             // HSEC-003: Non-fatal warning — the 12-character floor (NIST SP 800-63B) is always
             // enforced at validation time, but an explicit policy is recommended in production.
             if sys_realm.config().password_policy.is_none() {
@@ -1854,6 +1833,22 @@ async fn run_serve(
         Err(e) => {
             error!(error = %e, "realm reconciliation failed");
         }
+    }
+
+    // MFA policy (spec `mfa-policy`). The system realm — the admin console —
+    // always requires a second factor, in `--dev` as in production. Every
+    // other realm whose MFA is off is named once, loudly.
+    identity_engine
+        .apply_system_realm_mfa_required(true)
+        .map_err(|e| format!("could not apply the system realm MFA policy: {e}"))?;
+    match hearth::identity::realms_with_mfa_off(identity_engine.as_ref()) {
+        Ok(off) if !off.is_empty() => warn!(
+            realms = %off.join(", "),
+            "MFA is NOT required in these realms: a stolen password alone signs a user in. \
+             Remove `mfa_required: false` from hearth.yaml to require a second factor."
+        ),
+        Ok(_) => {}
+        Err(e) => warn!(error = %e, "could not list realms for the MFA policy check"),
     }
 
     // Re-seed RBAC defaults on every realm that exists in storage, not just

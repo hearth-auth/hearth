@@ -41,7 +41,7 @@ fn make_org(h: &common::TestHarness, realm: &RealmId, slug: &str) -> Organizatio
                 name: slug.to_string(),
                 slug: slug.to_string(),
                 description: None,
-                config: Some(OrganizationConfig { max_members: None }),
+                config: Some(OrganizationConfig::default()),
                 ..Default::default()
             },
         )

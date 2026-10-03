@@ -297,6 +297,7 @@ Body fields:
 | `name` | ✅ | Human-readable display name |
 | `description` | — | Optional description |
 | `config.max_members` | — | Member limit (omit for unlimited) |
+| `mfa_required` | — | `true` requires MFA for every member. Default `false`. It can only tighten the realm policy. |
 | `attributes` | — | Key-value metadata map |
 
 ```json
@@ -319,6 +320,7 @@ Returns the created organization object.
 `PATCH /admin/orgs/{id}`
 
 Partially updates an organization. All fields are optional; omitted fields are unchanged.
+Send `mfa_required` (bool) to change the organization's MFA requirement. Responses include `mfa_required`.
 
 To replace the attribute map:
 

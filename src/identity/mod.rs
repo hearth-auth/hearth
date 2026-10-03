@@ -20,6 +20,7 @@ pub mod key_encryption;
 pub(crate) mod keys;
 pub(crate) mod magic_link;
 pub mod mcp;
+pub mod mfa_policy;
 pub mod migration;
 pub mod oidc;
 pub mod onboarding;
@@ -90,6 +91,7 @@ pub use kdf_gate::{
     KdfGateError, DEFAULT_ADMIN_MAX_IN_FLIGHT, DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS,
 };
 pub use magic_link::MagicLinkResponse;
+pub use mfa_policy::{realm_requires_mfa, realms_with_mfa_off};
 pub use oidc::{
     fuzz_parse_token_exchange, AccessTokenAuthorization, ApplicationStatus, AuthorizationRequest,
     AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel,
@@ -224,6 +226,31 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         request: &UpdateRealmRequest,
     ) -> Result<Realm, IdentityError>;
+
+    /// Whether signing `user_id` in needs a qualifying second factor (a
+    /// passkey, a TOTP code or a recovery code) — the one MFA resolver (spec
+    /// `mfa-policy`). It is the logical OR of the realm policy, any
+    /// organization of the user that requires MFA, the client named by
+    /// `client_id` (its `mfa_required`), and the user's roles listed in the
+    /// realm's `mfa_required_roles`. Nothing loosens another's requirement.
+    ///
+    /// # Errors
+    /// A realm, client, role or membership lookup failed; the caller refuses.
+    fn effective_mfa_requirement(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_id: Option<&ClientId>,
+    ) -> Result<bool, IdentityError>;
+
+    /// Records `required` as the system realm's `mfa_required` — the one
+    /// write the system realm accepts, made at startup from the configured
+    /// policy (spec `mfa-policy`). A change is audited as
+    /// `MfaRequirementChanged`. Returns whether the stored value changed.
+    ///
+    /// # Errors
+    /// A storage or audit failure.
+    fn apply_system_realm_mfa_required(&self, required: bool) -> Result<bool, IdentityError>;
 
     /// Suspends (`suspended = true`) or reinstates a realm — the
     /// incident-response freeze control.

@@ -50,6 +50,8 @@ const JWKS_JSON: &str = r#"{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k2","alg
 fn config(app_lines: &str) -> Config {
     let yaml = format!(
         r#"
+auth:
+  mfa_required: false
 realms:
   yamlcreds:
     applications:

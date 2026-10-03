@@ -255,8 +255,9 @@ impl EmbeddedIdentityEngine {
         client.set_jwks(request.jwks.clone());
         client.set_jwks_uri(request.jwks_uri.clone());
         client.set_dpop_bound_access_tokens(request.dpop_bound_access_tokens);
+        // mfa-resolver-ok: copies the request into the client record
         if request.mfa_required.is_some() {
-            client.set_mfa_required(request.mfa_required);
+            client.set_mfa_required(request.mfa_required); // mfa-resolver-ok: a write
         }
         if !request.cors_origins.is_empty() {
             client.set_cors_origins(request.cors_origins.clone());
@@ -555,7 +556,11 @@ impl EmbeddedIdentityEngine {
                 .filter(|s| s.user_id() == &request.user_id)
                 .map_or(crate::identity::MfaProof::None, |s| s.mfa_proof());
             if !proof.satisfies_mfa_required()
-                && self.client_or_role_requires_mfa(realm_id, &request.user_id, &client)?
+                && self.effective_mfa_requirement(
+                    realm_id,
+                    &request.user_id,
+                    Some(client.client_id()),
+                )?
             {
                 return Err(IdentityError::MfaRequired);
             }
@@ -3348,23 +3353,47 @@ impl EmbeddedIdentityEngine {
         })
     }
 
-    /// Whether `client` (its `mfa_required`) or one of `user_id`'s roles
-    /// (listed in the realm's `mfa_required_roles`) demands a second factor —
-    /// the engine twin of the web layer's `client_or_role_requires_mfa`.
+    /// Whether an organization `user_id` belongs to requires MFA — the
+    /// organization input of [`IdentityEngine::effective_mfa_requirement`].
     /// A lookup failure is returned, so the caller refuses.
-    fn client_or_role_requires_mfa(
+    pub(super) fn org_requires_mfa(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
-        client: &OAuthClient,
     ) -> Result<bool, IdentityError> {
-        if client.mfa_required() == Some(true) {
-            return Ok(true);
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self.list_user_organizations(
+                realm_id,
+                user_id,
+                cursor.as_deref(),
+                crate::core::MAX_PAGE_LIMIT as usize,
+            )?;
+            for membership in &page.items {
+                let org = self.get_organization(realm_id, membership.org_id())?;
+                // mfa-resolver-ok: the resolver's organization input
+                if org.is_some_and(|o| o.config().mfa_required) {
+                    return Ok(true);
+                }
+            }
+            match page.next_cursor {
+                Some(next) if !page.items.is_empty() => cursor = Some(next),
+                _ => return Ok(false),
+            }
         }
-        let required_roles = self
-            .get_realm(realm_id)?
-            .and_then(|realm| realm.config().mfa_required_roles.clone())
-            .unwrap_or_default();
+    }
+
+    /// Whether one of `user_id`'s roles is listed in the realm's
+    /// `mfa_required_roles` — the role input of
+    /// [`IdentityEngine::effective_mfa_requirement`]. A lookup failure is
+    /// returned, so the caller refuses.
+    pub(super) fn role_requires_mfa(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        config: &crate::identity::RealmConfig,
+    ) -> Result<bool, IdentityError> {
+        let required_roles = config.mfa_required_roles.as_deref().unwrap_or_default();
         if required_roles.is_empty() {
             return Ok(false);
         }
@@ -4136,6 +4165,7 @@ impl EmbeddedIdentityEngine {
         if let Some(required) = request.dpop_bound_access_tokens {
             client.set_dpop_bound_access_tokens(required);
         }
+        // mfa-resolver-ok: copies the request into the client record
         if let Some(mfa_req) = request.mfa_required {
             client.set_mfa_required(mfa_req);
         }

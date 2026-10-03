@@ -30,6 +30,8 @@ const SECRET: &str = "rs-introspect-secret-0123456789!";
 fn yaml(introspection_client: &str) -> String {
     format!(
         r#"
+auth:
+  mfa_required: false
 realms:
   {REALM}:
     applications:
