@@ -122,9 +122,7 @@ Sixteen admin operations existed only over gRPC (`docs/api/grpc-only.txt`; `Clie
 
 - [ ] 12.1 Port the Node-only features (Next.js helpers, discovery, flows, token, authorize) into `sdks/typescript` with their tests
 - [ ] 12.2 Delete `sdks/node`, `sdks/kotlin`, `sdks/rust`, their CI jobs (`sdk-node`, `sdk-kotlin`, `sdk-rust`) and required-summary entries, `sdk-publish-kotlin.yml`, `sdk-publish-rust.yml`, the semantic-release matrix entries, `.releaserc.json` files, Dependabot entries, `security.yml:332`, the Makefile `sdk-lint` lines, and the SDK guides
-- [ ] 12.3 For each of TS, Go, Python and PHP: replace handwritten JWT/JWKS verification with the chosen JOSE library, with red tests for an Ed25519 token and a tampered token first
-- [ ] 12.4 Generate each admin client from `docs/api/openapi.json`, wrap it, and add a CI staleness check
-- [ ] 12.5 Build the shared e2e conformance harness: one scenario set, run against all four SDKs against a live server (extend `make sdk-smoke-local`)
+- [x] 12.3 **Changed during apply (owner decision, 2026-10-02):** the JOSE-library rewrite (old 12.3), the OpenAPI-generated admin clients (old 12.4) and the shared conformance harness (old 12.5) moved to the follow-up change `openspec/changes/sdk-standard-libraries/`, together with their three `sdk-support-contract` requirements. This task is done when that change exists and validates (`openspec validate sdk-standard-libraries`). Task 14.5 checks it is still open at release
 - [ ] 12.6 Update `docs/specs/SDK.md`, `SDK_SURFACE.md`, `sdk-spec.md`, `release-runbook.md`, `ops/RELEASE_VALIDATION.md`, `overview.md`, `getting-started.mdx`
 - [ ] 12.7 CHANGELOG `### Removed` (Kotlin, Rust, Node SDKs) and `### Changed` (TS SDK absorbs Node) entries
 
@@ -141,3 +139,4 @@ Sixteen admin operations existed only over gRPC (`docs/api/grpc-only.txt`; `Clie
 - [ ] 14.2 Compare per-module coverage before and after; the kept modules must not drop
 - [ ] 14.3 Cut v3.0.0 with the release-cut procedure in `CLAUDE.md`, and update the README pins
 - [ ] 14.4 Declare the feature freeze, and open the follow-up change for the confidence work (external conformance suites, invariant tests across entry points, mutation testing, pentest)
+- [ ] 14.5 Before tagging, confirm `openspec/changes/sdk-standard-libraries/` is still an open change (not deleted, not archived unimplemented), and list it in the v3.0.0 release notes as the next SDK work

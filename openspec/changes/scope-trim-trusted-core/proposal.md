@@ -25,7 +25,7 @@ This change shrinks Hearth to a **trusted core**. Then we freeze features and st
 - **NEW** An organization can require MFA for its members, even when its realm does not. It can tighten the realm policy, never loosen it.
 - **BREAKING** The SAML SP accepts only a strict profile: exactly one signature, no DTD, exactly one assertion, and data read only from the signed element.
 - **BREAKING** The pre-token webhook defaults to `on_error: fail_closed`.
-- SDKs use standard JOSE/OIDC libraries for token validation, and an admin client generated from OpenAPI. They expose a rich developer API on top.
+- SDKs use standard JOSE/OIDC libraries for token validation, and an admin client generated from OpenAPI. They expose a rich developer API on top. **Moved during apply:** this work is the follow-up change `sdk-standard-libraries`; this change ships only the supported SDK set.
 
 ## Capabilities
 
@@ -34,7 +34,7 @@ This change shrinks Hearth to a **trusted core**. Then we freeze features and st
 - `mfa-policy`: the MFA default, which factors satisfy it, organization-level tightening, and the warning and audit when MFA is turned off.
 - `saml-sp-profile`: the strict profile the SAML SP accepts.
 - `pre-token-webhook-failure`: the webhook's failure mode and its default.
-- `sdk-support-contract`: the supported SDK set and how SDKs validate tokens and call the admin API.
+- `sdk-support-contract`: the supported SDK set. (How SDKs validate tokens and call the admin API is added by the follow-up change `sdk-standard-libraries`.)
 
 ### Modified Capabilities
 None. `openspec/specs/` has no archived specs yet.

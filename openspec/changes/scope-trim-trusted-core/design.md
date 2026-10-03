@@ -76,6 +76,8 @@ The ROPC grant goes, including its adaptive-MFA code. 27 test calls in 6 files u
 Each supported SDK validates tokens through a widely used JOSE library that supports EdDSA/Ed25519: TS `jose`, Go `go-jose` or `jwx`, Python `joserfc` or `PyJWT[crypto]`, PHP `web-token/jwt-framework`. The admin client is generated from `docs/api/openapi.json`, and a handwritten ergonomic layer wraps it. Only the Hearth-specific parts are handwritten: DPoP proof creation, agent flows, and the session-version cache.
 **Why:** the developer still writes very little code, and the risky code lives in libraries that thousands of projects already test.
 
+**Changed during apply (owner decision, 2026-10-02):** this change ships only the supported SDK set (the Node port and the Kotlin, Rust and Node deletions). The JOSE-library rewrite, the generated admin clients and the conformance harness moved to the follow-up change `openspec/changes/sdk-standard-libraries/`, with their requirements. The server trim does not depend on them.
+
 ## Risks / Trade-offs
 
 - [The FAPI removal drops a call that some kept path relies on to require DPoP] → Before deleting `require_fapi_sender_constraint`, list every caller and check that client-level `dpop_bound_access_tokens` and agent-level DPoP-required are enforced by `dpop.rs` alone. A red test per caller comes first: device grant, auth-code exchange, client credentials, JWT bearer, refresh, step-up.
