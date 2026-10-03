@@ -36,11 +36,13 @@
 ## 4. Conformance harness
 
 - [x] 4.1 Write `sdks/conformance/scenarios.yaml` (token validation set plus client credentials; design Open Question 2)
-- [ ] 4.2 Write a runner per SDK (`sdks/<sdk>/conformance/`) that prints one JSON result per scenario
-- [ ] 4.3 Write the driver (extend `scripts/sdk-smoke-local.sh`): boot `--dev`, bootstrap, mint tokens, run the runners, diff; a difference names the SDK and the scenario
-- [ ] 4.4 Add the harness as a CI job, required in the summary
+- [x] 4.2 Write a runner per SDK (`sdks/<sdk>/conformance/`) that prints one JSON result per scenario
+- [x] 4.3 Write the driver (extend `scripts/sdk-smoke-local.sh`): boot `--dev`, bootstrap, mint tokens, run the runners, diff; a difference names the SDK and the scenario
+- [x] 4.4 Add the harness as a CI job, required in the summary
+  - Changed during apply: the driver is `scripts/sdk-conformance.sh` + `scripts/sdk_conformance.py` (`make sdk-conformance`; also step 9 of `sdk-smoke-local.sh`). It boots two servers, because the server's per-realm `access_token_ttl` does not reach client-credentials tokens (`oauth.rs` uses the global TTL): `main` and `expiry` (1 s global TTL). Runners: `sdks/<sdk>/conformance/run.sh`. CI: job `conformance / all SDKs` in `sdk-smoke.yml`, gated by `sdk-smoke-ok` → `required-summary`. First full run found 4 SDK bugs, all fixed: unknown `kid` gave `JWKSFetchError` (Go, Python, PHP); Go checked `iss` against discovery; Go and Python sent the realm name in `X-Realm-ID`, so client credentials never worked live. Now 9 scenarios × 4 SDKs agree
+  - Server defects found, for `trusted-core-confidence` (feature freeze, not fixed here): per-realm `access_token_ttl` is ignored by the client-credentials, JWT-bearer and device grants; client credentials without `scope` answers `400 HEARTH_INVALID_INPUT` (RFC 6749 makes `scope` optional)
 
 ## 5. Docs and release
 
-- [ ] 5.1 Update `docs/specs/SDK.md`, `docs/specs/SDK_SURFACE.md` and the four SDK guides: the libraries, the generated clients, the harness
+- [x] 5.1 Update `docs/specs/SDK.md`, `docs/specs/SDK_SURFACE.md` and the four SDK guides: the libraries, the generated clients, the harness
 - [ ] 5.2 CHANGELOG `### Changed` entries per SDK (verification library, admin client method names)
