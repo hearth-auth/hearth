@@ -6,6 +6,7 @@ namespace Hearth\Tests\Unit;
 
 use Hearth\Claims;
 use Hearth\Contracts\JwksClientInterface;
+use Hearth\Exceptions\JWKSFetchException;
 use Hearth\Exceptions\RequiredActionException;
 use Hearth\Exceptions\TokenAudienceException;
 use Hearth\Exceptions\TokenExpiredException;
@@ -217,5 +218,81 @@ final class TokenVerifierTest extends TestCase
 
         $this->expectException(TokenInvalidException::class);
         $this->verifier->verify($this->makeToken($this->validClaims()));
+    }
+
+    // -------------------------------------------------------------------------
+    // JOSE-library verification (sdk-standard-libraries 2.4)
+    // -------------------------------------------------------------------------
+
+    private static function b64url(string $raw): string
+    {
+        return strtr(rtrim(base64_encode($raw), '='), '+/', '-_');
+    }
+
+    public function testVerifyRejectsTamperedPayload(): void
+    {
+        $this->setUpJwksForKey();
+        [$header, , $sig] = explode('.', $this->makeToken($this->validClaims()));
+        $tampered = self::b64url((string) json_encode($this->validClaims(['sub' => 'usr_admin'])));
+
+        $this->expectException(TokenInvalidException::class);
+        $this->verifier->verify("{$header}.{$tampered}.{$sig}");
+    }
+
+    public function testVerifyRejectsUnsignedAlgNoneToken(): void
+    {
+        $this->setUpJwksForKey();
+        $header  = self::b64url((string) json_encode(['alg' => 'none', 'typ' => 'JWT', 'kid' => 'test-key']));
+        $payload = self::b64url((string) json_encode($this->validClaims()));
+
+        $this->expectException(TokenInvalidException::class);
+        $this->verifier->verify("{$header}.{$payload}.");
+    }
+
+    public function testVerifyRejectsAlgNoneHeaderEvenWithAValidEd25519Signature(): void
+    {
+        $this->setUpJwksForKey();
+        $header  = self::b64url((string) json_encode(['alg' => 'none', 'typ' => 'JWT', 'kid' => 'test-key']));
+        $payload = self::b64url((string) json_encode($this->validClaims()));
+        $sig     = self::b64url(sodium_crypto_sign_detached(
+            "{$header}.{$payload}",
+            sodium_crypto_sign_secretkey($this->keypair),
+        ));
+
+        $this->expectException(TokenInvalidException::class);
+        $this->verifier->verify("{$header}.{$payload}.{$sig}");
+    }
+
+    public function testVerifyRejectsTokenWhoseKidNamesADifferentKey(): void
+    {
+        $otherPublic = sodium_crypto_sign_publickey(sodium_crypto_sign_keypair());
+        $this->jwksClient
+            ->method('getKey')
+            ->willReturnMap([['other-key', $otherPublic]]);
+
+        $this->expectException(TokenInvalidException::class);
+        $this->verifier->verify($this->makeToken($this->validClaims(), 'other-key'));
+    }
+
+    public function testVerifyPropagatesUnknownKidAsJwksFetchException(): void
+    {
+        $this->jwksClient
+            ->method('getKey')
+            ->willThrowException(new JWKSFetchException("No key with kid 'nope' found in JWKS after re-fetch"));
+
+        $this->expectException(JWKSFetchException::class);
+        $this->verifier->verify($this->makeToken($this->validClaims(), 'nope'));
+    }
+
+    /**
+     * The signature check belongs to lcobucci/jwt, not to the SDK
+     * (spec: "No handwritten signature check remains").
+     */
+    public function testVerifierContainsNoHandwrittenSignatureCheck(): void
+    {
+        $source = (string) file_get_contents(__DIR__ . '/../../src/TokenVerifier.php');
+
+        self::assertStringNotContainsString('sodium_crypto_sign_verify_detached', $source);
+        self::assertStringContainsString('Lcobucci\\JWT\\Signer\\Eddsa', $source);
     }
 }

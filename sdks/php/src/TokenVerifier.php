@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Hearth;
 
+use DateInterval;
 use DateTimeImmutable;
 use Hearth\Contracts\JwksClientInterface;
 use Hearth\Contracts\TokenVerifierInterface;
@@ -15,22 +16,38 @@ use Hearth\Exceptions\TokenIssuerException;
 use Hearth\Exceptions\TokenInvalidException;
 use Hearth\Exceptions\TokenNotYetValidException;
 use JsonException;
+use Lcobucci\JWT\Encoding\JoseEncoder;
+use Lcobucci\JWT\Exception as JwtException;
+use Lcobucci\JWT\Signer\Eddsa;
+use Lcobucci\JWT\Signer\Key\InMemory;
+use Lcobucci\JWT\Token\Parser;
+use Lcobucci\JWT\Token\RegisteredClaims;
+use Lcobucci\JWT\UnencryptedToken;
+use Lcobucci\JWT\Validation\Constraint;
+use Lcobucci\JWT\Validation\Constraint\IssuedBy;
+use Lcobucci\JWT\Validation\Constraint\LooseValidAt;
+use Lcobucci\JWT\Validation\Constraint\PermittedFor;
+use Lcobucci\JWT\Validation\Constraint\SignedWith;
+use Lcobucci\JWT\Validation\Validator;
+use Psr\Clock\ClockInterface;
 
 /**
  * Verifies a raw JWT string against the Hearth JWKS and validates standard claims.
  *
- * Implements the mandatory §1.2–1.3 JWT validation steps in order:
- *   1. Verify Ed25519 signature against cached JWKS.
- *   2. Verify `exp` claim (reject if expired).
- *   3. Verify `iss` matches the configured issuer URL.
- *   4. Verify `aud` contains the configured client ID (when set).
- *   5. Verify `iat` is not in the future (allow up to 5 s clock skew).
+ * Parsing, the signature check and the registered-claim checks are done by
+ * lcobucci/jwt (`Lcobucci\JWT\Signer\Eddsa` and the validation constraints). This class
+ * only resolves the key by `kid` and maps a failed constraint to the SDK error taxonomy.
+ * The checks run in this order:
+ *   1. `alg` is `EdDSA` and the Ed25519 signature verifies (`SignedWith`).
+ *   2. `exp`, `nbf` and `iat` hold at the current time, with 5 s clock skew (`LooseValidAt`).
+ *   3. `iss` matches the configured issuer URL (`IssuedBy`).
+ *   4. `aud` contains the configured client ID, when set (`PermittedFor`).
  *
  * Tokens with `token_type === "required_action"` raise RequiredActionException.
  */
 final class TokenVerifier implements TokenVerifierInterface
 {
-    /** Maximum clock skew tolerated for the `iat` claim (seconds). */
+    /** Clock skew tolerated for the `exp`, `nbf` and `iat` claims (seconds). */
     private const CLOCK_SKEW_SECONDS = 5;
 
     /**
@@ -57,35 +74,39 @@ final class TokenVerifier implements TokenVerifierInterface
      */
     public function verify(string $rawToken): Claims
     {
-        [$headerB64, $payloadB64, $sigB64] = $this->splitToken($rawToken);
+        $token = $this->parse($rawToken);
 
-        $header = $this->decodeJsonPart($headerB64, 'header');
-        $claims = $this->decodeJsonPart($payloadB64, 'payload');
-
-        $this->checkAlgorithm($header);
-
-        // Step 1 — signature verification (before any claim checks)
-        $kid           = is_string($header['kid'] ?? null) ? $header['kid'] : '';
-        $publicKeyBytes = $this->jwksClient->getKey($kid);
-        $this->verifySignature($headerB64, $payloadB64, $sigB64, $publicKeyBytes);
-
-        // Step 2 — expiration
-        $this->checkExpiry($claims);
-
-        // Step 3 — issuer
-        $this->checkIssuer($claims);
-
-        // Step 4 — audience
-        if ($this->clientId !== null) {
-            $this->checkAudience($claims);
+        // Step 1 — algorithm allow-list and signature, before any claim check
+        $kid = $token->headers()->get('kid');
+        $key = $this->jwksClient->getKey(is_string($kid) ? $kid : '');
+        if ($key === '') {
+            throw new TokenInvalidException('Signing key is empty');
+        }
+        if (!$this->satisfies($token, new SignedWith(new Eddsa(), InMemory::plainText($key)))) {
+            throw new TokenInvalidException('JWT signature verification failed');
         }
 
-        // Step 5 — not-before (RFC 7519 §4.1.5)
-        $this->checkNotBefore($claims);
+        // Step 2 — exp / nbf / iat
+        $this->checkValidAt($token);
 
-        // Step 6 — issued-at / clock skew
-        $this->checkIssuedAt($claims);
+        // Step 3 — issuer
+        // An empty expected issuer or audience matches no token (lcobucci needs non-empty).
+        if ($this->issuerUrl === '' || !$this->satisfies($token, new IssuedBy($this->issuerUrl))) {
+            $iss = $token->claims()->get(RegisteredClaims::ISSUER);
+            throw new TokenIssuerException($this->issuerUrl, is_string($iss) ? $iss : '');
+        }
 
+        // Step 4 — audience
+        if (
+            $this->clientId !== null
+            && ($this->clientId === '' || !$this->satisfies($token, new PermittedFor($this->clientId)))
+        ) {
+            /** @var list<string> $audiences */
+            $audiences = array_map('strval', (array) $token->claims()->get(RegisteredClaims::AUDIENCE, []));
+            throw new TokenAudienceException($this->clientId, $audiences);
+        }
+
+        $claims    = $this->rawClaims($token);
         $claimsObj = new Claims($claims);
 
         // Required-action tokens must not be accepted as regular access tokens
@@ -103,174 +124,106 @@ final class TokenVerifier implements TokenVerifierInterface
     // -------------------------------------------------------------------------
 
     /**
-     * Splits a JWT into its three base64url-encoded parts.
+     * Parses the compact JWS with lcobucci/jwt.
      *
-     * @return array{string, string, string}
      * @throws TokenInvalidException
      */
-    private function splitToken(string $rawToken): array
+    private function parse(string $rawToken): UnencryptedToken
     {
-        $parts = explode('.', $rawToken);
-        if (count($parts) !== 3) {
-            throw new TokenInvalidException('Malformed JWT: expected 3 dot-separated parts');
+        if ($rawToken === '') {
+            throw new TokenInvalidException('Malformed JWT: empty token');
         }
 
-        return [$parts[0], $parts[1], $parts[2]];
+        try {
+            $token = (new Parser(new JoseEncoder()))->parse($rawToken);
+        } catch (JwtException $e) {
+            throw new TokenInvalidException('Malformed JWT: ' . $e->getMessage(), 0, $e);
+        }
+
+        if (!$token instanceof UnencryptedToken) {
+            throw new TokenInvalidException('Malformed JWT: not a signed token');
+        }
+
+        return $token;
     }
 
     /**
-     * Base64url-decodes and JSON-decodes a JWT part.
+     * Runs one lcobucci constraint. A library error (for example a key or
+     * signature of the wrong length) is a failed check, not a crash: it must
+     * surface as a HearthException so HearthMiddleware answers 401, not 500.
+     *
+     * @throws TokenInvalidException
+     */
+    private function satisfies(UnencryptedToken $token, Constraint $constraint): bool
+    {
+        try {
+            return (new Validator())->validate($token, $constraint);
+        } catch (JwtException $e) {
+            throw new TokenInvalidException('JWT verification failed: ' . $e->getMessage(), 0, $e);
+        }
+    }
+
+    /**
+     * Checks `exp`, `nbf` and `iat` with LooseValidAt, then names the failed claim.
+     *
+     * @throws TokenExpiredException
+     * @throws TokenNotYetValidException
+     * @throws TokenInvalidException
+     */
+    private function checkValidAt(UnencryptedToken $token): void
+    {
+        $clock = new class () implements ClockInterface {
+            public function now(): DateTimeImmutable
+            {
+                return new DateTimeImmutable();
+            }
+        };
+        $leeway = new DateInterval('PT' . self::CLOCK_SKEW_SECONDS . 'S');
+
+        if ($this->satisfies($token, new LooseValidAt($clock, $leeway))) {
+            return;
+        }
+
+        $claims = $token->claims();
+        $now    = $clock->now();
+
+        $exp = $claims->get(RegisteredClaims::EXPIRATION_TIME);
+        if ($exp instanceof DateTimeImmutable && $token->isExpired($now->sub($leeway))) {
+            throw new TokenExpiredException($exp);
+        }
+
+        $nbf = $claims->get(RegisteredClaims::NOT_BEFORE);
+        if ($nbf instanceof DateTimeImmutable && !$token->isMinimumTimeBefore($now->add($leeway))) {
+            throw new TokenNotYetValidException($nbf);
+        }
+
+        throw new TokenInvalidException('JWT was issued in the future (beyond clock skew tolerance)');
+    }
+
+    /**
+     * Returns the payload as the JSON object the server signed, for the Claims accessor.
      *
      * @return array<string, mixed>
      * @throws TokenInvalidException
      */
-    private function decodeJsonPart(string $b64url, string $partName): array
+    private function rawClaims(UnencryptedToken $token): array
     {
-        $decoded = base64_decode(strtr($b64url, '-_', '+/'), true);
-        if ($decoded === false) {
-            throw new TokenInvalidException("Malformed JWT: could not base64url-decode {$partName}");
-        }
-
         try {
-            $data = json_decode($decoded, true, 512, JSON_THROW_ON_ERROR);
-        } catch (JsonException $e) {
-            throw new TokenInvalidException("Malformed JWT: {$partName} is not valid JSON", 0, $e);
+            $data = json_decode(
+                (new JoseEncoder())->base64UrlDecode($token->claims()->toString()),
+                true,
+                512,
+                JSON_THROW_ON_ERROR,
+            );
+        } catch (JsonException | JwtException $e) {
+            throw new TokenInvalidException('Malformed JWT: payload is not valid JSON', 0, $e);
         }
 
         if (!is_array($data)) {
-            throw new TokenInvalidException("Malformed JWT: {$partName} must be a JSON object");
+            throw new TokenInvalidException('Malformed JWT: payload must be a JSON object');
         }
 
+        /** @var array<string, mixed> $data */
         return $data;
-    }
-
-    /**
-     * Rejects tokens that are not EdDSA-signed.
-     *
-     * @param array<string, mixed> $header
-     * @throws TokenInvalidException
-     */
-    private function checkAlgorithm(array $header): void
-    {
-        $alg = $header['alg'] ?? null;
-        if ($alg !== 'EdDSA') {
-            throw new TokenInvalidException(
-                "Unsupported JWT algorithm: expected EdDSA, got " . json_encode($alg),
-            );
-        }
-    }
-
-    /**
-     * Verifies the Ed25519 signature using libsodium.
-     *
-     * @throws TokenInvalidException
-     */
-    private function verifySignature(
-        string $headerB64,
-        string $payloadB64,
-        string $sigB64,
-        string $publicKeyBytes,
-    ): void {
-        $message   = "{$headerB64}.{$payloadB64}";
-        $signature = base64_decode(strtr($sigB64, '-_', '+/'), true);
-
-        if ($signature === false) {
-            throw new TokenInvalidException('Malformed JWT: could not base64url-decode signature');
-        }
-
-        // libsodium throws SodiumException (not a HearthException) on a wrong
-        // length, which HearthMiddleware would not catch: reject it here.
-        if (strlen($signature) !== SODIUM_CRYPTO_SIGN_BYTES) {
-            throw new TokenInvalidException('Malformed JWT: Ed25519 signature must be 64 bytes');
-        }
-
-        if (strlen($publicKeyBytes) !== SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES) {
-            throw new TokenInvalidException('Signing key is not a 32-byte Ed25519 public key');
-        }
-
-        if (!sodium_crypto_sign_verify_detached($signature, $message, $publicKeyBytes)) {
-            throw new TokenInvalidException('JWT signature verification failed');
-        }
-    }
-
-    /**
-     * @param array<string, mixed> $claims
-     * @throws TokenExpiredException
-     */
-    private function checkExpiry(array $claims): void
-    {
-        if (!isset($claims['exp'])) {
-            return;
-        }
-
-        $exp = (int) $claims['exp'];
-        if (time() > $exp) {
-            $expiredAt = (new DateTimeImmutable())->setTimestamp($exp);
-            throw new TokenExpiredException($expiredAt);
-        }
-    }
-
-    /**
-     * @param array<string, mixed> $claims
-     * @throws TokenIssuerException
-     */
-    private function checkIssuer(array $claims): void
-    {
-        $iss = (string) ($claims['iss'] ?? '');
-        if ($iss !== $this->issuerUrl) {
-            throw new TokenIssuerException($this->issuerUrl, $iss);
-        }
-    }
-
-    /**
-     * @param array<string, mixed> $claims
-     * @throws TokenAudienceException
-     */
-    private function checkAudience(array $claims): void
-    {
-        $aud = $claims['aud'] ?? [];
-        $audiences = is_array($aud) ? array_map('strval', $aud) : [(string) $aud];
-
-        if (!in_array($this->clientId, $audiences, true)) {
-            throw new TokenAudienceException((string) $this->clientId, $audiences);
-        }
-    }
-
-    /**
-     * Rejects a token presented before its `nbf` (not-before) claim.
-     *
-     * The same clock-skew allowance as the `iat` check applies, so a token
-     * minted a second or two ahead of this host's clock still verifies.
-     *
-     * @param array<string, mixed> $claims
-     * @throws TokenNotYetValidException
-     */
-    private function checkNotBefore(array $claims): void
-    {
-        if (!isset($claims['nbf'])) {
-            return;
-        }
-
-        $nbf = (int) $claims['nbf'];
-        if ($nbf > time() + self::CLOCK_SKEW_SECONDS) {
-            $notBefore = (new DateTimeImmutable())->setTimestamp($nbf);
-            throw new TokenNotYetValidException($notBefore);
-        }
-    }
-
-    /**
-     * @param array<string, mixed> $claims
-     * @throws TokenInvalidException
-     */
-    private function checkIssuedAt(array $claims): void
-    {
-        if (!isset($claims['iat'])) {
-            return;
-        }
-
-        $iat = (int) $claims['iat'];
-        if ($iat > time() + self::CLOCK_SKEW_SECONDS) {
-            throw new TokenInvalidException('JWT was issued in the future (beyond clock skew tolerance)');
-        }
     }
 }
