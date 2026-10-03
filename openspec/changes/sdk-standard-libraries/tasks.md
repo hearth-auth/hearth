@@ -35,7 +35,7 @@
 
 ## 4. Conformance harness
 
-- [ ] 4.1 Write `sdks/conformance/scenarios.yaml` (token validation set plus client credentials; design Open Question 2)
+- [x] 4.1 Write `sdks/conformance/scenarios.yaml` (token validation set plus client credentials; design Open Question 2)
 - [ ] 4.2 Write a runner per SDK (`sdks/<sdk>/conformance/`) that prints one JSON result per scenario
 - [ ] 4.3 Write the driver (extend `scripts/sdk-smoke-local.sh`): boot `--dev`, bootstrap, mint tokens, run the runners, diff; a difference names the SDK and the scenario
 - [ ] 4.4 Add the harness as a CI job, required in the summary
