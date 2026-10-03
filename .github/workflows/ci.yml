@@ -7,7 +7,7 @@ name: CI
 #   filter ─┬─> quality        (Rust changes)
 #           ├─> proto-freshness (proto/ or generated SDK types — audit §4.8#8)
 #           ├─> ui             (UI changes — replaces ui-tests + ui-tests-exploratory)
-#           ├─> sdk-node       (sdks/node changes — folded from node-sdk-ci.yml)
+#           ├─> sdk-*          (one job per supported SDK: go, typescript, python, php)
 #           └─> sdk-conformance (any SDK / spec / script change — folded from sdk-conformance.yml)
 #
 # Downstream jobs gate on the `filter` job's outputs so doc-only PRs run
@@ -63,12 +63,9 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       ui: ${{ steps.filter.outputs.ui }}
-      sdks-node: ${{ steps.filter.outputs.sdks-node }}
       sdks-go: ${{ steps.filter.outputs.sdks-go }}
       sdks-python: ${{ steps.filter.outputs.sdks-python }}
-      sdks-rust: ${{ steps.filter.outputs.sdks-rust }}
       sdks-php: ${{ steps.filter.outputs.sdks-php }}
-      sdks-kotlin: ${{ steps.filter.outputs.sdks-kotlin }}
       sdks-typescript: ${{ steps.filter.outputs.sdks-typescript }}
       sdks-any: ${{ steps.filter.outputs.sdks-any }}
       proto: ${{ steps.filter.outputs.proto }}
@@ -141,10 +138,6 @@ jobs:
               - 'tests/ui/**'
               - 'Makefile'
               - '.github/workflows/ci.yml'
-            sdks-node:
-              - 'sdks/node/**'
-              - 'proto/**'
-              - '.github/workflows/ci.yml'
             # HEA-2171: one filter per SDK so every SDK suite is testable in CI.
             # The integration suites (go, typescript) additionally trigger on
             # 'src/protocol/**' — they build the hearth server and exercise its
@@ -164,19 +157,8 @@ jobs:
               - 'sdks/python/**'
               - 'proto/**'
               - '.github/workflows/ci.yml'
-            sdks-rust:
-              - 'sdks/rust/**'
-              - 'proto/**'
-              # sdks/rust has no rustfmt.toml of its own; `cargo fmt` in the
-              # sdk-rust job reads the repository's.
-              - 'rustfmt.toml'
-              - '.github/workflows/ci.yml'
             sdks-php:
               - 'sdks/php/**'
-              - 'proto/**'
-              - '.github/workflows/ci.yml'
-            sdks-kotlin:
-              - 'sdks/kotlin/**'
               - 'proto/**'
               - '.github/workflows/ci.yml'
             sdks-any:
@@ -910,61 +892,6 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-  # ── Node SDK matrix (folded from node-sdk-ci.yml) ────────────────────────────
-
-  sdk-node:
-    name: sdk-node (${{ matrix.node-version }}.x)
-    needs: filter
-    # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-node == 'true') || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: sdks/node
-
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: ["20", "22"]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Set up Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: "npm"
-          cache-dependency-path: sdks/node/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      # Tool versions come from package-lock.json (prettier is pinned exact).
-      - name: Lint (eslint)
-        run: npm run lint
-
-      - name: Format check (prettier)
-        run: npm run format:check
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Test with coverage (>=80% line gate)
-        run: npm test
-
-      - name: Upload coverage report
-        if: matrix.node-version == '20'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: node-sdk-coverage
-          path: sdks/node/coverage/
-          retention-days: 7
-
   # ── SDK spec conformance (folded from sdk-conformance.yml) ───────────────────
 
   sdk-conformance:
@@ -986,53 +913,23 @@ jobs:
 
   # ── Per-SDK test suites (HEA-2171) ───────────────────────────────────────────
   #
-  # Before HEA-2171 only the Node SDK ran its tests in CI, so a `createRealm`
-  # method the server 405s shipped in all seven SDKs and two integration suites
-  # sat red at HEAD unnoticed. Every SDK now runs its own suite here.
+  # Before HEA-2171 only one SDK ran its tests in CI, so a `createRealm`
+  # method the server 405s shipped in every SDK and two integration suites
+  # sat red at HEAD unnoticed. Every supported SDK (go, typescript, python,
+  # php) now runs its own suite here.
   #
   # Gating: every sdk-* job is in required-summary's `needs:` and results loop
   # (audit §4.12#12; scripts/check-required-summary-coverage.sh fails CI if one
-  # drops out), so a red SDK suite blocks the merge. That includes sdk-go,
-  # sdk-typescript and sdk-kotlin, which HEA-2171 first added as run-only.
+  # drops out), so a red SDK suite blocks the merge.
   # The PHP integration suite needs a live server and runs in sdk-smoke.yml.
   #
   # Lint (GA sweep 4): every SDK job also runs its language's linter and
   # formatter check, with the tool version pinned in the SDK's own manifest:
-  # rust rustfmt + clippy -D warnings, python ruff check + ruff format
-  # (pyproject dev extra), php phpstan (composer.lock), go golangci-lint
-  # (version below; config sdks/go/.golangci.yml), typescript/node eslint +
-  # prettier (package-lock.json). Lint steps run before the tests so a style
-  # failure is reported without waiting for a server build. Kotlin declares
-  # no linter (no ktlint/detekt in its Gradle build), so sdk-kotlin has none.
-
-  # Rust SDK — unit suite (client logic, no server). Gated. All features, so
-  # the tower/actix middleware modules and their tests are compiled and run.
-  sdk-rust:
-    name: sdk-rust
-    needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-rust == 'true') || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: clippy, rustfmt
-      # sdks/rust is its own workspace, so the root fmt/clippy gates never
-      # reach it. rustfmt picks up the repository's rustfmt.toml.
-      - name: cargo fmt --check
-        working-directory: sdks/rust
-        run: cargo fmt --check
-      - name: cargo clippy (all targets, all features)
-        working-directory: sdks/rust
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: cargo test (all features)
-        working-directory: sdks/rust
-        run: cargo test --all-features
+  # python ruff check + ruff format (pyproject dev extra), php phpstan
+  # (composer.lock), go golangci-lint (version below; config
+  # sdks/go/.golangci.yml), typescript eslint + prettier (package-lock.json).
+  # Lint steps run before the tests so a style failure is reported without
+  # waiting for a server build.
 
   # Python SDK — unit suite (respx-mocked). Gated.
   sdk-python:
@@ -1090,31 +987,6 @@ jobs:
       - name: composer test (unit)
         working-directory: sdks/php
         run: composer test
-
-  # Kotlin SDK — unit suite (MockWebServer). Gated.
-  sdk-kotlin:
-    name: sdk-kotlin
-    needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-kotlin == 'true') || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Set up JDK
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
-        with:
-          distribution: temurin
-          java-version: "17"
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947 # v4
-        with:
-          gradle-version: "8.10"
-      - name: gradle test
-        working-directory: sdks/kotlin
-        run: gradle test
 
   # Go SDK — integration suite; the tests build and boot the hearth server, so
   # Rust + protoc are provisioned. Gated.
@@ -1496,7 +1368,7 @@ jobs:
   # (paths-filter determined no changes in scope). It fails if any upstream job
   # failed or was cancelled.
   #
-  # Why: conditional matrix jobs (sdk-node) and conditional jobs (quality, ui,
+  # Why: conditional jobs (quality, ui, the sdk-* jobs,
   # sdk-conformance) only post individual check-run entries when they actually
   # execute. When paths-filter skips them, branch protection sees "Expected —
   # Waiting for status to be reported" for each individual check name forever.
@@ -1584,7 +1456,7 @@ jobs:
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, proto-freshness, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-kotlin, sdk-go, sdk-typescript, sdk-conformance, abuse-coverage, cluster-chaos, no-dev-endpoints, cargo-deny, msrv, unsafe-code, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
+    needs: [filter, quality, proto-freshness, ui, sdk-python, sdk-php, sdk-go, sdk-typescript, sdk-conformance, abuse-coverage, cluster-chaos, no-dev-endpoints, cargo-deny, msrv, unsafe-code, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -1595,11 +1467,8 @@ jobs:
           QUALITY: ${{ needs.quality.result }}
           PROTO_FRESHNESS: ${{ needs.proto-freshness.result }}
           UI: ${{ needs.ui.result }}
-          SDK_NODE: ${{ needs.sdk-node.result }}
-          SDK_RUST: ${{ needs.sdk-rust.result }}
           SDK_PYTHON: ${{ needs.sdk-python.result }}
           SDK_PHP: ${{ needs.sdk-php.result }}
-          SDK_KOTLIN: ${{ needs.sdk-kotlin.result }}
           SDK_GO: ${{ needs.sdk-go.result }}
           SDK_TYPESCRIPT: ${{ needs.sdk-typescript.result }}
           SDK_CONFORMANCE: ${{ needs.sdk-conformance.result }}
@@ -1615,14 +1484,14 @@ jobs:
           SECURITY: ${{ needs.security.result }}
           LOADTEST_SMOKE: ${{ needs.loadtest-smoke.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-kotlin=$SDK_KOTLIN sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE cluster-chaos=$CLUSTER_CHAOS no-dev-endpoints=$NO_DEV_ENDPOINTS cargo-deny=$CARGO_DENY msrv=$MSRV unsafe-code=$UNSAFE_CODE commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
+          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE cluster-chaos=$CLUSTER_CHAOS no-dev-endpoints=$NO_DEV_ENDPOINTS cargo-deny=$CARGO_DENY msrv=$MSRV unsafe-code=$UNSAFE_CODE commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
           # ALLOWLIST, not a denylist (production-readiness task 24.4). This
           # loop used to fail only on "failure" or "cancelled". That is
           # fail-open by construction: any result GitHub adds, and any empty
           # string from an expression that did not evaluate, would have been
           # read as "fine". `success` and `skipped` are the only two results
           # that may pass; everything else — including "" — blocks the merge.
-          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_KOTLIN" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$CLUSTER_CHAOS" "$NO_DEV_ENDPOINTS" "$CARGO_DENY" "$MSRV" "$UNSAFE_CODE" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
+          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_PYTHON" "$SDK_PHP" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$CLUSTER_CHAOS" "$NO_DEV_ENDPOINTS" "$CARGO_DENY" "$MSRV" "$UNSAFE_CODE" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
             case "$result" in
               success|skipped) ;;
               *)

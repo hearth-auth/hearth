@@ -1,5 +1,0 @@
-# Build and test output.
-dist/
-coverage/
-# CHANGELOG.md is written by semantic-release; prose Markdown is not linted.
-*.md

@@ -40,13 +40,16 @@ export async function GET(req: NextRequest) {
     maxAge: tokens.expires_in,
     path: "/",
   });
-  response.cookies.set("refresh_token", tokens.refresh_token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    maxAge: 60 * 60 * 24 * 7, // 7 days
-    path: "/",
-  });
+  // A refresh token is issued only when the client may use the refresh grant.
+  if (tokens.refresh_token) {
+    response.cookies.set("refresh_token", tokens.refresh_token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 60 * 60 * 24 * 7, // 7 days
+      path: "/",
+    });
+  }
 
   // Clean up PKCE cookies.
   response.cookies.delete("pkce_verifier");

@@ -1,3 +1,5 @@
+import { IntrospectionError } from "./errors.js";
+
 /** RFC 7662 §2.2 — result of a token introspection request. */
 export interface IntrospectionResult {
   /** Whether the token is currently active. */
@@ -48,7 +50,7 @@ export interface IntrospectionClientConfig {
  * Low-level RFC 7662 token introspection client.
  *
  * Results are never cached — per RFC 7662 §2.1, token state can change
- * at any time. Full error taxonomy will be added in §3.
+ * at any time.
  */
 export class IntrospectionClient {
   private readonly endpoint: string;
@@ -63,21 +65,42 @@ export class IntrospectionClient {
     this.httpTimeout = config.httpTimeout ?? 10_000;
   }
 
-  /** Introspect a token. Never cached per RFC 7662 §2.1. */
-  async introspect(token: string): Promise<IntrospectionResult> {
+  /**
+   * Introspect a token. Never cached per RFC 7662 §2.1.
+   *
+   * @param tokenTypeHint - Optional RFC 7662 `token_type_hint`.
+   * @throws {@link IntrospectionError} when the request fails, the endpoint
+   *   answers non-2xx, or the response is not JSON.
+   */
+  async introspect(
+    token: string,
+    tokenTypeHint?: "access_token" | "refresh_token",
+  ): Promise<IntrospectionResult> {
     const credentials = btoa(`${this.clientId}:${this.clientSecret}`);
-    const resp = await fetch(this.endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${credentials}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({ token }),
-      signal: AbortSignal.timeout(this.httpTimeout),
-    });
-    if (!resp.ok) {
-      throw new Error(`Introspection endpoint returned HTTP ${resp.status}`);
+    const body = new URLSearchParams({ token });
+    if (tokenTypeHint) body.set("token_type_hint", tokenTypeHint);
+
+    let resp: Response;
+    try {
+      resp = await fetch(this.endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${credentials}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body,
+        signal: AbortSignal.timeout(this.httpTimeout),
+      });
+    } catch (err) {
+      throw new IntrospectionError("Introspection request failed", err);
     }
-    return resp.json() as Promise<IntrospectionResult>;
+    if (!resp.ok) {
+      throw new IntrospectionError(`Introspection endpoint returned HTTP ${resp.status}`);
+    }
+    try {
+      return (await resp.json()) as IntrospectionResult;
+    } catch (err) {
+      throw new IntrospectionError("Introspection response is not valid JSON", err);
+    }
   }
 }

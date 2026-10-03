@@ -45,13 +45,17 @@ export interface DeviceAuthorizationResponse {
   interval: number;
 }
 
-/** Response from the token exchange endpoint. */
+/**
+ * Response from the token endpoint. `refresh_token` and `id_token` are present
+ * only for grants that issue them (a client-credentials grant issues neither).
+ */
 export interface TokenResponse {
   access_token: string;
-  id_token: string;
   token_type: string;
   expires_in: number;
-  refresh_token: string;
+  refresh_token?: string;
+  id_token?: string;
+  scope?: string;
 }
 
 /** UserInfo response from the OIDC UserInfo endpoint. */
@@ -60,6 +64,53 @@ export interface UserInfoResponse {
   name?: string;
   email?: string;
   email_verified?: boolean;
+  preferred_username?: string;
+  /** Any other claim the server releases for the granted scopes. */
+  [claim: string]: unknown;
+}
+
+/** Options for `HearthClient.exchangeCode()`. */
+export interface ExchangeCodeOptions {
+  /** PKCE code verifier. Required when the authorization request sent a `code_challenge`. */
+  codeVerifier?: string;
+}
+
+/**
+ * Result of `HearthClient.beginLogin()`. Store `state` and `codeVerifier` in
+ * the server-side session, then redirect the browser to `authorizationUrl`.
+ */
+export interface LoginBeginResult {
+  /** Full authorization URL to redirect the browser to. */
+  authorizationUrl: string;
+  /** CSRF value. Check it equals the `state` query parameter on the callback. */
+  state: string;
+  /** PKCE code verifier. Pass it to `completeLogin()` on the callback. */
+  codeVerifier: string;
+}
+
+/** Response from `GET /oauth/session-versions/snapshot` (RFC HEA-930). */
+export interface SvSnapshotResponse {
+  realm: string;
+  /** Sequence number to pass as `since` to the first delta call. */
+  current_seq: number;
+  /** Minimum accepted `sv` per session ID. */
+  versions: Record<string, number>;
+}
+
+/** One session-version bump in the delta feed (RFC HEA-930). */
+export interface SvDeltaEntry {
+  seq: number;
+  session_id: string;
+  min_sv: number;
+  bumped_at?: number;
+}
+
+/** Response from `GET /oauth/session-versions?since=<seq>` (RFC HEA-930). */
+export interface SvDeltaResponse {
+  realm: string;
+  /** Sequence number to pass as `since` to the next call. */
+  next_seq: number;
+  deltas: SvDeltaEntry[];
 }
 
 // ── WebAuthn / passkeys (C-21) ──────────────────────────────────────────────
@@ -186,6 +237,14 @@ export interface UpdateRealmParams {
   name?: string;
   status?: string;
   config?: Record<string, unknown>;
+}
+
+/** Pagination options for admin list calls. */
+export interface PageOptions {
+  /** Maximum number of items to return. */
+  limit?: number;
+  /** `next_cursor` from the previous page. */
+  cursor?: string;
 }
 
 /** Paginated list response. */

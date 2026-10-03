@@ -655,7 +655,7 @@ SDKs are the primary interface between application developers and Hearth. They a
 
 - SDK types SHOULD be generated from the `.proto` contract definitions (see [Section 4.1](#41-protobuf-as-single-source-of-truth)), ensuring type safety and eliminating drift between server and client.
 - The server API MUST be SDK-friendly: consistent naming, predictable error shapes, pagination patterns, and idempotency keys where appropriate.
-- SDKs MUST be idiomatic to their target language — a Go SDK feels like Go, not like a Rust SDK ported to Go.
+- SDKs MUST be idiomatic to their target language — a Go SDK feels like Go, not like a TypeScript SDK ported to Go.
 
 SDK priority order is defined in [VISION.md Section 8.2](../vision/VISION.md).
 

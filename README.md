@@ -1006,19 +1006,16 @@ Per-realm variants of the core OAuth/OIDC endpoints are available at `/realms/{r
 
 ## Client SDKs
 
-Seven first-party SDKs live under [`sdks/`](sdks): TypeScript, Node.js, Go, Python, Rust,
-PHP and Kotlin. Registry status, checked 2026-09-28 — not every SDK is installable from its
+Four first-party SDKs live under [`sdks/`](sdks): TypeScript (browser and Node.js, including
+Express, Fastify and Next.js helpers), Go, Python and PHP. Registry status, checked 2026-09-28 — not every SDK is installable from its
 registry yet, and the published versions lag the source tree:
 
 | SDK | Package | Registry status |
 |---|---|---|
 | TypeScript | `@hearth-auth/sdk` | npm, **1.6.2** |
-| Node.js | `@hearth-auth/node` | npm, **1.6.2** |
 | Go | `github.com/hearth-auth/hearth/sdks/go` | Go module proxy, **v1.6.11** |
 | Python | `hearth-sdk` | PyPI, **1.6.8** |
-| Rust | `hearth-sdk` | crates.io, **1.6.11** |
 | PHP | `hearth-auth/php-sdk` | Packagist, **`dev-main` only** (no tagged release) |
-| Kotlin / JVM | `io.hearth:hearth-core` (+ `hearth-ktor`, `hearth-spring`) | **not published** — build from source |
 
 See [docs/guides/sdks/overview.md](docs/guides/sdks/overview.md) for per-SDK install notes.
 Two examples:

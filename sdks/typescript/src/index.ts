@@ -14,7 +14,7 @@ export type {
   StartLoginOptions,
   StartLoginResult,
 } from "./pkce.js";
-export type { HearthClientConfig } from "./hearth-client.js";
+export type { HearthClientConfig, OidcConfiguration } from "./hearth-client.js";
 
 // Lower-level primitives (JWKS and introspection).
 export { JwksClient } from "./jwks-client.js";
@@ -39,11 +39,29 @@ export {
   TokenInvalidError,
   TokenIssuerError,
   TokenNotYetValidError,
+  TokenVerificationError,
 } from "./errors.js";
 
-// Mode-aware middleware (HEA-923).
-export { requirePermission } from "./middleware.js";
-export type { PermissionChecker, RequirePermissionOptions } from "./middleware.js";
+// Mode-aware permission checks and request middleware (HEA-923).
+// Next.js helpers live at `@hearth-auth/sdk/nextjs` and `@hearth-auth/sdk/nextjs/edge`.
+export {
+  assertMiddlewareOptions,
+  authenticateRequest,
+  hearthFastifyHook,
+  hearthMiddleware,
+  requirePermission,
+} from "./middleware.js";
+export type {
+  FastifyReplyLike,
+  FastifyRequestLike,
+  HearthAuthErrorBody,
+  HearthAuthResult,
+  HearthMiddlewareOptions,
+  MiddlewareRequest,
+  MiddlewareResponse,
+  PermissionChecker,
+  RequirePermissionOptions,
+} from "./middleware.js";
 
 // Claims API (spec §4).
 export { Claims } from "./claims.js";
@@ -70,16 +88,22 @@ export type {
   AuthorizeResponse,
   BootstrapResponse,
   CreateUserParams,
+  ExchangeCodeOptions,
   JwksDocument,
   JsonWebKey,
+  LoginBeginResult,
   MePermissionsResponse,
   OAuthClient,
+  PageOptions,
   PageResponse,
   RegisterClientParams,
   Realm,
   SessionVersionConfig,
   StepUpAssertion,
   StepUpProof,
+  SvDeltaEntry,
+  SvDeltaResponse,
+  SvSnapshotResponse,
   TokenExchangeParams,
   DeviceAuthorizationResponse,
   TokenResponse,

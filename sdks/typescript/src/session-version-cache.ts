@@ -1,24 +1,5 @@
-import type { SessionVersionConfig } from "./types.js";
+import type { SessionVersionConfig, SvDeltaResponse, SvSnapshotResponse } from "./types.js";
 import { SessionVersionCacheStaleError, SessionVersionRevokedError } from "./errors.js";
-
-interface SnapshotResponse {
-  realm: string;
-  current_seq: number;
-  versions: Record<string, number>;
-}
-
-interface DeltaEntry {
-  seq: number;
-  session_id: string;
-  min_sv: number;
-  bumped_at: number;
-}
-
-interface DeltaFeedResponse {
-  realm: string;
-  next_seq: number;
-  deltas: DeltaEntry[];
-}
 
 /**
  * Client-side cache of per-session minimum accepted `sv` values.
@@ -115,7 +96,7 @@ export class SessionVersionCache {
     if (!resp.ok) {
       throw new Error(`SV snapshot fetch failed: HTTP ${resp.status}`);
     }
-    const data = (await resp.json()) as SnapshotResponse;
+    const data = (await resp.json()) as SvSnapshotResponse;
     this.versions.clear();
     for (const [sid, minSv] of Object.entries(data.versions)) {
       this.versions.set(sid, BigInt(minSv));
@@ -151,7 +132,7 @@ export class SessionVersionCache {
     if (!resp.ok) {
       throw new Error(`SV delta poll failed: HTTP ${resp.status}`);
     }
-    const data = (await resp.json()) as DeltaFeedResponse;
+    const data = (await resp.json()) as SvDeltaResponse;
     for (const delta of data.deltas) {
       this.versions.set(delta.session_id, BigInt(delta.min_sv));
     }

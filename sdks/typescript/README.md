@@ -14,7 +14,13 @@ yarn add @hearth-auth/sdk
 pnpm add @hearth-auth/sdk
 ```
 
-**Peer dependencies:** React (`>=17 <20`) is optional. Only required for the `HearthProvider` / `useHasPermission` hooks.
+**Peer dependencies:** both optional. React (`>=17 <20`) is needed only for the `HearthProvider` / `useHasPermission` hooks. Next.js (`>=14`) is needed only if you import `@hearth-auth/sdk/nextjs` or `@hearth-auth/sdk/nextjs/edge`.
+
+| Import path | What it gives you |
+|---|---|
+| `@hearth-auth/sdk` | `HearthClient`, token verification, OAuth flows, Express/Fastify middleware, admin client, React hooks, browser auth |
+| `@hearth-auth/sdk/nextjs` | `withHearthAuth` (Pages Router) and `getHearthClaims` (App Router Route Handlers) |
+| `@hearth-auth/sdk/nextjs/edge` | `hearthEdgeMiddleware` for `middleware.ts` on the Edge Runtime |
 
 ---
 
@@ -23,11 +29,17 @@ pnpm add @hearth-auth/sdk
 ```typescript
 import { createHearth, HearthClient } from "@hearth-auth/sdk";
 
-// Low-level HTTP client — auth flows, token exchange, admin ops
+// Server-side client: discovery, token verification, OAuth flows
 const client = new HearthClient({
-  baseUrl: "https://hearth.example.com",
+  issuerUrl: "https://hearth.example.com",
+  clientId: "<client-id>",
+  clientSecret: "<client-secret>", // confidential clients only
   realmId: "<your-realm-id>",
 });
+
+const claims = await client.verifyToken(accessToken); // throws on a bad token
+claims.subject();
+claims.hasPermission("docs.write");
 
 // RBAC facade — local, synchronous permission checks from the JWT
 const hearth = createHearth({
@@ -37,56 +49,62 @@ const hearth = createHearth({
 });
 ```
 
-`HearthClient` is for server-side or client-side HTTP operations (token exchange, admin CRUD, JWKS). `createHearth` gives you a zero-network RBAC facade that reads claims from the JWT in memory.
+`HearthClient` reads every endpoint URL from `{issuerUrl}/.well-known/openid-configuration` on first use and caches it. `httpTimeout` (default 10 000 ms) applies to every request it makes. Call `client.invalidateCache()` to drop the cached discovery document, JWKS and introspection client.
+
+`createHearth` gives you a zero-network RBAC facade that reads claims from the JWT in memory.
 
 ---
 
-## Auth code flow (with PKCE)
+## Server-side login (authorization code with PKCE)
 
-PKCE is the secure default for every OAuth authorization code flow — required for public clients, recommended for confidential clients.
+`beginLogin` builds the authorization URL with a fresh PKCE verifier and `state`. Keep both in your server-side session; on the callback, check `state` and call `completeLogin`.
 
 ```typescript
-import {
-  HearthApiClient,
-  generateCodeVerifier,
-  generateCodeChallenge,
-} from "@hearth-auth/sdk";
+// GET /login
+const { authorizationUrl, state, codeVerifier } = await client.beginLogin(
+  "https://app.example.com/callback",
+  "openid profile email", // default: "openid"
+);
+session.oauth = { state, codeVerifier };
+res.redirect(authorizationUrl);
 
-const client = new HearthApiClient({
-  baseUrl: "https://hearth.example.com",
-  realmId: "<your-realm-id>",
-});
-
-// 1. Generate PKCE pair using the SDK helper (works in Node.js 19+ and browsers)
-const codeVerifier = generateCodeVerifier();
-const codeChallenge = await generateCodeChallenge(codeVerifier);
-
-// 2. Start the authorization request
-const { code } = await client.authorize({
-  clientId: "<client-id>",
-  redirectUri: "https://app.example.com/callback",
-  scope: "openid profile email",
-  state: crypto.randomUUID(), // CSRF token
-  userId: "<authenticated-user-uuid>",    // resolved user on your backend
-  codeChallenge,
-  codeChallengeMethod: "S256",
-});
-
-// 3. Exchange the code for tokens
-const tokens = await client.exchangeCode({
-  clientId: "<client-id>",
-  code,
-  redirectUri: "https://app.example.com/callback",
-  codeVerifier,
-});
-
-// tokens.access_token  — short-lived JWT (check tokens.expires_in)
-// tokens.id_token      — OIDC identity token
-// tokens.refresh_token — rotate with refreshTokens()
-
-// 4. Refresh before expiry
-const refreshed = await client.refreshTokens("<client-id>", tokens.refresh_token);
+// GET /callback
+const url = new URL(req.url, "https://app.example.com");
+if (url.searchParams.get("state") !== session.oauth.state) throw new Error("state mismatch");
+const tokens = await client.completeLogin(
+  url.searchParams.get("code")!,
+  session.oauth.codeVerifier,
+  "https://app.example.com/callback",
+);
+// tokens.access_token, tokens.expires_in, tokens.refresh_token?, tokens.id_token?
 ```
+
+`completeLogin(code, verifier, redirectUri)` is `exchangeCode(code, redirectUri, { codeVerifier })`. Call `exchangeCode` directly when you built the authorization URL yourself.
+
+Both send `client_id` in the form body, plus `client_secret` when one is configured. A public client leaves `clientSecret` unset and relies on PKCE.
+
+### Refreshing tokens
+
+```typescript
+const refreshed = await client.refreshTokens(tokens.refresh_token!);
+// Store refreshed.refresh_token when present — Hearth rotates refresh tokens.
+```
+
+Pass a second argument to request a narrower scope.
+
+### Other grants
+
+| Method | Grant |
+|---|---|
+| `clientCredentials(scope?)` | Client credentials (RFC 6749 §4.4) |
+| `startDeviceFlow(scope?)`, `pollDeviceToken(deviceCode, interval)` | Device authorization (RFC 8628) |
+| `requestMagicLink(email)`, `exchangeMagicLink(token)` | Passwordless magic link (needs `realmId`) |
+
+Every token-endpoint failure throws `OAuthFlowError` with `statusCode` and the OAuth `errorCode` (for example `invalid_grant`). A network failure or timeout has `statusCode` 0.
+
+### Browser apps
+
+A single-page app has no server session to hold the verifier. Use `createHearthAuth`, or build the flow from `generateCodeVerifier`, `generateCodeChallenge` and `buildAuthorizationUrl`.
 
 ---
 
@@ -206,56 +224,64 @@ All hooks return `false` when no `HearthProvider` is mounted, making them safe t
 
 ---
 
-## UserInfo endpoint
+## UserInfo and live permissions
 
-Returns OIDC claims filtered by the granted scopes. `sub` is always present; `name` requires `profile` scope; `email` and `email_verified` require `email` scope.
+`userinfo` calls the discovered `userinfo_endpoint`. It returns OIDC claims filtered by the granted scopes: `sub` is always present; `name` needs the `profile` scope; `email` and `email_verified` need `email`.
 
 ```typescript
 const info = await client.userinfo(accessToken);
-// info.sub            — stable user identifier
-// info.name           — display name (if profile scope granted)
-// info.email          — email address (if email scope granted)
-// info.email_verified — boolean (if email scope granted)
+// info.sub, info.name?, info.email?, info.email_verified?, plus any other released claim
 ```
+
+`mePermissions` calls `GET /v1/me/permissions` and returns the user's roles, groups and permissions as they are now on the server, including changes made after the token was issued. It needs `realmId`.
+
+```typescript
+const { roles, groups, permissions } = await client.mePermissions(accessToken);
+```
+
+### Session-version feed
+
+`svSnapshot` and `svDelta` read the session-version feed (RFC HEA-930) that lets a resource server see session revocations without introspecting every token. Both need `realmId` and a service token with the `hearth.sv_feed` scope.
+
+```typescript
+const snap = await client.svSnapshot(serviceToken); // { current_seq, versions: { [sessionId]: minSv } }
+const delta = await client.svDelta(serviceToken, snap.current_seq, 500); // null when nothing changed
+```
+
+`SessionVersionCache` runs this loop for you and checks a token's `sv` claim without a network call.
 
 ---
 
 ## JWKS and discovery
 
 ```typescript
-// Retrieve the realm's public signing keys (for local JWT verification)
-const jwks = await client.jwks();
-// jwks.keys — array of JWK entries (kty, crv, x, kid, use, alg)
+// The discovery document (cached after the first call)
+const discovery = await client.discover();
 
-// Retrieve the OIDC discovery document
-const discovery = await client.discovery();
-// Standard OIDC Core 1.0 metadata
+// Verify an access token: EdDSA signature against the realm JWKS, then exp,
+// nbf, iss (must equal issuerUrl) and aud (must contain clientId, when set).
+const claims = await client.verifyToken(accessToken);
+claims.subject();          // sub
+claims.scopes();           // scope split into an array
+claims.requiredActions();  // required_actions, [] when absent
+claims.raw();              // the whole payload, frozen
 ```
 
-Use the JWKS with a library like `jose` to verify access tokens on your backend:
-
-```typescript
-import { createRemoteJWKSet, jwtVerify } from "jose";
-
-const JWKS = createRemoteJWKSet(
-  new URL("https://hearth.example.com/jwks"),
-);
-
-const { payload } = await jwtVerify(accessToken, JWKS, {
-  issuer: "https://hearth.example.com",
-  audience: "<client-id>",
-});
-```
+The JWKS is cached; on an unknown `kid` it is fetched again once before the token is refused. `client.jwksClient()` returns the underlying `JwksClient` if you need it directly.
 
 ---
 
 ## Admin API
 
-`AdminClient` wraps the `/admin/*` endpoints. Obtain one from any `HearthClient` instance using a bearer token that carries the `hearth.admin` permission.
+`AdminClient` wraps the `/admin/*` endpoints. Construct it with a bearer token that carries the `hearth.admin` permission. Empty arguments throw `ConfigurationError`.
 
 ```typescript
-const admin = client.admin(accessToken);
+import { AdminClient } from "@hearth-auth/sdk";
+
+const admin = new AdminClient("https://hearth.example.com", "<realm-id>", accessToken);
 ```
+
+Every list method takes `{ limit?, cursor? }` and returns `{ items, next_cursor }`. Pass `next_cursor` back as `cursor` until it is `null`. Every non-2xx response throws `HearthError` with `status` and `body` (parsed JSON, or the raw text when the body is not JSON).
 
 ### Users
 
@@ -287,45 +313,56 @@ await admin.deleteUser("<user-id>");
 
 ```typescript
 // Realms are provisioned via hearth.yaml, not the admin API — there is no
-// createRealm() (the server returns 405). Only read paths are exposed.
+// createRealm() or updateRealm() (the server returns 405).
 
 // List realms (paginated)
 const page = await admin.listRealms({ limit: 20 });
-// page.items: Realm[], page.next_cursor: string | null
 
 // Get a realm by ID
 const realm = await admin.getRealm("<realm-id>");
-
-// Update a realm
-const updated = await admin.updateRealm("<realm-id>", {
-  status: "suspended",
-});
 
 // Delete a realm (cascades users, sessions, clients, assignments)
 await admin.deleteRealm("<realm-id>");
 ```
 
+### Clients, roles and groups
+
+`createClient`, `getClient`, `updateClient`, `regenerateClientSecret`, `deleteClient`, `listClients`, and the same create/get/update/delete/list set for roles and groups.
+
 ---
 
 ## Error handling
 
-All methods throw `HearthError` on non-2xx responses.
+Errors raised by the SDK itself extend `HearthSdkError`:
+
+| Error | When |
+|---|---|
+| `ConfigurationError` | A required setting is missing (`clientId`, `realmId`, a discovery endpoint) |
+| `DiscoveryError` | The discovery document cannot be fetched or is invalid |
+| `JWKSFetchError` | The JWKS cannot be fetched |
+| `TokenVerificationError` | Base class of every token failure below |
+| `TokenExpiredError`, `TokenNotYetValidError` | `exp` / `nbf` outside the clock-skew window |
+| `TokenInvalidError` | Bad signature, wrong algorithm, malformed JWT |
+| `TokenIssuerError`, `TokenAudienceError` | `iss` / `aud` mismatch |
+| `IntrospectionError` | The introspection request failed or returned non-JSON |
+| `OAuthFlowError` | A token, userinfo, permissions or session-version request failed (`statusCode`, `errorCode`) |
+| `AuthorizationModeMismatchError` | Introspection echoed a mode other than `expectedMode` |
+| `RequiredActionError`, `SessionVersionRevokedError`, `SessionVersionCacheStaleError` | See their doc comments |
+
+Any JWT-shaped string in an error message is replaced with `[redacted]`, so logging an error does not log a token.
+
+`AdminClient` and `HearthApiClient` throw `HearthError` on a non-2xx response: `status` is the HTTP status code, `body` the parsed JSON (or raw text).
 
 ```typescript
-import { HearthClient, HearthError } from "@hearth-auth/sdk";
+import { HearthError, OAuthFlowError, TokenVerificationError } from "@hearth-auth/sdk";
 
 try {
-  const tokens = await client.exchangeCode({ ... });
+  await client.verifyToken(token);
 } catch (err) {
-  if (err instanceof HearthError) {
-    console.error(`HTTP ${err.status}:`, err.body);
-  } else {
-    throw err;
-  }
+  if (err instanceof TokenVerificationError) return res.status(401).end();
+  throw err;
 }
 ```
-
-`HearthError.status` is the HTTP status code. `HearthError.body` is the parsed JSON response body (or the raw string if parsing fails).
 
 ---
 
@@ -334,17 +371,13 @@ try {
 The bootstrap endpoint creates a realm, admin user, session, assigns the `realm.admin` role, and returns tokens. It is available only when Hearth is running with `--dev`. In production, it returns 404.
 
 ```typescript
-import { HearthClient } from "@hearth-auth/sdk";
+import { AdminClient, HearthApiClient } from "@hearth-auth/sdk";
 
 const { realm_id, user_id, access_token, refresh_token } =
-  await HearthClient.bootstrap("http://127.0.0.1:8420");
+  await HearthApiClient.bootstrap("http://127.0.0.1:8420");
 
 // Use realm_id and access_token to make subsequent requests
-const client = new HearthClient({
-  baseUrl: "http://127.0.0.1:8420",
-  realmId: realm_id,
-});
-const admin = client.admin(access_token);
+const admin = new AdminClient("http://127.0.0.1:8420", realm_id, access_token);
 ```
 
 ---
@@ -354,8 +387,14 @@ const admin = client.admin(access_token);
 ```typescript
 // HearthClientConfig — constructor argument for HearthClient
 interface HearthClientConfig {
-  baseUrl: string;   // Hearth server base URL, e.g. "https://hearth.example.com"
-  realmId: string;   // Realm UUID to scope all requests to
+  issuerUrl: string;            // e.g. "https://hearth.example.com"; endpoints are discovered from it
+  clientId?: string;            // needed for login flows, introspection; pins `aud` on verifyToken
+  clientSecret?: string;        // confidential clients only
+  realmId?: string;             // sent as X-Realm-ID; needed by authorize, mePermissions, sv feed, magic link
+  httpTimeout?: number;         // ms, default 10 000
+  jwksTtl?: number;             // ms, default 5 minutes
+  introspectionEndpoint?: string;
+  expectedMode?: "embedded" | "introspection" | "decision";
 }
 
 // HearthOptions — argument to createHearth()
@@ -398,10 +437,18 @@ interface TokenExchangeParams {
 // TokenResponse
 interface TokenResponse {
   access_token: string;
-  id_token: string;
-  token_type: string;   // "Bearer"
-  expires_in: number;   // seconds
-  refresh_token: string;
+  token_type: string;      // "Bearer"
+  expires_in: number;      // seconds
+  refresh_token?: string;  // absent for client credentials
+  id_token?: string;       // present when `openid` was granted
+  scope?: string;
+}
+
+// LoginBeginResult — returned by beginLogin()
+interface LoginBeginResult {
+  authorizationUrl: string;
+  state: string;
+  codeVerifier: string;
 }
 
 // UserInfoResponse
@@ -410,6 +457,8 @@ interface UserInfoResponse {
   name?: string;
   email?: string;
   email_verified?: boolean;
+  preferred_username?: string;
+  [claim: string]: unknown;
 }
 
 // MePermissionsResponse — from GET /v1/me/permissions
@@ -562,6 +611,123 @@ const allowed = await check(accessToken);
 > whether `permissions` is present in the JWT. The `mode` must always be set explicitly.
 > Absence of a `permissions` claim in `embedded` mode means the user has no permissions, not
 > that the SDK should try a network call.
+
+---
+
+## Server middleware (Express and Fastify)
+
+`hearthMiddleware` and `hearthFastifyHook` verify the bearer token on each request, apply optional scope, role and permission guards, and attach the verified `Claims`. Both take the same options:
+
+| Option | Meaning |
+|---|---|
+| `client` | The `HearthClient` to verify with. Create one per process so the JWKS cache is shared. |
+| `mode` | `"embedded"`, `"introspection"` or `"decision"`. Default: `client.expectedMode`, then `"embedded"`. |
+| `required` | Default `true`. When `false`, a request with no token or a token that does not verify goes through without claims. |
+| `requiredScope`, `requiredRole` | Checked against the verified JWT in every mode. |
+| `requiredPermission` | Checked per `mode` (see below). |
+| `organizationId`, `resource` | Sent with the decision-mode `POST /oauth/authorize` call. |
+
+```typescript
+import express from "express";
+import { HearthClient, hearthMiddleware } from "@hearth-auth/sdk";
+
+const client = new HearthClient({ issuerUrl: "https://hearth.example.com", clientId: "my-api" });
+const app = express();
+
+app.get("/docs", hearthMiddleware({ client, requiredPermission: "docs.read" }), (req, res) => {
+  res.json({ sub: req.hearthClaims!.subject() });
+});
+```
+
+```typescript
+import Fastify from "fastify";
+import { hearthFastifyHook } from "@hearth-auth/sdk";
+
+const app = Fastify();
+app.addHook("onRequest", hearthFastifyHook({ client, requiredRole: "editor" }));
+// request.hearthClaims is set in route handlers
+```
+
+Responses:
+
+| Situation | Status |
+|---|---|
+| No bearer token (with `required`), or the token does not verify | 401 |
+| `token_type` is `required_action` (even when `required` is `false`) | 401 |
+| Introspection mode: the token is no longer active | 401 |
+| Missing scope, role or permission; decision mode denied; introspection failed or echoed another mode | 403 |
+
+Every 401 carries `WWW-Authenticate: Bearer realm="hearth"`. Bodies are JSON: `{ "error": "unauthorized" | "forbidden", "error_description": "..." }`.
+
+How `requiredPermission` is checked:
+
+- **embedded** — from the `permissions` claim of the verified JWT. No network call. A token without the claim has no permissions; the middleware never falls back to another mode.
+- **introspection** — from the live `permissions` returned by `POST /introspect`. Needs `clientId` and `clientSecret` on the client.
+- **decision** — `POST /oauth/authorize` decides; the JWT claim is ignored. Needs `realmId` on the client.
+
+A client that cannot serve the mode makes the factory throw `ConfigurationError` at startup, not on the first request.
+
+For another framework, call `authenticateRequest(authorizationHeader, options)`. It returns `{ ok: true, claims }` or `{ ok: false, status, headers, body }` for you to send.
+
+---
+
+## Next.js
+
+### Pages Router API routes
+
+```typescript
+// pages/api/profile.ts
+import { withHearthAuth } from "@hearth-auth/sdk/nextjs";
+import { hearth } from "../../lib/hearth"; // a module-scope HearthClient
+
+export default withHearthAuth(
+  (req, res) => {
+    res.json({ sub: req.hearthClaims!.subject() });
+  },
+  { client: hearth, requiredPermission: "profile.read" },
+);
+```
+
+`withHearthAuth` takes the same options as `hearthMiddleware`. On a 401 or 403 the handler is not called.
+
+### App Router Route Handlers
+
+```typescript
+// app/api/profile/route.ts
+import { NextResponse } from "next/server";
+import { getHearthClaims } from "@hearth-auth/sdk/nextjs";
+import { hearth } from "@/lib/hearth";
+
+export async function GET(request: Request) {
+  const claims = await getHearthClaims(request, hearth);
+  if (!claims) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  return NextResponse.json({ sub: claims.subject() });
+}
+```
+
+`getHearthClaims` returns `null` when there is no bearer token, the token does not verify, or it is a `required_action` token.
+
+### `middleware.ts` (Edge Runtime)
+
+```typescript
+// middleware.ts
+import { NextResponse, type NextRequest } from "next/server";
+import { HearthClient } from "@hearth-auth/sdk";
+import { hearthEdgeMiddleware } from "@hearth-auth/sdk/nextjs/edge";
+
+const guard = hearthEdgeMiddleware({
+  client: new HearthClient({ issuerUrl: process.env.HEARTH_ISSUER_URL! }),
+  requiredScope: "api",
+});
+
+export async function middleware(request: NextRequest) {
+  return (await guard(request)) ?? NextResponse.next();
+}
+
+export const config = { matcher: ["/api/:path*"] };
+```
+
+The guard resolves to `undefined` when the request may proceed, or to a 401/403 JSON `Response`. It uses only `fetch` and Web Crypto, so it runs on the Edge Runtime. Create it at module scope so the discovery document and JWKS stay cached for the life of the isolate.
 
 ---
 

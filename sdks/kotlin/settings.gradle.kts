@@ -1,5 +1,0 @@
-rootProject.name = "hearth-kotlin-sdk"
-
-include(":hearth-core")
-include(":hearth-spring")
-include(":hearth-ktor")

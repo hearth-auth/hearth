@@ -105,10 +105,6 @@ signing uses `ring`).
 Advisory exceptions for SDK and tooling lockfiles live in [`osv-scanner.toml`](osv-scanner.toml),
 each with its rationale.
 
-| CVE / Advisory | Affected crate / package | Justification |
-|---|---|---|
-| RUSTSEC-2023-0071 | `rsa`, **Rust SDK only** (`sdks/rust/Cargo.lock`, via `jsonwebtoken`'s `rust_crypto` backend and a test-only dependency) | Marvin Attack timing side-channel in PKCS#1 v1.5 decryption. The Rust SDK performs no RSA decryption. No patched `rsa` release exists. |
-
 ## Encryption at Rest
 
 Encryption at rest is **active** in Hearth 1.0. All data written to disk — WAL records and SST file sections — is encrypted using a three-tier key hierarchy:

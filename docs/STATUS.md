@@ -101,13 +101,13 @@
 
 | SDK | Status | Location |
 |-----|--------|----------|
-| TypeScript / browser | ✅ Shipped | `sdks/typescript/` |
-| Node.js | ✅ Shipped | `sdks/node/` |
+| TypeScript (browser, Node.js server, Next.js) | ✅ Shipped | `sdks/typescript/` |
 | Go | ✅ Shipped | `sdks/go/` |
 | PHP | ✅ Shipped | `sdks/php/` |
 | Python | ✅ Shipped | `sdks/python/` |
-| Rust | ✅ Shipped | `sdks/rust/` |
-| Kotlin / JVM | ✅ Shipped | `sdks/kotlin/` |
+
+The Node.js SDK (`@hearth-auth/node`) was folded into `@hearth-auth/sdk`. The Rust and Kotlin
+SDKs were removed in the 2026-10 scope trim.
 
 ---
 

@@ -7,13 +7,10 @@
 # that hoisting/override resolution breaks the root install. The repo does not
 # use pnpm; this file is purely a discovery manifest.
 packages:
-  - "sdks/node"
   - "sdks/typescript"
   - "sdks/go"
-  - "sdks/rust"
   - "sdks/python"
   - "sdks/php"
-  - "sdks/kotlin"
 allowBuilds:
   better-sqlite3: false
   context-mode: false

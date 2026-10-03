@@ -49,11 +49,8 @@ PUBLISH_WORKFLOWS=(
     docker.yml                # ghcr.io/hearth-auth/hearth container image
     helm.yml                  # ghcr.io/hearth-auth/charts/hearth OCI chart
     sdk-publish-go.yml        # Go module proxy (tag-driven)
-    sdk-publish-kotlin.yml    # Maven Central
-    sdk-publish-node.yml      # npm
     sdk-publish-php.yml       # Packagist (tag-driven)
     sdk-publish-python.yml    # PyPI
-    sdk-publish-rust.yml      # crates.io
     sdk-publish-typescript.yml # npm
     semantic-release.yml      # creates the Release objects and pushes every tag
 )

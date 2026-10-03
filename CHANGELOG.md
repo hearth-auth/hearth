@@ -105,6 +105,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   removed key stops startup with a named error. The rate limits, lockout backoff, request
   shaper, distributed-attack detector, tenant CIDR policy, CAPTCHA challenge and outbound caps
   stay.
+- **BREAKING: the Kotlin, Rust and Node.js SDKs are removed.** Hearth supports four SDKs:
+  TypeScript (`@hearth-auth/sdk`), Go, Python and PHP. The Node.js SDK's features (Express and
+  Fastify middleware, Next.js helpers, the server-side OAuth flows) moved into
+  `@hearth-auth/sdk`; see `### Changed`. `@hearth-auth/node` and the crates.io `hearth-sdk`
+  get no further releases, and the Kotlin SDK was never published. Their CI jobs, publish
+  workflows and guides are gone.
 
 ### Security
 - **`GET /admin/users/{id}/effective-permissions?org_id=` no longer reports a suspended
@@ -154,6 +160,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   gRPC keys, `sms`, `security.risk_scorer` and the four SMS shield caps.
 - Backups no longer contain `saml_service_providers.ndjson`; an archive that does is refused as
   containing an unrecognized member.
+- **BREAKING (SDK): `@hearth-auth/sdk` absorbs the Node.js SDK.** One TypeScript package now
+  serves the browser and Node.js:
+  - `HearthClient` gains `exchangeCode`, `refreshTokens`, `beginLogin`/`completeLogin`,
+    `userinfo`, `mePermissions`, `svSnapshot`, `svDelta` and `invalidateCache`.
+    `mePermissions`, `svSnapshot` and `svDelta` send `X-Realm-ID`, so they need `realmId`.
+  - Express `hearthMiddleware` and `hearthFastifyHook` take a `HearthClient` and a `mode`, and
+    put the claims on `req.hearthClaims`. A token with pending required actions gets `401`.
+  - Next.js helpers: `@hearth-auth/sdk/nextjs` (`withHearthAuth`, `getHearthClaims`) and
+    `@hearth-auth/sdk/nextjs/edge` (`hearthEdgeMiddleware`). `next` and `react` are optional
+    peer dependencies.
+  - `Claims` gains `requiredActions()`, `raw()` and `notBefore()`. Every token failure extends
+    the new `TokenVerificationError`. `IntrospectionClient` throws `IntrospectionError`.
+  - Coming from `@hearth-auth/node`: `VerifiedToken` is `Claims`, `getHearthToken` is
+    `getHearthClaims`, and `generatePkce` is replaced by the existing PKCE helpers
+    (`generateCodeVerifier`, `generateCodeChallenge`).
 
 <!-- GA audit round 3 follow-ups, 2026-09-30 (branch feature/ga-sweep-4-2026-09-29). -->
 

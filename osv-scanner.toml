@@ -39,11 +39,6 @@
 # GHSA-g7r4-m6w7-qqqr suppressed `esbuild`, which is not installed in any
 # scanned lockfile. A suppression that matches nothing is coverage on paper.
 
-# guard: package=rsa lockfile=sdks/rust/Cargo.lock
-[[IgnoredVulns]]
-id = "RUSTSEC-2023-0071"
-reason = "Marvin Attack timing side-channel in the rsa crate. Scope correction (audit 2026-08-28 §4.12#15): the server does not link rsa at all — it is absent from the root Cargo.lock. rsa reaches exactly one scanned tree, sdks/rust/Cargo.lock, as a transitive dependency of jsonwebtoken. The advisory's only affected code path is PKCS#1 v1.5 decryption; the Rust SDK performs no RSA decryption, and Hearth signs Ed25519 only (CLAUDE.md: no HS256, no alg:none). No patched version of rsa is available; revisit when rsa 0.10+ lands in the jsonwebtoken dependency tree. Tracked in HEA-116."
-
 # guard: package=golang.org/x/crypto lockfile=sdks/go/go.mod
 [[IgnoredVulns]]
 id = "GO-2026-5932"

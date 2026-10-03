@@ -534,14 +534,12 @@ sdk-test:
 
 ## Run every SDK's linter and formatter check — the lint steps of CI's sdk-* jobs.
 ## Needs each SDK's dev dependencies installed (npm ci, composer install,
-## pip install -e '.[dev]') and golangci-lint v2.12.2 on PATH. Kotlin has none.
+## pip install -e '.[dev]') and golangci-lint v2.12.2 on PATH.
 sdk-lint:
-	cd sdks/rust && cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings
 	cd sdks/go && golangci-lint run ./...
 	cd sdks/python && ruff check . && ruff format --check .
 	cd sdks/php && composer analyse
 	cd sdks/typescript && npm run lint && npm run format:check
-	cd sdks/node && npm run lint && npm run format:check
 
 # ── CI Tiers ──────────────────────────────────────────
 
