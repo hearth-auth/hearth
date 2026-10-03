@@ -31,4 +31,4 @@ plugins:
     opt:
       - allow_merge=true
       - merge_file_name=openapi_proto_derived
-      - json_names_for_fields=true
+      - json_names_for_fields=false

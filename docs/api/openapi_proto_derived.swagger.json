@@ -99,7 +99,7 @@
         ]
       }
     },
-    "/admin/applications/{clientId}": {
+    "/admin/applications/{client_id}": {
       "get": {
         "operationId": "ApplicationAdminService_GetApplication",
         "responses": {
@@ -118,7 +118,7 @@
         },
         "parameters": [
           {
-            "name": "clientId",
+            "name": "client_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -146,7 +146,7 @@
         },
         "parameters": [
           {
-            "name": "clientId",
+            "name": "client_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -174,7 +174,7 @@
         },
         "parameters": [
           {
-            "name": "clientId",
+            "name": "client_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -193,7 +193,7 @@
         ]
       }
     },
-    "/admin/applications/{clientId}/regenerate-secret": {
+    "/admin/applications/{client_id}/regenerate-secret": {
       "post": {
         "summary": "Replaces a confidential client's secret with a new Hearth-generated one\n(256 bits from the OS CSPRNG, stored only as a hash). The new secret is\nreturned once, in the response's client_secret; the old one stops\nauthenticating at once. Refused for a public client. Audited.",
         "operationId": "ApplicationAdminService_RegenerateApplicationSecret",
@@ -213,7 +213,7 @@
         },
         "parameters": [
           {
-            "name": "clientId",
+            "name": "client_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -224,7 +224,7 @@
         ]
       }
     },
-    "/admin/assignments/{assignmentId}": {
+    "/admin/assignments/{assignment_id}": {
       "delete": {
         "operationId": "RbacAdminService_UnassignUserRole",
         "responses": {
@@ -243,19 +243,19 @@
         },
         "parameters": [
           {
-            "name": "assignmentId",
+            "name": "assignment_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
           },
           {
-            "name": "userId",
+            "name": "user_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -286,20 +286,20 @@
         },
         "parameters": [
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
           },
           {
-            "name": "startTime",
+            "name": "start_time",
             "in": "query",
             "required": false,
             "type": "string",
             "format": "int64"
           },
           {
-            "name": "endTime",
+            "name": "end_time",
             "in": "query",
             "required": false,
             "type": "string",
@@ -467,7 +467,7 @@
         },
         "parameters": [
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -521,7 +521,7 @@
         ]
       }
     },
-    "/admin/groups/{groupId}": {
+    "/admin/groups/{group_id}": {
       "get": {
         "operationId": "RbacAdminService_GetGroup",
         "responses": {
@@ -540,13 +540,13 @@
         },
         "parameters": [
           {
-            "name": "groupId",
+            "name": "group_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -574,13 +574,13 @@
         },
         "parameters": [
           {
-            "name": "groupId",
+            "name": "group_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -608,7 +608,7 @@
         },
         "parameters": [
           {
-            "name": "groupId",
+            "name": "group_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -627,7 +627,7 @@
         ]
       }
     },
-    "/admin/groups/{groupId}/members": {
+    "/admin/groups/{group_id}/members": {
       "get": {
         "operationId": "RbacAdminService_ListGroupMembers",
         "responses": {
@@ -646,13 +646,13 @@
         },
         "parameters": [
           {
-            "name": "groupId",
+            "name": "group_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -693,7 +693,7 @@
         },
         "parameters": [
           {
-            "name": "groupId",
+            "name": "group_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -712,7 +712,7 @@
         ]
       }
     },
-    "/admin/groups/{groupId}/members/{member.id}": {
+    "/admin/groups/{group_id}/members/{member.id}": {
       "delete": {
         "operationId": "RbacAdminService_RemoveGroupMember",
         "responses": {
@@ -731,7 +731,7 @@
         },
         "parameters": [
           {
-            "name": "groupId",
+            "name": "group_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -743,7 +743,7 @@
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -1010,7 +1010,7 @@
         },
         "parameters": [
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -1064,7 +1064,7 @@
         ]
       }
     },
-    "/admin/roles/{roleId}": {
+    "/admin/roles/{role_id}": {
       "get": {
         "operationId": "RbacAdminService_GetRole",
         "responses": {
@@ -1083,13 +1083,13 @@
         },
         "parameters": [
           {
-            "name": "roleId",
+            "name": "role_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -1117,13 +1117,13 @@
         },
         "parameters": [
           {
-            "name": "roleId",
+            "name": "role_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -1157,7 +1157,7 @@
         },
         "parameters": [
           {
-            "name": "roleId",
+            "name": "role_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -1339,7 +1339,7 @@
         ]
       }
     },
-    "/admin/users/{userId}/consents": {
+    "/admin/users/{user_id}/consents": {
       "get": {
         "summary": "List all active consents for a user.",
         "operationId": "RbacAdminService_ListUserConsents",
@@ -1359,13 +1359,13 @@
         },
         "parameters": [
           {
-            "name": "userId",
+            "name": "user_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -1376,7 +1376,7 @@
         ]
       }
     },
-    "/admin/users/{userId}/consents/{clientId}": {
+    "/admin/users/{user_id}/consents/{client_id}": {
       "delete": {
         "summary": "Revoke OAuth consent for a specific (user, client) pair.",
         "operationId": "RbacAdminService_RevokeConsent",
@@ -1396,19 +1396,19 @@
         },
         "parameters": [
           {
-            "name": "userId",
+            "name": "user_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "clientId",
+            "name": "client_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -1419,7 +1419,7 @@
         ]
       }
     },
-    "/admin/users/{userId}/effective-permissions": {
+    "/admin/users/{user_id}/effective-permissions": {
       "get": {
         "operationId": "RbacAdminService_ResolveEffectivePermissions",
         "responses": {
@@ -1438,19 +1438,19 @@
         },
         "parameters": [
           {
-            "name": "userId",
+            "name": "user_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
           },
           {
-            "name": "orgId",
+            "name": "org_id",
             "description": "optional; empty means realm-only",
             "in": "query",
             "required": false,
@@ -1469,7 +1469,7 @@
         ]
       }
     },
-    "/admin/users/{userId}/roles": {
+    "/admin/users/{user_id}/roles": {
       "get": {
         "operationId": "RbacAdminService_ListUserAssignments",
         "responses": {
@@ -1488,13 +1488,13 @@
         },
         "parameters": [
           {
-            "name": "userId",
+            "name": "user_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -1522,7 +1522,7 @@
         },
         "parameters": [
           {
-            "name": "userId",
+            "name": "user_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -1829,7 +1829,7 @@
         },
         "parameters": [
           {
-            "name": "ownerId",
+            "name": "owner_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -1903,7 +1903,7 @@
         ]
       }
     },
-    "/v1/agents/{agentId}/credentials": {
+    "/v1/agents/{agent_id}/credentials": {
       "get": {
         "operationId": "IdentityAdminService_ListAgentCredentials",
         "responses": {
@@ -1922,7 +1922,7 @@
         },
         "parameters": [
           {
-            "name": "agentId",
+            "name": "agent_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -1933,7 +1933,7 @@
         ]
       }
     },
-    "/v1/agents/{agentId}/credentials/keys": {
+    "/v1/agents/{agent_id}/credentials/keys": {
       "post": {
         "operationId": "IdentityAdminService_CreateAgentApiKey",
         "responses": {
@@ -1952,7 +1952,7 @@
         },
         "parameters": [
           {
-            "name": "agentId",
+            "name": "agent_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -1971,7 +1971,7 @@
         ]
       }
     },
-    "/v1/agents/{agentId}/credentials/{credentialId}": {
+    "/v1/agents/{agent_id}/credentials/{credential_id}": {
       "delete": {
         "operationId": "IdentityAdminService_RevokeAgentCredential",
         "responses": {
@@ -1990,13 +1990,13 @@
         },
         "parameters": [
           {
-            "name": "agentId",
+            "name": "agent_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "credentialId",
+            "name": "credential_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -2115,7 +2115,7 @@
     "RbacAdminServiceAddGroupMemberBody": {
       "type": "object",
       "properties": {
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "member": {
@@ -2126,10 +2126,10 @@
     "RbacAdminServiceAssignUserRoleBody": {
       "type": "object",
       "properties": {
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
-        "roleId": {
+        "role_id": {
           "type": "string"
         },
         "scope": {
@@ -2140,7 +2140,7 @@
     "RbacAdminServiceUpdateGroupBody": {
       "type": "object",
       "properties": {
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "name": {
@@ -2157,7 +2157,7 @@
     "RbacAdminServiceUpdateRoleBody": {
       "type": "object",
       "properties": {
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "name": {
@@ -2173,7 +2173,7 @@
             "type": "string"
           }
         },
-        "parentRoleIds": {
+        "parent_role_ids": {
           "type": "array",
           "items": {
             "type": "string"
@@ -2228,18 +2228,18 @@
         "id": {
           "type": "string"
         },
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
-        "ownerType": {
+        "owner_type": {
           "type": "string",
           "description": "Owner type: \"user\" or \"organization\"."
         },
-        "ownerId": {
+        "owner_id": {
           "type": "string",
           "description": "UUID of the owning user or organization."
         },
-        "displayName": {
+        "display_name": {
           "type": "string"
         },
         "description": {
@@ -2254,15 +2254,15 @@
         "status": {
           "$ref": "#/definitions/v1AgentStatus"
         },
-        "maxDelegationDepth": {
+        "max_delegation_depth": {
           "type": "integer",
           "format": "int64"
         },
-        "createdAt": {
+        "created_at": {
           "type": "string",
           "format": "int64"
         },
-        "updatedAt": {
+        "updated_at": {
           "type": "string",
           "format": "int64"
         }
@@ -2275,7 +2275,7 @@
         "id": {
           "type": "string"
         },
-        "agentId": {
+        "agent_id": {
           "type": "string"
         },
         "kind": {
@@ -2284,11 +2284,11 @@
         "label": {
           "type": "string"
         },
-        "createdAt": {
+        "created_at": {
           "type": "string",
           "format": "int64"
         },
-        "revokedAt": {
+        "revoked_at": {
           "type": "string",
           "format": "int64"
         }
@@ -2329,7 +2329,7 @@
             "$ref": "#/definitions/v1Agent"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       },
@@ -2483,7 +2483,7 @@
         "id": {
           "type": "string"
         },
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "actor": {
@@ -2492,10 +2492,10 @@
         "action": {
           "$ref": "#/definitions/v1AuditAction"
         },
-        "resourceType": {
+        "resource_type": {
           "type": "string"
         },
-        "resourceId": {
+        "resource_id": {
           "type": "string"
         },
         "timestamp": {
@@ -2506,7 +2506,7 @@
           "type": "string",
           "description": "Optional additional context (JSON-encoded)."
         },
-        "integrityHash": {
+        "integrity_hash": {
           "type": "string"
         }
       },
@@ -2528,10 +2528,10 @@
     "v1AuthorizationRequest": {
       "type": "object",
       "properties": {
-        "clientId": {
+        "client_id": {
           "type": "string"
         },
-        "redirectUri": {
+        "redirect_uri": {
           "type": "string"
         },
         "scope": {
@@ -2540,22 +2540,22 @@
         "state": {
           "type": "string"
         },
-        "responseType": {
+        "response_type": {
           "type": "string"
         },
-        "userId": {
+        "user_id": {
           "type": "string"
         },
-        "codeChallenge": {
+        "code_challenge": {
           "type": "string"
         },
-        "codeChallengeMethod": {
+        "code_challenge_method": {
           "type": "string"
         },
         "nonce": {
           "type": "string"
         },
-        "requestUri": {
+        "request_uri": {
           "type": "string",
           "description": "PAR request_uri (RFC 9126). When set, the server expands the stored\npushed authorization parameters. Other authorization fields are ignored\nwhen this is set."
         }
@@ -2577,13 +2577,13 @@
     "v1ClientCredentialsResponse": {
       "type": "object",
       "properties": {
-        "accessToken": {
+        "access_token": {
           "type": "string"
         },
-        "tokenType": {
+        "token_type": {
           "type": "string"
         },
-        "expiresIn": {
+        "expires_in": {
           "type": "string",
           "format": "int64"
         },
@@ -2606,23 +2606,23 @@
     "v1ConsentEntry": {
       "type": "object",
       "properties": {
-        "clientId": {
+        "client_id": {
           "type": "string"
         },
-        "clientName": {
+        "client_name": {
           "type": "string"
         },
-        "grantedScopes": {
+        "granted_scopes": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "grantedAt": {
+        "granted_at": {
           "type": "string",
           "format": "int64"
         },
-        "updatedAt": {
+        "updated_at": {
           "type": "string",
           "format": "int64"
         }
@@ -2644,17 +2644,17 @@
     "v1CreateAgentRequest": {
       "type": "object",
       "properties": {
-        "displayName": {
+        "display_name": {
           "type": "string"
         },
         "description": {
           "type": "string"
         },
-        "ownerType": {
+        "owner_type": {
           "type": "string",
           "description": "Owner type: \"user\" or \"organization\"."
         },
-        "ownerId": {
+        "owner_id": {
           "type": "string",
           "description": "UUID of the owning user or organization."
         },
@@ -2664,7 +2664,7 @@
             "type": "string"
           }
         },
-        "maxDelegationDepth": {
+        "max_delegation_depth": {
           "type": "integer",
           "format": "int64",
           "description": "Maximum delegation depth (1–10, default 1)."
@@ -2675,7 +2675,7 @@
     "v1CreateGroupRequest": {
       "type": "object",
       "properties": {
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "name": {
@@ -2704,7 +2704,7 @@
     "v1CreateRoleRequest": {
       "type": "object",
       "properties": {
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "name": {
@@ -2719,7 +2719,7 @@
             "type": "string"
           }
         },
-        "parentRoleIds": {
+        "parent_role_ids": {
           "type": "array",
           "items": {
             "type": "string"
@@ -2733,13 +2733,13 @@
         "email": {
           "type": "string"
         },
-        "displayName": {
+        "display_name": {
           "type": "string"
         },
-        "firstName": {
+        "first_name": {
           "type": "string"
         },
-        "lastName": {
+        "last_name": {
           "type": "string"
         },
         "attributes": {
@@ -2760,13 +2760,13 @@
     "v1DeviceAuthorizationRequest": {
       "type": "object",
       "properties": {
-        "clientId": {
+        "client_id": {
           "type": "string"
         },
         "scope": {
           "type": "string"
         },
-        "clientSecret": {
+        "client_secret": {
           "type": "string",
           "description": "Client secret for a confidential client (RFC 8628 s3.1). HTTP Basic Auth\nis preferred and takes precedence; this is the client_secret_post\nfallback. Public clients omit it."
         },
@@ -2784,16 +2784,16 @@
     "v1DeviceAuthorizationResponse": {
       "type": "object",
       "properties": {
-        "deviceCode": {
+        "device_code": {
           "type": "string"
         },
-        "userCode": {
+        "user_code": {
           "type": "string"
         },
-        "verificationUri": {
+        "verification_uri": {
           "type": "string"
         },
-        "expiresIn": {
+        "expires_in": {
           "type": "string",
           "format": "int64"
         },
@@ -2827,7 +2827,7 @@
         "id": {
           "type": "string"
         },
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "name": {
@@ -2839,11 +2839,11 @@
         "description": {
           "type": "string"
         },
-        "createdAtMicros": {
+        "created_at_micros": {
           "type": "string",
           "format": "int64"
         },
-        "updatedAtMicros": {
+        "updated_at_micros": {
           "type": "string",
           "format": "int64"
         }
@@ -2872,17 +2872,17 @@
     "v1GroupMembership": {
       "type": "object",
       "properties": {
-        "groupId": {
+        "group_id": {
           "type": "string"
         },
         "member": {
           "$ref": "#/definitions/v1GroupMember"
         },
-        "addedAtMicros": {
+        "added_at_micros": {
           "type": "string",
           "format": "int64"
         },
-        "addedByUserId": {
+        "added_by_user_id": {
           "type": "string"
         }
       }
@@ -2906,7 +2906,7 @@
         "scope": {
           "type": "string"
         },
-        "clientId": {
+        "client_id": {
           "type": "string"
         },
         "sub": {
@@ -2920,7 +2920,7 @@
           "type": "string",
           "format": "int64"
         },
-        "tokenType": {
+        "token_type": {
           "type": "string"
         },
         "iss": {
@@ -2956,7 +2956,7 @@
     "v1ListAdditionalRolesResponse": {
       "type": "object",
       "properties": {
-        "roleNames": {
+        "role_names": {
           "type": "array",
           "items": {
             "type": "string"
@@ -2974,7 +2974,7 @@
             "$ref": "#/definitions/v1GroupMember"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       }
@@ -2989,7 +2989,7 @@
             "$ref": "#/definitions/v1Group"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       }
@@ -3004,7 +3004,7 @@
             "$ref": "#/definitions/v1PermissionEntry"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       }
@@ -3019,7 +3019,7 @@
             "$ref": "#/definitions/v1RoleEntry"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       }
@@ -3034,7 +3034,7 @@
             "$ref": "#/definitions/v1RoleSubject"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       }
@@ -3049,7 +3049,7 @@
             "$ref": "#/definitions/v1Role"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       }
@@ -3093,32 +3093,32 @@
     "v1OAuthClient": {
       "type": "object",
       "properties": {
-        "clientId": {
+        "client_id": {
           "type": "string"
         },
-        "clientName": {
+        "client_name": {
           "type": "string"
         },
-        "redirectUris": {
+        "redirect_uris": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "createdAt": {
+        "created_at": {
           "type": "string",
           "format": "int64"
         },
-        "isConfidential": {
+        "is_confidential": {
           "type": "boolean"
         },
-        "grantTypes": {
+        "grant_types": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "accessTokenAuthorization": {
+        "access_token_authorization": {
           "$ref": "#/definitions/v1AccessTokenAuthorization"
         },
         "id_token_signed_response_alg": {
@@ -3146,7 +3146,7 @@
             "$ref": "#/definitions/v1OAuthClient"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       },
@@ -3159,20 +3159,20 @@
     "v1OidcTokenResponse": {
       "type": "object",
       "properties": {
-        "accessToken": {
+        "access_token": {
           "type": "string"
         },
-        "idToken": {
+        "id_token": {
           "type": "string"
         },
-        "tokenType": {
+        "token_type": {
           "type": "string"
         },
-        "expiresIn": {
+        "expires_in": {
           "type": "string",
           "format": "int64"
         },
-        "refreshToken": {
+        "refresh_token": {
           "type": "string"
         }
       },
@@ -3181,7 +3181,7 @@
     "v1OrgScope": {
       "type": "object",
       "properties": {
-        "orgId": {
+        "org_id": {
           "type": "string"
         }
       }
@@ -3192,27 +3192,27 @@
         "id": {
           "type": "string"
         },
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "slug": {
           "type": "string"
         },
-        "displayName": {
+        "display_name": {
           "type": "string"
         },
         "status": {
           "$ref": "#/definitions/v1OrganizationStatus"
         },
-        "createdAt": {
+        "created_at": {
           "type": "string",
           "format": "int64"
         },
-        "updatedAt": {
+        "updated_at": {
           "type": "string",
           "format": "int64"
         },
-        "memberLimit": {
+        "member_limit": {
           "type": "integer",
           "format": "int64"
         },
@@ -3235,7 +3235,7 @@
             "$ref": "#/definitions/v1Organization"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       },
@@ -3281,11 +3281,11 @@
         "config": {
           "$ref": "#/definitions/v1RealmConfig"
         },
-        "createdAt": {
+        "created_at": {
           "type": "string",
           "format": "int64"
         },
-        "updatedAt": {
+        "updated_at": {
           "type": "string",
           "format": "int64"
         }
@@ -3295,15 +3295,15 @@
     "v1RealmConfig": {
       "type": "object",
       "properties": {
-        "sessionTtlMicros": {
+        "session_ttl_micros": {
           "type": "string",
           "format": "int64"
         },
-        "passwordMemoryCost": {
+        "password_memory_cost": {
           "type": "integer",
           "format": "int64"
         },
-        "passwordTimeCost": {
+        "password_time_cost": {
           "type": "integer",
           "format": "int64"
         }
@@ -3320,7 +3320,7 @@
             "$ref": "#/definitions/v1Realm"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       },
@@ -3342,29 +3342,29 @@
     "v1RegisterClientRequest": {
       "type": "object",
       "properties": {
-        "clientName": {
+        "client_name": {
           "type": "string"
         },
-        "redirectUris": {
+        "redirect_uris": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "clientSecret": {
+        "client_secret": {
           "type": "string",
           "description": "Not accepted on the admin create paths (REST and gRPC refuse it): Hearth\ngenerates client secrets. Request one with token_endpoint_auth_method."
         },
-        "grantTypes": {
+        "grant_types": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "accessTokenAuthorization": {
+        "access_token_authorization": {
           "$ref": "#/definitions/v1AccessTokenAuthorization"
         },
-        "trustLevel": {
+        "trust_level": {
           "$ref": "#/definitions/v1ClientTrustLevel",
           "description": "Trust level for this client.  Unspecified defaults to ThirdParty on the\nDCR path.  The authenticated admin create path respects this field."
         },
@@ -3420,7 +3420,7 @@
         "id": {
           "type": "string"
         },
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "name": {
@@ -3435,17 +3435,17 @@
             "type": "string"
           }
         },
-        "parentRoleIds": {
+        "parent_role_ids": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "createdAtMicros": {
+        "created_at_micros": {
           "type": "string",
           "format": "int64"
         },
-        "updatedAtMicros": {
+        "updated_at_micros": {
           "type": "string",
           "format": "int64"
         }
@@ -3457,26 +3457,26 @@
         "id": {
           "type": "string"
         },
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
-        "subjectId": {
+        "subject_id": {
           "type": "string"
         },
-        "subjectType": {
+        "subject_type": {
           "$ref": "#/definitions/v1GroupMemberType"
         },
-        "roleId": {
+        "role_id": {
           "type": "string"
         },
         "scope": {
           "$ref": "#/definitions/v1Scope"
         },
-        "assignedAtMicros": {
+        "assigned_at_micros": {
           "type": "string",
           "format": "int64"
         },
-        "assignedByUserId": {
+        "assigned_by_user_id": {
           "type": "string"
         }
       }
@@ -3493,7 +3493,7 @@
         "description": {
           "type": "string"
         },
-        "scopeKind": {
+        "scope_kind": {
           "type": "string",
           "description": "Scope kind: \"realm\", \"organization\", or \"any\"."
         },
@@ -3503,7 +3503,7 @@
             "type": "string"
           }
         },
-        "parentRoles": {
+        "parent_roles": {
           "type": "array",
           "items": {
             "type": "string"
@@ -3514,10 +3514,10 @@
     "v1RoleSubject": {
       "type": "object",
       "properties": {
-        "subjectType": {
+        "subject_type": {
           "$ref": "#/definitions/v1GroupMemberType"
         },
-        "subjectId": {
+        "subject_id": {
           "type": "string"
         }
       }
@@ -3539,7 +3539,7 @@
         "permission": {
           "type": "string"
         },
-        "organizationId": {
+        "organization_id": {
           "type": "string"
         },
         "resource": {
@@ -3560,16 +3560,16 @@
     "v1TokenExchangeRequest": {
       "type": "object",
       "properties": {
-        "clientId": {
+        "client_id": {
           "type": "string"
         },
         "code": {
           "type": "string"
         },
-        "redirectUri": {
+        "redirect_uri": {
           "type": "string"
         },
-        "codeVerifier": {
+        "code_verifier": {
           "type": "string"
         }
       },
@@ -3581,7 +3581,7 @@
         "token": {
           "type": "string"
         },
-        "tokenTypeHint": {
+        "token_type_hint": {
           "type": "string"
         }
       },
@@ -3593,7 +3593,7 @@
         "token": {
           "type": "string"
         },
-        "tokenTypeHint": {
+        "token_type_hint": {
           "type": "string"
         }
       },
@@ -3608,7 +3608,7 @@
     "v1UpdateAgentRequest": {
       "type": "object",
       "properties": {
-        "displayName": {
+        "display_name": {
           "type": "string"
         },
         "description": {
@@ -3620,7 +3620,7 @@
             "type": "string"
           }
         },
-        "maxDelegationDepth": {
+        "max_delegation_depth": {
           "type": "integer",
           "format": "int64"
         }
@@ -3630,25 +3630,25 @@
     "v1UpdateClientRequest": {
       "type": "object",
       "properties": {
-        "clientName": {
+        "client_name": {
           "type": "string"
         },
-        "redirectUris": {
+        "redirect_uris": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "grantTypes": {
+        "grant_types": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "accessTokenAuthorization": {
+        "access_token_authorization": {
           "$ref": "#/definitions/v1AccessTokenAuthorization"
         },
-        "trustLevel": {
+        "trust_level": {
           "$ref": "#/definitions/v1ClientTrustLevel",
           "description": "Trust level override.  Omit to leave unchanged."
         },
@@ -3665,13 +3665,13 @@
         "slug": {
           "type": "string"
         },
-        "displayName": {
+        "display_name": {
           "type": "string"
         },
         "status": {
           "$ref": "#/definitions/v1OrganizationStatus"
         },
-        "memberLimit": {
+        "member_limit": {
           "type": "integer",
           "format": "int64"
         },
@@ -3682,7 +3682,7 @@
           },
           "description": "When non-empty, replaces the organization's entire custom attribute map.\nAn empty map is treated as \"no change\"; use clear_attributes to remove all."
         },
-        "clearAttributes": {
+        "clear_attributes": {
           "type": "boolean",
           "description": "When true and attributes is empty, clears all custom attributes."
         }
@@ -3710,16 +3710,16 @@
         "email": {
           "type": "string"
         },
-        "displayName": {
+        "display_name": {
           "type": "string"
         },
         "status": {
           "$ref": "#/definitions/v1UserStatus"
         },
-        "firstName": {
+        "first_name": {
           "type": "string"
         },
-        "lastName": {
+        "last_name": {
           "type": "string"
         },
         "attributes": {
@@ -3729,7 +3729,7 @@
           },
           "description": "When non-empty, replaces the user's entire custom attribute map.\nAn empty map is treated as \"no change\"; use clear_attributes to remove all."
         },
-        "clearAttributes": {
+        "clear_attributes": {
           "type": "boolean",
           "description": "When true and attributes is empty, clears all custom attributes."
         }
@@ -3745,27 +3745,27 @@
         "email": {
           "type": "string"
         },
-        "displayName": {
+        "display_name": {
           "type": "string"
         },
         "status": {
           "$ref": "#/definitions/v1UserStatus"
         },
-        "createdAt": {
+        "created_at": {
           "type": "string",
           "format": "int64"
         },
-        "updatedAt": {
+        "updated_at": {
           "type": "string",
           "format": "int64"
         },
-        "firstName": {
+        "first_name": {
           "type": "string"
         },
-        "lastName": {
+        "last_name": {
           "type": "string"
         },
-        "requiredActions": {
+        "required_actions": {
           "type": "array",
           "items": {
             "type": "string"
@@ -3785,7 +3785,7 @@
             "$ref": "#/definitions/v1User"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       },
@@ -3797,16 +3797,16 @@
         "permission": {
           "type": "string"
         },
-        "scopeType": {
+        "scope_type": {
           "type": "string"
         },
-        "orgId": {
+        "org_id": {
           "type": "string"
         },
-        "grantedBy": {
+        "granted_by": {
           "type": "string"
         },
-        "grantedAt": {
+        "granted_at": {
           "type": "string",
           "format": "int64",
           "description": "Unix timestamp (seconds)."
@@ -3830,10 +3830,10 @@
         "ok": {
           "type": "boolean"
         },
-        "brokenAtEventId": {
+        "broken_at_event_id": {
           "type": "string"
         },
-        "eventCount": {
+        "event_count": {
           "type": "string",
           "format": "uint64"
         }

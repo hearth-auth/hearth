@@ -34,9 +34,16 @@ def upgrade_ref(ref: str) -> str:
 
 
 def upgrade_schema(schema: dict) -> dict:
-    """Recursively rewrite $ref in a schema object."""
+    """Recursively rewrite $ref in a schema object.
+
+    The proto3 JSON mapping writes 64-bit integers as strings, and the Swagger
+    says so. The REST handlers send numbers (`proto_to_rest_json` turns every
+    integer-like string into a JSON number), so 64-bit fields become integers.
+    """
     if not isinstance(schema, dict):
         return schema
+    if schema.get("type") == "string" and schema.get("format") in ("int64", "uint64"):
+        schema = {**schema, "type": "integer", "format": "int64"}
     out = {}
     for k, v in schema.items():
         if k == "$ref" and isinstance(v, str):
@@ -198,11 +205,13 @@ def omit_operations(paths: dict, operation_ids: list) -> dict:
     return out
 
 
-def mark_created(paths: dict, operation_ids: list) -> dict:
-    """Rename the `200` response of each listed operation to `201`.
+def rename_success(paths: dict, operation_ids: list, status: str, key: str) -> dict:
+    """Rename the `200` response of each listed operation to `status`.
 
     protoc-gen-openapiv2 documents every success as `200`; these operations
-    answer `201 Created`. Fails when a listed operationId has no `200`.
+    answer `201 Created` or `204 No Content`. A `204` keeps no body. Fails
+    when a listed operationId has no `200`, so the supplement list cannot go
+    stale (`key` names the list in the error).
     """
     wanted = set(operation_ids)
     found = set()
@@ -212,11 +221,15 @@ def mark_created(paths: dict, operation_ids: list) -> dict:
                 responses = op.get("responses", {})
                 if "200" in responses:
                     found.add(op["operationId"])
-                    responses = {("201" if k == "200" else k): v for k, v in responses.items()}
+                    ok = dict(responses.pop("200"))
+                    if status == "204":
+                        ok.pop("content", None)
+                        ok["description"] = ok.get("description") or "No Content"
+                    responses[status] = ok
                     op["responses"] = dict(sorted(responses.items()))
     missing = wanted - found
     if missing:
-        sys.exit(f"x-hearth-created-operations: no `200` operation matches {sorted(missing)}")
+        sys.exit(f"{key}: no `200` operation matches {sorted(missing)}")
     return paths
 
 
@@ -269,9 +282,13 @@ def main() -> None:
 
     # Convert proto-derived Swagger 2.0 → OpenAPI 3.0
     proto_oas3 = convert_swagger2_to_openapi3(swagger2)
-    proto_oas3["paths"] = mark_created(
-        proto_oas3.get("paths", {}), supplement.get("x-hearth-created-operations") or []
-    )
+    for status, key in (
+        ("201", "x-hearth-created-operations"),
+        ("204", "x-hearth-no-content-operations"),
+    ):
+        proto_oas3["paths"] = rename_success(
+            proto_oas3.get("paths", {}), supplement.get(key) or [], status, key
+        )
     patch_schemas(
         proto_oas3.get("components", {}).get("schemas", {}),
         supplement.get("x-hearth-schema-patches") or {},
