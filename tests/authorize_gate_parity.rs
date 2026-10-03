@@ -850,8 +850,8 @@ async fn par_consent_approval_keeps_the_pushed_response_mode_and_resource() {
 //
 // A pushed request had no way to carry `prompt`: the PAR endpoint had no
 // field for it, the stored entry had none, a JAR pushed through PAR lost its
-// `prompt` claim, and the authorize branch hard-coded it empty. On a FAPI 2.0
-// realm, where PAR is mandatory, `prompt` could never take effect.
+// `prompt` claim, and the authorize branch hard-coded it empty. A client that
+// sends every request through PAR could never make `prompt` take effect.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
