@@ -176,6 +176,9 @@ jobs:
             sdks-any:
               - 'sdks/**'
               - 'scripts/check-sdk-conformance.sh'
+              # The live conformance harness (sdk-smoke.yml conformance-harness).
+              - 'scripts/sdk-conformance.sh'
+              - 'scripts/sdk_conformance.py'
               - 'docs/specs/SDK.md'
               - '.github/workflows/ci.yml'
               # sdk-smoke gates on this filter: its own workflow file and the

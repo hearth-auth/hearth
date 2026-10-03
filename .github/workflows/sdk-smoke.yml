@@ -306,18 +306,71 @@ jobs:
         if: always()
         run: kill $HEARTH_PID 2>/dev/null || true
 
+  # ── Shared SDK conformance harness ─────────────────────────────────────────
+  # One scenario set (sdks/conformance/scenarios.yaml), run through all four
+  # SDK runners against live servers; fails on a wrong answer or on two SDKs
+  # disagreeing, naming the SDK and the scenario (openspec
+  # sdk-support-contract, "One shared conformance harness tests every SDK").
+  conformance-harness:
+    name: conformance / all SDKs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build-hearth
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: sdks/typescript/package-lock.json
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: sdks/go/go.mod
+          cache-dependency-path: sdks/go/go.sum
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv and PyYAML (Python runner, driver)
+        run: pip install 'uv==0.11.17' 'pyyaml==6.0.2'
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: "8.3"
+          tools: composer:v2
+
+      - name: Download Hearth binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hearth-binary
+          path: /tmp/hearth-bin
+
+      - name: Make binary executable
+        run: chmod +x /tmp/hearth-bin/hearth
+
+      - name: Run the conformance harness
+        env:
+          HEARTH_BIN: /tmp/hearth-bin/hearth
+        run: bash scripts/sdk-conformance.sh
+
   # ── Required summary gate ──────────────────────────────────────────────────
   sdk-smoke-ok:
     name: sdk-smoke-ok
     runs-on: ubuntu-latest
-    needs: [typescript-nextjs, go-gin, php-integration]
+    needs: [typescript-nextjs, go-gin, php-integration, conformance-harness]
     if: always()
     steps:
       - name: All smoke jobs passed
         run: |
           if [ "${{ needs.typescript-nextjs.result }}" != "success" ] || \
              [ "${{ needs.go-gin.result }}" != "success" ] || \
-             [ "${{ needs.php-integration.result }}" != "success" ]; then
+             [ "${{ needs.php-integration.result }}" != "success" ] || \
+             [ "${{ needs.conformance-harness.result }}" != "success" ]; then
             echo "One or more SDK smoke jobs failed"
             exit 1
           fi
