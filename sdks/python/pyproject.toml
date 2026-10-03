@@ -8,6 +8,9 @@ dependencies = [
     "pyjwt[crypto]>=2.8",
     "cryptography>=41",
     "pydantic>=2",
+    # Runtime of the generated admin client (hearth.generated.admin).
+    "attrs>=22.2",
+    "python-dateutil>=2.8",
 ]
 
 [project.optional-dependencies]
@@ -43,7 +46,9 @@ packages = ["src/hearth"]
 # follows requires-python.
 [tool.ruff]
 # Python sources only: README code samples are prose, not package code.
-extend-exclude = ["*.md"]
+# The generated admin client is gen-admin.sh output (formatted by it, never
+# edited by hand), so it is not linted.
+extend-exclude = ["*.md", "src/hearth/generated"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's dependency-injection markers are meant to be called in defaults.

@@ -1,0 +1,4 @@
+# openapi-python-client config for sdks/python/gen-admin.sh.
+# Post-hooks are off: they run whatever `ruff` is on PATH, which is not
+# deterministic. gen-admin.sh formats with the SDK's pinned ruff instead.
+post_hooks: []

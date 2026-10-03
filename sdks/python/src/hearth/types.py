@@ -36,11 +36,29 @@ class CreateUserRequest(BaseModel):
     attributes: dict | None = None
 
 
+# Proto ``UserStatus`` names for the SDK's snake_case user statuses.
+# ``PATCH /admin/users/{id}`` deserializes the proto ``UpdateUserRequest``: it
+# answers ``invalid status`` for ``active``.
+_PROTO_USER_STATUS = {
+    "active": "USER_STATUS_ACTIVE",
+    "disabled": "USER_STATUS_DISABLED",
+    "pending_verification": "USER_STATUS_PENDING_VERIFICATION",
+}
+
+
 class UpdateUserRequest(BaseModel):
     username: str | None = None
     email: str | None = None
+    #: ``active``, ``disabled`` or ``pending_verification`` (or the proto
+    #: ``USER_STATUS_*`` name).
     status: str | None = None
     attributes: dict | None = None
+
+    @field_serializer("status")
+    def _serialize_status(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _PROTO_USER_STATUS.get(value, value)
 
 
 class PageResponse(BaseModel, Generic[T]):
@@ -236,7 +254,7 @@ class CreateRoleRequest(BaseModel):
 
 
 class UpdateRoleRequest(BaseModel):
-    """Request body for PUT /admin/roles/{id}."""
+    """Request body for PATCH /admin/roles/{id}."""
 
     name: str | None = None
     description: str | None = None
@@ -258,15 +276,59 @@ class CreateGroupRequest(BaseModel):
 
 
 class UpdateGroupRequest(BaseModel):
-    """Request body for PUT /admin/groups/{id}."""
+    """Request body for PATCH /admin/groups/{id}."""
 
     name: str | None = None
     description: str | None = None
 
 
+class Organization(BaseModel):
+    """An organization, as ``/admin/organizations`` returns it."""
+
+    id: str
+    slug: str
+    display_name: str
+    #: ``active``, ``suspended`` or ``archived``.
+    status: str
+    member_limit: int | None = None
+    #: Members need MFA even where the realm does not require it.
+    mfa_required: bool = False
+    attributes: dict[str, str] = {}
+    #: Microseconds since the Unix epoch.
+    created_at: int | None = None
+    #: Microseconds since the Unix epoch.
+    updated_at: int | None = None
+
+
+class CreateOrganizationRequest(BaseModel):
+    """Request body for POST /admin/organizations."""
+
+    slug: str
+    display_name: str
+    member_limit: int | None = None
+    #: Default ``False``; it can only tighten the realm's MFA policy.
+    mfa_required: bool | None = None
+    attributes: dict[str, str] | None = None
+
+
+class UpdateOrganizationRequest(BaseModel):
+    """Request body for PATCH /admin/organizations/{id}.
+
+    Fields left as ``None`` keep their value. The slug is immutable.
+    """
+
+    display_name: str | None = None
+    #: ``active`` or ``suspended``.
+    status: str | None = None
+    member_limit: int | None = None
+    mfa_required: bool | None = None
+    #: Replaces the whole attribute map.
+    attributes: dict[str, str] | None = None
+
+
 # OrgMember and AddOrgMemberRequest were removed with the org-membership
-# methods: Hearth serves no organization route over HTTP
-# (audit 2026-08-28 §25.19).
+# methods: Hearth serves no `/admin/orgs` route (audit 2026-08-28 §25.19).
+# Organizations are administered at `/admin/organizations` (Organization).
 
 
 class Jwk(BaseModel):

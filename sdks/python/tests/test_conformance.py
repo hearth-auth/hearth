@@ -497,12 +497,13 @@ class TestAdminGroups:
 
 
 class TestAdminOrgMembersRemoved:
-    """Hearth serves no organization route over HTTP.
+    """Hearth serves no ``/admin/orgs`` route.
 
-    There is no ``/admin/orgs``, no ``/admin/orgs/{id}/members`` and no
-    per-member route anywhere in the axum router, so every one of these
-    methods 404'd. They were removed rather than repointed, because there is
-    nothing to repoint them at (audit 2026-08-28 §25.19).
+    There is no ``/admin/orgs`` and no ``/admin/orgs/{id}/members`` in the axum
+    router, so every one of these methods 404'd and was removed (audit
+    2026-08-28 §25.19). Organizations are administered at
+    ``/admin/organizations`` (``AdminClient.create_organization`` and the
+    rest); membership itself has no admin route.
     """
 
     def test_admin_client_exposes_no_org_member_methods(self):
