@@ -69,21 +69,21 @@ class V1RealmNormalizer implements DenormalizerInterface, NormalizerInterface, D
             $object->setConfig(null);
             unset($data['config']);
         }
-        if (\array_key_exists('createdAt', $data) && $data['createdAt'] !== null) {
-            $object->setCreatedAt($data['createdAt']);
-            unset($data['createdAt']);
+        if (\array_key_exists('created_at', $data) && $data['created_at'] !== null) {
+            $object->setCreatedAt($data['created_at']);
+            unset($data['created_at']);
         }
-        elseif (\array_key_exists('createdAt', $data) && $data['createdAt'] === null) {
+        elseif (\array_key_exists('created_at', $data) && $data['created_at'] === null) {
             $object->setCreatedAt(null);
-            unset($data['createdAt']);
+            unset($data['created_at']);
         }
-        if (\array_key_exists('updatedAt', $data) && $data['updatedAt'] !== null) {
-            $object->setUpdatedAt($data['updatedAt']);
-            unset($data['updatedAt']);
+        if (\array_key_exists('updated_at', $data) && $data['updated_at'] !== null) {
+            $object->setUpdatedAt($data['updated_at']);
+            unset($data['updated_at']);
         }
-        elseif (\array_key_exists('updatedAt', $data) && $data['updatedAt'] === null) {
+        elseif (\array_key_exists('updated_at', $data) && $data['updated_at'] === null) {
             $object->setUpdatedAt(null);
-            unset($data['updatedAt']);
+            unset($data['updated_at']);
         }
         foreach ($data as $key => $value) {
             if (preg_match('/.*/', (string) $key)) {
@@ -108,10 +108,10 @@ class V1RealmNormalizer implements DenormalizerInterface, NormalizerInterface, D
             $dataArray['config'] = $data->getConfig() === null ? null : new \Hearth\Generated\Admin\Runtime\JsonObject($this->normalizer->normalize($data->getConfig(), 'json', $context));
         }
         if ($data->isInitialized('createdAt') && null !== $data->getCreatedAt()) {
-            $dataArray['createdAt'] = $data->getCreatedAt();
+            $dataArray['created_at'] = $data->getCreatedAt();
         }
         if ($data->isInitialized('updatedAt') && null !== $data->getUpdatedAt()) {
-            $dataArray['updatedAt'] = $data->getUpdatedAt();
+            $dataArray['updated_at'] = $data->getUpdatedAt();
         }
         foreach ($data->additionalPropertyEntries() as $key => $value) {
             if (preg_match('/.*/', (string) $key)) {

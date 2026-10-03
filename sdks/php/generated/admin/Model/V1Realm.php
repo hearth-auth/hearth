@@ -36,11 +36,11 @@ class V1Realm implements AdditionalPropertiesInterface
      */
     protected $config;
     /**
-     * @var string|null
+     * @var int|null
      */
     protected $createdAt;
     /**
-     * @var string|null
+     * @var int|null
      */
     protected $updatedAt;
     /**
@@ -124,36 +124,36 @@ class V1Realm implements AdditionalPropertiesInterface
         return $this;
     }
     /**
-     * @return string|null
+     * @return int|null
      */
-    public function getCreatedAt(): ?string
+    public function getCreatedAt(): ?int
     {
         return $this->createdAt;
     }
     /**
-     * @param string|null $createdAt
+     * @param int|null $createdAt
      *
      * @return self
      */
-    public function setCreatedAt(?string $createdAt): self
+    public function setCreatedAt(?int $createdAt): self
     {
         $this->initialized['createdAt'] = true;
         $this->createdAt = $createdAt;
         return $this;
     }
     /**
-     * @return string|null
+     * @return int|null
      */
-    public function getUpdatedAt(): ?string
+    public function getUpdatedAt(): ?int
     {
         return $this->updatedAt;
     }
     /**
-     * @param string|null $updatedAt
+     * @param int|null $updatedAt
      *
      * @return self
      */
-    public function setUpdatedAt(?string $updatedAt): self
+    public function setUpdatedAt(?int $updatedAt): self
     {
         $this->initialized['updatedAt'] = true;
         $this->updatedAt = $updatedAt;
@@ -161,6 +161,6 @@ class V1Realm implements AdditionalPropertiesInterface
     }
     public function definedProperties(): array
     {
-        return ['id' => ['id', 'getId', 'setId'], 'name' => ['name', 'getName', 'setName'], 'status' => ['status', 'getStatus', 'setStatus'], 'config' => ['config', 'getConfig', 'setConfig'], 'createdAt' => ['createdAt', 'getCreatedAt', 'setCreatedAt'], 'updatedAt' => ['updatedAt', 'getUpdatedAt', 'setUpdatedAt']];
+        return ['id' => ['id', 'getId', 'setId'], 'name' => ['name', 'getName', 'setName'], 'status' => ['status', 'getStatus', 'setStatus'], 'config' => ['config', 'getConfig', 'setConfig'], 'createdAt' => ['created_at', 'getCreatedAt', 'setCreatedAt'], 'updatedAt' => ['updated_at', 'getUpdatedAt', 'setUpdatedAt']];
     }
 }

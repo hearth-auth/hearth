@@ -37,61 +37,61 @@ class V1RegisterClientRequestNormalizer implements DenormalizerInterface, Normal
         if (isset($data['$recursiveRef'])) {
             return new Reference($data['$recursiveRef'], $context['document-origin']);
         }
-        if (\array_key_exists('clientName', $data) && $data['clientName'] !== null) {
-            $object->setClientName($data['clientName']);
-            unset($data['clientName']);
+        if (\array_key_exists('client_name', $data) && $data['client_name'] !== null) {
+            $object->setClientName($data['client_name']);
+            unset($data['client_name']);
         }
-        elseif (\array_key_exists('clientName', $data) && $data['clientName'] === null) {
+        elseif (\array_key_exists('client_name', $data) && $data['client_name'] === null) {
             $object->setClientName(null);
-            unset($data['clientName']);
+            unset($data['client_name']);
         }
-        if (\array_key_exists('redirectUris', $data) && $data['redirectUris'] !== null) {
+        if (\array_key_exists('redirect_uris', $data) && $data['redirect_uris'] !== null) {
             $values = [];
-            foreach ($data['redirectUris'] as $value) {
+            foreach ($data['redirect_uris'] as $value) {
                 $values[] = $value;
             }
             $object->setRedirectUris($values);
-            unset($data['redirectUris']);
+            unset($data['redirect_uris']);
         }
-        elseif (\array_key_exists('redirectUris', $data) && $data['redirectUris'] === null) {
+        elseif (\array_key_exists('redirect_uris', $data) && $data['redirect_uris'] === null) {
             $object->setRedirectUris(null);
-            unset($data['redirectUris']);
+            unset($data['redirect_uris']);
         }
-        if (\array_key_exists('clientSecret', $data) && $data['clientSecret'] !== null) {
-            $object->setClientSecret($data['clientSecret']);
-            unset($data['clientSecret']);
+        if (\array_key_exists('client_secret', $data) && $data['client_secret'] !== null) {
+            $object->setClientSecret($data['client_secret']);
+            unset($data['client_secret']);
         }
-        elseif (\array_key_exists('clientSecret', $data) && $data['clientSecret'] === null) {
+        elseif (\array_key_exists('client_secret', $data) && $data['client_secret'] === null) {
             $object->setClientSecret(null);
-            unset($data['clientSecret']);
+            unset($data['client_secret']);
         }
-        if (\array_key_exists('grantTypes', $data) && $data['grantTypes'] !== null) {
+        if (\array_key_exists('grant_types', $data) && $data['grant_types'] !== null) {
             $values_1 = [];
-            foreach ($data['grantTypes'] as $value_1) {
+            foreach ($data['grant_types'] as $value_1) {
                 $values_1[] = $value_1;
             }
             $object->setGrantTypes($values_1);
-            unset($data['grantTypes']);
+            unset($data['grant_types']);
         }
-        elseif (\array_key_exists('grantTypes', $data) && $data['grantTypes'] === null) {
+        elseif (\array_key_exists('grant_types', $data) && $data['grant_types'] === null) {
             $object->setGrantTypes(null);
-            unset($data['grantTypes']);
+            unset($data['grant_types']);
         }
-        if (\array_key_exists('accessTokenAuthorization', $data) && $data['accessTokenAuthorization'] !== null) {
-            $object->setAccessTokenAuthorization($data['accessTokenAuthorization']);
-            unset($data['accessTokenAuthorization']);
+        if (\array_key_exists('access_token_authorization', $data) && $data['access_token_authorization'] !== null) {
+            $object->setAccessTokenAuthorization($data['access_token_authorization']);
+            unset($data['access_token_authorization']);
         }
-        elseif (\array_key_exists('accessTokenAuthorization', $data) && $data['accessTokenAuthorization'] === null) {
+        elseif (\array_key_exists('access_token_authorization', $data) && $data['access_token_authorization'] === null) {
             $object->setAccessTokenAuthorization(null);
-            unset($data['accessTokenAuthorization']);
+            unset($data['access_token_authorization']);
         }
-        if (\array_key_exists('trustLevel', $data) && $data['trustLevel'] !== null) {
-            $object->setTrustLevel($data['trustLevel']);
-            unset($data['trustLevel']);
+        if (\array_key_exists('trust_level', $data) && $data['trust_level'] !== null) {
+            $object->setTrustLevel($data['trust_level']);
+            unset($data['trust_level']);
         }
-        elseif (\array_key_exists('trustLevel', $data) && $data['trustLevel'] === null) {
+        elseif (\array_key_exists('trust_level', $data) && $data['trust_level'] === null) {
             $object->setTrustLevel(null);
-            unset($data['trustLevel']);
+            unset($data['trust_level']);
         }
         if (\array_key_exists('id_token_signed_response_alg', $data) && $data['id_token_signed_response_alg'] !== null) {
             $object->setIdTokenSignedResponseAlg($data['id_token_signed_response_alg']);
@@ -120,30 +120,30 @@ class V1RegisterClientRequestNormalizer implements DenormalizerInterface, Normal
     {
         $dataArray = [];
         if ($data->isInitialized('clientName') && null !== $data->getClientName()) {
-            $dataArray['clientName'] = $data->getClientName();
+            $dataArray['client_name'] = $data->getClientName();
         }
         if ($data->isInitialized('redirectUris') && null !== $data->getRedirectUris()) {
             $values = [];
             foreach ($data->getRedirectUris() as $value) {
                 $values[] = $value;
             }
-            $dataArray['redirectUris'] = $values;
+            $dataArray['redirect_uris'] = $values;
         }
         if ($data->isInitialized('clientSecret') && null !== $data->getClientSecret()) {
-            $dataArray['clientSecret'] = $data->getClientSecret();
+            $dataArray['client_secret'] = $data->getClientSecret();
         }
         if ($data->isInitialized('grantTypes') && null !== $data->getGrantTypes()) {
             $values_1 = [];
             foreach ($data->getGrantTypes() as $value_1) {
                 $values_1[] = $value_1;
             }
-            $dataArray['grantTypes'] = $values_1;
+            $dataArray['grant_types'] = $values_1;
         }
         if ($data->isInitialized('accessTokenAuthorization') && null !== $data->getAccessTokenAuthorization()) {
-            $dataArray['accessTokenAuthorization'] = $data->getAccessTokenAuthorization();
+            $dataArray['access_token_authorization'] = $data->getAccessTokenAuthorization();
         }
         if ($data->isInitialized('trustLevel') && null !== $data->getTrustLevel()) {
-            $dataArray['trustLevel'] = $data->getTrustLevel();
+            $dataArray['trust_level'] = $data->getTrustLevel();
         }
         if ($data->isInitialized('idTokenSignedResponseAlg') && null !== $data->getIdTokenSignedResponseAlg()) {
             $dataArray['id_token_signed_response_alg'] = $data->getIdTokenSignedResponseAlg();

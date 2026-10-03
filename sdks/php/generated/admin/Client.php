@@ -79,36 +79,22 @@ class Client extends \Hearth\Generated\Admin\Runtime\Client\Client
         return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminUnassignRole($id), $fetch);
     }
     /**
-    * @param array{
-    *    "realmId"?: string,
-    *    "startTime"?: string,
-    *    "endTime"?: string,
-    *    "actor"?: string,
-    *    "action"?: string, // - AUDIT_ACTION_GROUP_CREATED: RBAC group management
-    - AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED: Permission management
-    - AUDIT_ACTION_LOGIN_FAILED: Login events
-    - AUDIT_ACTION_BACKUP_CREATED: Backup and export
-    - AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED: Required actions
-    - AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED: Password security
-    - AUDIT_ACTION_SESSION_LIMIT_ENFORCED: Session management
-    - AUDIT_ACTION_ABUSE_DETECTED: Abuse detection
-    - AUDIT_ACTION_EMAIL_CHANGE_INITIATED: Email change
-    - AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED: OIDC silent auth
-    - AUDIT_ACTION_AGENT_CREATED: Agent lifecycle
-    - AUDIT_ACTION_AGENT_DELEGATION: Agent delegation and MCP (M2)
-    - AUDIT_ACTION_AAT_ISSUED: Phase D — advanced agent surface
-    - AUDIT_ACTION_MFA_ENABLED: MFA lifecycle
-    - AUDIT_ACTION_INVITATION_CREATED: Organization invitation lifecycle
-    *    "limit"?: int,
-    * } $queryParameters
-    
-    * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
-    *
-    * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1AuditEventPage|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
-    */
-    public function auditServiceListEvents(array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
+     * Requires `hearth.realm.admin`. Newest first.
+     * @param array{
+     *    "actor"?: string,
+     *    "action"?: string, //An audit action name, e.g. `UserCreated`.
+     *    "start_time"?: int, //Microseconds since the Unix epoch.
+     *    "end_time"?: int, //Microseconds since the Unix epoch.
+     *    "limit"?: int, //Default 50, at most 200.
+     * } $queryParameters
+     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     * @throws \Hearth\Generated\Admin\Exception\AdminListAuditEventsBadRequestException
+     *
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\AdminAuditEventList : \Psr\Http\Message\ResponseInterface)
+     */
+    public function adminListAuditEvents(array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
     {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AuditServiceListEvents($queryParameters), $fetch);
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminListAuditEvents($queryParameters), $fetch);
     }
     /**
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
@@ -180,91 +166,92 @@ class Client extends \Hearth\Generated\Admin\Runtime\Client\Client
         return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminClusterTransferLeadership(), $fetch);
     }
     /**
+     * `cursor` is a decimal offset; follow `next_cursor` until it is null.
      * @param array{
-     *    "realmId"?: string,
      *    "cursor"?: string,
      *    "limit"?: int,
      * } $queryParameters
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
      *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1ListGroupsResponse|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\AdminGroupPage : \Psr\Http\Message\ResponseInterface)
      */
-    public function rbacAdminServiceListGroups(array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
+    public function adminListGroups(array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
     {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceListGroups($queryParameters), $fetch);
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminListGroups($queryParameters), $fetch);
     }
     /**
-     * @param null|\Hearth\Generated\Admin\Model\V1CreateGroupRequest $requestBody
+     * @param null|\Hearth\Generated\Admin\Model\AdminCreateGroupRequest $requestBody
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     * @throws \Hearth\Generated\Admin\Exception\AdminCreateGroupConflictException
      *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1Group|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\AdminGroup : \Psr\Http\Message\ResponseInterface)
      */
-    public function rbacAdminServiceCreateGroup(?\Hearth\Generated\Admin\Model\V1CreateGroupRequest $requestBody = null, string $fetch = self::FETCH_OBJECT)
+    public function adminCreateGroup(?\Hearth\Generated\Admin\Model\AdminCreateGroupRequest $requestBody = null, string $fetch = self::FETCH_OBJECT)
     {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceCreateGroup($requestBody), $fetch);
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminCreateGroup($requestBody), $fetch);
     }
     /**
-     * @param string $groupId
+     * @param string $id
+     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     * @throws \Hearth\Generated\Admin\Exception\AdminDeleteGroupNotFoundException
+     *
+     * @return ($fetch is 'object' ? null : \Psr\Http\Message\ResponseInterface)
+     */
+    public function adminDeleteGroup(string $id, string $fetch = self::FETCH_OBJECT)
+    {
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminDeleteGroup($id), $fetch);
+    }
+    /**
+     * @param string $id
+     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     * @throws \Hearth\Generated\Admin\Exception\AdminGetGroupNotFoundException
+     *
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\AdminGroup : \Psr\Http\Message\ResponseInterface)
+     */
+    public function adminGetGroup(string $id, string $fetch = self::FETCH_OBJECT)
+    {
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminGetGroup($id), $fetch);
+    }
+    /**
+     * Absent fields are unchanged; `description` null clears it.
+     * @param string $id
+     * @param null|\Hearth\Generated\Admin\Model\AdminUpdateGroupRequest $requestBody
+     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     * @throws \Hearth\Generated\Admin\Exception\AdminUpdateGroupNotFoundException
+     *
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\AdminGroup : \Psr\Http\Message\ResponseInterface)
+     */
+    public function adminUpdateGroup(string $id, ?\Hearth\Generated\Admin\Model\AdminUpdateGroupRequest $requestBody = null, string $fetch = self::FETCH_OBJECT)
+    {
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminUpdateGroup($id, $requestBody), $fetch);
+    }
+    /**
+     * @param string $id
      * @param array{
-     *    "realmId"?: string,
-     * } $queryParameters
-     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
-     *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
-     */
-    public function rbacAdminServiceDeleteGroup(string $groupId, array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
-    {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceDeleteGroup($groupId, $queryParameters), $fetch);
-    }
-    /**
-     * @param string $groupId
-     * @param array{
-     *    "realmId"?: string,
-     * } $queryParameters
-     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
-     *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1Group|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
-     */
-    public function rbacAdminServiceGetGroup(string $groupId, array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
-    {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceGetGroup($groupId, $queryParameters), $fetch);
-    }
-    /**
-     * @param string $groupId
-     * @param null|\Hearth\Generated\Admin\Model\RbacAdminServiceUpdateGroupBody $requestBody
-     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
-     *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1Group|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
-     */
-    public function rbacAdminServiceUpdateGroup(string $groupId, ?\Hearth\Generated\Admin\Model\RbacAdminServiceUpdateGroupBody $requestBody = null, string $fetch = self::FETCH_OBJECT)
-    {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceUpdateGroup($groupId, $requestBody), $fetch);
-    }
-    /**
-     * @param string $groupId
-     * @param array{
-     *    "realmId"?: string,
      *    "cursor"?: string,
      *    "limit"?: int,
      * } $queryParameters
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     * @throws \Hearth\Generated\Admin\Exception\AdminListGroupMembersNotFoundException
      *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1ListGroupMembersResponse|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\AdminGroupMemberPage : \Psr\Http\Message\ResponseInterface)
      */
-    public function rbacAdminServiceListGroupMembers(string $groupId, array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
+    public function adminListGroupMembers(string $id, array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
     {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceListGroupMembers($groupId, $queryParameters), $fetch);
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminListGroupMembers($id, $queryParameters), $fetch);
     }
     /**
-     * @param string $groupId
-     * @param null|\Hearth\Generated\Admin\Model\RbacAdminServiceAddGroupMemberBody $requestBody
+     * @param string $id
+     * @param null|\Hearth\Generated\Admin\Model\AdminAddGroupMemberRequest $requestBody
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     * @throws \Hearth\Generated\Admin\Exception\AdminAddGroupMemberBadRequestException
+     * @throws \Hearth\Generated\Admin\Exception\AdminAddGroupMemberNotFoundException
      *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1GroupMembership|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\AdminGroupMembership : \Psr\Http\Message\ResponseInterface)
      */
-    public function rbacAdminServiceAddGroupMember(string $groupId, ?\Hearth\Generated\Admin\Model\RbacAdminServiceAddGroupMemberBody $requestBody = null, string $fetch = self::FETCH_OBJECT)
+    public function adminAddGroupMember(string $id, ?\Hearth\Generated\Admin\Model\AdminAddGroupMemberRequest $requestBody = null, string $fetch = self::FETCH_OBJECT)
     {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceAddGroupMember($groupId, $requestBody), $fetch);
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminAddGroupMember($id, $requestBody), $fetch);
     }
     /**
      * @param string $id
@@ -581,28 +568,69 @@ class Client extends \Hearth\Generated\Admin\Runtime\Client\Client
         return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminPatchUserRequiredActions($realmId, $userId, $requestBody), $fetch);
     }
     /**
+     * Requires `hearth.realm.admin`. Follow `next_cursor` until it is null.
      * @param array{
-     *    "realmId"?: string,
      *    "cursor"?: string,
      *    "limit"?: int,
      * } $queryParameters
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
      *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1ListRolesResponse|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\AdminRolePage : \Psr\Http\Message\ResponseInterface)
      */
-    public function rbacAdminServiceListRoles(array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
+    public function adminListRoles(array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
     {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceListRoles($queryParameters), $fetch);
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminListRoles($queryParameters), $fetch);
     }
     /**
-     * @param null|\Hearth\Generated\Admin\Model\V1CreateRoleRequest $requestBody
+     * @param null|\Hearth\Generated\Admin\Model\AdminCreateRoleRequest $requestBody
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     * @throws \Hearth\Generated\Admin\Exception\AdminCreateRoleBadRequestException
+     * @throws \Hearth\Generated\Admin\Exception\AdminCreateRoleConflictException
      *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1Role|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\AdminRole : \Psr\Http\Message\ResponseInterface)
      */
-    public function rbacAdminServiceCreateRole(?\Hearth\Generated\Admin\Model\V1CreateRoleRequest $requestBody = null, string $fetch = self::FETCH_OBJECT)
+    public function adminCreateRole(?\Hearth\Generated\Admin\Model\AdminCreateRoleRequest $requestBody = null, string $fetch = self::FETCH_OBJECT)
     {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceCreateRole($requestBody), $fetch);
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminCreateRole($requestBody), $fetch);
+    }
+    /**
+     * @param string $id
+     * @param array{
+     *    "cascade"?: bool, //Also remove the role's assignments, parent links and extra org-role rows. Without it a referenced role answers `409 role_in_use`.
+     * } $queryParameters
+     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     * @throws \Hearth\Generated\Admin\Exception\AdminDeleteRoleNotFoundException
+     * @throws \Hearth\Generated\Admin\Exception\AdminDeleteRoleConflictException
+     *
+     * @return ($fetch is 'object' ? null : \Psr\Http\Message\ResponseInterface)
+     */
+    public function adminDeleteRole(string $id, array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
+    {
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminDeleteRole($id, $queryParameters), $fetch);
+    }
+    /**
+     * @param string $id
+     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     * @throws \Hearth\Generated\Admin\Exception\AdminGetRoleNotFoundException
+     *
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\AdminRole : \Psr\Http\Message\ResponseInterface)
+     */
+    public function adminGetRole(string $id, string $fetch = self::FETCH_OBJECT)
+    {
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminGetRole($id), $fetch);
+    }
+    /**
+     * Absent fields are unchanged; `description` null clears it.
+     * @param string $id
+     * @param null|\Hearth\Generated\Admin\Model\AdminUpdateRoleRequest $requestBody
+     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     * @throws \Hearth\Generated\Admin\Exception\AdminUpdateRoleNotFoundException
+     *
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\AdminRole : \Psr\Http\Message\ResponseInterface)
+     */
+    public function adminUpdateRole(string $id, ?\Hearth\Generated\Admin\Model\AdminUpdateRoleRequest $requestBody = null, string $fetch = self::FETCH_OBJECT)
+    {
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminUpdateRole($id, $requestBody), $fetch);
     }
     /**
      * @param string $id
@@ -617,44 +645,6 @@ class Client extends \Hearth\Generated\Admin\Runtime\Client\Client
     public function adminListRoleMembers(string $id, array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
     {
         return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminListRoleMembers($id, $queryParameters), $fetch);
-    }
-    /**
-     * @param string $roleId
-     * @param array{
-     *    "realmId"?: string,
-     *    "cascade"?: bool,
-     * } $queryParameters
-     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
-     *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
-     */
-    public function rbacAdminServiceDeleteRole(string $roleId, array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
-    {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceDeleteRole($roleId, $queryParameters), $fetch);
-    }
-    /**
-     * @param string $roleId
-     * @param array{
-     *    "realmId"?: string,
-     * } $queryParameters
-     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
-     *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1Role|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
-     */
-    public function rbacAdminServiceGetRole(string $roleId, array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
-    {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceGetRole($roleId, $queryParameters), $fetch);
-    }
-    /**
-     * @param string $roleId
-     * @param null|\Hearth\Generated\Admin\Model\RbacAdminServiceUpdateRoleBody $requestBody
-     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
-     *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1Role|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
-     */
-    public function rbacAdminServiceUpdateRole(string $roleId, ?\Hearth\Generated\Admin\Model\RbacAdminServiceUpdateRoleBody $requestBody = null, string $fetch = self::FETCH_OBJECT)
-    {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceUpdateRole($roleId, $requestBody), $fetch);
     }
     /**
      * @param string $sessionId
@@ -789,9 +779,34 @@ class Client extends \Hearth\Generated\Admin\Runtime\Client\Client
         return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminRevokeUserPermission($id, $permission, $queryParameters), $fetch);
     }
     /**
+     * @param string $id
+     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     * @throws \Hearth\Generated\Admin\Exception\AdminListUserAssignmentsNotFoundException
+     *
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\AdminRoleAssignmentList : \Psr\Http\Message\ResponseInterface)
+     */
+    public function adminListUserAssignments(string $id, string $fetch = self::FETCH_OBJECT)
+    {
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminListUserAssignments($id), $fetch);
+    }
+    /**
+     * Realm-wide, or inside one organization when `org_id` is set.
+     * @param string $id
+     * @param null|\Hearth\Generated\Admin\Model\AdminAssignRoleRequest $requestBody
+     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     * @throws \Hearth\Generated\Admin\Exception\AdminAssignUserRoleForbiddenException
+     * @throws \Hearth\Generated\Admin\Exception\AdminAssignUserRoleNotFoundException
+     *
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\AdminRoleAssignment : \Psr\Http\Message\ResponseInterface)
+     */
+    public function adminAssignUserRole(string $id, ?\Hearth\Generated\Admin\Model\AdminAssignRoleRequest $requestBody = null, string $fetch = self::FETCH_OBJECT)
+    {
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminAssignUserRole($id, $requestBody), $fetch);
+    }
+    /**
      * @param string $userId
      * @param array{
-     *    "realmId"?: string,
+     *    "realm_id"?: string,
      * } $queryParameters
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
      *
@@ -805,7 +820,7 @@ class Client extends \Hearth\Generated\Admin\Runtime\Client\Client
      * @param string $userId
      * @param string $clientId
      * @param array{
-     *    "realmId"?: string,
+     *    "realm_id"?: string,
      * } $queryParameters
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
      *
@@ -818,8 +833,8 @@ class Client extends \Hearth\Generated\Admin\Runtime\Client\Client
     /**
      * @param string $userId
      * @param array{
-     *    "realmId"?: string,
-     *    "orgId"?: string, //optional; empty means realm-only
+     *    "realm_id"?: string,
+     *    "org_id"?: string, //optional; empty means realm-only
      *    "scope"?: string, //optional; empty means no narrowing
      * } $queryParameters
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
@@ -829,30 +844,6 @@ class Client extends \Hearth\Generated\Admin\Runtime\Client\Client
     public function rbacAdminServiceResolveEffectivePermissions(string $userId, array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
     {
         return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceResolveEffectivePermissions($userId, $queryParameters), $fetch);
-    }
-    /**
-     * @param string $userId
-     * @param array{
-     *    "realmId"?: string,
-     * } $queryParameters
-     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
-     *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1ListUserAssignmentsResponse|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
-     */
-    public function rbacAdminServiceListUserAssignments(string $userId, array $queryParameters = [], string $fetch = self::FETCH_OBJECT)
-    {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceListUserAssignments($userId, $queryParameters), $fetch);
-    }
-    /**
-     * @param string $userId
-     * @param null|\Hearth\Generated\Admin\Model\RbacAdminServiceAssignUserRoleBody $requestBody
-     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
-     *
-     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1RoleAssignment|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
-     */
-    public function rbacAdminServiceAssignUserRole(string $userId, ?\Hearth\Generated\Admin\Model\RbacAdminServiceAssignUserRoleBody $requestBody = null, string $fetch = self::FETCH_OBJECT)
-    {
-        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\RbacAdminServiceAssignUserRole($userId, $requestBody), $fetch);
     }
     /**
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)

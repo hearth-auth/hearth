@@ -4,14 +4,14 @@ namespace Hearth\Generated\Admin\Endpoint;
 
 class ApplicationAdminServiceUpdateApplication extends \Hearth\Generated\Admin\Runtime\Client\BaseEndpoint implements \Hearth\Generated\Admin\Runtime\Client\Endpoint
 {
-    protected $clientId;
+    protected $client_id;
     /**
      * @param string $clientId
      * @param null|\Hearth\Generated\Admin\Model\V1UpdateClientRequest $requestBody
      */
     public function __construct(string $clientId, ?\Hearth\Generated\Admin\Model\V1UpdateClientRequest $requestBody = null)
     {
-        $this->clientId = $clientId;
+        $this->client_id = $clientId;
         $this->body = $requestBody;
     }
     use \Hearth\Generated\Admin\Runtime\Client\EndpointTrait;
@@ -21,7 +21,7 @@ class ApplicationAdminServiceUpdateApplication extends \Hearth\Generated\Admin\R
     }
     public function getUri(): string
     {
-        return str_replace(['{clientId}'], [rawurlencode($this->clientId)], '/admin/applications/{clientId}');
+        return str_replace(['{client_id}'], [rawurlencode($this->client_id)], '/admin/applications/{client_id}');
     }
     public function getBody(\Symfony\Component\Serializer\SerializerInterface $serializer, $streamFactory = null): array
     {

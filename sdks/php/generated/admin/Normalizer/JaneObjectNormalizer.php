@@ -20,61 +20,65 @@ class JaneObjectNormalizer implements DenormalizerInterface, NormalizerInterface
         
         \Hearth\Generated\Admin\Model\AdminAddAdditionalRoleRequest::class => \Hearth\Generated\Admin\Normalizer\AdminAddAdditionalRoleRequestNormalizer::class,
         
+        \Hearth\Generated\Admin\Model\AdminAddGroupMemberRequest::class => \Hearth\Generated\Admin\Normalizer\AdminAddGroupMemberRequestNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminAssignRoleRequest::class => \Hearth\Generated\Admin\Normalizer\AdminAssignRoleRequestNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminAssignmentScope::class => \Hearth\Generated\Admin\Normalizer\AdminAssignmentScopeNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminAuditEvent::class => \Hearth\Generated\Admin\Normalizer\AdminAuditEventNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminAuditEventList::class => \Hearth\Generated\Admin\Normalizer\AdminAuditEventListNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminCreateGroupRequest::class => \Hearth\Generated\Admin\Normalizer\AdminCreateGroupRequestNormalizer::class,
+        
         \Hearth\Generated\Admin\Model\AdminCreateOrganizationRequest::class => \Hearth\Generated\Admin\Normalizer\AdminCreateOrganizationRequestNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminCreateRoleRequest::class => \Hearth\Generated\Admin\Normalizer\AdminCreateRoleRequestNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminGroup::class => \Hearth\Generated\Admin\Normalizer\AdminGroupNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminGroupMemberPage::class => \Hearth\Generated\Admin\Normalizer\AdminGroupMemberPageNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminGroupMembership::class => \Hearth\Generated\Admin\Normalizer\AdminGroupMembershipNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminGroupPage::class => \Hearth\Generated\Admin\Normalizer\AdminGroupPageNormalizer::class,
         
         \Hearth\Generated\Admin\Model\AdminOrganization::class => \Hearth\Generated\Admin\Normalizer\AdminOrganizationNormalizer::class,
         
         \Hearth\Generated\Admin\Model\AdminOrganizationPage::class => \Hearth\Generated\Admin\Normalizer\AdminOrganizationPageNormalizer::class,
         
+        \Hearth\Generated\Admin\Model\AdminRole::class => \Hearth\Generated\Admin\Normalizer\AdminRoleNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminRoleAssignment::class => \Hearth\Generated\Admin\Normalizer\AdminRoleAssignmentNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminRoleAssignmentList::class => \Hearth\Generated\Admin\Normalizer\AdminRoleAssignmentListNormalizer::class,
+        
         \Hearth\Generated\Admin\Model\AdminRoleNameList::class => \Hearth\Generated\Admin\Normalizer\AdminRoleNameListNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminRolePage::class => \Hearth\Generated\Admin\Normalizer\AdminRolePageNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminSubject::class => \Hearth\Generated\Admin\Normalizer\AdminSubjectNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminUpdateGroupRequest::class => \Hearth\Generated\Admin\Normalizer\AdminUpdateGroupRequestNormalizer::class,
         
         \Hearth\Generated\Admin\Model\AdminUpdateOrganizationRequest::class => \Hearth\Generated\Admin\Normalizer\AdminUpdateOrganizationRequestNormalizer::class,
         
-        \Hearth\Generated\Admin\Model\RbacAdminServiceAddGroupMemberBody::class => \Hearth\Generated\Admin\Normalizer\RbacAdminServiceAddGroupMemberBodyNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\RbacAdminServiceAssignUserRoleBody::class => \Hearth\Generated\Admin\Normalizer\RbacAdminServiceAssignUserRoleBodyNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\RbacAdminServiceUpdateGroupBody::class => \Hearth\Generated\Admin\Normalizer\RbacAdminServiceUpdateGroupBodyNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\RbacAdminServiceUpdateRoleBody::class => \Hearth\Generated\Admin\Normalizer\RbacAdminServiceUpdateRoleBodyNormalizer::class,
+        \Hearth\Generated\Admin\Model\AdminUpdateRoleRequest::class => \Hearth\Generated\Admin\Normalizer\AdminUpdateRoleRequestNormalizer::class,
         
         \Hearth\Generated\Admin\Model\ProtobufAny::class => \Hearth\Generated\Admin\Normalizer\ProtobufAnyNormalizer::class,
         
         \Hearth\Generated\Admin\Model\RpcStatus::class => \Hearth\Generated\Admin\Normalizer\RpcStatusNormalizer::class,
         
-        \Hearth\Generated\Admin\Model\V1AuditEvent::class => \Hearth\Generated\Admin\Normalizer\V1AuditEventNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\V1AuditEventPage::class => \Hearth\Generated\Admin\Normalizer\V1AuditEventPageNormalizer::class,
-        
         \Hearth\Generated\Admin\Model\V1ConsentEntry::class => \Hearth\Generated\Admin\Normalizer\V1ConsentEntryNormalizer::class,
         
-        \Hearth\Generated\Admin\Model\V1CreateGroupRequest::class => \Hearth\Generated\Admin\Normalizer\V1CreateGroupRequestNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\V1CreateRoleRequest::class => \Hearth\Generated\Admin\Normalizer\V1CreateRoleRequestNormalizer::class,
-        
         \Hearth\Generated\Admin\Model\V1CreateUserRequest::class => \Hearth\Generated\Admin\Normalizer\V1CreateUserRequestNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\V1Group::class => \Hearth\Generated\Admin\Normalizer\V1GroupNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\V1GroupMember::class => \Hearth\Generated\Admin\Normalizer\V1GroupMemberNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\V1GroupMembership::class => \Hearth\Generated\Admin\Normalizer\V1GroupMembershipNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\V1ListGroupMembersResponse::class => \Hearth\Generated\Admin\Normalizer\V1ListGroupMembersResponseNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\V1ListGroupsResponse::class => \Hearth\Generated\Admin\Normalizer\V1ListGroupsResponseNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\V1ListRolesResponse::class => \Hearth\Generated\Admin\Normalizer\V1ListRolesResponseNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\V1ListUserAssignmentsResponse::class => \Hearth\Generated\Admin\Normalizer\V1ListUserAssignmentsResponseNormalizer::class,
         
         \Hearth\Generated\Admin\Model\V1ListUserConsentsResponse::class => \Hearth\Generated\Admin\Normalizer\V1ListUserConsentsResponseNormalizer::class,
         
         \Hearth\Generated\Admin\Model\V1OAuthClient::class => \Hearth\Generated\Admin\Normalizer\V1OAuthClientNormalizer::class,
         
         \Hearth\Generated\Admin\Model\V1OAuthClientPage::class => \Hearth\Generated\Admin\Normalizer\V1OAuthClientPageNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\V1OrgScope::class => \Hearth\Generated\Admin\Normalizer\V1OrgScopeNormalizer::class,
         
         \Hearth\Generated\Admin\Model\V1Realm::class => \Hearth\Generated\Admin\Normalizer\V1RealmNormalizer::class,
         
@@ -85,12 +89,6 @@ class JaneObjectNormalizer implements DenormalizerInterface, NormalizerInterface
         \Hearth\Generated\Admin\Model\V1RegisterClientRequest::class => \Hearth\Generated\Admin\Normalizer\V1RegisterClientRequestNormalizer::class,
         
         \Hearth\Generated\Admin\Model\V1ResolveEffectivePermissionsResponse::class => \Hearth\Generated\Admin\Normalizer\V1ResolveEffectivePermissionsResponseNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\V1Role::class => \Hearth\Generated\Admin\Normalizer\V1RoleNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\V1RoleAssignment::class => \Hearth\Generated\Admin\Normalizer\V1RoleAssignmentNormalizer::class,
-        
-        \Hearth\Generated\Admin\Model\V1Scope::class => \Hearth\Generated\Admin\Normalizer\V1ScopeNormalizer::class,
         
         \Hearth\Generated\Admin\Model\V1UpdateClientRequest::class => \Hearth\Generated\Admin\Normalizer\V1UpdateClientRequestNormalizer::class,
         

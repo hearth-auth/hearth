@@ -49,13 +49,13 @@ class V1UserPageNormalizer implements DenormalizerInterface, NormalizerInterface
             $object->setItems(null);
             unset($data['items']);
         }
-        if (\array_key_exists('nextCursor', $data) && $data['nextCursor'] !== null) {
-            $object->setNextCursor($data['nextCursor']);
-            unset($data['nextCursor']);
+        if (\array_key_exists('next_cursor', $data) && $data['next_cursor'] !== null) {
+            $object->setNextCursor($data['next_cursor']);
+            unset($data['next_cursor']);
         }
-        elseif (\array_key_exists('nextCursor', $data) && $data['nextCursor'] === null) {
+        elseif (\array_key_exists('next_cursor', $data) && $data['next_cursor'] === null) {
             $object->setNextCursor(null);
-            unset($data['nextCursor']);
+            unset($data['next_cursor']);
         }
         foreach ($data as $key => $value_1) {
             if (preg_match('/.*/', (string) $key)) {
@@ -75,7 +75,7 @@ class V1UserPageNormalizer implements DenormalizerInterface, NormalizerInterface
             $dataArray['items'] = $values;
         }
         if ($data->isInitialized('nextCursor') && null !== $data->getNextCursor()) {
-            $dataArray['nextCursor'] = $data->getNextCursor();
+            $dataArray['next_cursor'] = $data->getNextCursor();
         }
         foreach ($data->additionalPropertyEntries() as $key => $value_1) {
             if (preg_match('/.*/', (string) $key)) {

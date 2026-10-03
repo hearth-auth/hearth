@@ -200,6 +200,6 @@ class V1UpdateClientRequest implements AdditionalPropertiesInterface
     }
     public function definedProperties(): array
     {
-        return ['clientName' => ['clientName', 'getClientName', 'setClientName'], 'redirectUris' => ['redirectUris', 'getRedirectUris', 'setRedirectUris'], 'grantTypes' => ['grantTypes', 'getGrantTypes', 'setGrantTypes'], 'accessTokenAuthorization' => ['accessTokenAuthorization', 'getAccessTokenAuthorization', 'setAccessTokenAuthorization'], 'trustLevel' => ['trustLevel', 'getTrustLevel', 'setTrustLevel'], 'idTokenSignedResponseAlg' => ['id_token_signed_response_alg', 'getIdTokenSignedResponseAlg', 'setIdTokenSignedResponseAlg']];
+        return ['clientName' => ['client_name', 'getClientName', 'setClientName'], 'redirectUris' => ['redirect_uris', 'getRedirectUris', 'setRedirectUris'], 'grantTypes' => ['grant_types', 'getGrantTypes', 'setGrantTypes'], 'accessTokenAuthorization' => ['access_token_authorization', 'getAccessTokenAuthorization', 'setAccessTokenAuthorization'], 'trustLevel' => ['trust_level', 'getTrustLevel', 'setTrustLevel'], 'idTokenSignedResponseAlg' => ['id_token_signed_response_alg', 'getIdTokenSignedResponseAlg', 'setIdTokenSignedResponseAlg']];
     }
 }

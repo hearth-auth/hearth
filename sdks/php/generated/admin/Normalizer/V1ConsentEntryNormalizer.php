@@ -37,49 +37,49 @@ class V1ConsentEntryNormalizer implements DenormalizerInterface, NormalizerInter
         if (isset($data['$recursiveRef'])) {
             return new Reference($data['$recursiveRef'], $context['document-origin']);
         }
-        if (\array_key_exists('clientId', $data) && $data['clientId'] !== null) {
-            $object->setClientId($data['clientId']);
-            unset($data['clientId']);
+        if (\array_key_exists('client_id', $data) && $data['client_id'] !== null) {
+            $object->setClientId($data['client_id']);
+            unset($data['client_id']);
         }
-        elseif (\array_key_exists('clientId', $data) && $data['clientId'] === null) {
+        elseif (\array_key_exists('client_id', $data) && $data['client_id'] === null) {
             $object->setClientId(null);
-            unset($data['clientId']);
+            unset($data['client_id']);
         }
-        if (\array_key_exists('clientName', $data) && $data['clientName'] !== null) {
-            $object->setClientName($data['clientName']);
-            unset($data['clientName']);
+        if (\array_key_exists('client_name', $data) && $data['client_name'] !== null) {
+            $object->setClientName($data['client_name']);
+            unset($data['client_name']);
         }
-        elseif (\array_key_exists('clientName', $data) && $data['clientName'] === null) {
+        elseif (\array_key_exists('client_name', $data) && $data['client_name'] === null) {
             $object->setClientName(null);
-            unset($data['clientName']);
+            unset($data['client_name']);
         }
-        if (\array_key_exists('grantedScopes', $data) && $data['grantedScopes'] !== null) {
+        if (\array_key_exists('granted_scopes', $data) && $data['granted_scopes'] !== null) {
             $values = [];
-            foreach ($data['grantedScopes'] as $value) {
+            foreach ($data['granted_scopes'] as $value) {
                 $values[] = $value;
             }
             $object->setGrantedScopes($values);
-            unset($data['grantedScopes']);
+            unset($data['granted_scopes']);
         }
-        elseif (\array_key_exists('grantedScopes', $data) && $data['grantedScopes'] === null) {
+        elseif (\array_key_exists('granted_scopes', $data) && $data['granted_scopes'] === null) {
             $object->setGrantedScopes(null);
-            unset($data['grantedScopes']);
+            unset($data['granted_scopes']);
         }
-        if (\array_key_exists('grantedAt', $data) && $data['grantedAt'] !== null) {
-            $object->setGrantedAt($data['grantedAt']);
-            unset($data['grantedAt']);
+        if (\array_key_exists('granted_at', $data) && $data['granted_at'] !== null) {
+            $object->setGrantedAt($data['granted_at']);
+            unset($data['granted_at']);
         }
-        elseif (\array_key_exists('grantedAt', $data) && $data['grantedAt'] === null) {
+        elseif (\array_key_exists('granted_at', $data) && $data['granted_at'] === null) {
             $object->setGrantedAt(null);
-            unset($data['grantedAt']);
+            unset($data['granted_at']);
         }
-        if (\array_key_exists('updatedAt', $data) && $data['updatedAt'] !== null) {
-            $object->setUpdatedAt($data['updatedAt']);
-            unset($data['updatedAt']);
+        if (\array_key_exists('updated_at', $data) && $data['updated_at'] !== null) {
+            $object->setUpdatedAt($data['updated_at']);
+            unset($data['updated_at']);
         }
-        elseif (\array_key_exists('updatedAt', $data) && $data['updatedAt'] === null) {
+        elseif (\array_key_exists('updated_at', $data) && $data['updated_at'] === null) {
             $object->setUpdatedAt(null);
-            unset($data['updatedAt']);
+            unset($data['updated_at']);
         }
         foreach ($data as $key => $value_1) {
             if (preg_match('/.*/', (string) $key)) {
@@ -92,23 +92,23 @@ class V1ConsentEntryNormalizer implements DenormalizerInterface, NormalizerInter
     {
         $dataArray = [];
         if ($data->isInitialized('clientId') && null !== $data->getClientId()) {
-            $dataArray['clientId'] = $data->getClientId();
+            $dataArray['client_id'] = $data->getClientId();
         }
         if ($data->isInitialized('clientName') && null !== $data->getClientName()) {
-            $dataArray['clientName'] = $data->getClientName();
+            $dataArray['client_name'] = $data->getClientName();
         }
         if ($data->isInitialized('grantedScopes') && null !== $data->getGrantedScopes()) {
             $values = [];
             foreach ($data->getGrantedScopes() as $value) {
                 $values[] = $value;
             }
-            $dataArray['grantedScopes'] = $values;
+            $dataArray['granted_scopes'] = $values;
         }
         if ($data->isInitialized('grantedAt') && null !== $data->getGrantedAt()) {
-            $dataArray['grantedAt'] = $data->getGrantedAt();
+            $dataArray['granted_at'] = $data->getGrantedAt();
         }
         if ($data->isInitialized('updatedAt') && null !== $data->getUpdatedAt()) {
-            $dataArray['updatedAt'] = $data->getUpdatedAt();
+            $dataArray['updated_at'] = $data->getUpdatedAt();
         }
         foreach ($data->additionalPropertyEntries() as $key => $value_1) {
             if (preg_match('/.*/', (string) $key)) {

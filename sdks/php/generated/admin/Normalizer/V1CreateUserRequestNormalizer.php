@@ -45,29 +45,29 @@ class V1CreateUserRequestNormalizer implements DenormalizerInterface, Normalizer
             $object->setEmail(null);
             unset($data['email']);
         }
-        if (\array_key_exists('displayName', $data) && $data['displayName'] !== null) {
-            $object->setDisplayName($data['displayName']);
-            unset($data['displayName']);
+        if (\array_key_exists('display_name', $data) && $data['display_name'] !== null) {
+            $object->setDisplayName($data['display_name']);
+            unset($data['display_name']);
         }
-        elseif (\array_key_exists('displayName', $data) && $data['displayName'] === null) {
+        elseif (\array_key_exists('display_name', $data) && $data['display_name'] === null) {
             $object->setDisplayName(null);
-            unset($data['displayName']);
+            unset($data['display_name']);
         }
-        if (\array_key_exists('firstName', $data) && $data['firstName'] !== null) {
-            $object->setFirstName($data['firstName']);
-            unset($data['firstName']);
+        if (\array_key_exists('first_name', $data) && $data['first_name'] !== null) {
+            $object->setFirstName($data['first_name']);
+            unset($data['first_name']);
         }
-        elseif (\array_key_exists('firstName', $data) && $data['firstName'] === null) {
+        elseif (\array_key_exists('first_name', $data) && $data['first_name'] === null) {
             $object->setFirstName(null);
-            unset($data['firstName']);
+            unset($data['first_name']);
         }
-        if (\array_key_exists('lastName', $data) && $data['lastName'] !== null) {
-            $object->setLastName($data['lastName']);
-            unset($data['lastName']);
+        if (\array_key_exists('last_name', $data) && $data['last_name'] !== null) {
+            $object->setLastName($data['last_name']);
+            unset($data['last_name']);
         }
-        elseif (\array_key_exists('lastName', $data) && $data['lastName'] === null) {
+        elseif (\array_key_exists('last_name', $data) && $data['last_name'] === null) {
             $object->setLastName(null);
-            unset($data['lastName']);
+            unset($data['last_name']);
         }
         if (\array_key_exists('attributes', $data) && $data['attributes'] !== null) {
             $values = new \Hearth\Generated\Admin\Runtime\JsonObject();
@@ -95,13 +95,13 @@ class V1CreateUserRequestNormalizer implements DenormalizerInterface, Normalizer
             $dataArray['email'] = $data->getEmail();
         }
         if ($data->isInitialized('displayName') && null !== $data->getDisplayName()) {
-            $dataArray['displayName'] = $data->getDisplayName();
+            $dataArray['display_name'] = $data->getDisplayName();
         }
         if ($data->isInitialized('firstName') && null !== $data->getFirstName()) {
-            $dataArray['firstName'] = $data->getFirstName();
+            $dataArray['first_name'] = $data->getFirstName();
         }
         if ($data->isInitialized('lastName') && null !== $data->getLastName()) {
-            $dataArray['lastName'] = $data->getLastName();
+            $dataArray['last_name'] = $data->getLastName();
         }
         if ($data->isInitialized('attributes') && null !== $data->getAttributes()) {
             $values = new \Hearth\Generated\Admin\Runtime\JsonObject();

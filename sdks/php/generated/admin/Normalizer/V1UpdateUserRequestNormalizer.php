@@ -37,8 +37,8 @@ class V1UpdateUserRequestNormalizer implements DenormalizerInterface, Normalizer
         if (isset($data['$recursiveRef'])) {
             return new Reference($data['$recursiveRef'], $context['document-origin']);
         }
-        if (\array_key_exists('clearAttributes', $data) && \is_int($data['clearAttributes'])) {
-            $data['clearAttributes'] = (bool) $data['clearAttributes'];
+        if (\array_key_exists('clear_attributes', $data) && \is_int($data['clear_attributes'])) {
+            $data['clear_attributes'] = (bool) $data['clear_attributes'];
         }
         if (\array_key_exists('email', $data) && $data['email'] !== null) {
             $object->setEmail($data['email']);
@@ -48,13 +48,13 @@ class V1UpdateUserRequestNormalizer implements DenormalizerInterface, Normalizer
             $object->setEmail(null);
             unset($data['email']);
         }
-        if (\array_key_exists('displayName', $data) && $data['displayName'] !== null) {
-            $object->setDisplayName($data['displayName']);
-            unset($data['displayName']);
+        if (\array_key_exists('display_name', $data) && $data['display_name'] !== null) {
+            $object->setDisplayName($data['display_name']);
+            unset($data['display_name']);
         }
-        elseif (\array_key_exists('displayName', $data) && $data['displayName'] === null) {
+        elseif (\array_key_exists('display_name', $data) && $data['display_name'] === null) {
             $object->setDisplayName(null);
-            unset($data['displayName']);
+            unset($data['display_name']);
         }
         if (\array_key_exists('status', $data) && $data['status'] !== null) {
             $object->setStatus($data['status']);
@@ -64,21 +64,21 @@ class V1UpdateUserRequestNormalizer implements DenormalizerInterface, Normalizer
             $object->setStatus(null);
             unset($data['status']);
         }
-        if (\array_key_exists('firstName', $data) && $data['firstName'] !== null) {
-            $object->setFirstName($data['firstName']);
-            unset($data['firstName']);
+        if (\array_key_exists('first_name', $data) && $data['first_name'] !== null) {
+            $object->setFirstName($data['first_name']);
+            unset($data['first_name']);
         }
-        elseif (\array_key_exists('firstName', $data) && $data['firstName'] === null) {
+        elseif (\array_key_exists('first_name', $data) && $data['first_name'] === null) {
             $object->setFirstName(null);
-            unset($data['firstName']);
+            unset($data['first_name']);
         }
-        if (\array_key_exists('lastName', $data) && $data['lastName'] !== null) {
-            $object->setLastName($data['lastName']);
-            unset($data['lastName']);
+        if (\array_key_exists('last_name', $data) && $data['last_name'] !== null) {
+            $object->setLastName($data['last_name']);
+            unset($data['last_name']);
         }
-        elseif (\array_key_exists('lastName', $data) && $data['lastName'] === null) {
+        elseif (\array_key_exists('last_name', $data) && $data['last_name'] === null) {
             $object->setLastName(null);
-            unset($data['lastName']);
+            unset($data['last_name']);
         }
         if (\array_key_exists('attributes', $data) && $data['attributes'] !== null) {
             $values = new \Hearth\Generated\Admin\Runtime\JsonObject();
@@ -92,13 +92,13 @@ class V1UpdateUserRequestNormalizer implements DenormalizerInterface, Normalizer
             $object->setAttributes(null);
             unset($data['attributes']);
         }
-        if (\array_key_exists('clearAttributes', $data) && $data['clearAttributes'] !== null) {
-            $object->setClearAttributes($data['clearAttributes']);
-            unset($data['clearAttributes']);
+        if (\array_key_exists('clear_attributes', $data) && $data['clear_attributes'] !== null) {
+            $object->setClearAttributes($data['clear_attributes']);
+            unset($data['clear_attributes']);
         }
-        elseif (\array_key_exists('clearAttributes', $data) && $data['clearAttributes'] === null) {
+        elseif (\array_key_exists('clear_attributes', $data) && $data['clear_attributes'] === null) {
             $object->setClearAttributes(null);
-            unset($data['clearAttributes']);
+            unset($data['clear_attributes']);
         }
         foreach ($data as $key_1 => $value_1) {
             if (preg_match('/.*/', (string) $key_1)) {
@@ -114,16 +114,16 @@ class V1UpdateUserRequestNormalizer implements DenormalizerInterface, Normalizer
             $dataArray['email'] = $data->getEmail();
         }
         if ($data->isInitialized('displayName') && null !== $data->getDisplayName()) {
-            $dataArray['displayName'] = $data->getDisplayName();
+            $dataArray['display_name'] = $data->getDisplayName();
         }
         if ($data->isInitialized('status') && null !== $data->getStatus()) {
             $dataArray['status'] = $data->getStatus();
         }
         if ($data->isInitialized('firstName') && null !== $data->getFirstName()) {
-            $dataArray['firstName'] = $data->getFirstName();
+            $dataArray['first_name'] = $data->getFirstName();
         }
         if ($data->isInitialized('lastName') && null !== $data->getLastName()) {
-            $dataArray['lastName'] = $data->getLastName();
+            $dataArray['last_name'] = $data->getLastName();
         }
         if ($data->isInitialized('attributes') && null !== $data->getAttributes()) {
             $values = new \Hearth\Generated\Admin\Runtime\JsonObject();
@@ -133,7 +133,7 @@ class V1UpdateUserRequestNormalizer implements DenormalizerInterface, Normalizer
             $dataArray['attributes'] = $values;
         }
         if ($data->isInitialized('clearAttributes') && null !== $data->getClearAttributes()) {
-            $dataArray['clearAttributes'] = $data->getClearAttributes();
+            $dataArray['clear_attributes'] = $data->getClearAttributes();
         }
         foreach ($data->additionalPropertyEntries() as $key_1 => $value_1) {
             if (preg_match('/.*/', (string) $key_1)) {

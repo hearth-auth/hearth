@@ -107,8 +107,29 @@ final class AdminClientTest extends TestCase
 
     public function testUpdateClientSendsPatchToApplications(): void
     {
-        $this->client->updateClient('c1', ['name' => 'New']);
+        $this->client->updateClient('c1', ['client_name' => 'New']);
         $this->assertSent('PATCH', '/admin/applications/c1');
+        self::assertSame(['client_name' => 'New'], $this->sentJson());
+    }
+
+    /**
+     * The create/update bodies go through the generated models, which carry
+     * the REST field names (snake_case), whichever spelling the caller used.
+     */
+    public function testRoleAndGroupBodiesUseTheRestFieldNames(): void
+    {
+        $this->client->updateRole('r1', ['description' => 'New', 'parentRoles' => ['base']]);
+        self::assertSame(['description' => 'New', 'parent_roles' => ['base']], $this->sentJson());
+
+        $this->client->createGroup(['name' => 'Ops', 'slug' => 'ops']);
+        $this->assertSent('POST', '/admin/groups');
+        self::assertSame(['name' => 'Ops', 'slug' => 'ops'], $this->sentJson());
+    }
+
+    public function testAKeyTheApiDoesNotDefineIsRefusedBeforeSending(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->client->updateClient('c1', ['name' => 'New']);
     }
 
     public function testUpdateRoleSendsPatch(): void

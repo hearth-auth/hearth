@@ -34,11 +34,11 @@ class V1User implements AdditionalPropertiesInterface
      */
     protected $status = 'USER_STATUS_UNSPECIFIED';
     /**
-     * @var string|null
+     * @var int|null
      */
     protected $createdAt;
     /**
-     * @var string|null
+     * @var int|null
      */
     protected $updatedAt;
     /**
@@ -133,36 +133,36 @@ class V1User implements AdditionalPropertiesInterface
         return $this;
     }
     /**
-     * @return string|null
+     * @return int|null
      */
-    public function getCreatedAt(): ?string
+    public function getCreatedAt(): ?int
     {
         return $this->createdAt;
     }
     /**
-     * @param string|null $createdAt
+     * @param int|null $createdAt
      *
      * @return self
      */
-    public function setCreatedAt(?string $createdAt): self
+    public function setCreatedAt(?int $createdAt): self
     {
         $this->initialized['createdAt'] = true;
         $this->createdAt = $createdAt;
         return $this;
     }
     /**
-     * @return string|null
+     * @return int|null
      */
-    public function getUpdatedAt(): ?string
+    public function getUpdatedAt(): ?int
     {
         return $this->updatedAt;
     }
     /**
-     * @param string|null $updatedAt
+     * @param int|null $updatedAt
      *
      * @return self
      */
-    public function setUpdatedAt(?string $updatedAt): self
+    public function setUpdatedAt(?int $updatedAt): self
     {
         $this->initialized['updatedAt'] = true;
         $this->updatedAt = $updatedAt;
@@ -230,6 +230,6 @@ class V1User implements AdditionalPropertiesInterface
     }
     public function definedProperties(): array
     {
-        return ['id' => ['id', 'getId', 'setId'], 'email' => ['email', 'getEmail', 'setEmail'], 'displayName' => ['displayName', 'getDisplayName', 'setDisplayName'], 'status' => ['status', 'getStatus', 'setStatus'], 'createdAt' => ['createdAt', 'getCreatedAt', 'setCreatedAt'], 'updatedAt' => ['updatedAt', 'getUpdatedAt', 'setUpdatedAt'], 'firstName' => ['firstName', 'getFirstName', 'setFirstName'], 'lastName' => ['lastName', 'getLastName', 'setLastName'], 'requiredActions' => ['requiredActions', 'getRequiredActions', 'setRequiredActions']];
+        return ['id' => ['id', 'getId', 'setId'], 'email' => ['email', 'getEmail', 'setEmail'], 'displayName' => ['display_name', 'getDisplayName', 'setDisplayName'], 'status' => ['status', 'getStatus', 'setStatus'], 'createdAt' => ['created_at', 'getCreatedAt', 'setCreatedAt'], 'updatedAt' => ['updated_at', 'getUpdatedAt', 'setUpdatedAt'], 'firstName' => ['first_name', 'getFirstName', 'setFirstName'], 'lastName' => ['last_name', 'getLastName', 'setLastName'], 'requiredActions' => ['required_actions', 'getRequiredActions', 'setRequiredActions']];
     }
 }

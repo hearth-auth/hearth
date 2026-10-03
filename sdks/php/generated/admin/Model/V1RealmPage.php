@@ -61,6 +61,6 @@ class V1RealmPage implements AdditionalPropertiesInterface
     }
     public function definedProperties(): array
     {
-        return ['items' => ['items', 'getItems', 'setItems'], 'nextCursor' => ['nextCursor', 'getNextCursor', 'setNextCursor']];
+        return ['items' => ['items', 'getItems', 'setItems'], 'nextCursor' => ['next_cursor', 'getNextCursor', 'setNextCursor']];
     }
 }

@@ -53,13 +53,13 @@ class V1UserNormalizer implements DenormalizerInterface, NormalizerInterface, De
             $object->setEmail(null);
             unset($data['email']);
         }
-        if (\array_key_exists('displayName', $data) && $data['displayName'] !== null) {
-            $object->setDisplayName($data['displayName']);
-            unset($data['displayName']);
+        if (\array_key_exists('display_name', $data) && $data['display_name'] !== null) {
+            $object->setDisplayName($data['display_name']);
+            unset($data['display_name']);
         }
-        elseif (\array_key_exists('displayName', $data) && $data['displayName'] === null) {
+        elseif (\array_key_exists('display_name', $data) && $data['display_name'] === null) {
             $object->setDisplayName(null);
-            unset($data['displayName']);
+            unset($data['display_name']);
         }
         if (\array_key_exists('status', $data) && $data['status'] !== null) {
             $object->setStatus($data['status']);
@@ -69,49 +69,49 @@ class V1UserNormalizer implements DenormalizerInterface, NormalizerInterface, De
             $object->setStatus(null);
             unset($data['status']);
         }
-        if (\array_key_exists('createdAt', $data) && $data['createdAt'] !== null) {
-            $object->setCreatedAt($data['createdAt']);
-            unset($data['createdAt']);
+        if (\array_key_exists('created_at', $data) && $data['created_at'] !== null) {
+            $object->setCreatedAt($data['created_at']);
+            unset($data['created_at']);
         }
-        elseif (\array_key_exists('createdAt', $data) && $data['createdAt'] === null) {
+        elseif (\array_key_exists('created_at', $data) && $data['created_at'] === null) {
             $object->setCreatedAt(null);
-            unset($data['createdAt']);
+            unset($data['created_at']);
         }
-        if (\array_key_exists('updatedAt', $data) && $data['updatedAt'] !== null) {
-            $object->setUpdatedAt($data['updatedAt']);
-            unset($data['updatedAt']);
+        if (\array_key_exists('updated_at', $data) && $data['updated_at'] !== null) {
+            $object->setUpdatedAt($data['updated_at']);
+            unset($data['updated_at']);
         }
-        elseif (\array_key_exists('updatedAt', $data) && $data['updatedAt'] === null) {
+        elseif (\array_key_exists('updated_at', $data) && $data['updated_at'] === null) {
             $object->setUpdatedAt(null);
-            unset($data['updatedAt']);
+            unset($data['updated_at']);
         }
-        if (\array_key_exists('firstName', $data) && $data['firstName'] !== null) {
-            $object->setFirstName($data['firstName']);
-            unset($data['firstName']);
+        if (\array_key_exists('first_name', $data) && $data['first_name'] !== null) {
+            $object->setFirstName($data['first_name']);
+            unset($data['first_name']);
         }
-        elseif (\array_key_exists('firstName', $data) && $data['firstName'] === null) {
+        elseif (\array_key_exists('first_name', $data) && $data['first_name'] === null) {
             $object->setFirstName(null);
-            unset($data['firstName']);
+            unset($data['first_name']);
         }
-        if (\array_key_exists('lastName', $data) && $data['lastName'] !== null) {
-            $object->setLastName($data['lastName']);
-            unset($data['lastName']);
+        if (\array_key_exists('last_name', $data) && $data['last_name'] !== null) {
+            $object->setLastName($data['last_name']);
+            unset($data['last_name']);
         }
-        elseif (\array_key_exists('lastName', $data) && $data['lastName'] === null) {
+        elseif (\array_key_exists('last_name', $data) && $data['last_name'] === null) {
             $object->setLastName(null);
-            unset($data['lastName']);
+            unset($data['last_name']);
         }
-        if (\array_key_exists('requiredActions', $data) && $data['requiredActions'] !== null) {
+        if (\array_key_exists('required_actions', $data) && $data['required_actions'] !== null) {
             $values = [];
-            foreach ($data['requiredActions'] as $value) {
+            foreach ($data['required_actions'] as $value) {
                 $values[] = $value;
             }
             $object->setRequiredActions($values);
-            unset($data['requiredActions']);
+            unset($data['required_actions']);
         }
-        elseif (\array_key_exists('requiredActions', $data) && $data['requiredActions'] === null) {
+        elseif (\array_key_exists('required_actions', $data) && $data['required_actions'] === null) {
             $object->setRequiredActions(null);
-            unset($data['requiredActions']);
+            unset($data['required_actions']);
         }
         foreach ($data as $key => $value_1) {
             if (preg_match('/.*/', (string) $key)) {
@@ -130,29 +130,29 @@ class V1UserNormalizer implements DenormalizerInterface, NormalizerInterface, De
             $dataArray['email'] = $data->getEmail();
         }
         if ($data->isInitialized('displayName') && null !== $data->getDisplayName()) {
-            $dataArray['displayName'] = $data->getDisplayName();
+            $dataArray['display_name'] = $data->getDisplayName();
         }
         if ($data->isInitialized('status') && null !== $data->getStatus()) {
             $dataArray['status'] = $data->getStatus();
         }
         if ($data->isInitialized('createdAt') && null !== $data->getCreatedAt()) {
-            $dataArray['createdAt'] = $data->getCreatedAt();
+            $dataArray['created_at'] = $data->getCreatedAt();
         }
         if ($data->isInitialized('updatedAt') && null !== $data->getUpdatedAt()) {
-            $dataArray['updatedAt'] = $data->getUpdatedAt();
+            $dataArray['updated_at'] = $data->getUpdatedAt();
         }
         if ($data->isInitialized('firstName') && null !== $data->getFirstName()) {
-            $dataArray['firstName'] = $data->getFirstName();
+            $dataArray['first_name'] = $data->getFirstName();
         }
         if ($data->isInitialized('lastName') && null !== $data->getLastName()) {
-            $dataArray['lastName'] = $data->getLastName();
+            $dataArray['last_name'] = $data->getLastName();
         }
         if ($data->isInitialized('requiredActions') && null !== $data->getRequiredActions()) {
             $values = [];
             foreach ($data->getRequiredActions() as $value) {
                 $values[] = $value;
             }
-            $dataArray['requiredActions'] = $values;
+            $dataArray['required_actions'] = $values;
         }
         foreach ($data->additionalPropertyEntries() as $key => $value_1) {
             if (preg_match('/.*/', (string) $key)) {

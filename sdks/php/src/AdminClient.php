@@ -12,7 +12,6 @@ use Hearth\Generated\Admin\Endpoint;
 use Hearth\Generated\Admin\Model;
 use Hearth\Generated\Admin\Normalizer\JaneObjectNormalizer;
 use Hearth\Generated\Admin\Runtime\Client\Endpoint as GeneratedEndpoint;
-use Hearth\Internal\RawJsonEndpoint;
 use Hearth\Types\PageResponse;
 use Http\Client\Common\Plugin\AddHostPlugin;
 use Http\Client\Common\Plugin\AddPathPlugin;
@@ -50,12 +49,12 @@ use Symfony\Component\Serializer\Serializer;
  *   Authorization: Bearer {access_token}
  *   X-Realm-ID: {realm_id}
  *
- * Request bodies are arrays keyed by the API's JSON field names. Organization
- * bodies go through the generated models: snake_case (`display_name`) or
- * camelCase (`displayName`) keys both work, and a key the API does not define
- * throws InvalidArgumentException before any request is sent. The other bodies
- * are sent as given (see {@see RawJsonEndpoint}). Responses are the decoded
- * JSON body, as arrays.
+ * Request bodies are arrays keyed by the API's JSON field names. Every body
+ * goes through its generated model: snake_case (`display_name`) or camelCase
+ * (`displayName`) keys both work, and a key the API does not define throws
+ * InvalidArgumentException before any request is sent. Responses are the
+ * decoded JSON body, as arrays: Jane's generated parsers model only `200`,
+ * and several admin routes answer `201` or `204`.
  */
 final class AdminClient
 {
@@ -133,7 +132,7 @@ final class AdminClient
      */
     public function createUser(array $params): array
     {
-        return $this->call($this->raw(new Endpoint\IdentityAdminServiceCreateUser(), $params));
+        return $this->call(new Endpoint\IdentityAdminServiceCreateUser($this->body($params, Model\V1CreateUserRequest::class)));
     }
 
     /**
@@ -154,7 +153,7 @@ final class AdminClient
      */
     public function updateUser(string $id, array $params): array
     {
-        return $this->call($this->raw(new Endpoint\IdentityAdminServiceUpdateUser($id), $params));
+        return $this->call(new Endpoint\IdentityAdminServiceUpdateUser($id, $this->body($params, Model\V1UpdateUserRequest::class)));
     }
 
     /** Deletes a user by ID. */
@@ -231,7 +230,9 @@ final class AdminClient
      */
     public function createClient(array $params): array
     {
-        return $this->call($this->raw(new Endpoint\ApplicationAdminServiceCreateApplication(), $params));
+        return $this->call(new Endpoint\ApplicationAdminServiceCreateApplication(
+            $this->body($params, Model\V1RegisterClientRequest::class),
+        ));
     }
 
     /**
@@ -252,7 +253,10 @@ final class AdminClient
      */
     public function updateClient(string $id, array $params): array
     {
-        return $this->call($this->raw(new Endpoint\ApplicationAdminServiceUpdateApplication($id), $params));
+        return $this->call(new Endpoint\ApplicationAdminServiceUpdateApplication(
+            $id,
+            $this->body($params, Model\V1UpdateClientRequest::class),
+        ));
     }
 
     /**
@@ -299,7 +303,7 @@ final class AdminClient
      */
     public function createRole(array $params): array
     {
-        return $this->call($this->raw(new Endpoint\RbacAdminServiceCreateRole(), $params));
+        return $this->call(new Endpoint\AdminCreateRole($this->body($params, Model\AdminCreateRoleRequest::class)));
     }
 
     /**
@@ -309,7 +313,7 @@ final class AdminClient
      */
     public function getRole(string $id): array
     {
-        return $this->call(new Endpoint\RbacAdminServiceGetRole($id));
+        return $this->call(new Endpoint\AdminGetRole($id));
     }
 
     /**
@@ -320,13 +324,13 @@ final class AdminClient
      */
     public function updateRole(string $id, array $params): array
     {
-        return $this->call($this->raw(new Endpoint\RbacAdminServiceUpdateRole($id), $params));
+        return $this->call(new Endpoint\AdminUpdateRole($id, $this->body($params, Model\AdminUpdateRoleRequest::class)));
     }
 
     /** Deletes a role by ID. */
     public function deleteRole(string $id): void
     {
-        $this->call(new Endpoint\RbacAdminServiceDeleteRole($id));
+        $this->call(new Endpoint\AdminDeleteRole($id));
     }
 
     /**
@@ -336,7 +340,7 @@ final class AdminClient
      */
     public function listRoles(?int $limit = null, ?string $cursor = null): PageResponse
     {
-        return $this->page(new Endpoint\RbacAdminServiceListRoles($this->paginationQuery($limit, $cursor)));
+        return $this->page(new Endpoint\AdminListRoles($this->paginationQuery($limit, $cursor)));
     }
 
     // =========================================================================
@@ -351,7 +355,7 @@ final class AdminClient
      */
     public function createGroup(array $params): array
     {
-        return $this->call($this->raw(new Endpoint\RbacAdminServiceCreateGroup(), $params));
+        return $this->call(new Endpoint\AdminCreateGroup($this->body($params, Model\AdminCreateGroupRequest::class)));
     }
 
     /**
@@ -361,7 +365,7 @@ final class AdminClient
      */
     public function getGroup(string $id): array
     {
-        return $this->call(new Endpoint\RbacAdminServiceGetGroup($id));
+        return $this->call(new Endpoint\AdminGetGroup($id));
     }
 
     /**
@@ -372,13 +376,13 @@ final class AdminClient
      */
     public function updateGroup(string $id, array $params): array
     {
-        return $this->call($this->raw(new Endpoint\RbacAdminServiceUpdateGroup($id), $params));
+        return $this->call(new Endpoint\AdminUpdateGroup($id, $this->body($params, Model\AdminUpdateGroupRequest::class)));
     }
 
     /** Deletes a group by ID. */
     public function deleteGroup(string $id): void
     {
-        $this->call(new Endpoint\RbacAdminServiceDeleteGroup($id));
+        $this->call(new Endpoint\AdminDeleteGroup($id));
     }
 
     /**
@@ -388,7 +392,7 @@ final class AdminClient
      */
     public function listGroups(?int $limit = null, ?string $cursor = null): PageResponse
     {
-        return $this->page(new Endpoint\RbacAdminServiceListGroups($this->paginationQuery($limit, $cursor)));
+        return $this->page(new Endpoint\AdminListGroups($this->paginationQuery($limit, $cursor)));
     }
 
     // =========================================================================
@@ -538,20 +542,6 @@ final class AdminClient
         }
 
         return is_array($data) ? $data : [];
-    }
-
-    /**
-     * Gives a generated endpoint the caller's array as its raw JSON body.
-     *
-     * Used for users, applications, roles and groups: their proto-derived
-     * request models do not yet match the REST JSON, so the array is sent as
-     * given, exactly as before the generated client.
-     *
-     * @param array<string, mixed> $params
-     */
-    private function raw(GeneratedEndpoint $endpoint, array $params): GeneratedEndpoint
-    {
-        return new RawJsonEndpoint($endpoint, $params);
     }
 
     /**

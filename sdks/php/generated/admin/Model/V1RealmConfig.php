@@ -16,7 +16,7 @@ class V1RealmConfig implements AdditionalPropertiesInterface
         return array_key_exists($property, $this->initialized);
     }
     /**
-     * @var string|null
+     * @var int|null
      */
     protected $sessionTtlMicros;
     /**
@@ -28,18 +28,18 @@ class V1RealmConfig implements AdditionalPropertiesInterface
      */
     protected $passwordTimeCost;
     /**
-     * @return string|null
+     * @return int|null
      */
-    public function getSessionTtlMicros(): ?string
+    public function getSessionTtlMicros(): ?int
     {
         return $this->sessionTtlMicros;
     }
     /**
-     * @param string|null $sessionTtlMicros
+     * @param int|null $sessionTtlMicros
      *
      * @return self
      */
-    public function setSessionTtlMicros(?string $sessionTtlMicros): self
+    public function setSessionTtlMicros(?int $sessionTtlMicros): self
     {
         $this->initialized['sessionTtlMicros'] = true;
         $this->sessionTtlMicros = $sessionTtlMicros;
@@ -83,6 +83,6 @@ class V1RealmConfig implements AdditionalPropertiesInterface
     }
     public function definedProperties(): array
     {
-        return ['sessionTtlMicros' => ['sessionTtlMicros', 'getSessionTtlMicros', 'setSessionTtlMicros'], 'passwordMemoryCost' => ['passwordMemoryCost', 'getPasswordMemoryCost', 'setPasswordMemoryCost'], 'passwordTimeCost' => ['passwordTimeCost', 'getPasswordTimeCost', 'setPasswordTimeCost']];
+        return ['sessionTtlMicros' => ['session_ttl_micros', 'getSessionTtlMicros', 'setSessionTtlMicros'], 'passwordMemoryCost' => ['password_memory_cost', 'getPasswordMemoryCost', 'setPasswordMemoryCost'], 'passwordTimeCost' => ['password_time_cost', 'getPasswordTimeCost', 'setPasswordTimeCost']];
     }
 }

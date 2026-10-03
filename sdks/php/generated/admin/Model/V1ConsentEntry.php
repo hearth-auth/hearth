@@ -28,11 +28,11 @@ class V1ConsentEntry implements AdditionalPropertiesInterface
      */
     protected $grantedScopes;
     /**
-     * @var string|null
+     * @var int|null
      */
     protected $grantedAt;
     /**
-     * @var string|null
+     * @var int|null
      */
     protected $updatedAt;
     /**
@@ -90,36 +90,36 @@ class V1ConsentEntry implements AdditionalPropertiesInterface
         return $this;
     }
     /**
-     * @return string|null
+     * @return int|null
      */
-    public function getGrantedAt(): ?string
+    public function getGrantedAt(): ?int
     {
         return $this->grantedAt;
     }
     /**
-     * @param string|null $grantedAt
+     * @param int|null $grantedAt
      *
      * @return self
      */
-    public function setGrantedAt(?string $grantedAt): self
+    public function setGrantedAt(?int $grantedAt): self
     {
         $this->initialized['grantedAt'] = true;
         $this->grantedAt = $grantedAt;
         return $this;
     }
     /**
-     * @return string|null
+     * @return int|null
      */
-    public function getUpdatedAt(): ?string
+    public function getUpdatedAt(): ?int
     {
         return $this->updatedAt;
     }
     /**
-     * @param string|null $updatedAt
+     * @param int|null $updatedAt
      *
      * @return self
      */
-    public function setUpdatedAt(?string $updatedAt): self
+    public function setUpdatedAt(?int $updatedAt): self
     {
         $this->initialized['updatedAt'] = true;
         $this->updatedAt = $updatedAt;
@@ -127,6 +127,6 @@ class V1ConsentEntry implements AdditionalPropertiesInterface
     }
     public function definedProperties(): array
     {
-        return ['clientId' => ['clientId', 'getClientId', 'setClientId'], 'clientName' => ['clientName', 'getClientName', 'setClientName'], 'grantedScopes' => ['grantedScopes', 'getGrantedScopes', 'setGrantedScopes'], 'grantedAt' => ['grantedAt', 'getGrantedAt', 'setGrantedAt'], 'updatedAt' => ['updatedAt', 'getUpdatedAt', 'setUpdatedAt']];
+        return ['clientId' => ['client_id', 'getClientId', 'setClientId'], 'clientName' => ['client_name', 'getClientName', 'setClientName'], 'grantedScopes' => ['granted_scopes', 'getGrantedScopes', 'setGrantedScopes'], 'grantedAt' => ['granted_at', 'getGrantedAt', 'setGrantedAt'], 'updatedAt' => ['updated_at', 'getUpdatedAt', 'setUpdatedAt']];
     }
 }

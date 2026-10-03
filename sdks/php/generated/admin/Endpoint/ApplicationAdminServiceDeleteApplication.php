@@ -4,13 +4,13 @@ namespace Hearth\Generated\Admin\Endpoint;
 
 class ApplicationAdminServiceDeleteApplication extends \Hearth\Generated\Admin\Runtime\Client\BaseEndpoint implements \Hearth\Generated\Admin\Runtime\Client\Endpoint
 {
-    protected $clientId;
+    protected $client_id;
     /**
      * @param string $clientId
      */
     public function __construct(string $clientId)
     {
-        $this->clientId = $clientId;
+        $this->client_id = $clientId;
     }
     use \Hearth\Generated\Admin\Runtime\Client\EndpointTrait;
     public function getMethod(): string
@@ -19,7 +19,7 @@ class ApplicationAdminServiceDeleteApplication extends \Hearth\Generated\Admin\R
     }
     public function getUri(): string
     {
-        return str_replace(['{clientId}'], [rawurlencode($this->clientId)], '/admin/applications/{clientId}');
+        return str_replace(['{client_id}'], [rawurlencode($this->client_id)], '/admin/applications/{client_id}');
     }
     public function getBody(\Symfony\Component\Serializer\SerializerInterface $serializer, $streamFactory = null): array
     {
@@ -39,13 +39,8 @@ class ApplicationAdminServiceDeleteApplication extends \Hearth\Generated\Admin\R
     {
         $status = $response->getStatusCode();
         $body = (string) $response->getBody();
-        if (is_null($contentType) === false && (200 === $status && stripos(strtolower($contentType), 'application/json') !== false)) {
-            try {
-                $decodedBody = json_decode($body, false, 512, JSON_THROW_ON_ERROR);
-                return $decodedBody;
-            } catch (\JsonException $jsonException) {
-                throw new \Jane\Component\JsonSchemaRuntime\Exception\MalformedJsonException('Malformed JSON response body.', 0, $jsonException);
-            }
+        if (204 === $status) {
+            return null;
         }
         if (stripos(strtolower($contentType), 'application/json') !== false) {
             return $serializer->deserialize($body, 'Hearth\Generated\Admin\Model\RpcStatus', 'json');

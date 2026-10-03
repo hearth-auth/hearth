@@ -22,4 +22,7 @@ if [[ ! -x vendor/bin/jane-openapi ]]; then
   composer install --quiet --no-interaction
 fi
 
+# Jane writes files but never deletes them: clear the output so a renamed or
+# removed operation leaves no stale class behind.
+rm -rf generated/admin
 HEARTH_ADMIN_OPENAPI="$SPEC" vendor/bin/jane-openapi generate --config-file=.jane-openapi

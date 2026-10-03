@@ -37,29 +37,29 @@ class V1RealmConfigNormalizer implements DenormalizerInterface, NormalizerInterf
         if (isset($data['$recursiveRef'])) {
             return new Reference($data['$recursiveRef'], $context['document-origin']);
         }
-        if (\array_key_exists('sessionTtlMicros', $data) && $data['sessionTtlMicros'] !== null) {
-            $object->setSessionTtlMicros($data['sessionTtlMicros']);
-            unset($data['sessionTtlMicros']);
+        if (\array_key_exists('session_ttl_micros', $data) && $data['session_ttl_micros'] !== null) {
+            $object->setSessionTtlMicros($data['session_ttl_micros']);
+            unset($data['session_ttl_micros']);
         }
-        elseif (\array_key_exists('sessionTtlMicros', $data) && $data['sessionTtlMicros'] === null) {
+        elseif (\array_key_exists('session_ttl_micros', $data) && $data['session_ttl_micros'] === null) {
             $object->setSessionTtlMicros(null);
-            unset($data['sessionTtlMicros']);
+            unset($data['session_ttl_micros']);
         }
-        if (\array_key_exists('passwordMemoryCost', $data) && $data['passwordMemoryCost'] !== null) {
-            $object->setPasswordMemoryCost($data['passwordMemoryCost']);
-            unset($data['passwordMemoryCost']);
+        if (\array_key_exists('password_memory_cost', $data) && $data['password_memory_cost'] !== null) {
+            $object->setPasswordMemoryCost($data['password_memory_cost']);
+            unset($data['password_memory_cost']);
         }
-        elseif (\array_key_exists('passwordMemoryCost', $data) && $data['passwordMemoryCost'] === null) {
+        elseif (\array_key_exists('password_memory_cost', $data) && $data['password_memory_cost'] === null) {
             $object->setPasswordMemoryCost(null);
-            unset($data['passwordMemoryCost']);
+            unset($data['password_memory_cost']);
         }
-        if (\array_key_exists('passwordTimeCost', $data) && $data['passwordTimeCost'] !== null) {
-            $object->setPasswordTimeCost($data['passwordTimeCost']);
-            unset($data['passwordTimeCost']);
+        if (\array_key_exists('password_time_cost', $data) && $data['password_time_cost'] !== null) {
+            $object->setPasswordTimeCost($data['password_time_cost']);
+            unset($data['password_time_cost']);
         }
-        elseif (\array_key_exists('passwordTimeCost', $data) && $data['passwordTimeCost'] === null) {
+        elseif (\array_key_exists('password_time_cost', $data) && $data['password_time_cost'] === null) {
             $object->setPasswordTimeCost(null);
-            unset($data['passwordTimeCost']);
+            unset($data['password_time_cost']);
         }
         foreach ($data as $key => $value) {
             if (preg_match('/.*/', (string) $key)) {
@@ -72,13 +72,13 @@ class V1RealmConfigNormalizer implements DenormalizerInterface, NormalizerInterf
     {
         $dataArray = [];
         if ($data->isInitialized('sessionTtlMicros') && null !== $data->getSessionTtlMicros()) {
-            $dataArray['sessionTtlMicros'] = $data->getSessionTtlMicros();
+            $dataArray['session_ttl_micros'] = $data->getSessionTtlMicros();
         }
         if ($data->isInitialized('passwordMemoryCost') && null !== $data->getPasswordMemoryCost()) {
-            $dataArray['passwordMemoryCost'] = $data->getPasswordMemoryCost();
+            $dataArray['password_memory_cost'] = $data->getPasswordMemoryCost();
         }
         if ($data->isInitialized('passwordTimeCost') && null !== $data->getPasswordTimeCost()) {
-            $dataArray['passwordTimeCost'] = $data->getPasswordTimeCost();
+            $dataArray['password_time_cost'] = $data->getPasswordTimeCost();
         }
         foreach ($data->additionalPropertyEntries() as $key => $value) {
             if (preg_match('/.*/', (string) $key)) {

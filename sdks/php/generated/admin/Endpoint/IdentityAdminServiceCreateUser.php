@@ -41,7 +41,7 @@ class IdentityAdminServiceCreateUser extends \Hearth\Generated\Admin\Runtime\Cli
     {
         $status = $response->getStatusCode();
         $body = (string) $response->getBody();
-        if (is_null($contentType) === false && (200 === $status && stripos(strtolower($contentType), 'application/json') !== false)) {
+        if (is_null($contentType) === false && (201 === $status && stripos(strtolower($contentType), 'application/json') !== false)) {
             return $serializer->deserialize($body, 'Hearth\Generated\Admin\Model\V1User', 'json');
         }
         if (stripos(strtolower($contentType), 'application/json') !== false) {

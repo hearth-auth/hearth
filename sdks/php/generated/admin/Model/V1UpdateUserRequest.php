@@ -192,6 +192,6 @@ class V1UpdateUserRequest implements AdditionalPropertiesInterface
     }
     public function definedProperties(): array
     {
-        return ['email' => ['email', 'getEmail', 'setEmail'], 'displayName' => ['displayName', 'getDisplayName', 'setDisplayName'], 'status' => ['status', 'getStatus', 'setStatus'], 'firstName' => ['firstName', 'getFirstName', 'setFirstName'], 'lastName' => ['lastName', 'getLastName', 'setLastName'], 'attributes' => ['attributes', 'getAttributes', 'setAttributes'], 'clearAttributes' => ['clearAttributes', 'getClearAttributes', 'setClearAttributes']];
+        return ['email' => ['email', 'getEmail', 'setEmail'], 'displayName' => ['display_name', 'getDisplayName', 'setDisplayName'], 'status' => ['status', 'getStatus', 'setStatus'], 'firstName' => ['first_name', 'getFirstName', 'setFirstName'], 'lastName' => ['last_name', 'getLastName', 'setLastName'], 'attributes' => ['attributes', 'getAttributes', 'setAttributes'], 'clearAttributes' => ['clear_attributes', 'getClearAttributes', 'setClearAttributes']];
     }
 }

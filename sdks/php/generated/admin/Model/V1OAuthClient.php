@@ -28,7 +28,7 @@ class V1OAuthClient implements AdditionalPropertiesInterface
      */
     protected $redirectUris;
     /**
-     * @var string|null
+     * @var int|null
      */
     protected $createdAt;
     /**
@@ -127,18 +127,18 @@ class V1OAuthClient implements AdditionalPropertiesInterface
         return $this;
     }
     /**
-     * @return string|null
+     * @return int|null
      */
-    public function getCreatedAt(): ?string
+    public function getCreatedAt(): ?int
     {
         return $this->createdAt;
     }
     /**
-     * @param string|null $createdAt
+     * @param int|null $createdAt
      *
      * @return self
      */
-    public function setCreatedAt(?string $createdAt): self
+    public function setCreatedAt(?int $createdAt): self
     {
         $this->initialized['createdAt'] = true;
         $this->createdAt = $createdAt;
@@ -288,6 +288,6 @@ class V1OAuthClient implements AdditionalPropertiesInterface
     }
     public function definedProperties(): array
     {
-        return ['clientId' => ['clientId', 'getClientId', 'setClientId'], 'clientName' => ['clientName', 'getClientName', 'setClientName'], 'redirectUris' => ['redirectUris', 'getRedirectUris', 'setRedirectUris'], 'createdAt' => ['createdAt', 'getCreatedAt', 'setCreatedAt'], 'isConfidential' => ['isConfidential', 'getIsConfidential', 'setIsConfidential'], 'grantTypes' => ['grantTypes', 'getGrantTypes', 'setGrantTypes'], 'accessTokenAuthorization' => ['accessTokenAuthorization', 'getAccessTokenAuthorization', 'setAccessTokenAuthorization'], 'idTokenSignedResponseAlg' => ['id_token_signed_response_alg', 'getIdTokenSignedResponseAlg', 'setIdTokenSignedResponseAlg'], 'clientSecret' => ['client_secret', 'getClientSecret', 'setClientSecret'], 'dpopBoundAccessTokens' => ['dpop_bound_access_tokens', 'getDpopBoundAccessTokens', 'setDpopBoundAccessTokens']];
+        return ['clientId' => ['client_id', 'getClientId', 'setClientId'], 'clientName' => ['client_name', 'getClientName', 'setClientName'], 'redirectUris' => ['redirect_uris', 'getRedirectUris', 'setRedirectUris'], 'createdAt' => ['created_at', 'getCreatedAt', 'setCreatedAt'], 'isConfidential' => ['is_confidential', 'getIsConfidential', 'setIsConfidential'], 'grantTypes' => ['grant_types', 'getGrantTypes', 'setGrantTypes'], 'accessTokenAuthorization' => ['access_token_authorization', 'getAccessTokenAuthorization', 'setAccessTokenAuthorization'], 'idTokenSignedResponseAlg' => ['id_token_signed_response_alg', 'getIdTokenSignedResponseAlg', 'setIdTokenSignedResponseAlg'], 'clientSecret' => ['client_secret', 'getClientSecret', 'setClientSecret'], 'dpopBoundAccessTokens' => ['dpop_bound_access_tokens', 'getDpopBoundAccessTokens', 'setDpopBoundAccessTokens']];
     }
 }

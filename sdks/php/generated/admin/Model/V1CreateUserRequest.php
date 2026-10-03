@@ -127,6 +127,6 @@ class V1CreateUserRequest implements AdditionalPropertiesInterface
     }
     public function definedProperties(): array
     {
-        return ['email' => ['email', 'getEmail', 'setEmail'], 'displayName' => ['displayName', 'getDisplayName', 'setDisplayName'], 'firstName' => ['firstName', 'getFirstName', 'setFirstName'], 'lastName' => ['lastName', 'getLastName', 'setLastName'], 'attributes' => ['attributes', 'getAttributes', 'setAttributes']];
+        return ['email' => ['email', 'getEmail', 'setEmail'], 'displayName' => ['display_name', 'getDisplayName', 'setDisplayName'], 'firstName' => ['first_name', 'getFirstName', 'setFirstName'], 'lastName' => ['last_name', 'getLastName', 'setLastName'], 'attributes' => ['attributes', 'getAttributes', 'setAttributes']];
     }
 }
