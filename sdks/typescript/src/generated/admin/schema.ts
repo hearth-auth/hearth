@@ -20,7 +20,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/admin/applications/{clientId}": {
+    "/admin/applications/{client_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -36,7 +36,7 @@ export interface paths {
         patch: operations["ApplicationAdminService_UpdateApplication"];
         trace?: never;
     };
-    "/admin/applications/{clientId}/regenerate-secret": {
+    "/admin/applications/{client_id}/regenerate-secret": {
         parameters: {
             query?: never;
             header?: never;
@@ -82,8 +82,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Query audit events with optional filters. Maps to GET /admin/audit. */
-        get: operations["AuditService_ListEvents"];
+        /**
+         * List audit events
+         * @description Requires `hearth.realm.admin`. Newest first.
+         */
+        get: operations["adminListAuditEvents"];
         put?: never;
         post?: never;
         delete?: never;
@@ -228,41 +231,58 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["RbacAdminService_ListGroups"];
+        /**
+         * List groups
+         * @description `cursor` is a decimal offset; follow `next_cursor` until it is null.
+         */
+        get: operations["adminListGroups"];
         put?: never;
-        post: operations["RbacAdminService_CreateGroup"];
+        /** Create a group */
+        post: operations["adminCreateGroup"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/admin/groups/{groupId}": {
+    "/admin/groups/{id}": {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                id: string;
+            };
             cookie?: never;
         };
-        get: operations["RbacAdminService_GetGroup"];
+        /** Get a group */
+        get: operations["adminGetGroup"];
         put?: never;
         post?: never;
-        delete: operations["RbacAdminService_DeleteGroup"];
+        /** Delete a group */
+        delete: operations["adminDeleteGroup"];
         options?: never;
         head?: never;
-        patch: operations["RbacAdminService_UpdateGroup"];
+        /**
+         * Update a group
+         * @description Absent fields are unchanged; `description` null clears it.
+         */
+        patch: operations["adminUpdateGroup"];
         trace?: never;
     };
-    "/admin/groups/{groupId}/members": {
+    "/admin/groups/{id}/members": {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                id: string;
+            };
             cookie?: never;
         };
-        get: operations["RbacAdminService_ListGroupMembers"];
+        /** List a group's members */
+        get: operations["adminListGroupMembers"];
         put?: never;
-        post: operations["RbacAdminService_AddGroupMember"];
+        /** Add a member to a group */
+        post: operations["adminAddGroupMember"];
         delete?: never;
         options?: never;
         head?: never;
@@ -626,13 +646,42 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["RbacAdminService_ListRoles"];
+        /**
+         * List roles
+         * @description Requires `hearth.realm.admin`. Follow `next_cursor` until it is null.
+         */
+        get: operations["adminListRoles"];
         put?: never;
-        post: operations["RbacAdminService_CreateRole"];
+        /** Create a role */
+        post: operations["adminCreateRole"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/admin/roles/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Get a role */
+        get: operations["adminGetRole"];
+        put?: never;
+        post?: never;
+        /** Delete a role */
+        delete: operations["adminDeleteRole"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a role
+         * @description Absent fields are unchanged; `description` null clears it.
+         */
+        patch: operations["adminUpdateRole"];
         trace?: never;
     };
     "/admin/roles/{id}/members": {
@@ -650,22 +699,6 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
-        trace?: never;
-    };
-    "/admin/roles/{roleId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["RbacAdminService_GetRole"];
-        put?: never;
-        post?: never;
-        delete: operations["RbacAdminService_DeleteRole"];
-        options?: never;
-        head?: never;
-        patch: operations["RbacAdminService_UpdateRole"];
         trace?: never;
     };
     "/admin/sessions/{session_id}/sv-bump": {
@@ -812,7 +845,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/admin/users/{userId}/consents": {
+    "/admin/users/{id}/roles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** List a user's role assignments */
+        get: operations["adminListUserAssignments"];
+        put?: never;
+        /**
+         * Assign a role to a user
+         * @description Realm-wide, or inside one organization when `org_id` is set.
+         */
+        post: operations["adminAssignUserRole"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/users/{user_id}/consents": {
         parameters: {
             query?: never;
             header?: never;
@@ -829,7 +885,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/admin/users/{userId}/consents/{clientId}": {
+    "/admin/users/{user_id}/consents/{client_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -846,7 +902,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/admin/users/{userId}/effective-permissions": {
+    "/admin/users/{user_id}/effective-permissions": {
         parameters: {
             query?: never;
             header?: never;
@@ -856,22 +912,6 @@ export interface paths {
         get: operations["RbacAdminService_ResolveEffectivePermissions"];
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/admin/users/{userId}/roles": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["RbacAdminService_ListUserAssignments"];
-        put?: never;
-        post: operations["RbacAdminService_AssignUserRole"];
         delete?: never;
         options?: never;
         head?: never;
@@ -939,6 +979,58 @@ export interface components {
         AdminAddAdditionalRoleRequest: {
             role_name: string;
         };
+        AdminAddGroupMemberRequest: {
+            /** @enum {string} */
+            type: "user" | "group";
+            /** Format: uuid */
+            id: string;
+        };
+        AdminAssignRoleRequest: {
+            /** Format: uuid */
+            role_id: string;
+            /**
+             * Format: uuid
+             * @description Assign inside this organization only; absent or null assigns realm-wide.
+             */
+            org_id?: string | null;
+        };
+        AdminAssignmentScope: {
+            /** @enum {string} */
+            type: "realm" | "org";
+            /**
+             * Format: uuid
+             * @description Present when `type` is `org`.
+             */
+            org_id?: string;
+        };
+        AdminAuditEvent: {
+            id: string;
+            /** Format: uuid */
+            realm_id: string;
+            actor: string;
+            /** @description The audit action name, e.g. `UserCreated`. */
+            action: string;
+            resource_type: string;
+            resource_id: string;
+            /**
+             * Format: int64
+             * @description Microseconds since the Unix epoch.
+             */
+            timestamp: number;
+            /** @description Present only when the event carries metadata. */
+            metadata?: {
+                [key: string]: unknown;
+            };
+            integrity_hash: string;
+        };
+        AdminAuditEventList: {
+            events: components["schemas"]["AdminAuditEvent"][];
+        };
+        AdminCreateGroupRequest: {
+            name: string;
+            slug: string;
+            description?: string | null;
+        };
         AdminCreateOrganizationRequest: {
             slug: string;
             display_name: string;
@@ -949,6 +1041,53 @@ export interface components {
             attributes?: {
                 [key: string]: string;
             };
+        };
+        AdminCreateRoleRequest: {
+            name: string;
+            description?: string | null;
+            permissions?: string[];
+            parent_roles?: string[];
+        };
+        AdminGroup: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            realm_id: string;
+            name: string;
+            slug: string;
+            description: string | null;
+            /**
+             * Format: int64
+             * @description Microseconds since the Unix epoch.
+             */
+            created_at: number;
+            /**
+             * Format: int64
+             * @description Microseconds since the Unix epoch.
+             */
+            updated_at: number;
+        };
+        AdminGroupMemberPage: {
+            items: components["schemas"]["AdminSubject"][];
+            next_cursor: string | null;
+        };
+        AdminGroupMembership: {
+            /** Format: uuid */
+            group_id: string;
+            member: components["schemas"]["AdminSubject"];
+            /**
+             * Format: int64
+             * @description Microseconds since the Unix epoch.
+             */
+            added_at: number;
+            /** Format: uuid */
+            added_by: string | null;
+        };
+        AdminGroupPage: {
+            items: components["schemas"]["AdminGroup"][];
+            next_cursor: string | null;
+            /** Format: int64 */
+            total: number;
         };
         AdminOrganization: {
             /** Format: uuid */
@@ -979,8 +1118,72 @@ export interface components {
             items: components["schemas"]["AdminOrganization"][];
             next_cursor?: string | null;
         };
+        AdminRole: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            realm_id: string;
+            name: string;
+            description: string | null;
+            permissions: string[];
+            parent_roles: string[];
+            /** @enum {string} */
+            scope_kind: "realm" | "organization" | "any";
+            /** @enum {string} */
+            status: "active" | "archived";
+            /** @description Declared in hearth.yaml; the admin API cannot change it. */
+            yaml_managed: boolean;
+            /**
+             * Format: int64
+             * @description Microseconds since the Unix epoch.
+             */
+            created_at: number;
+            /**
+             * Format: int64
+             * @description Microseconds since the Unix epoch.
+             */
+            updated_at: number;
+        };
+        AdminRoleAssignment: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            realm_id: string;
+            subject: components["schemas"]["AdminSubject"];
+            /** Format: uuid */
+            role_id: string;
+            scope: components["schemas"]["AdminAssignmentScope"];
+            /**
+             * Format: int64
+             * @description Microseconds since the Unix epoch.
+             */
+            assigned_at: number;
+            /** Format: uuid */
+            assigned_by: string | null;
+        };
+        AdminRoleAssignmentList: {
+            items: components["schemas"]["AdminRoleAssignment"][];
+        };
         AdminRoleNameList: {
             items: string[];
+        };
+        AdminRolePage: {
+            items: components["schemas"]["AdminRole"][];
+            next_cursor: string | null;
+        };
+        /** @description A user or a group, as a group member or a role-assignment subject. */
+        AdminSubject: {
+            /** @enum {string} */
+            type: "user" | "group";
+            /** Format: uuid */
+            id: string;
+        };
+        /** @description Absent fields are unchanged. */
+        AdminUpdateGroupRequest: {
+            name?: string;
+            slug?: string;
+            /** @description null clears the description. */
+            description?: string | null;
         };
         /** @description Absent fields are unchanged. `slug` is immutable and is refused with 400. */
         AdminUpdateOrganizationRequest: {
@@ -995,28 +1198,13 @@ export interface components {
                 [key: string]: string;
             };
         };
-        RbacAdminServiceAddGroupMemberBody: {
-            realmId?: string;
-            member?: components["schemas"]["v1GroupMember"];
-        };
-        RbacAdminServiceAssignUserRoleBody: {
-            realmId?: string;
-            roleId?: string;
-            scope?: components["schemas"]["v1Scope"];
-        };
-        RbacAdminServiceUpdateGroupBody: {
-            realmId?: string;
+        /** @description Absent fields are unchanged. */
+        AdminUpdateRoleRequest: {
             name?: string;
-            slug?: string;
-            description?: string;
-        };
-        RbacAdminServiceUpdateRoleBody: {
-            realmId?: string;
-            /** @description Fields left empty = unchanged. */
-            name?: string;
-            description?: string;
+            /** @description null clears the description. */
+            description?: string | null;
             permissions?: string[];
-            parentRoleIds?: string[];
+            parent_roles?: string[];
         };
         protobufAny: {
             "@type"?: string;
@@ -1040,46 +1228,6 @@ export interface components {
          */
         v1AccessTokenAuthorization: "EMBEDDED" | "INTROSPECTION" | "DECISION";
         /**
-         * @description Categories of security-critical actions recorded in the audit log.
-         *
-         *      - AUDIT_ACTION_GROUP_CREATED: RBAC group management
-         *      - AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED: Permission management
-         *      - AUDIT_ACTION_LOGIN_FAILED: Login events
-         *      - AUDIT_ACTION_BACKUP_CREATED: Backup and export
-         *      - AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED: Required actions
-         *      - AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED: Password security
-         *      - AUDIT_ACTION_SESSION_LIMIT_ENFORCED: Session management
-         *      - AUDIT_ACTION_ABUSE_DETECTED: Abuse detection
-         *      - AUDIT_ACTION_EMAIL_CHANGE_INITIATED: Email change
-         *      - AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED: OIDC silent auth
-         *      - AUDIT_ACTION_AGENT_CREATED: Agent lifecycle
-         *      - AUDIT_ACTION_AGENT_DELEGATION: Agent delegation and MCP (M2)
-         *      - AUDIT_ACTION_AAT_ISSUED: Phase D — advanced agent surface
-         *      - AUDIT_ACTION_MFA_ENABLED: MFA lifecycle
-         *      - AUDIT_ACTION_INVITATION_CREATED: Organization invitation lifecycle
-         * @default AUDIT_ACTION_UNSPECIFIED
-         * @enum {string}
-         */
-        v1AuditAction: "AUDIT_ACTION_UNSPECIFIED" | "AUDIT_ACTION_USER_CREATED" | "AUDIT_ACTION_USER_UPDATED" | "AUDIT_ACTION_USER_DELETED" | "AUDIT_ACTION_CREDENTIAL_SET" | "AUDIT_ACTION_CREDENTIAL_CHANGED" | "AUDIT_ACTION_CREDENTIAL_VERIFIED" | "AUDIT_ACTION_SESSION_CREATED" | "AUDIT_ACTION_SESSION_REVOKED" | "AUDIT_ACTION_TOKEN_ISSUED" | "AUDIT_ACTION_TOKEN_REFRESHED" | "AUDIT_ACTION_REALM_CREATED" | "AUDIT_ACTION_REALM_UPDATED" | "AUDIT_ACTION_REALM_DELETED" | "AUDIT_ACTION_CLIENT_REGISTERED" | "AUDIT_ACTION_AUTHORIZATION_CODE_ISSUED" | "AUDIT_ACTION_AUTHORIZATION_CODE_EXCHANGED" | "AUDIT_ACTION_TUPLE_WRITTEN" | "AUDIT_ACTION_TUPLE_DELETED" | "AUDIT_ACTION_CLIENT_UPDATED" | "AUDIT_ACTION_CLIENT_DELETED" | "AUDIT_ACTION_BULK_USERS_CREATED" | "AUDIT_ACTION_BULK_USERS_DISABLED" | "AUDIT_ACTION_ORG_CREATED" | "AUDIT_ACTION_ORG_UPDATED" | "AUDIT_ACTION_ORG_DELETED" | "AUDIT_ACTION_CONSENT_GRANTED" | "AUDIT_ACTION_CONSENT_DENIED" | "AUDIT_ACTION_CONSENT_REVOKED" | "AUDIT_ACTION_FEDERATION_LOGIN_STARTED" | "AUDIT_ACTION_FEDERATION_LOGIN_COMPLETED" | "AUDIT_ACTION_FEDERATION_ACCOUNT_LINKED" | "AUDIT_ACTION_FEDERATION_ACCOUNT_UNLINKED" | "AUDIT_ACTION_FEDERATION_JIT_PROVISIONED" | "AUDIT_ACTION_SAML_LOGIN_INITIATED" | "AUDIT_ACTION_SAML_LOGIN_COMPLETED" | "AUDIT_ACTION_SAML_LOGIN_FAILED" | "AUDIT_ACTION_SAML_IDP_AUTHN_REQUEST_RECEIVED" | "AUDIT_ACTION_SAML_IDP_RESPONSE_ISSUED" | "AUDIT_ACTION_SAML_IDP_INITIATED_SSO" | "AUDIT_ACTION_SAML_SLO_REQUESTED" | "AUDIT_ACTION_SAML_SLO_COMPLETED" | "AUDIT_ACTION_SCIM_USER_CREATED" | "AUDIT_ACTION_SCIM_USER_UPDATED" | "AUDIT_ACTION_SCIM_USER_DELETED" | "AUDIT_ACTION_SCIM_GROUP_CREATED" | "AUDIT_ACTION_SCIM_GROUP_UPDATED" | "AUDIT_ACTION_SCIM_GROUP_DELETED" | "AUDIT_ACTION_ROLE_ASSIGNED" | "AUDIT_ACTION_ROLE_REVOKED" | "AUDIT_ACTION_CLEANUP" | "AUDIT_ACTION_GROUP_CREATED" | "AUDIT_ACTION_GROUP_UPDATED" | "AUDIT_ACTION_GROUP_DELETED" | "AUDIT_ACTION_GROUP_MEMBER_ADDED" | "AUDIT_ACTION_GROUP_MEMBER_REMOVED" | "AUDIT_ACTION_GROUP_MEMBER_ROLE_CHANGED" | "AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED" | "AUDIT_ACTION_USER_PERMISSION_GRANTED" | "AUDIT_ACTION_USER_PERMISSION_REVOKED" | "AUDIT_ACTION_CLIENT_CONSENT_GRANTED" | "AUDIT_ACTION_CLIENT_CONSENT_REVOKED" | "AUDIT_ACTION_CONSENT_REQUIRED_ON_REFRESH" | "AUDIT_ACTION_LOGIN_FAILED" | "AUDIT_ACTION_LOGIN_LOCKED" | "AUDIT_ACTION_IP_LOGIN_LIMIT_EXCEEDED" | "AUDIT_ACTION_BACKUP_CREATED" | "AUDIT_ACTION_BACKUP_RESTORED" | "AUDIT_ACTION_REALM_EXPORT_WATERMARKED" | "AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED" | "AUDIT_ACTION_REQUIRED_ACTION_REMOVED" | "AUDIT_ACTION_REQUIRED_ACTION_COMPLETED" | "AUDIT_ACTION_REQUIRED_ACTION_AUTO_CLEARED" | "AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED" | "AUDIT_ACTION_BREACH_CHECK_UNAVAILABLE" | "AUDIT_ACTION_SESSION_LIMIT_ENFORCED" | "AUDIT_ACTION_SESSIONS_REVOKED" | "AUDIT_ACTION_SESSION_EVICTED" | "AUDIT_ACTION_ABUSE_DETECTED" | "AUDIT_ACTION_EMAIL_CHANGE_INITIATED" | "AUDIT_ACTION_EMAIL_CHANGE_CONFIRMED" | "AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED" | "AUDIT_ACTION_AGENT_CREATED" | "AUDIT_ACTION_AGENT_UPDATED" | "AUDIT_ACTION_AGENT_SUSPENDED" | "AUDIT_ACTION_AGENT_REACTIVATED" | "AUDIT_ACTION_AGENT_REVOKED" | "AUDIT_ACTION_AGENT_DELETED" | "AUDIT_ACTION_AGENT_CREDENTIAL_CREATED" | "AUDIT_ACTION_AGENT_CREDENTIAL_REVOKED" | "AUDIT_ACTION_AGENT_DELEGATION" | "AUDIT_ACTION_AGENT_TOOL_INVOCATION" | "AUDIT_ACTION_APPROVAL_REQUESTED" | "AUDIT_ACTION_APPROVAL_GRANTED" | "AUDIT_ACTION_APPROVAL_DENIED" | "AUDIT_ACTION_AGENT_TOKEN_REVOKED" | "AUDIT_ACTION_CROSS_REALM_TRUST_CREATED" | "AUDIT_ACTION_CROSS_REALM_TRUST_REVOKED" | "AUDIT_ACTION_PROTECTED_RESOURCE_REGISTERED" | "AUDIT_ACTION_PROTECTED_RESOURCE_UPDATED" | "AUDIT_ACTION_PROTECTED_RESOURCE_DELETED" | "AUDIT_ACTION_AAT_ISSUED" | "AUDIT_ACTION_AAT_REVOKED" | "AUDIT_ACTION_TRANSACTION_TOKEN_ISSUED" | "AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED" | "AUDIT_ACTION_SPIFFE_ID_MAPPED" | "AUDIT_ACTION_SPIFFE_AUTH_SUCCESS" | "AUDIT_ACTION_AUDIT_LOG_PRUNED" | "AUDIT_ACTION_MFA_ENABLED" | "AUDIT_ACTION_MFA_DISABLED" | "AUDIT_ACTION_INVITATION_CREATED" | "AUDIT_ACTION_INVITATION_ACCEPTED" | "AUDIT_ACTION_INVITATION_REVOKED" | "AUDIT_ACTION_MFA_REQUIREMENT_CHANGED";
-        /** @description A recorded audit event in the append-only log. */
-        v1AuditEvent: {
-            id?: string;
-            realmId?: string;
-            actor?: string;
-            action?: components["schemas"]["v1AuditAction"];
-            resourceType?: string;
-            resourceId?: string;
-            /** Format: int64 */
-            timestamp?: string;
-            /** @description Optional additional context (JSON-encoded). */
-            metadata?: string;
-            integrityHash?: string;
-        };
-        /** @description A page of audit events. */
-        v1AuditEventPage: {
-            events?: components["schemas"]["v1AuditEvent"][];
-        };
-        /**
          * @description Controls whether a client is trusted as a first-party application.
          *
          *     FirstParty clients skip the consent screen and receive the full
@@ -1093,96 +1241,39 @@ export interface components {
          */
         v1ClientTrustLevel: "CLIENT_TRUST_LEVEL_UNSPECIFIED" | "CLIENT_TRUST_LEVEL_THIRD_PARTY" | "CLIENT_TRUST_LEVEL_FIRST_PARTY";
         v1ConsentEntry: {
-            clientId?: string;
-            clientName?: string;
-            grantedScopes?: string[];
+            client_id?: string;
+            client_name?: string;
+            granted_scopes?: string[];
             /** Format: int64 */
-            grantedAt?: string;
+            granted_at?: number;
             /** Format: int64 */
-            updatedAt?: string;
-        };
-        v1CreateGroupRequest: {
-            realmId?: string;
-            name?: string;
-            slug?: string;
-            description?: string;
-        };
-        v1CreateRoleRequest: {
-            realmId?: string;
-            name?: string;
-            description?: string;
-            permissions?: string[];
-            parentRoleIds?: string[];
+            updated_at?: number;
         };
         /** @description Request to create a new user. */
         v1CreateUserRequest: {
             email?: string;
-            displayName?: string;
-            firstName?: string;
-            lastName?: string;
+            display_name?: string;
+            first_name?: string;
+            last_name?: string;
             attributes?: {
                 [key: string]: string;
             };
         };
-        v1DeleteGroupResponse: Record<string, never>;
-        v1DeleteRoleResponse: Record<string, never>;
         /** @description Empty response type for delete RPCs. */
         v1Empty: Record<string, never>;
-        v1Group: {
-            id?: string;
-            realmId?: string;
-            name?: string;
-            slug?: string;
-            description?: string;
-            /** Format: int64 */
-            createdAtMicros?: string;
-            /** Format: int64 */
-            updatedAtMicros?: string;
-        };
-        v1GroupMember: {
-            type?: components["schemas"]["v1GroupMemberType"];
-            id?: string;
-        };
-        /**
-         * @default TYPE_UNSPECIFIED
-         * @enum {string}
-         */
-        v1GroupMemberType: "TYPE_UNSPECIFIED" | "TYPE_USER" | "TYPE_GROUP";
-        v1GroupMembership: {
-            groupId?: string;
-            member?: components["schemas"]["v1GroupMember"];
-            /** Format: int64 */
-            addedAtMicros?: string;
-            addedByUserId?: string;
-        };
-        v1ListGroupMembersResponse: {
-            members?: components["schemas"]["v1GroupMember"][];
-            nextCursor?: string;
-        };
-        v1ListGroupsResponse: {
-            groups?: components["schemas"]["v1Group"][];
-            nextCursor?: string;
-        };
-        v1ListRolesResponse: {
-            roles?: components["schemas"]["v1Role"][];
-            nextCursor?: string;
-        };
-        v1ListUserAssignmentsResponse: {
-            assignments?: components["schemas"]["v1RoleAssignment"][];
-        };
         v1ListUserConsentsResponse: {
             consents?: components["schemas"]["v1ConsentEntry"][];
         };
         /** @description A registered OAuth 2.0 client. */
         v1OAuthClient: {
-            clientId?: string;
-            clientName?: string;
-            redirectUris?: string[];
+            client_id?: string;
+            client_name?: string;
+            redirect_uris?: string[];
             /** Format: int64 */
-            createdAt?: string;
-            isConfidential?: boolean;
-            grantTypes?: string[];
-            accessTokenAuthorization?: components["schemas"]["v1AccessTokenAuthorization"];
+            created_at?: number;
+            is_confidential?: boolean;
+            grant_types?: string[];
+            access_token_authorization?: components["schemas"]["v1AccessTokenAuthorization"];
             /** @description The algorithm this client's ID tokens are signed with: "RS256" or "EdDSA". */
             id_token_signed_response_alg?: string;
             /**
@@ -1202,15 +1293,7 @@ export interface components {
         /** @description A cursor-based page of OAuth clients. */
         v1OAuthClientPage: {
             items?: components["schemas"]["v1OAuthClient"][];
-            nextCursor?: string;
-        };
-        /**
-         * @description Empty response type for delete RPCs (local to oauth.proto to avoid
-         *     cross-file service dependencies that complicate generated code).
-         */
-        v1OAuthEmpty: Record<string, never>;
-        v1OrgScope: {
-            orgId?: string;
+            next_cursor?: string;
         };
         /** @description A realm record. */
         v1Realm: {
@@ -1219,25 +1302,24 @@ export interface components {
             status?: components["schemas"]["v1RealmStatus"];
             config?: components["schemas"]["v1RealmConfig"];
             /** Format: int64 */
-            createdAt?: string;
+            created_at?: number;
             /** Format: int64 */
-            updatedAt?: string;
+            updated_at?: number;
         };
         /** @description Per-realm configuration overrides. */
         v1RealmConfig: {
             /** Format: int64 */
-            sessionTtlMicros?: string;
+            session_ttl_micros?: number;
             /** Format: int64 */
-            passwordMemoryCost?: number;
+            password_memory_cost?: number;
             /** Format: int64 */
-            passwordTimeCost?: number;
+            password_time_cost?: number;
         };
         /** @description A cursor-based page of realms. */
         v1RealmPage: {
             items?: components["schemas"]["v1Realm"][];
-            nextCursor?: string;
+            next_cursor?: string;
         };
-        v1RealmScope: Record<string, never>;
         /**
          * @description The lifecycle status of a realm.
          * @default REALM_STATUS_UNSPECIFIED
@@ -1246,20 +1328,20 @@ export interface components {
         v1RealmStatus: "REALM_STATUS_UNSPECIFIED" | "REALM_STATUS_ACTIVE" | "REALM_STATUS_SUSPENDED";
         /** @description Request to register a new OAuth 2.0 client. */
         v1RegisterClientRequest: {
-            clientName?: string;
-            redirectUris?: string[];
+            client_name?: string;
+            redirect_uris?: string[];
             /**
              * @description Not accepted on the admin create paths (REST and gRPC refuse it): Hearth
              *     generates client secrets. Request one with token_endpoint_auth_method.
              */
-            clientSecret?: string;
-            grantTypes?: string[];
-            accessTokenAuthorization?: components["schemas"]["v1AccessTokenAuthorization"];
+            client_secret?: string;
+            grant_types?: string[];
+            access_token_authorization?: components["schemas"]["v1AccessTokenAuthorization"];
             /**
              * @description Trust level for this client.  Unspecified defaults to ThirdParty on the
              *     DCR path.  The authenticated admin create path respects this field.
              */
-            trustLevel?: components["schemas"]["v1ClientTrustLevel"];
+            trust_level?: components["schemas"]["v1ClientTrustLevel"];
             /**
              * @description JWS algorithm for this client's ID tokens (OIDC Dynamic Client
              *     Registration 1.0 s2): "RS256" or "EdDSA"; anything else is rejected.
@@ -1288,51 +1370,24 @@ export interface components {
             permissions?: string[];
         };
         v1RevokeConsentResponse: Record<string, never>;
-        v1Role: {
-            id?: string;
-            realmId?: string;
-            name?: string;
-            description?: string;
-            permissions?: string[];
-            parentRoleIds?: string[];
-            /** Format: int64 */
-            createdAtMicros?: string;
-            /** Format: int64 */
-            updatedAtMicros?: string;
-        };
-        v1RoleAssignment: {
-            id?: string;
-            realmId?: string;
-            subjectId?: string;
-            subjectType?: components["schemas"]["v1GroupMemberType"];
-            roleId?: string;
-            scope?: components["schemas"]["v1Scope"];
-            /** Format: int64 */
-            assignedAtMicros?: string;
-            assignedByUserId?: string;
-        };
-        v1Scope: {
-            realm?: components["schemas"]["v1RealmScope"];
-            org?: components["schemas"]["v1OrgScope"];
-        };
         /** @description Request to update an existing OAuth 2.0 client. */
         v1UpdateClientRequest: {
-            clientName?: string;
-            redirectUris?: string[];
-            grantTypes?: string[];
-            accessTokenAuthorization?: components["schemas"]["v1AccessTokenAuthorization"];
+            client_name?: string;
+            redirect_uris?: string[];
+            grant_types?: string[];
+            access_token_authorization?: components["schemas"]["v1AccessTokenAuthorization"];
             /** @description Trust level override.  Omit to leave unchanged. */
-            trustLevel?: components["schemas"]["v1ClientTrustLevel"];
+            trust_level?: components["schemas"]["v1ClientTrustLevel"];
             /** @description ID-token signing algorithm: "RS256" or "EdDSA". Omit to leave unchanged. */
             id_token_signed_response_alg?: string;
         };
         /** @description Request to update an existing user. */
         v1UpdateUserRequest: {
             email?: string;
-            displayName?: string;
+            display_name?: string;
             status?: components["schemas"]["v1UserStatus"];
-            firstName?: string;
-            lastName?: string;
+            first_name?: string;
+            last_name?: string;
             /**
              * @description When non-empty, replaces the user's entire custom attribute map.
              *     An empty map is treated as "no change"; use clear_attributes to remove all.
@@ -1341,30 +1396,30 @@ export interface components {
                 [key: string]: string;
             };
             /** @description When true and attributes is empty, clears all custom attributes. */
-            clearAttributes?: boolean;
+            clear_attributes?: boolean;
         };
         /** @description A user record within a realm. */
         v1User: {
             id?: string;
             email?: string;
-            displayName?: string;
+            display_name?: string;
             status?: components["schemas"]["v1UserStatus"];
             /** Format: int64 */
-            createdAt?: string;
+            created_at?: number;
             /** Format: int64 */
-            updatedAt?: string;
-            firstName?: string;
-            lastName?: string;
+            updated_at?: number;
+            first_name?: string;
+            last_name?: string;
             /**
              * @description Actions the user must complete before full access is granted.
              *     Values: "VERIFY_EMAIL", "UPDATE_PASSWORD".
              */
-            requiredActions?: string[];
+            required_actions?: string[];
         };
         /** @description A cursor-based page of users. */
         v1UserPage: {
             items?: components["schemas"]["v1User"][];
-            nextCursor?: string;
+            next_cursor?: string;
         };
         /**
          * @description The lifecycle status of a user account.
@@ -1451,7 +1506,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                clientId: string;
+                client_id: string;
             };
             cookie?: never;
         };
@@ -1482,20 +1537,18 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                clientId: string;
+                client_id: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
             /** @description A successful response. */
-            200: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["v1OAuthEmpty"];
-                };
+                content?: never;
             };
             /** @description An unexpected error response. */
             default: {
@@ -1513,7 +1566,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                clientId: string;
+                client_id: string;
             };
             cookie?: never;
         };
@@ -1548,7 +1601,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                clientId: string;
+                client_id: string;
             };
             cookie?: never;
         };
@@ -1594,31 +1647,17 @@ export interface operations {
             };
         };
     };
-    AuditService_ListEvents: {
+    adminListAuditEvents: {
         parameters: {
             query?: {
-                realmId?: string;
-                startTime?: string;
-                endTime?: string;
                 actor?: string;
-                /**
-                 * @description - AUDIT_ACTION_GROUP_CREATED: RBAC group management
-                 *      - AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED: Permission management
-                 *      - AUDIT_ACTION_LOGIN_FAILED: Login events
-                 *      - AUDIT_ACTION_BACKUP_CREATED: Backup and export
-                 *      - AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED: Required actions
-                 *      - AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED: Password security
-                 *      - AUDIT_ACTION_SESSION_LIMIT_ENFORCED: Session management
-                 *      - AUDIT_ACTION_ABUSE_DETECTED: Abuse detection
-                 *      - AUDIT_ACTION_EMAIL_CHANGE_INITIATED: Email change
-                 *      - AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED: OIDC silent auth
-                 *      - AUDIT_ACTION_AGENT_CREATED: Agent lifecycle
-                 *      - AUDIT_ACTION_AGENT_DELEGATION: Agent delegation and MCP (M2)
-                 *      - AUDIT_ACTION_AAT_ISSUED: Phase D — advanced agent surface
-                 *      - AUDIT_ACTION_MFA_ENABLED: MFA lifecycle
-                 *      - AUDIT_ACTION_INVITATION_CREATED: Organization invitation lifecycle
-                 */
-                action?: "AUDIT_ACTION_UNSPECIFIED" | "AUDIT_ACTION_USER_CREATED" | "AUDIT_ACTION_USER_UPDATED" | "AUDIT_ACTION_USER_DELETED" | "AUDIT_ACTION_CREDENTIAL_SET" | "AUDIT_ACTION_CREDENTIAL_CHANGED" | "AUDIT_ACTION_CREDENTIAL_VERIFIED" | "AUDIT_ACTION_SESSION_CREATED" | "AUDIT_ACTION_SESSION_REVOKED" | "AUDIT_ACTION_TOKEN_ISSUED" | "AUDIT_ACTION_TOKEN_REFRESHED" | "AUDIT_ACTION_REALM_CREATED" | "AUDIT_ACTION_REALM_UPDATED" | "AUDIT_ACTION_REALM_DELETED" | "AUDIT_ACTION_CLIENT_REGISTERED" | "AUDIT_ACTION_AUTHORIZATION_CODE_ISSUED" | "AUDIT_ACTION_AUTHORIZATION_CODE_EXCHANGED" | "AUDIT_ACTION_TUPLE_WRITTEN" | "AUDIT_ACTION_TUPLE_DELETED" | "AUDIT_ACTION_CLIENT_UPDATED" | "AUDIT_ACTION_CLIENT_DELETED" | "AUDIT_ACTION_BULK_USERS_CREATED" | "AUDIT_ACTION_BULK_USERS_DISABLED" | "AUDIT_ACTION_ORG_CREATED" | "AUDIT_ACTION_ORG_UPDATED" | "AUDIT_ACTION_ORG_DELETED" | "AUDIT_ACTION_CONSENT_GRANTED" | "AUDIT_ACTION_CONSENT_DENIED" | "AUDIT_ACTION_CONSENT_REVOKED" | "AUDIT_ACTION_FEDERATION_LOGIN_STARTED" | "AUDIT_ACTION_FEDERATION_LOGIN_COMPLETED" | "AUDIT_ACTION_FEDERATION_ACCOUNT_LINKED" | "AUDIT_ACTION_FEDERATION_ACCOUNT_UNLINKED" | "AUDIT_ACTION_FEDERATION_JIT_PROVISIONED" | "AUDIT_ACTION_SAML_LOGIN_INITIATED" | "AUDIT_ACTION_SAML_LOGIN_COMPLETED" | "AUDIT_ACTION_SAML_LOGIN_FAILED" | "AUDIT_ACTION_SAML_IDP_AUTHN_REQUEST_RECEIVED" | "AUDIT_ACTION_SAML_IDP_RESPONSE_ISSUED" | "AUDIT_ACTION_SAML_IDP_INITIATED_SSO" | "AUDIT_ACTION_SAML_SLO_REQUESTED" | "AUDIT_ACTION_SAML_SLO_COMPLETED" | "AUDIT_ACTION_SCIM_USER_CREATED" | "AUDIT_ACTION_SCIM_USER_UPDATED" | "AUDIT_ACTION_SCIM_USER_DELETED" | "AUDIT_ACTION_SCIM_GROUP_CREATED" | "AUDIT_ACTION_SCIM_GROUP_UPDATED" | "AUDIT_ACTION_SCIM_GROUP_DELETED" | "AUDIT_ACTION_ROLE_ASSIGNED" | "AUDIT_ACTION_ROLE_REVOKED" | "AUDIT_ACTION_CLEANUP" | "AUDIT_ACTION_GROUP_CREATED" | "AUDIT_ACTION_GROUP_UPDATED" | "AUDIT_ACTION_GROUP_DELETED" | "AUDIT_ACTION_GROUP_MEMBER_ADDED" | "AUDIT_ACTION_GROUP_MEMBER_REMOVED" | "AUDIT_ACTION_GROUP_MEMBER_ROLE_CHANGED" | "AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED" | "AUDIT_ACTION_USER_PERMISSION_GRANTED" | "AUDIT_ACTION_USER_PERMISSION_REVOKED" | "AUDIT_ACTION_CLIENT_CONSENT_GRANTED" | "AUDIT_ACTION_CLIENT_CONSENT_REVOKED" | "AUDIT_ACTION_CONSENT_REQUIRED_ON_REFRESH" | "AUDIT_ACTION_LOGIN_FAILED" | "AUDIT_ACTION_LOGIN_LOCKED" | "AUDIT_ACTION_IP_LOGIN_LIMIT_EXCEEDED" | "AUDIT_ACTION_BACKUP_CREATED" | "AUDIT_ACTION_BACKUP_RESTORED" | "AUDIT_ACTION_REALM_EXPORT_WATERMARKED" | "AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED" | "AUDIT_ACTION_REQUIRED_ACTION_REMOVED" | "AUDIT_ACTION_REQUIRED_ACTION_COMPLETED" | "AUDIT_ACTION_REQUIRED_ACTION_AUTO_CLEARED" | "AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED" | "AUDIT_ACTION_BREACH_CHECK_UNAVAILABLE" | "AUDIT_ACTION_SESSION_LIMIT_ENFORCED" | "AUDIT_ACTION_SESSIONS_REVOKED" | "AUDIT_ACTION_SESSION_EVICTED" | "AUDIT_ACTION_ABUSE_DETECTED" | "AUDIT_ACTION_EMAIL_CHANGE_INITIATED" | "AUDIT_ACTION_EMAIL_CHANGE_CONFIRMED" | "AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED" | "AUDIT_ACTION_AGENT_CREATED" | "AUDIT_ACTION_AGENT_UPDATED" | "AUDIT_ACTION_AGENT_SUSPENDED" | "AUDIT_ACTION_AGENT_REACTIVATED" | "AUDIT_ACTION_AGENT_REVOKED" | "AUDIT_ACTION_AGENT_DELETED" | "AUDIT_ACTION_AGENT_CREDENTIAL_CREATED" | "AUDIT_ACTION_AGENT_CREDENTIAL_REVOKED" | "AUDIT_ACTION_AGENT_DELEGATION" | "AUDIT_ACTION_AGENT_TOOL_INVOCATION" | "AUDIT_ACTION_APPROVAL_REQUESTED" | "AUDIT_ACTION_APPROVAL_GRANTED" | "AUDIT_ACTION_APPROVAL_DENIED" | "AUDIT_ACTION_AGENT_TOKEN_REVOKED" | "AUDIT_ACTION_CROSS_REALM_TRUST_CREATED" | "AUDIT_ACTION_CROSS_REALM_TRUST_REVOKED" | "AUDIT_ACTION_PROTECTED_RESOURCE_REGISTERED" | "AUDIT_ACTION_PROTECTED_RESOURCE_UPDATED" | "AUDIT_ACTION_PROTECTED_RESOURCE_DELETED" | "AUDIT_ACTION_AAT_ISSUED" | "AUDIT_ACTION_AAT_REVOKED" | "AUDIT_ACTION_TRANSACTION_TOKEN_ISSUED" | "AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED" | "AUDIT_ACTION_SPIFFE_ID_MAPPED" | "AUDIT_ACTION_SPIFFE_AUTH_SUCCESS" | "AUDIT_ACTION_AUDIT_LOG_PRUNED" | "AUDIT_ACTION_MFA_ENABLED" | "AUDIT_ACTION_MFA_DISABLED" | "AUDIT_ACTION_INVITATION_CREATED" | "AUDIT_ACTION_INVITATION_ACCEPTED" | "AUDIT_ACTION_INVITATION_REVOKED" | "AUDIT_ACTION_MFA_REQUIREMENT_CHANGED";
+                /** @description An audit action name, e.g. `UserCreated`. */
+                action?: string;
+                /** @description Microseconds since the Unix epoch. */
+                start_time?: number;
+                /** @description Microseconds since the Unix epoch. */
+                end_time?: number;
+                /** @description Default 50, at most 200. */
                 limit?: number;
             };
             header?: never;
@@ -1627,23 +1666,21 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description A successful response. */
+            /** @description Matching audit events */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["v1AuditEventPage"];
+                    "application/json": components["schemas"]["AdminAuditEventList"];
                 };
             };
-            /** @description An unexpected error response. */
-            default: {
+            /** @description `start_time` is after `end_time` */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
-                };
+                content?: never;
             };
         };
     };
@@ -1854,10 +1891,9 @@ export interface operations {
             };
         };
     };
-    RbacAdminService_ListGroups: {
+    adminListGroups: {
         parameters: {
             query?: {
-                realmId?: string;
                 cursor?: string;
                 limit?: number;
             };
@@ -1867,27 +1903,18 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description A successful response. */
+            /** @description A page of groups */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["v1ListGroupsResponse"];
-                };
-            };
-            /** @description An unexpected error response. */
-            default: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
+                    "application/json": components["schemas"]["AdminGroupPage"];
                 };
             };
         };
     };
-    RbacAdminService_CreateGroup: {
+    adminCreateGroup: {
         parameters: {
             query?: never;
             header?: never;
@@ -1896,198 +1923,186 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["v1CreateGroupRequest"];
+                "application/json": components["schemas"]["AdminCreateGroupRequest"];
             };
         };
         responses: {
-            /** @description A successful response. */
-            200: {
+            /** @description The created group */
+            201: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["v1Group"];
+                    "application/json": components["schemas"]["AdminGroup"];
                 };
             };
-            /** @description An unexpected error response. */
-            default: {
+            /** @description A group with this slug exists */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
-                };
+                content?: never;
             };
         };
     };
-    RbacAdminService_GetGroup: {
-        parameters: {
-            query?: {
-                realmId?: string;
-            };
-            header?: never;
-            path: {
-                groupId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description A successful response. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["v1Group"];
-                };
-            };
-            /** @description An unexpected error response. */
-            default: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
-                };
-            };
-        };
-    };
-    RbacAdminService_DeleteGroup: {
-        parameters: {
-            query?: {
-                realmId?: string;
-            };
-            header?: never;
-            path: {
-                groupId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description A successful response. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["v1DeleteGroupResponse"];
-                };
-            };
-            /** @description An unexpected error response. */
-            default: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
-                };
-            };
-        };
-    };
-    RbacAdminService_UpdateGroup: {
+    adminGetGroup: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                groupId: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The group */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminGroup"];
+                };
+            };
+            /** @description No such group in the realm */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    adminDeleteGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such group in the realm */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    adminUpdateGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["RbacAdminServiceUpdateGroupBody"];
+                "application/json": components["schemas"]["AdminUpdateGroupRequest"];
             };
         };
         responses: {
-            /** @description A successful response. */
+            /** @description The updated group */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["v1Group"];
+                    "application/json": components["schemas"]["AdminGroup"];
                 };
             };
-            /** @description An unexpected error response. */
-            default: {
+            /** @description No such group in the realm */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
-                };
+                content?: never;
             };
         };
     };
-    RbacAdminService_ListGroupMembers: {
+    adminListGroupMembers: {
         parameters: {
             query?: {
-                realmId?: string;
                 cursor?: string;
                 limit?: number;
             };
             header?: never;
             path: {
-                groupId: string;
+                id: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description A successful response. */
+            /** @description A page of members */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["v1ListGroupMembersResponse"];
+                    "application/json": components["schemas"]["AdminGroupMemberPage"];
                 };
             };
-            /** @description An unexpected error response. */
-            default: {
+            /** @description No such group in the realm */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
-                };
+                content?: never;
             };
         };
     };
-    RbacAdminService_AddGroupMember: {
+    adminAddGroupMember: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                groupId: string;
+                id: string;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["RbacAdminServiceAddGroupMemberBody"];
+                "application/json": components["schemas"]["AdminAddGroupMemberRequest"];
             };
         };
         responses: {
-            /** @description A successful response. */
-            200: {
+            /** @description The new membership */
+            201: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["v1GroupMembership"];
+                    "application/json": components["schemas"]["AdminGroupMembership"];
                 };
             };
-            /** @description An unexpected error response. */
-            default: {
+            /** @description Invalid member type or id */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
+                content?: never;
+            };
+            /** @description No such group in the realm */
+            404: {
+                headers: {
+                    [name: string]: unknown;
                 };
+                content?: never;
             };
         };
     };
@@ -2825,10 +2840,9 @@ export interface operations {
             };
         };
     };
-    RbacAdminService_ListRoles: {
+    adminListRoles: {
         parameters: {
             query?: {
-                realmId?: string;
                 cursor?: string;
                 limit?: number;
             };
@@ -2838,27 +2852,18 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description A successful response. */
+            /** @description A page of roles */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["v1ListRolesResponse"];
-                };
-            };
-            /** @description An unexpected error response. */
-            default: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
+                    "application/json": components["schemas"]["AdminRolePage"];
                 };
             };
         };
     };
-    RbacAdminService_CreateRole: {
+    adminCreateRole: {
         parameters: {
             query?: never;
             header?: never;
@@ -2867,27 +2872,131 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["v1CreateRoleRequest"];
+                "application/json": components["schemas"]["AdminCreateRoleRequest"];
             };
         };
         responses: {
-            /** @description A successful response. */
+            /** @description The created role */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminRole"];
+                };
+            };
+            /** @description Invalid name, permission or parent role */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A role with this name exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    adminGetRole: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The role */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["v1Role"];
+                    "application/json": components["schemas"]["AdminRole"];
                 };
             };
-            /** @description An unexpected error response. */
-            default: {
+            /** @description No such role in the realm */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    adminDeleteRole: {
+        parameters: {
+            query?: {
+                /** @description Also remove the role's assignments, parent links and extra org-role rows. Without it a referenced role answers `409 role_in_use`. */
+                cascade?: boolean;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such role in the realm */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The role is in use and `cascade` is not set */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    adminUpdateRole: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminUpdateRoleRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated role */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["rpcStatus"];
+                    "application/json": components["schemas"]["AdminRole"];
                 };
+            };
+            /** @description No such role in the realm */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -2911,108 +3020,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
-            };
-        };
-    };
-    RbacAdminService_GetRole: {
-        parameters: {
-            query?: {
-                realmId?: string;
-            };
-            header?: never;
-            path: {
-                roleId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description A successful response. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["v1Role"];
-                };
-            };
-            /** @description An unexpected error response. */
-            default: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
-                };
-            };
-        };
-    };
-    RbacAdminService_DeleteRole: {
-        parameters: {
-            query?: {
-                realmId?: string;
-                cascade?: boolean;
-            };
-            header?: never;
-            path: {
-                roleId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description A successful response. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["v1DeleteRoleResponse"];
-                };
-            };
-            /** @description An unexpected error response. */
-            default: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
-                };
-            };
-        };
-    };
-    RbacAdminService_UpdateRole: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                roleId: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RbacAdminServiceUpdateRoleBody"];
-            };
-        };
-        responses: {
-            /** @description A successful response. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["v1Role"];
-                };
-            };
-            /** @description An unexpected error response. */
-            default: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
-                };
             };
         };
     };
@@ -3082,7 +3089,7 @@ export interface operations {
         };
         responses: {
             /** @description A successful response. */
-            200: {
+            201: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3206,13 +3213,11 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description A successful response. */
-            200: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["v1Empty"];
-                };
+                content?: never;
             };
             /** @description An unexpected error response. */
             default: {
@@ -3344,14 +3349,83 @@ export interface operations {
             };
         };
     };
+    adminListUserAssignments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The user's direct role assignments */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminRoleAssignmentList"];
+                };
+            };
+            /** @description No such user in the realm */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    adminAssignUserRole: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminAssignRoleRequest"];
+            };
+        };
+        responses: {
+            /** @description The new assignment */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminRoleAssignment"];
+                };
+            };
+            /** @description The role holds permissions the caller lacks */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such user or role in the realm */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     RbacAdminService_ListUserConsents: {
         parameters: {
             query?: {
-                realmId?: string;
+                realm_id?: string;
             };
             header?: never;
             path: {
-                userId: string;
+                user_id: string;
             };
             cookie?: never;
         };
@@ -3380,12 +3454,12 @@ export interface operations {
     RbacAdminService_RevokeConsent: {
         parameters: {
             query?: {
-                realmId?: string;
+                realm_id?: string;
             };
             header?: never;
             path: {
-                userId: string;
-                clientId: string;
+                user_id: string;
+                client_id: string;
             };
             cookie?: never;
         };
@@ -3414,15 +3488,15 @@ export interface operations {
     RbacAdminService_ResolveEffectivePermissions: {
         parameters: {
             query?: {
-                realmId?: string;
+                realm_id?: string;
                 /** @description optional; empty means realm-only */
-                orgId?: string;
+                org_id?: string;
                 /** @description optional; empty means no narrowing */
                 scope?: string;
             };
             header?: never;
             path: {
-                userId: string;
+                user_id: string;
             };
             cookie?: never;
         };
@@ -3435,74 +3509,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["v1ResolveEffectivePermissionsResponse"];
-                };
-            };
-            /** @description An unexpected error response. */
-            default: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
-                };
-            };
-        };
-    };
-    RbacAdminService_ListUserAssignments: {
-        parameters: {
-            query?: {
-                realmId?: string;
-            };
-            header?: never;
-            path: {
-                userId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description A successful response. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["v1ListUserAssignmentsResponse"];
-                };
-            };
-            /** @description An unexpected error response. */
-            default: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["rpcStatus"];
-                };
-            };
-        };
-    };
-    RbacAdminService_AssignUserRole: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                userId: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RbacAdminServiceAssignUserRoleBody"];
-            };
-        };
-        responses: {
-            /** @description A successful response. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["v1RoleAssignment"];
                 };
             };
             /** @description An unexpected error response. */

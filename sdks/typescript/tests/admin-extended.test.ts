@@ -136,7 +136,7 @@ describe("AdminClient — Roles CRUD", () => {
 describe("AdminClient — Groups CRUD", () => {
   it("createGroup POSTs to /admin/groups", async () => {
     vi.mocked(fetch).mockResolvedValue(mockOk({ id: "grp1", name: "engineers" }, 201));
-    const result = await makeAdmin().createGroup({ name: "engineers" });
+    const result = await makeAdmin().createGroup({ name: "engineers", slug: "engineers" });
     const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
     expect(url).toBe(`${BASE}/admin/groups`);
     expect(init.method).toBe("POST");

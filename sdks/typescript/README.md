@@ -302,7 +302,7 @@ const user = await admin.getUser("<user-id>");
 // Update a user
 const updated = await admin.updateUser("<user-id>", {
   displayName: "Alice Smith",
-  status: "active",
+  status: "USER_STATUS_ACTIVE", // the proto enum name; "active" is refused
 });
 
 // Delete a user

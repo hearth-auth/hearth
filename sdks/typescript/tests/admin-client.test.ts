@@ -70,10 +70,29 @@ describe("AdminClient — pagination", () => {
   });
 
   it("returns items and next_cursor", async () => {
-    respond(JSON.stringify({ items: [{ id: "u1" }], next_cursor: "next" }), 200);
+    const user = {
+      id: "u1",
+      email: "u1@example.com",
+      display_name: "U One",
+      status: "USER_STATUS_ACTIVE",
+      created_at: 1,
+      updated_at: 2,
+    };
+    respond(JSON.stringify({ items: [user], next_cursor: "next" }), 200);
     const page = await new AdminClient(BASE, REALM, TOKEN).listUsers();
-    expect(page.items).toEqual([{ id: "u1" }]);
+    expect(page.items).toEqual([user]);
     expect(page.next_cursor).toBe("next");
+  });
+
+  it("reads a field proto3 JSON left out as its default", async () => {
+    respond(JSON.stringify({ items: [{ id: "u1", email: "u1@example.com" }] }), 200);
+    const page = await new AdminClient(BASE, REALM, TOKEN).listUsers();
+    expect(page.items[0]).toMatchObject({
+      id: "u1",
+      display_name: "",
+      status: "USER_STATUS_UNSPECIFIED",
+    });
+    expect(page.next_cursor).toBeNull();
   });
 });
 
