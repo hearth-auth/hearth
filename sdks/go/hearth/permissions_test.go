@@ -128,6 +128,9 @@ func TestInOrg(t *testing.T) {
 	}
 }
 
+// permRealmID is a realm UUID: X-Realm-ID is sent only for a UUID.
+const permRealmID = "0b9c0a51-6a8e-4f4e-9d0a-2f1d3c4b5a69"
+
 func TestPermissionsHTTP(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/me/permissions" {
@@ -137,7 +140,7 @@ func TestPermissionsHTTP(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer tok-abc" {
 			t.Errorf("Authorization header: got %q", got)
 		}
-		if got := r.Header.Get("X-Realm-ID"); got != "r1" {
+		if got := r.Header.Get("X-Realm-ID"); got != permRealmID {
 			t.Errorf("X-Realm-ID header: got %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -150,7 +153,7 @@ func TestPermissionsHTTP(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "r1")
+	c := NewClient(srv.URL, permRealmID)
 	resp, err := c.Permissions(context.Background(), "tok-abc")
 	if err != nil {
 		t.Fatalf("Permissions: %v", err)

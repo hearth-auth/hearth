@@ -69,7 +69,7 @@ func mixedJWKSClient(t *testing.T, rsaPub *rsa.PublicKey, x, edKid, issuer strin
 		jwksSrv.Close()
 		mainSrv.Close()
 	})
-	c := NewClient(mainSrv.URL, "realm-1")
+	c := NewClient(issuer, "realm-1") // the configured issuer; JWKS from the test server
 	c.jwksURLOverride = jwksSrv.URL + "/.well-known/jwks.json"
 	return c
 }

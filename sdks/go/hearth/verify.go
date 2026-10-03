@@ -135,11 +135,9 @@ func (c *Client) VerifyToken(ctx context.Context, token string, audience ...stri
 
 	// 5. Registered claims (spec §2): go-jose checks iss, aud, nbf, exp and
 	// iat with one 5 s clock-skew allowance.
-	issuer, err := c.resolveIssuer(ctx)
-	if err != nil {
-		// Could not discover — use baseURL as best-effort fallback.
-		issuer = c.baseURL
-	}
+	// SDK.md §2 step 3: compare with the CONFIGURED issuer (the client's
+	// base URL), never with what discovery reports.
+	issuer := strings.TrimRight(c.baseURL, "/")
 	expected := jwt.Expected{Issuer: issuer, Time: c.clock()}
 	if len(audience) > 0 && audience[0] != "" {
 		expected.AnyAudience = jwt.Audience{audience[0]}
@@ -175,16 +173,4 @@ func (c *Client) clock() time.Time {
 		return c.now()
 	}
 	return time.Now()
-}
-
-// resolveIssuer returns the issuer URL: discovered > baseURL fallback.
-func (c *Client) resolveIssuer(ctx context.Context) (string, error) {
-	disc, err := c.getDiscovery(ctx)
-	if err != nil {
-		return "", err
-	}
-	if disc.Issuer != "" {
-		return disc.Issuer, nil
-	}
-	return c.baseURL, nil
 }
