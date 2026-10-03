@@ -2,14 +2,15 @@ package hearth
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 )
 
 // getJwksCache lazily creates the JWKS cache.
@@ -81,64 +82,41 @@ func (c *Client) getDiscovery(ctx context.Context) (*oidcDiscovery, error) {
 }
 
 // VerifyToken verifies a JWT using JWKS-based Ed25519/EdDSA local signature
-// verification and the mandatory five validation steps from spec §2.
+// verification through go-jose and the mandatory five validation steps from spec §2.
 //
 // Optional audience — when supplied, the aud claim must contain it (step 4).
 // Returns a typed Claims on success, or one of the §5 typed errors on failure.
 //
 // This method MUST NOT silently fall back to introspection.
 func (c *Client) VerifyToken(ctx context.Context, token string, audience ...string) (*Claims, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
+	if strings.Count(token, ".") != 2 {
 		return nil, &TokenInvalidError{Reason: "expected three dot-separated segments"}
 	}
 
-	// 1. Decode and validate the JWT header.
-	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	// 1. Parse the compact JWS. go-jose enforces the algorithm allow-list
+	// (EdDSA only, spec §2 — so `alg: none` and RS256 ID tokens are refused)
+	// and rejects unknown critical headers (RFC 7515 §4.1.11).
+	jws, err := jwt.ParseSigned(token, []jose.SignatureAlgorithm{jose.EdDSA})
 	if err != nil {
-		headerBytes, err = base64.URLEncoding.DecodeString(parts[0])
-		if err != nil {
-			return nil, &TokenInvalidError{Reason: "invalid header base64url encoding"}
-		}
+		return nil, &TokenInvalidError{Reason: "invalid token: " + err.Error()}
+	}
+	if len(jws.Headers) != 1 {
+		return nil, &TokenInvalidError{Reason: "expected exactly one signature"}
 	}
 
-	var header struct {
-		Alg string `json:"alg"`
-		Kid string `json:"kid"`
-	}
-	if err := json.Unmarshal(headerBytes, &header); err != nil {
-		return nil, &TokenInvalidError{Reason: "invalid header JSON: " + err.Error()}
-	}
-
-	// Reject any algorithm that is not EdDSA (spec §2).
-	if header.Alg != "EdDSA" {
-		return nil, &TokenInvalidError{
-			Reason: fmt.Sprintf("unsupported algorithm %q: only EdDSA is accepted", header.Alg),
-		}
-	}
-
-	// 2. Look up the signing key from the JWKS cache.
+	// 2. Look up the signing key by kid from the JWKS cache.
 	cache, err := c.getJwksCache(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	pubKey, err := cache.GetKey(header.Kid)
+	pubKey, err := cache.GetKey(jws.Headers[0].KeyID)
 	if err != nil {
 		return nil, err
 	}
 
-	// 3. Verify Ed25519 signature over header_b64.payload_b64 (RFC 8037).
-	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		sigBytes, err = base64.URLEncoding.DecodeString(parts[2])
-		if err != nil {
-			return nil, &TokenInvalidError{Reason: "invalid signature base64url encoding"}
-		}
-	}
-
-	msg := []byte(parts[0] + "." + parts[1])
-	if !ed25519.Verify(pubKey, msg, sigBytes) {
+	// 3. Verify the Ed25519 signature (RFC 8037) through go-jose.
+	if err := jws.Claims(pubKey); err != nil {
 		return nil, &TokenInvalidError{Reason: "signature verification failed"}
 	}
 
