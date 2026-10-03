@@ -1,0 +1,20 @@
+<?php
+
+// Jane OpenAPI generator config for the admin client (sdks/php/gen-admin.sh).
+// The spec path comes from HEARTH_ADMIN_OPENAPI: the /admin subset of
+// docs/api/openapi.json written by scripts/admin_openapi.py.
+
+$spec = getenv('HEARTH_ADMIN_OPENAPI');
+if ($spec === false || $spec === '') {
+    fwrite(STDERR, "HEARTH_ADMIN_OPENAPI is not set\n");
+    exit(1);
+}
+
+return [
+    'openapi-file' => $spec,
+    'namespace' => 'Hearth\\Generated\\Admin',
+    'directory' => __DIR__ . '/generated/admin',
+    'reference' => true,
+    'strict' => false,
+    'clean-generated' => true,
+];
