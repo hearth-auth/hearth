@@ -21,7 +21,7 @@
 - [x] 2.3 Python: red tests first; verify with `jwt.decode(..., algorithms=["EdDSA"])` and `PyJWK`; delete the `Ed25519PublicKey.verify` path in `client.py` and the key cache in `jwks.py` it fed
 - [x] 2.4 PHP: red tests first; verify with `lcobucci/jwt` `Signer\Eddsa` and the validation constraints; delete the `sodium_crypto_sign_verify_detached` path in `TokenVerifier.php`
   - Changed during apply (owner decision 2026-10-03): the JOSE libraries apply one clock skew to `exp`, `nbf` and `iat`, so all four SDKs now use one 5 s allowance (Go and PHP/Python were 0 s on `exp`; TypeScript defaulted to 60 s). `SDK.md` §2 must say so (task 5.1). Open: `jose` (TypeScript) refuses a future `iat` only when `maxTokenAge` is set, so TypeScript does not refuse it
-- [ ] 2.5 Add a CI grep that fails on a direct Ed25519 verify call in `sdks/` (the "No handwritten signature check remains" scenario)
+- [x] 2.5 Add a CI grep that fails on a direct Ed25519 verify call in `sdks/` (the "No handwritten signature check remains" scenario) **Changed during apply:** section 5 of `scripts/check-sdk-conformance.sh` (already a CI step); it fails on the pre-change tree for Go, Python and PHP, and passes now
 
 ## 3. Generated admin clients
 
