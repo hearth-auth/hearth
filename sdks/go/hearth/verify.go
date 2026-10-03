@@ -3,6 +3,7 @@ package hearth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -116,7 +117,8 @@ func (c *Client) VerifyToken(ctx context.Context, token string, audience ...stri
 	}
 
 	// 3. Verify the Ed25519 signature (RFC 8037) through go-jose.
-	if err := jws.Claims(pubKey); err != nil {
+	var registered jwt.Claims
+	if err := jws.Claims(pubKey, &registered); err != nil {
 		return nil, &TokenInvalidError{Reason: "signature verification failed"}
 	}
 
@@ -126,49 +128,45 @@ func (c *Client) VerifyToken(ctx context.Context, token string, audience ...stri
 		return nil, err
 	}
 
-	now := time.Now().Unix()
-
-	// Step 1 (spec §2 validation order): verify exp.
-	if claims.Expiry() != 0 && claims.Expiry() < now {
-		return nil, &TokenExpiredError{ExpiredAt: claims.Expiry()}
-	}
-
-	// Step 2: verify iss matches the discovered issuer.
+	// 5. Registered claims (spec §2): go-jose checks iss, aud, nbf, exp and
+	// iat with one 5 s clock-skew allowance.
 	issuer, err := c.resolveIssuer(ctx)
 	if err != nil {
 		// Could not discover — use baseURL as best-effort fallback.
 		issuer = c.baseURL
 	}
-	if claims.Issuer() != issuer {
-		return nil, &TokenIssuerError{Expected: issuer, Actual: claims.Issuer()}
-	}
-
-	// Step 3: verify aud (only when caller supplied an expected audience).
+	expected := jwt.Expected{Issuer: issuer, Time: c.clock()}
 	if len(audience) > 0 && audience[0] != "" {
-		found := false
-		for _, aud := range claims.Audiences() {
-			if aud == audience[0] {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, &TokenAudienceError{Expected: audience[0], Actual: claims.Audiences()}
-		}
+		expected.AnyAudience = jwt.Audience{audience[0]}
 	}
 
-	// Step 4: verify nbf (RFC 7519 §4.1.5) — the token is not usable before it.
-	// 5 s clock skew allowed, matching the iat check below.
-	if nbf := claims.NotBefore(); nbf != 0 && nbf > now+5 {
-		return nil, &TokenNotYetValidError{NotBefore: nbf}
-	}
-
-	// Step 5: verify iat is not in the future (5 s clock skew allowed).
-	if claims.IssuedAt() != 0 && claims.IssuedAt() > now+5 {
+	switch err := registered.ValidateWithLeeway(expected, clockSkew); {
+	case err == nil:
+		return claims, nil
+	case errors.Is(err, jwt.ErrExpired):
+		return nil, &TokenExpiredError{ExpiredAt: claims.Expiry()}
+	case errors.Is(err, jwt.ErrInvalidIssuer):
+		return nil, &TokenIssuerError{Expected: issuer, Actual: claims.Issuer()}
+	case errors.Is(err, jwt.ErrInvalidAudience):
+		return nil, &TokenAudienceError{Expected: audience[0], Actual: claims.Audiences()}
+	case errors.Is(err, jwt.ErrNotValidYet):
+		return nil, &TokenNotYetValidError{NotBefore: claims.NotBefore()}
+	case errors.Is(err, jwt.ErrIssuedInTheFuture):
 		return nil, &TokenNotYetValidError{NotBefore: claims.IssuedAt()}
+	default:
+		return nil, &TokenInvalidError{Reason: "invalid registered claims: " + err.Error()}
 	}
+}
 
-	return claims, nil
+// clockSkew is the one allowance applied to exp, nbf and iat (spec §2).
+const clockSkew = 5 * time.Second
+
+// clock returns the time VerifyToken validates against.
+func (c *Client) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 // resolveIssuer returns the issuer URL: discovered > baseURL fallback.

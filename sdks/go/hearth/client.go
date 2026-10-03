@@ -31,6 +31,10 @@ type Client struct {
 	// jwksURLOverride lets tests point the JWKS fetch at a different server.
 	jwksURLOverride string
 
+	// now is the clock VerifyToken checks exp/nbf/iat against. nil means
+	// time.Now; tests set it to pin the clock.
+	now func() time.Time
+
 	// Lazy-initialised JWKS cache and discovery document.
 	jwksMu    sync.Mutex
 	jwksCache *JwksCache

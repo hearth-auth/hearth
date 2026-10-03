@@ -130,6 +130,41 @@ func TestJoseVerify_UnknownCriticalHeaderFails(t *testing.T) {
 	requireTokenInvalid(t, claims, err)
 }
 
+// Owner decision (sdk-standard-libraries): one 5 s clock-skew allowance on
+// exp, nbf and iat, applied by go-jose's ValidateWithLeeway.
+func TestJoseVerify_ExpWithinFiveSecondSkewIsAccepted(t *testing.T) {
+	ti := newTestIssuer(t)
+	fixed := time.Now().Truncate(time.Second)
+	c := ti.client()
+	c.now = func() time.Time { return fixed }
+
+	token := ti.sign(t, map[string]any{"sub": "user-1", "exp": fixed.Unix() - 3})
+	claims, err := c.VerifyToken(context.Background(), token)
+	if err != nil {
+		t.Fatalf("exp 3 s in the past must pass under the 5 s skew, got %T: %v", err, err)
+	}
+	if claims.Subject() != "user-1" {
+		t.Fatalf("subject = %q, want user-1", claims.Subject())
+	}
+}
+
+func TestJoseVerify_ExpBeyondFiveSecondSkewIsExpired(t *testing.T) {
+	ti := newTestIssuer(t)
+	fixed := time.Now().Truncate(time.Second)
+	c := ti.client()
+	c.now = func() time.Time { return fixed }
+
+	token := ti.sign(t, map[string]any{"sub": "user-1", "exp": fixed.Unix() - 6})
+	claims, err := c.VerifyToken(context.Background(), token)
+	var expired *TokenExpiredError
+	if !errors.As(err, &expired) {
+		t.Fatalf("expected *TokenExpiredError, got %T: %v (claims %+v)", err, err, claims)
+	}
+	if expired.ExpiredAt != fixed.Unix()-6 {
+		t.Fatalf("ExpiredAt = %d, want %d", expired.ExpiredAt, fixed.Unix()-6)
+	}
+}
+
 // RFC 7797 `b64:false` changes the signing input. Hearth never issues it, so a
 // token that asks for it is refused rather than verified under the wrong input.
 func TestJoseVerify_UnencodedPayloadOptionFails(t *testing.T) {
