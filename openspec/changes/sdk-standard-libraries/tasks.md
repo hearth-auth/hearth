@@ -25,9 +25,13 @@
 
 ## 3. Generated admin clients
 
-- [ ] 3.1 Add `make sdk-admin-gen` (all four generators) and commit each generated client under `sdks/<sdk>/generated/admin/`
-- [ ] 3.2 Rewrite each handwritten `AdminClient` as a wrapper over its generated client, keeping its tests green. Expose the `/admin/organizations` routes (CRUD and extra member roles) that the 3.0.0 server added, and delete the stale "Hearth serves no `/admin/orgs` route" comments in `sdks/go/hearth/admin.go`, `sdks/php/src/AdminClient.php`, `sdks/php/README.md` and `sdks/php/tests/Unit/AdminClientTest.php`
-- [ ] 3.3 Add `make sdk-admin-check` and a CI step that fails on a stale generated client
+- [x] 3.1 Add `make sdk-admin-gen` (all four generators) and commit each generated client under `sdks/<sdk>/generated/admin/`
+- [x] 3.2 Rewrite each handwritten `AdminClient` as a wrapper over its generated client, keeping its tests green. Expose the `/admin/organizations` routes (CRUD and extra member roles) that the 3.0.0 server added, and delete the stale "Hearth serves no `/admin/orgs` route" comments in `sdks/go/hearth/admin.go`, `sdks/php/src/AdminClient.php`, `sdks/php/README.md` and `sdks/php/tests/Unit/AdminClientTest.php`
+- [x] 3.3 Add `make sdk-admin-check` and a CI step that fails on a stale generated client
+  - Changed during apply: `scripts/admin_openapi.py` feeds every generator the `/admin` subset (51 paths); `scripts/sdk-admin-gen.sh` runs each `sdks/<sdk>/gen-admin.sh`, which pins its generator: `openapi-typescript` 7.13.0 (+ `openapi-fetch` runtime) → `sdks/typescript/src/generated/admin/schema.ts`; `oapi-codegen` v2.8.0 (+ `oapi-codegen/runtime`) → `sdks/go/generated/admin/`; `openapi-python-client` 0.29.1 + ruff → `sdks/python/src/hearth/generated/admin/` (importable package); `jane-php/open-api-3` 7.14.4 (Jane 8 needs PHP 8.3; the SDK supports 8.1) → `sdks/php/generated/admin/`. CI job `sdk-admin-freshness` (in `required-summary`).
+  - Changed during apply: no SDK had a method on a route the server does not serve (the `/admin/orgs` methods were already gone); each gained the eight organization methods. A live probe showed the proto-derived schemas for users, applications, roles, groups, realms, assignments and audit do not match the REST JSON, so for now the eight create/update calls per SDK send the SDK's own snake_case body through the generated route (raw body) and every non-organization response decodes into the SDK's own types. Follow-up 3.4 tightens them once the spec describes the served JSON
+
+- [ ] 3.4 (added during apply) Make `docs/api/openapi.json` describe the served REST admin JSON (`json_names_for_fields=false`, supplement `Admin*` schemas for the hand-rolled DTO handlers, `tests/openapi_contract.rs` checking live responses against the spec), regenerate, and move the raw-body calls in each SDK onto the generated types
 
 ## 4. Conformance harness
 
