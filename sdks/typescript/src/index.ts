@@ -70,6 +70,7 @@ export { Claims } from "./claims.js";
 export { HearthApiClient, HearthError } from "./client.js";
 export type { HearthApiClientConfig, HandleCallbackParams } from "./client.js";
 export { AdminClient } from "./admin.js";
+export type { CreateOrganizationParams, Organization, UpdateOrganizationParams } from "./admin.js";
 export { createHearth } from "./hearth.js";
 export type { HearthFacade, HearthHttpClient, HearthOptions } from "./hearth.js";
 export {
