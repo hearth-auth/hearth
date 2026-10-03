@@ -9,6 +9,7 @@ use DateTimeImmutable;
 use Hearth\Contracts\JwksClientInterface;
 use Hearth\Contracts\TokenVerifierInterface;
 use Hearth\Exceptions\JWKSFetchException;
+use Hearth\Exceptions\JwksKeyNotFoundException;
 use Hearth\Exceptions\RequiredActionException;
 use Hearth\Exceptions\TokenAudienceException;
 use Hearth\Exceptions\TokenExpiredException;
@@ -64,8 +65,8 @@ final class TokenVerifier implements TokenVerifierInterface
     /**
      * Verifies and decodes a JWT, returning a typed Claims accessor.
      *
-     * @throws TokenInvalidException  On malformed JWT or invalid Ed25519 signature
-     * @throws JWKSFetchException            When the signing key cannot be resolved
+     * @throws TokenInvalidException  On malformed JWT, invalid Ed25519 signature or unknown `kid`
+     * @throws JWKSFetchException      When the JWKS endpoint fails
      * @throws TokenExpiredException    When `exp` is in the past
      * @throws TokenNotYetValidException When `nbf` is in the future
      * @throws TokenIssuerException     When `iss` does not match
@@ -78,7 +79,13 @@ final class TokenVerifier implements TokenVerifierInterface
 
         // Step 1 — algorithm allow-list and signature, before any claim check
         $kid = $token->headers()->get('kid');
-        $key = $this->jwksClient->getKey(is_string($kid) ? $kid : '');
+        try {
+            $key = $this->jwksClient->getKey(is_string($kid) ? $kid : '');
+        } catch (JwksKeyNotFoundException $e) {
+            // SDK.md §5: an unknown signing key makes the token invalid;
+            // JWKSFetchException stays for a failing JWKS endpoint.
+            throw new TokenInvalidException('JWT signed with an unknown key', 0, $e);
+        }
         if ($key === '') {
             throw new TokenInvalidException('Signing key is empty');
         }

@@ -7,6 +7,7 @@ namespace Hearth\Tests\Unit;
 use Hearth\Claims;
 use Hearth\Contracts\JwksClientInterface;
 use Hearth\Exceptions\JWKSFetchException;
+use Hearth\Exceptions\JwksKeyNotFoundException;
 use Hearth\Exceptions\RequiredActionException;
 use Hearth\Exceptions\TokenAudienceException;
 use Hearth\Exceptions\TokenExpiredException;
@@ -274,14 +275,28 @@ final class TokenVerifierTest extends TestCase
         $this->verifier->verify($this->makeToken($this->validClaims(), 'other-key'));
     }
 
-    public function testVerifyPropagatesUnknownKidAsJwksFetchException(): void
+    /**
+     * SDK.md §5: an unknown `kid` (absent after one re-fetch) is a bad token,
+     * not a JWKS fetch failure.
+     */
+    public function testVerifyReportsUnknownKidAsTokenInvalid(): void
     {
         $this->jwksClient
             ->method('getKey')
-            ->willThrowException(new JWKSFetchException("No key with kid 'nope' found in JWKS after re-fetch"));
+            ->willThrowException(new JwksKeyNotFoundException('nope'));
+
+        $this->expectException(TokenInvalidException::class);
+        $this->verifier->verify($this->makeToken($this->validClaims(), 'nope'));
+    }
+
+    public function testVerifyPropagatesARealJwksFetchFailure(): void
+    {
+        $this->jwksClient
+            ->method('getKey')
+            ->willThrowException(new JWKSFetchException('JWKS endpoint returned HTTP 503'));
 
         $this->expectException(JWKSFetchException::class);
-        $this->verifier->verify($this->makeToken($this->validClaims(), 'nope'));
+        $this->verifier->verify($this->makeToken($this->validClaims(), 'test-key'));
     }
 
     /**

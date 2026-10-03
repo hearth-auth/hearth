@@ -7,6 +7,7 @@ namespace Hearth\Tests\Unit;
 use GuzzleHttp\Psr7\HttpFactory;
 use GuzzleHttp\Psr7\Response;
 use Hearth\Exceptions\JWKSFetchException;
+use Hearth\Exceptions\JwksKeyNotFoundException;
 use Hearth\JwksClient;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -72,7 +73,9 @@ final class JwksClientTest extends TestCase
             ->method('sendRequest')
             ->willReturn(new Response(200, [], $jwks));
 
-        $this->expectException(JWKSFetchException::class);
+        // A subclass of JWKSFetchException, so existing catch blocks still work;
+        // TokenVerifier turns it into TokenInvalidException.
+        $this->expectException(JwksKeyNotFoundException::class);
         $this->jwksClient->getKey('unknown-kid');
     }
 
