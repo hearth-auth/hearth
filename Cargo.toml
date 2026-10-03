@@ -73,7 +73,7 @@ pbkdf2 = { version = "0.12", default-features = false }
 # the default heapless features to keep the crate out of the dependency graph.
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
-quick-xml = "0.41"
+quick-xml = "0.42"
 # rcgen with the `aws_lc_rs` backend provides RSA key generation — RSA-2048
 # for SAML, RSA-3072 for RS256 ID tokens (the `ring` backend cannot generate
 # RSA keys). This replaces the `rsa` crate, which has no patched version for
